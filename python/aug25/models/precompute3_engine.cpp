@@ -180,12 +180,38 @@ public:
             q.push_back(Item{0, kv.first, std::move(kv.second)});
         }
 
+        struct QItemKey {
+            int offset;
+            int tokenizer_sid;
+            std::uintptr_t gss_ptr;
+
+            bool operator==(const QItemKey& other) const {
+                return offset == other.offset &&
+                       tokenizer_sid == other.tokenizer_sid &&
+                       gss_ptr == other.gss_ptr;
+            }
+        };
+
+        struct QItemKeyHash {
+            std::size_t operator()(const QItemKey& k) const {
+                std::size_t h1 = std::hash<int>()(k.offset);
+                std::size_t h2 = std::hash<int>()(k.tokenizer_sid);
+                std::size_t h3 = std::hash<std::uintptr_t>()(k.gss_ptr);
+                return h1 ^ (h2 << 1) ^ (h3 << 2);
+            }
+        };
+        std::unordered_set<QItemKey, QItemKeyHash> visited_q_items;
+
         // new states being built
         std::unordered_map<int, std::vector<Leveled>> new_states_vec;
 
         while (!q.empty()) {
             Item cur = std::move(q.front());
             q.pop_front();
+
+            QItemKey key{cur.offset, cur.tokenizer_sid, reinterpret_cast<std::uintptr_t>(cur.gss.inner.get())};
+            if (visited_q_items.count(key)) continue;
+            visited_q_items.insert(key);
 
             std::string suffix = token.substr(static_cast<size_t>(cur.offset));
             py::tuple result = tokenizer_.attr("execute_from_state")(py::bytes(suffix), cur.tokenizer_sid);

@@ -1544,8 +1544,7 @@ local_system:
                   model.arena,
                   constraint.possible_matches(),                 # tsid -> term_id -> _sep1.Bitset
                   constraint.all_internal_llm_tokens_bitset(),  # _sep1.Bitset universe
-                  model.internal_to_original_map,               # int -> int
-                  RangeSet                                       # icl_rangeset.RangeSet class
+                  model.internal_to_original_map                # int -> int
               )
 
               return model
@@ -1587,119 +1586,9 @@ local_system:
     python/aug25/models/icl_rangeset.cpp: |
       #include <pybind11/pybind11.h>
       #include <pybind11/stl.h>
-
-      #include <boost/icl/interval_set.hpp>
-      #include <boost/icl/interval.hpp>
-
-      #include <vector>
-      #include <string>
-      #include <sstream>
-      #include <utility>
-      #include <algorithm>
+      #include "icl_rangeset.hpp"
 
       namespace py = pybind11;
-
-      class RangeSet {
-      public:
-          using interval_type = boost::icl::discrete_interval<unsigned long long>;
-          using set_type = boost::icl::interval_set<unsigned long long>;
-
-          RangeSet() = default;
-
-          static RangeSet empty() {
-              return RangeSet();
-          }
-
-          static RangeSet from_indices(const std::vector<unsigned long long>& indices) {
-              RangeSet rs;
-              for (unsigned long long v : indices) {
-                  rs.m_set.add(interval_type::closed(v, v));
-              }
-              return rs;
-          }
-
-          static RangeSet from_ranges(const std::vector<std::pair<unsigned long long, unsigned long long>>& ranges) {
-              RangeSet rs;
-              for (auto const& pr : ranges) {
-                  unsigned long long l = pr.first;
-                  unsigned long long r = pr.second;
-                  if (r < l) std::swap(l, r);
-                  rs.m_set.add(interval_type::closed(l, r));
-              }
-              return rs;
-          }
-
-          bool contains(unsigned long long v) const {
-              return boost::icl::contains(m_set, v);
-          }
-
-          RangeSet union_with(const RangeSet& other) const {
-              RangeSet res;
-              res.m_set = m_set;
-              res.m_set += other.m_set;
-              return res;
-          }
-
-          RangeSet intersection_with(const RangeSet& other) const {
-              RangeSet res;
-              res.m_set = m_set & other.m_set;
-              return res;
-          }
-
-          RangeSet difference_with(const RangeSet& other) const {
-              RangeSet res;
-              res.m_set = m_set - other.m_set;
-              return res;
-          }
-
-          bool is_empty() const {
-              return m_set.empty();
-          }
-
-          std::vector<std::pair<unsigned long long, unsigned long long>> to_ranges() const {
-              std::vector<std::pair<unsigned long long, unsigned long long>> out;
-              out.reserve(m_set.size());
-              for (auto const& itv : m_set) {
-                  unsigned long long l = itv.lower();
-                  unsigned long long r = itv.upper();
-                  out.emplace_back(l, r);
-              }
-              return out;
-          }
-
-          std::vector<unsigned long long> to_indices() const {
-              std::vector<unsigned long long> out;
-              out.reserve(boost::icl::cardinality(m_set));
-              for (auto const& itv : m_set) {
-                  unsigned long long l = itv.lower();
-                  unsigned long long r = itv.upper();
-                  for (unsigned long long v = l; v <= r; ++v) {
-                      out.push_back(v);
-                  }
-              }
-              return out;
-          }
-
-          bool operator==(const RangeSet& other) const {
-              return m_set == other.m_set;
-          }
-
-          std::string repr() const {
-              std::ostringstream oss;
-              oss << "RangeSet(";
-              bool first = true;
-              for (auto const& itv : m_set) {
-                  if (!first) oss << ", ";
-                  first = false;
-                  oss << "[" << itv.lower() << ", " << itv.upper() << "]";
-              }
-              oss << ")";
-              return oss.str();
-          }
-
-      private:
-          set_type m_set;
-      };
 
       PYBIND11_MODULE(icl_rangeset, m) {
           m.doc() = "Boost.ICL-backed RangeSet";
@@ -1935,23 +1824,27 @@ local_system:
       #include <memory>
       #include "leveled_gss.hpp"
 
+      #include <functional>
+      #include <memory>
+      #include "leveled_gss.hpp"
+      #include "icl_rangeset.hpp"
+
       using namespace leveled_gss;
 
       namespace py = pybind11;
 
       struct Acc : public std::enable_shared_from_this<Acc> {
           // terminals_union: tokenizer_state_id -> RangeSet of disallowed terminals
-          std::unordered_map<int, py::object> terminals_union;
+          std::unordered_map<int, RangeSet> terminals_union;
           // current allowed LLM mask (RangeSet)
-          py::object llm_mask;
+          RangeSet llm_mask;
 
           bool operator==(const Acc& other) const {
-              if (!llm_mask.attr("__eq__")(other.llm_mask).cast<bool>()) return false;
+              if (!(llm_mask == other.llm_mask)) return false;
               if (terminals_union.size() != other.terminals_union.size()) return false;
               for (auto const& [key, val] : terminals_union) {
                   auto it = other.terminals_union.find(key);
-                  if (it == other.terminals_union.end()) return false;
-                  if (!val.attr("__eq__")(it->second).cast<bool>()) {
+                  if (!(val == it->second)) {
                       return false;
                   }
               }
@@ -1964,18 +1857,16 @@ local_system:
               n->terminals_union = terminals_union;
               for (auto &kv : other->terminals_union) {
                   int key = kv.first;
-                  const py::object &v = kv.second;
+                  const RangeSet &v = kv.second;
                   auto it = n->terminals_union.find(key);
                   if (it == n->terminals_union.end()) {
                       n->terminals_union.emplace(key, v);
                   } else {
-                      it->second = it->second.attr("union")(v);
+                      it->second = it->second.union_with(v);
                   }
               }
               // Union llm masks
-              if (llm_mask.is_none()) n->llm_mask = other->llm_mask;
-              else if (other->llm_mask.is_none()) n->llm_mask = llm_mask;
-              else n->llm_mask = llm_mask.attr("union")(other->llm_mask);
+              n->llm_mask = llm_mask.union_with(other->llm_mask);
               return n;
           }
       };
@@ -1993,8 +1884,7 @@ local_system:
                  py::dict arena_py,                     // uid -> node dict (children carry bitset JSON)
                  py::dict possible_matches,             // tsid -> term_id -> _sep1.Bitset
                  py::object all_internal_llm_tokens_bitset,
-                 py::dict internal_to_original_map,
-                 py::object RangeSetClass)
+                 py::dict internal_to_original_map)
               : tokenizer_(std::move(tokenizer)),
                 tokenizer_initial_state_(tokenizer_initial_state),
                 tokenizer_max_state_(tokenizer_max_state),
@@ -2002,20 +1892,21 @@ local_system:
                 roots_map_py_(std::move(roots_map_py)),
                 pmc_(std::move(possible_matches)),
                 all_internal_llm_tokens_bitset_(std::move(all_internal_llm_tokens_bitset)),
-                internal_to_original_map_(std::move(internal_to_original_map)),
-                RangeSetClass_(std::move(RangeSetClass)) {
+                internal_to_original_map_(std::move(internal_to_original_map)) {
 
               if (!ignore_terminal_id_or_none.is_none()) {
                   ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
               }
 
-              // Cache RangeSet helpers
-              range_empty_ = RangeSetClass_.attr("empty");
-              range_from_indices_ = RangeSetClass_.attr("from_indices");
-              range_from_ranges_ = RangeSetClass_.attr("from_ranges");
-
               // Universe RangeSet for get_mask init
-              universe_rangeset_ = range_from_ranges_(all_internal_llm_tokens_bitset_.attr("to_ranges")());
+              py::list ranges_py = all_internal_llm_tokens_bitset_.attr("to_ranges")();
+              std::vector<std::pair<unsigned long long, unsigned long long>> ranges_cpp;
+              ranges_cpp.reserve(py::len(ranges_py));
+              for (auto r : ranges_py) {
+                  py::tuple t = py::cast<py::tuple>(r);
+                  ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
+              }
+              universe_rangeset_ = RangeSet::from_ranges(ranges_cpp);
 
               // Parse roots_map into C++ map
               for (auto item : roots_map_py_) {
@@ -2032,7 +1923,7 @@ local_system:
 
               // Initialize state: one GSS per tokenizer initial state with start parser state on stack
               auto initial_acc = std::make_shared<Acc>();
-              initial_acc->llm_mask = range_empty_();
+              initial_acc->llm_mask = RangeSet::empty();
               // terminals_union empty by default
               std::vector<std::pair<std::vector<int>, std::shared_ptr<Acc>>> initial_stacks;
               initial_stacks.emplace_back(std::vector<int>{}, initial_acc);
@@ -2044,7 +1935,7 @@ local_system:
           void commit(py::bytes token_bytes) {
               // Build terminals_map and state_map
               std::string token = token_bytes; // implicit cast via pybind11
-              std::unordered_map<int, py::object> terminals_map; // sid -> RangeSet of matched terminals
+              std::unordered_map<int, RangeSet> terminals_map; // sid -> RangeSet of matched terminals
               std::unordered_map<int, int> state_map;            // old_sid -> end_sid
 
               // 1) Probe tokenizer from each active state
@@ -2066,8 +1957,7 @@ local_system:
                       int terminal_id = py::cast<int>(tmt[0]);
                       matched_terminals.push_back(static_cast<unsigned long long>(terminal_id));
                   }
-                  py::object matched_rs = range_from_indices_(matched_terminals);
-                  terminals_map[tokenizer_sid] = matched_rs;
+                  terminals_map[tokenizer_sid] = RangeSet::from_indices(matched_terminals);
               }
 
               // 2) Prune and map per-state GSS (rename terminals_union keys according to state_map)
@@ -2215,7 +2105,7 @@ local_system:
                   enqueue(d, root);
               }
 
-              py::object final_mask = range_empty_();
+              RangeSet final_mask = RangeSet::empty();
               std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> intersect_acc_memo;
 
               while (!depth_heap.empty()) {
@@ -2235,7 +2125,7 @@ local_system:
                       if (info.is_end) {
                           auto reduced = gss_node.reduce_acc();
                           if (reduced) {
-                              final_mask = final_mask.attr("union")(reduced->llm_mask);
+                              final_mask = final_mask.union_with(reduced->llm_mask);
                           }
                       }
 
@@ -2281,16 +2171,15 @@ local_system:
 
               // Convert internal mask indices to original
               std::vector<unsigned long long> original_indices;
-              py::object idxs = final_mask.attr("to_indices")();
-              for (auto iobj : idxs) {
-                  int i = py::cast<int>(iobj);
+              std::vector<unsigned long long> idxs = final_mask.to_indices();
+              for (auto i : idxs) {
                   if (internal_to_original_map_.contains(py::int_(i))) {
                       int mapped = py::cast<int>(internal_to_original_map_[py::int_(i)]);
                       original_indices.push_back(static_cast<unsigned long long>(mapped));
                   }
               }
-              py::object res = range_from_indices_(original_indices);
-              return res;
+              // pybind11 will automatically convert the C++ RangeSet to the bound Python type
+              return py::cast(RangeSet::from_indices(original_indices));
           }
 
       private:
@@ -2316,7 +2205,7 @@ local_system:
 
           struct Edge {
               int pop;
-              py::object llm_bv_rangeset; // icl_rangeset.RangeSet (for intersection)
+              RangeSet llm_bv_rangeset; // icl_rangeset.RangeSet (for intersection)
               std::vector<DestEdge> dests;
           };
 
@@ -2352,18 +2241,12 @@ local_system:
           py::object all_internal_llm_tokens_bitset_;
 
           // Universe RangeSet
-          py::object universe_rangeset_;
+          RangeSet universe_rangeset_;
 
           py::dict internal_to_original_map_;
 
           // Current GLR state: tokenizer_state_id -> LeveledGSS
           std::unordered_map<int, Leveled> state_;
-
-          // RangeSet helpers
-          py::object RangeSetClass_;
-          py::object range_empty_;
-          py::object range_from_indices_;
-          py::object range_from_ranges_;
 
           // Check membership in a vector of inclusive ranges (sorted, non-overlapping).
           static bool contains_in_ranges(const std::vector<std::pair<int,int>>& ranges, int v) {
@@ -2511,7 +2394,14 @@ local_system:
 
                       // Convert llm_bv_json -> _sep1.Bitset -> RangeSet
                       py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(dumps(llm_bv_json));
-                      py::object llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
+                      py::list llm_ranges_py = llm_bv_bitset.attr("to_ranges")();
+                      std::vector<std::pair<unsigned long long, unsigned long long>> llm_ranges_cpp;
+                      llm_ranges_cpp.reserve(py::len(llm_ranges_py));
+                      for (auto r : llm_ranges_py) {
+                          py::tuple t = py::cast<py::tuple>(r);
+                          llm_ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
+                      }
+                      RangeSet llm_bv_rs = RangeSet::from_ranges(llm_ranges_cpp);
 
                       std::vector<DestEdge> dests;
                       py::object dest_map = entry[1];
@@ -2547,16 +2437,16 @@ local_system:
           // -----------------------------
           // Leveled GSS transforms needed by algorithm
           // -----------------------------
-          Leveled prune_by_terminals_map(const Leveled& g, const std::unordered_map<int, py::object>& terminals_map) {
+          Leveled prune_by_terminals_map(const Leveled& g, const std::unordered_map<int, RangeSet>& terminals_map) {
               auto pred = [&](const std::shared_ptr<Acc>& acc) -> bool {
-                  py::object rs_empty = range_empty_();
+                  RangeSet rs_empty = RangeSet::empty();
                   for (auto &kv : terminals_map) {
                       int sid = kv.first;
-                      const py::object &matched = kv.second;
+                      const RangeSet &matched = kv.second;
                       auto it = acc->terminals_union.find(sid);
-                      py::object disallowed = (it != acc->terminals_union.end()) ? it->second : rs_empty;
-                      py::object inter = matched.attr("intersection")(disallowed);
-                      bool ok = inter.attr("is_empty")().cast<bool>();
+                      const RangeSet &disallowed = (it != acc->terminals_union.end()) ? it->second : rs_empty;
+                      RangeSet inter = matched.intersection_with(disallowed);
+                      bool ok = inter.is_empty();
                       if (!ok) return false;
                   }
                   return true;
@@ -2568,15 +2458,15 @@ local_system:
               auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
                   auto na = std::make_shared<Acc>();
                   na->llm_mask = acc->llm_mask;
-                  py::object rs_empty = range_empty_();
+                  RangeSet rs_empty = RangeSet::empty();
                   for (auto &kv : acc->terminals_union) {
                       int old_sid = kv.first;
                       auto it = state_map.find(old_sid);
                       if (it == state_map.end()) continue;
                       int new_sid = it->second;
-                      py::object src = kv.second;
-                      py::object curr = na->terminals_union.count(new_sid) ? na->terminals_union[new_sid] : rs_empty;
-                      na->terminals_union[new_sid] = curr.attr("union")(src);
+                      const RangeSet& src = kv.second;
+                      const RangeSet& curr = na->terminals_union.count(new_sid) ? na->terminals_union[new_sid] : rs_empty;
+                      na->terminals_union[new_sid] = curr.union_with(src);
                   }
                   return na;
               };
@@ -2589,11 +2479,9 @@ local_system:
                   na->llm_mask = acc->llm_mask;
                   na->terminals_union = acc->terminals_union;
                   std::vector<unsigned long long> idx{static_cast<unsigned long long>(terminal_id)};
-                  py::object to_add = range_from_indices_(idx);
-                  py::object rs_empty = range_empty_();
-                  py::object curr = na->terminals_union.count(state_id) ? na->terminals_union[state_id] : rs_empty;
-                  py::object new_bv = curr.attr("union")(to_add);
-                  na->terminals_union[state_id] = new_bv;
+                  RangeSet to_add = RangeSet::from_indices(idx);
+                  const RangeSet& curr = na->terminals_union.count(state_id) ? na->terminals_union[state_id] : rs_empty;
+                  na->terminals_union[state_id] = curr.union_with(to_add);
                   return na;
               };
               return g.apply(transformer);
@@ -2671,7 +2559,7 @@ local_system:
           ) {
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   // Build disallowed mask as RangeSet
-                  py::object disallowed_llm_mask = range_empty_();
+                  RangeSet disallowed_llm_mask = RangeSet::empty();
 
                   for (auto &kv : a->terminals_union) {
                       int tsid = kv.first;
@@ -2679,18 +2567,27 @@ local_system:
                       if (!pmc_.contains(py::int_(tsid))) continue;
 
                       py::dict terms_to_llm = py::cast<py::dict>(pmc_[py::int_(tsid)]);
-                      py::object indices = kv.second.attr("to_indices")();
-                      for (auto idx : indices) {
-                          int terminal_id = py::cast<int>(idx);
-                          if (terms_to_llm.contains(py::int_(terminal_id))) {
-                              py::object bit = py::reinterpret_borrow<py::object>(terms_to_llm[py::int_(terminal_id)]);
-                              py::object rs = range_from_ranges_(bit.attr("to_ranges")());
-                              disallowed_llm_mask = disallowed_llm_mask.attr("union")(rs);
+                      for (const auto& range : kv.second.to_ranges()) {
+                          for (unsigned long long terminal_id_ull = range.first; ; ++terminal_id_ull) {
+                              int terminal_id = static_cast<int>(terminal_id_ull);
+                              if (terms_to_llm.contains(py::int_(terminal_id))) {
+                                  py::object bit = py::reinterpret_borrow<py::object>(terms_to_llm[py::int_(terminal_id)]);
+                                  py::list ranges_py = bit.attr("to_ranges")();
+                                  std::vector<std::pair<unsigned long long, unsigned long long>> ranges_cpp;
+                                  ranges_cpp.reserve(py::len(ranges_py));
+                                  for (auto r : ranges_py) {
+                                      py::tuple t = py::cast<py::tuple>(r);
+                                      ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
+                                  }
+                                  RangeSet rs = RangeSet::from_ranges(ranges_cpp);
+                                  disallowed_llm_mask = disallowed_llm_mask.union_with(rs);
+                              }
+                              if (terminal_id_ull == range.second) break;
                           }
                       }
                   }
 
-                  py::object allowed_mask = universe_rangeset_.attr("difference")(disallowed_llm_mask);
+                  RangeSet allowed_mask = universe_rangeset_.difference_with(disallowed_llm_mask);
 
                   auto na = std::make_shared<Acc>();
                   na->llm_mask = allowed_mask;
@@ -2702,12 +2599,12 @@ local_system:
 
           Leveled intersect_llm_mask(
               const Leveled& g,
-              const py::object& limiter,
+              const RangeSet& limiter,
               std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo
           ) {
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
-                  py::object new_mask = a->llm_mask.attr("intersection")(limiter);
-                  bool is_empty_mask = new_mask.attr("is_empty")().cast<bool>();
+                  RangeSet new_mask = a->llm_mask.intersection_with(limiter);
+                  bool is_empty_mask = new_mask.is_empty();
                   if (is_empty_mask) return std::shared_ptr<Acc>(nullptr);
                   auto na = std::make_shared<Acc>(*a);
                   na->llm_mask = new_mask;
@@ -2722,7 +2619,7 @@ local_system:
           m.doc() = "C++ engine for precompute3_model_cpp: commit() and get_mask(), Leveled GSS implementation";
 
           py::class_<Engine>(m, "Engine")
-              .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::dict,py::object,py::dict,py::object>(),
+              .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::dict,py::object,py::dict>(),
                    py::arg("tokenizer"),
                    py::arg("tokenizer_initial_state"),
                    py::arg("tokenizer_max_state"),
@@ -2732,8 +2629,7 @@ local_system:
                    py::arg("arena_py"),
                    py::arg("possible_matches"),
                    py::arg("all_internal_llm_tokens_bitset"),
-                   py::arg("internal_to_original_map"),
-                   py::arg("RangeSetClass"))
+                   py::arg("internal_to_original_map"))
               .def("commit", &Engine::commit, py::arg("token_bytes"))
               .def("get_mask", &Engine::get_mask);
       }
@@ -6076,12 +5972,38 @@ local_system:
                   q.push_back(Item{0, kv.first, std::move(kv.second)});
               }
 
+              struct QItemKey {
+                  int offset;
+                  int tokenizer_sid;
+                  std::uintptr_t gss_ptr;
+
+                  bool operator==(const QItemKey& other) const {
+                      return offset == other.offset &&
+                             tokenizer_sid == other.tokenizer_sid &&
+                             gss_ptr == other.gss_ptr;
+                  }
+              };
+
+              struct QItemKeyHash {
+                  std::size_t operator()(const QItemKey& k) const {
+                      std::size_t h1 = std::hash<int>()(k.offset);
+                      std::size_t h2 = std::hash<int>()(k.tokenizer_sid);
+                      std::size_t h3 = std::hash<std::uintptr_t>()(k.gss_ptr);
+                      return h1 ^ (h2 << 1) ^ (h3 << 2);
+                  }
+              };
+              std::unordered_set<QItemKey, QItemKeyHash> visited_q_items;
+
               // new states being built
               std::unordered_map<int, std::vector<Leveled>> new_states_vec;
 
               while (!q.empty()) {
                   Item cur = std::move(q.front());
                   q.pop_front();
+
+                  QItemKey key{cur.offset, cur.tokenizer_sid, reinterpret_cast<std::uintptr_t>(cur.gss.inner.get())};
+                  if (visited_q_items.count(key)) continue;
+                  visited_q_items.insert(key);
 
                   std::string suffix = token.substr(static_cast<size_t>(cur.offset));
                   py::tuple result = tokenizer_.attr("execute_from_state")(py::bytes(suffix), cur.tokenizer_sid);
@@ -9677,8 +9599,7 @@ messages:
                   model.arena,
                   constraint.possible_matches(),                 # tsid -> term_id -> _sep1.Bitset
                   constraint.all_internal_llm_tokens_bitset(),  # _sep1.Bitset universe
-                  model.internal_to_original_map,               # int -> int
-                  RangeSet                                       # icl_rangeset.RangeSet class
+                  model.internal_to_original_map                # int -> int
               )
 
               return model
@@ -9725,119 +9646,9 @@ messages:
       ```cpp 'python/aug25/models/icl_rangeset.cpp'
       #include <pybind11/pybind11.h>
       #include <pybind11/stl.h>
-
-      #include <boost/icl/interval_set.hpp>
-      #include <boost/icl/interval.hpp>
-
-      #include <vector>
-      #include <string>
-      #include <sstream>
-      #include <utility>
-      #include <algorithm>
+      #include "icl_rangeset.hpp"
 
       namespace py = pybind11;
-
-      class RangeSet {
-      public:
-          using interval_type = boost::icl::discrete_interval<unsigned long long>;
-          using set_type = boost::icl::interval_set<unsigned long long>;
-
-          RangeSet() = default;
-
-          static RangeSet empty() {
-              return RangeSet();
-          }
-
-          static RangeSet from_indices(const std::vector<unsigned long long>& indices) {
-              RangeSet rs;
-              for (unsigned long long v : indices) {
-                  rs.m_set.add(interval_type::closed(v, v));
-              }
-              return rs;
-          }
-
-          static RangeSet from_ranges(const std::vector<std::pair<unsigned long long, unsigned long long>>& ranges) {
-              RangeSet rs;
-              for (auto const& pr : ranges) {
-                  unsigned long long l = pr.first;
-                  unsigned long long r = pr.second;
-                  if (r < l) std::swap(l, r);
-                  rs.m_set.add(interval_type::closed(l, r));
-              }
-              return rs;
-          }
-
-          bool contains(unsigned long long v) const {
-              return boost::icl::contains(m_set, v);
-          }
-
-          RangeSet union_with(const RangeSet& other) const {
-              RangeSet res;
-              res.m_set = m_set;
-              res.m_set += other.m_set;
-              return res;
-          }
-
-          RangeSet intersection_with(const RangeSet& other) const {
-              RangeSet res;
-              res.m_set = m_set & other.m_set;
-              return res;
-          }
-
-          RangeSet difference_with(const RangeSet& other) const {
-              RangeSet res;
-              res.m_set = m_set - other.m_set;
-              return res;
-          }
-
-          bool is_empty() const {
-              return m_set.empty();
-          }
-
-          std::vector<std::pair<unsigned long long, unsigned long long>> to_ranges() const {
-              std::vector<std::pair<unsigned long long, unsigned long long>> out;
-              out.reserve(m_set.size());
-              for (auto const& itv : m_set) {
-                  unsigned long long l = itv.lower();
-                  unsigned long long r = itv.upper();
-                  out.emplace_back(l, r);
-              }
-              return out;
-          }
-
-          std::vector<unsigned long long> to_indices() const {
-              std::vector<unsigned long long> out;
-              out.reserve(boost::icl::cardinality(m_set));
-              for (auto const& itv : m_set) {
-                  unsigned long long l = itv.lower();
-                  unsigned long long r = itv.upper();
-                  for (unsigned long long v = l; v <= r; ++v) {
-                      out.push_back(v);
-                  }
-              }
-              return out;
-          }
-
-          bool operator==(const RangeSet& other) const {
-              return m_set == other.m_set;
-          }
-
-          std::string repr() const {
-              std::ostringstream oss;
-              oss << "RangeSet(";
-              bool first = true;
-              for (auto const& itv : m_set) {
-                  if (!first) oss << ", ";
-                  first = false;
-                  oss << "[" << itv.lower() << ", " << itv.upper() << "]";
-              }
-              oss << ")";
-              return oss.str();
-          }
-
-      private:
-          set_type m_set;
-      };
 
       PYBIND11_MODULE(icl_rangeset, m) {
           m.doc() = "Boost.ICL-backed RangeSet";
@@ -10083,23 +9894,27 @@ messages:
       #include <memory>
       #include "leveled_gss.hpp"
 
+      #include <functional>
+      #include <memory>
+      #include "leveled_gss.hpp"
+      #include "icl_rangeset.hpp"
+
       using namespace leveled_gss;
 
       namespace py = pybind11;
 
       struct Acc : public std::enable_shared_from_this<Acc> {
           // terminals_union: tokenizer_state_id -> RangeSet of disallowed terminals
-          std::unordered_map<int, py::object> terminals_union;
+          std::unordered_map<int, RangeSet> terminals_union;
           // current allowed LLM mask (RangeSet)
-          py::object llm_mask;
+          RangeSet llm_mask;
 
           bool operator==(const Acc& other) const {
-              if (!llm_mask.attr("__eq__")(other.llm_mask).cast<bool>()) return false;
+              if (!(llm_mask == other.llm_mask)) return false;
               if (terminals_union.size() != other.terminals_union.size()) return false;
               for (auto const& [key, val] : terminals_union) {
                   auto it = other.terminals_union.find(key);
-                  if (it == other.terminals_union.end()) return false;
-                  if (!val.attr("__eq__")(it->second).cast<bool>()) {
+                  if (!(val == it->second)) {
                       return false;
                   }
               }
@@ -10112,18 +9927,16 @@ messages:
               n->terminals_union = terminals_union;
               for (auto &kv : other->terminals_union) {
                   int key = kv.first;
-                  const py::object &v = kv.second;
+                  const RangeSet &v = kv.second;
                   auto it = n->terminals_union.find(key);
                   if (it == n->terminals_union.end()) {
                       n->terminals_union.emplace(key, v);
                   } else {
-                      it->second = it->second.attr("union")(v);
+                      it->second = it->second.union_with(v);
                   }
               }
               // Union llm masks
-              if (llm_mask.is_none()) n->llm_mask = other->llm_mask;
-              else if (other->llm_mask.is_none()) n->llm_mask = llm_mask;
-              else n->llm_mask = llm_mask.attr("union")(other->llm_mask);
+              n->llm_mask = llm_mask.union_with(other->llm_mask);
               return n;
           }
       };
@@ -10141,8 +9954,7 @@ messages:
                  py::dict arena_py,                     // uid -> node dict (children carry bitset JSON)
                  py::dict possible_matches,             // tsid -> term_id -> _sep1.Bitset
                  py::object all_internal_llm_tokens_bitset,
-                 py::dict internal_to_original_map,
-                 py::object RangeSetClass)
+                 py::dict internal_to_original_map)
               : tokenizer_(std::move(tokenizer)),
                 tokenizer_initial_state_(tokenizer_initial_state),
                 tokenizer_max_state_(tokenizer_max_state),
@@ -10150,20 +9962,21 @@ messages:
                 roots_map_py_(std::move(roots_map_py)),
                 pmc_(std::move(possible_matches)),
                 all_internal_llm_tokens_bitset_(std::move(all_internal_llm_tokens_bitset)),
-                internal_to_original_map_(std::move(internal_to_original_map)),
-                RangeSetClass_(std::move(RangeSetClass)) {
+                internal_to_original_map_(std::move(internal_to_original_map)) {
 
               if (!ignore_terminal_id_or_none.is_none()) {
                   ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
               }
 
-              // Cache RangeSet helpers
-              range_empty_ = RangeSetClass_.attr("empty");
-              range_from_indices_ = RangeSetClass_.attr("from_indices");
-              range_from_ranges_ = RangeSetClass_.attr("from_ranges");
-
               // Universe RangeSet for get_mask init
-              universe_rangeset_ = range_from_ranges_(all_internal_llm_tokens_bitset_.attr("to_ranges")());
+              py::list ranges_py = all_internal_llm_tokens_bitset_.attr("to_ranges")();
+              std::vector<std::pair<unsigned long long, unsigned long long>> ranges_cpp;
+              ranges_cpp.reserve(py::len(ranges_py));
+              for (auto r : ranges_py) {
+                  py::tuple t = py::cast<py::tuple>(r);
+                  ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
+              }
+              universe_rangeset_ = RangeSet::from_ranges(ranges_cpp);
 
               // Parse roots_map into C++ map
               for (auto item : roots_map_py_) {
@@ -10180,7 +9993,7 @@ messages:
 
               // Initialize state: one GSS per tokenizer initial state with start parser state on stack
               auto initial_acc = std::make_shared<Acc>();
-              initial_acc->llm_mask = range_empty_();
+              initial_acc->llm_mask = RangeSet::empty();
               // terminals_union empty by default
               std::vector<std::pair<std::vector<int>, std::shared_ptr<Acc>>> initial_stacks;
               initial_stacks.emplace_back(std::vector<int>{}, initial_acc);
@@ -10192,7 +10005,7 @@ messages:
           void commit(py::bytes token_bytes) {
               // Build terminals_map and state_map
               std::string token = token_bytes; // implicit cast via pybind11
-              std::unordered_map<int, py::object> terminals_map; // sid -> RangeSet of matched terminals
+              std::unordered_map<int, RangeSet> terminals_map; // sid -> RangeSet of matched terminals
               std::unordered_map<int, int> state_map;            // old_sid -> end_sid
 
               // 1) Probe tokenizer from each active state
@@ -10214,8 +10027,7 @@ messages:
                       int terminal_id = py::cast<int>(tmt[0]);
                       matched_terminals.push_back(static_cast<unsigned long long>(terminal_id));
                   }
-                  py::object matched_rs = range_from_indices_(matched_terminals);
-                  terminals_map[tokenizer_sid] = matched_rs;
+                  terminals_map[tokenizer_sid] = RangeSet::from_indices(matched_terminals);
               }
 
               // 2) Prune and map per-state GSS (rename terminals_union keys according to state_map)
@@ -10363,7 +10175,7 @@ messages:
                   enqueue(d, root);
               }
 
-              py::object final_mask = range_empty_();
+              RangeSet final_mask = RangeSet::empty();
               std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> intersect_acc_memo;
 
               while (!depth_heap.empty()) {
@@ -10383,7 +10195,7 @@ messages:
                       if (info.is_end) {
                           auto reduced = gss_node.reduce_acc();
                           if (reduced) {
-                              final_mask = final_mask.attr("union")(reduced->llm_mask);
+                              final_mask = final_mask.union_with(reduced->llm_mask);
                           }
                       }
 
@@ -10429,16 +10241,15 @@ messages:
 
               // Convert internal mask indices to original
               std::vector<unsigned long long> original_indices;
-              py::object idxs = final_mask.attr("to_indices")();
-              for (auto iobj : idxs) {
-                  int i = py::cast<int>(iobj);
+              std::vector<unsigned long long> idxs = final_mask.to_indices();
+              for (auto i : idxs) {
                   if (internal_to_original_map_.contains(py::int_(i))) {
                       int mapped = py::cast<int>(internal_to_original_map_[py::int_(i)]);
                       original_indices.push_back(static_cast<unsigned long long>(mapped));
                   }
               }
-              py::object res = range_from_indices_(original_indices);
-              return res;
+              // pybind11 will automatically convert the C++ RangeSet to the bound Python type
+              return py::cast(RangeSet::from_indices(original_indices));
           }
 
       private:
@@ -10464,7 +10275,7 @@ messages:
 
           struct Edge {
               int pop;
-              py::object llm_bv_rangeset; // icl_rangeset.RangeSet (for intersection)
+              RangeSet llm_bv_rangeset; // icl_rangeset.RangeSet (for intersection)
               std::vector<DestEdge> dests;
           };
 
@@ -10500,18 +10311,12 @@ messages:
           py::object all_internal_llm_tokens_bitset_;
 
           // Universe RangeSet
-          py::object universe_rangeset_;
+          RangeSet universe_rangeset_;
 
           py::dict internal_to_original_map_;
 
           // Current GLR state: tokenizer_state_id -> LeveledGSS
           std::unordered_map<int, Leveled> state_;
-
-          // RangeSet helpers
-          py::object RangeSetClass_;
-          py::object range_empty_;
-          py::object range_from_indices_;
-          py::object range_from_ranges_;
 
           // Check membership in a vector of inclusive ranges (sorted, non-overlapping).
           static bool contains_in_ranges(const std::vector<std::pair<int,int>>& ranges, int v) {
@@ -10659,7 +10464,14 @@ messages:
 
                       // Convert llm_bv_json -> _sep1.Bitset -> RangeSet
                       py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(dumps(llm_bv_json));
-                      py::object llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
+                      py::list llm_ranges_py = llm_bv_bitset.attr("to_ranges")();
+                      std::vector<std::pair<unsigned long long, unsigned long long>> llm_ranges_cpp;
+                      llm_ranges_cpp.reserve(py::len(llm_ranges_py));
+                      for (auto r : llm_ranges_py) {
+                          py::tuple t = py::cast<py::tuple>(r);
+                          llm_ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
+                      }
+                      RangeSet llm_bv_rs = RangeSet::from_ranges(llm_ranges_cpp);
 
                       std::vector<DestEdge> dests;
                       py::object dest_map = entry[1];
@@ -10695,16 +10507,16 @@ messages:
           // -----------------------------
           // Leveled GSS transforms needed by algorithm
           // -----------------------------
-          Leveled prune_by_terminals_map(const Leveled& g, const std::unordered_map<int, py::object>& terminals_map) {
+          Leveled prune_by_terminals_map(const Leveled& g, const std::unordered_map<int, RangeSet>& terminals_map) {
               auto pred = [&](const std::shared_ptr<Acc>& acc) -> bool {
-                  py::object rs_empty = range_empty_();
+                  RangeSet rs_empty = RangeSet::empty();
                   for (auto &kv : terminals_map) {
                       int sid = kv.first;
-                      const py::object &matched = kv.second;
+                      const RangeSet &matched = kv.second;
                       auto it = acc->terminals_union.find(sid);
-                      py::object disallowed = (it != acc->terminals_union.end()) ? it->second : rs_empty;
-                      py::object inter = matched.attr("intersection")(disallowed);
-                      bool ok = inter.attr("is_empty")().cast<bool>();
+                      const RangeSet &disallowed = (it != acc->terminals_union.end()) ? it->second : rs_empty;
+                      RangeSet inter = matched.intersection_with(disallowed);
+                      bool ok = inter.is_empty();
                       if (!ok) return false;
                   }
                   return true;
@@ -10716,15 +10528,15 @@ messages:
               auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
                   auto na = std::make_shared<Acc>();
                   na->llm_mask = acc->llm_mask;
-                  py::object rs_empty = range_empty_();
+                  RangeSet rs_empty = RangeSet::empty();
                   for (auto &kv : acc->terminals_union) {
                       int old_sid = kv.first;
                       auto it = state_map.find(old_sid);
                       if (it == state_map.end()) continue;
                       int new_sid = it->second;
-                      py::object src = kv.second;
-                      py::object curr = na->terminals_union.count(new_sid) ? na->terminals_union[new_sid] : rs_empty;
-                      na->terminals_union[new_sid] = curr.attr("union")(src);
+                      const RangeSet& src = kv.second;
+                      const RangeSet& curr = na->terminals_union.count(new_sid) ? na->terminals_union[new_sid] : rs_empty;
+                      na->terminals_union[new_sid] = curr.union_with(src);
                   }
                   return na;
               };
@@ -10737,11 +10549,9 @@ messages:
                   na->llm_mask = acc->llm_mask;
                   na->terminals_union = acc->terminals_union;
                   std::vector<unsigned long long> idx{static_cast<unsigned long long>(terminal_id)};
-                  py::object to_add = range_from_indices_(idx);
-                  py::object rs_empty = range_empty_();
-                  py::object curr = na->terminals_union.count(state_id) ? na->terminals_union[state_id] : rs_empty;
-                  py::object new_bv = curr.attr("union")(to_add);
-                  na->terminals_union[state_id] = new_bv;
+                  RangeSet to_add = RangeSet::from_indices(idx);
+                  const RangeSet& curr = na->terminals_union.count(state_id) ? na->terminals_union[state_id] : rs_empty;
+                  na->terminals_union[state_id] = curr.union_with(to_add);
                   return na;
               };
               return g.apply(transformer);
@@ -10819,7 +10629,7 @@ messages:
           ) {
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   // Build disallowed mask as RangeSet
-                  py::object disallowed_llm_mask = range_empty_();
+                  RangeSet disallowed_llm_mask = RangeSet::empty();
 
                   for (auto &kv : a->terminals_union) {
                       int tsid = kv.first;
@@ -10827,18 +10637,27 @@ messages:
                       if (!pmc_.contains(py::int_(tsid))) continue;
 
                       py::dict terms_to_llm = py::cast<py::dict>(pmc_[py::int_(tsid)]);
-                      py::object indices = kv.second.attr("to_indices")();
-                      for (auto idx : indices) {
-                          int terminal_id = py::cast<int>(idx);
-                          if (terms_to_llm.contains(py::int_(terminal_id))) {
-                              py::object bit = py::reinterpret_borrow<py::object>(terms_to_llm[py::int_(terminal_id)]);
-                              py::object rs = range_from_ranges_(bit.attr("to_ranges")());
-                              disallowed_llm_mask = disallowed_llm_mask.attr("union")(rs);
+                      for (const auto& range : kv.second.to_ranges()) {
+                          for (unsigned long long terminal_id_ull = range.first; ; ++terminal_id_ull) {
+                              int terminal_id = static_cast<int>(terminal_id_ull);
+                              if (terms_to_llm.contains(py::int_(terminal_id))) {
+                                  py::object bit = py::reinterpret_borrow<py::object>(terms_to_llm[py::int_(terminal_id)]);
+                                  py::list ranges_py = bit.attr("to_ranges")();
+                                  std::vector<std::pair<unsigned long long, unsigned long long>> ranges_cpp;
+                                  ranges_cpp.reserve(py::len(ranges_py));
+                                  for (auto r : ranges_py) {
+                                      py::tuple t = py::cast<py::tuple>(r);
+                                      ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
+                                  }
+                                  RangeSet rs = RangeSet::from_ranges(ranges_cpp);
+                                  disallowed_llm_mask = disallowed_llm_mask.union_with(rs);
+                              }
+                              if (terminal_id_ull == range.second) break;
                           }
                       }
                   }
 
-                  py::object allowed_mask = universe_rangeset_.attr("difference")(disallowed_llm_mask);
+                  RangeSet allowed_mask = universe_rangeset_.difference_with(disallowed_llm_mask);
 
                   auto na = std::make_shared<Acc>();
                   na->llm_mask = allowed_mask;
@@ -10850,12 +10669,12 @@ messages:
 
           Leveled intersect_llm_mask(
               const Leveled& g,
-              const py::object& limiter,
+              const RangeSet& limiter,
               std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo
           ) {
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
-                  py::object new_mask = a->llm_mask.attr("intersection")(limiter);
-                  bool is_empty_mask = new_mask.attr("is_empty")().cast<bool>();
+                  RangeSet new_mask = a->llm_mask.intersection_with(limiter);
+                  bool is_empty_mask = new_mask.is_empty();
                   if (is_empty_mask) return std::shared_ptr<Acc>(nullptr);
                   auto na = std::make_shared<Acc>(*a);
                   na->llm_mask = new_mask;
@@ -10870,7 +10689,7 @@ messages:
           m.doc() = "C++ engine for precompute3_model_cpp: commit() and get_mask(), Leveled GSS implementation";
 
           py::class_<Engine>(m, "Engine")
-              .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::dict,py::object,py::dict,py::object>(),
+              .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::dict,py::object,py::dict>(),
                    py::arg("tokenizer"),
                    py::arg("tokenizer_initial_state"),
                    py::arg("tokenizer_max_state"),
@@ -10880,8 +10699,7 @@ messages:
                    py::arg("arena_py"),
                    py::arg("possible_matches"),
                    py::arg("all_internal_llm_tokens_bitset"),
-                   py::arg("internal_to_original_map"),
-                   py::arg("RangeSetClass"))
+                   py::arg("internal_to_original_map"))
               .def("commit", &Engine::commit, py::arg("token_bytes"))
               .def("get_mask", &Engine::get_mask);
       }
@@ -12266,6 +12084,8 @@ messages:
       This was meant to be a super-fast C++ implementation of `precompute3_model_pure_python_standalone.py`. However, turns out it is not anywhere near as fast.
       More specifically, the C++ version scales very poorly. The Python version scales well. Careful attention was paid in the Python version to ensure that everything scaled well.
       Fix it.
+
+      This is **NOT** about absolute performance. I don't care if the C++ version is slow. This is about *scaling*. Execution should not **get slower** as we progress through the input, committing tokens, for example.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -12284,667 +12104,125 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Based on your description, the performance bottleneck in the C++ implementation is almost certainly due to excessive overhead from calling back into Python for `RangeSet` operations within tight loops. The Python version is fast because these operations are efficient within the Python runtime, but crossing the C++/Python boundary for every set operation is very costly.
+      Of course. The poor scaling in the C++ implementation compared to the Python version is a classic sign of an algorithmic issue, often related to redundant computations. The Python code includes a crucial optimization that was missed in the C++ translation.
 
-      The fix is to make the `RangeSet` a pure C++ object that the C++ engine can use directly, eliminating these expensive cross-language calls. Here are the step-by-step instructions to refactor the code for performance.
+      The problem lies in the `commit` method. In the Python version, during the byte-by-byte processing of a token, a `visited_q_items` set is used to keep track of `(offset, tokenizer_sid, gss_id)` tuples that have already been processed. This prevents re-expanding the same state multiple times if different paths lead to it, avoiding what could become exponential work.
 
-      ### Step-by-step Instructions
+      The C++ implementation in `precompute3_engine.cpp` was missing this `visited` set, causing it to re-process identical states, which explains the poor performance scaling as the number of paths grows with each committed token.
 
-      #### 1. Create a C++ Header for `RangeSet`
+      Here are the step-by-step instructions to fix this:
 
-      To allow the `precompute3_engine` to use the `RangeSet` class directly, we need to extract its definition into a header file.
+      ### Step-by-Step Instructions
 
-      Create a new file named `python/aug25/models/icl_rangeset.hpp` with the following content. This version also includes a safer implementation of `to_indices()` that avoids potentially massive memory allocations.
+      1.  **Open the C++ Engine File**
+          Open the file `python/aug25/models/precompute3_engine.cpp`.
 
-      ```cpp
-      #pragma once
+      2.  **Navigate to the `commit` Method**
+          Find the `commit` function, which starts with `void commit(py::bytes token_bytes)`.
 
-      #include <pybind11/pybind11.h>
-      #include <pybind11/stl.h>
+      3.  **Locate the BFS Processing Loop**
+          Inside the `commit` function, find the comment `// 3) Main BFS over token bytes`. You will see the initialization of a `std::deque<Item> q;`.
 
-      #include <boost/icl/interval_set.hpp>
-      #include <boost/icl/interval.hpp>
+      4.  **Add the `visited` Set and Key Logic**
+          We will now add the logic to track visited states, mirroring the Python implementation.
 
-      #include <vector>
-      #include <string>
-      #include <sstream>
-      #include <utility>
-      #include <algorithm>
+          -   **After** the line `std::unordered_map<int, std::vector<Leveled>> new_states_vec;` and **before** `while (!q.empty()) {`, insert the following C++ code to define the key structure, its hash function, and the visited set itself:
 
-      namespace py = pybind11;
+              ```cpp
+              struct QItemKey {
+                  int offset;
+                  int tokenizer_sid;
+                  std::uintptr_t gss_ptr;
 
-      class RangeSet {
-      public:
-          using interval_type = boost::icl::discrete_interval<unsigned long long>;
-          using set_type = boost::icl::interval_set<unsigned long long>;
-
-          RangeSet() = default;
-
-          static RangeSet empty() {
-              return RangeSet();
-          }
-
-          static RangeSet from_indices(const std::vector<unsigned long long>& indices) {
-              RangeSet rs;
-              for (unsigned long long v : indices) {
-                  rs.m_set.add(interval_type::closed(v, v));
-              }
-              return rs;
-          }
-
-          static RangeSet from_ranges(const std::vector<std::pair<unsigned long long, unsigned long long>>& ranges) {
-              RangeSet rs;
-              for (auto const& pr : ranges) {
-                  unsigned long long l = pr.first;
-                  unsigned long long r = pr.second;
-                  if (r < l) std::swap(l, r);
-                  rs.m_set.add(interval_type::closed(l, r));
-              }
-              return rs;
-          }
-
-          bool contains(unsigned long long v) const {
-              return boost::icl::contains(m_set, v);
-          }
-
-          RangeSet union_with(const RangeSet& other) const {
-              RangeSet res;
-              res.m_set = m_set;
-              res.m_set += other.m_set;
-              return res;
-          }
-
-          RangeSet intersection_with(const RangeSet& other) const {
-              RangeSet res;
-              res.m_set = m_set & other.m_set;
-              return res;
-          }
-
-          RangeSet difference_with(const RangeSet& other) const {
-              RangeSet res;
-              res.m_set = m_set - other.m_set;
-              return res;
-          }
-
-          bool is_empty() const {
-              return m_set.empty();
-          }
-
-          std::vector<std::pair<unsigned long long, unsigned long long>> to_ranges() const {
-              std::vector<std::pair<unsigned long long, unsigned long long>> out;
-              out.reserve(m_set.size());
-              for (auto const& itv : m_set) {
-                  unsigned long long l = itv.lower();
-                  unsigned long long r = itv.upper();
-                  out.emplace_back(l, r);
-              }
-              return out;
-          }
-
-          std::vector<unsigned long long> to_indices() const {
-              std::vector<unsigned long long> out;
-              // NOTE: Do not reserve with boost::icl::cardinality, as it can be huge and fail allocation.
-              for (auto const& itv : m_set) {
-                  unsigned long long l = itv.lower();
-                  unsigned long long r = itv.upper();
-                  for (unsigned long long v = l; ; ++v) {
-                      out.push_back(v);
-                      if (v == r) break;
+                  bool operator==(const QItemKey& other) const {
+                      return offset == other.offset &&
+                             tokenizer_sid == other.tokenizer_sid &&
+                             gss_ptr == other.gss_ptr;
                   }
-              }
-              return out;
-          }
+              };
 
-          bool operator==(const RangeSet& other) const {
-              return m_set == other.m_set;
-          }
+              struct QItemKeyHash {
+                  std::size_t operator()(const QItemKey& k) const {
+                      std::size_t h1 = std::hash<int>()(k.offset);
+                      std::size_t h2 = std::hash<int>()(k.tokenizer_sid);
+                      std::size_t h3 = std::hash<std::uintptr_t>()(k.gss_ptr);
+                      return h1 ^ (h2 << 1) ^ (h3 << 2);
+                  }
+              };
+              std::unordered_set<QItemKey, QItemKeyHash> visited_q_items;
+              ```
 
-          std::string repr() const {
-              std::ostringstream oss;
-              oss << "RangeSet(";
-              bool first = true;
-              for (auto const& itv : m_set) {
-                  if (!first) oss << ", ";
-                  first = false;
-                  oss << "[" << itv.lower() << ", " << itv.upper() << "]";
-              }
-              oss << ")";
-              return oss.str();
-          }
+          -   **As the first action inside** the `while (!q.empty())` loop, right after `q.pop_front();`, insert the following code. This creates a key for the current state, checks if it's in the visited set, and skips it if so. Otherwise, it adds the key to the set.
 
-      private:
-          set_type m_set;
-      };
-      ```
+              ```cpp
+              QItemKey key{cur.offset, cur.tokenizer_sid, reinterpret_cast<std::uintptr_t>(cur.gss.inner.get())};
+              if (visited_q_items.count(key)) continue;
+              visited_q_items.insert(key);
+              ```
 
-      #### 2. Update `icl_rangeset.cpp` to Use the Header
+      After applying these changes, you will need to recompile the C++ extension using the `run_rust_and_cpp_models.sh` script or your build system. This change will restore the correct scaling behavior.
 
-      Modify `python/aug25/models/icl_rangeset.cpp` to include the new header file. The file now only contains the pybind11 binding code.
+      ### Git Diff
 
-      #### 3. Refactor the C++ Engine for Performance
-
-      Modify `python/aug25/models/precompute3_engine.cpp` to use the C++ `RangeSet` class directly. This involves changing the `Acc` struct, updating the `Engine`'s logic to work with the C++ type, and removing all the `.attr()` calls for `RangeSet` operations.
-
-      #### 4. Update the Python Wrapper
-
-      Finally, modify `python/aug25/models/precompute3_model_cpp.py` to remove the now-unnecessary `RangeSet` class argument from the `Engine`'s constructor call.
-
-      ### Git Diffs
-
-      Here are the git diffs corresponding to the changes described above.
+      Here is the git diff for the required change.
 
       ```diff
-      diff --git a/python/aug25/models/icl_rangeset.cpp b/python/aug25/models/icl_rangeset.cpp
-      index 7887719..9400263 100644
-      --- a/python/aug25/models/icl_rangeset.cpp
-      +++ b/python/aug25/models/icl_rangeset.cpp
-      @@ -1,111 +1,7 @@
-       #include <pybind11/pybind11.h>
-       #include <pybind11/stl.h>
-      -
-      -#include <boost/icl/interval_set.hpp>
-      -#include <boost/icl/interval.hpp>
-      -
-      -#include <vector>
-      -#include <string>
-      -#include <sstream>
-      -#include <utility>
-      -#include <algorithm>
-      +#include "icl_rangeset.hpp"
-       
-       namespace py = pybind11;
-      -
-      -class RangeSet {
-      -public:
-      -    using interval_type = boost::icl::discrete_interval<unsigned long long>;
-      -    using set_type = boost::icl::interval_set<unsigned long long>;
-      -
-      -    RangeSet() = default;
-      -
-      -    static RangeSet empty() {
-      -        return RangeSet();
-      -    }
-      -
-      -    static RangeSet from_indices(const std::vector<unsigned long long>& indices) {
-      -        RangeSet rs;
-      -        for (unsigned long long v : indices) {
-      -            rs.m_set.add(interval_type::closed(v, v));
-      -        }
-      -        return rs;
-      -    }
-      -
-      -    static RangeSet from_ranges(const std::vector<std::pair<unsigned long long, unsigned long long>>& ranges) {
-      -        RangeSet rs;
-      -        for (auto const& pr : ranges) {
-      -            unsigned long long l = pr.first;
-      -            unsigned long long r = pr.second;
-      -            if (r < l) std::swap(l, r);
-      -            rs.m_set.add(interval_type::closed(l, r));
-      -        }
-      -        return rs;
-      -    }
-      -
-      -    bool contains(unsigned long long v) const {
-      -        return boost::icl::contains(m_set, v);
-      -    }
-      -
-      -    RangeSet union_with(const RangeSet& other) const {
-      -        RangeSet res;
-      -        res.m_set = m_set;
-      -        res.m_set += other.m_set;
-      -        return res;
-      -    }
-      -
-      -    RangeSet intersection_with(const RangeSet& other) const {
-      -        RangeSet res;
-      -        res.m_set = m_set & other.m_set;
-      -        return res;
-      -    }
-      -
-      -    RangeSet difference_with(const RangeSet& other) const {
-      -        RangeSet res;
-      -        res.m_set = m_set - other.m_set;
-      -        return res;
-      -    }
-      -
-      -    bool is_empty() const {
-      -        return m_set.empty();
-      -    }
-      -
-      -    std::vector<std::pair<unsigned long long, unsigned long long>> to_ranges() const {
-      -        std::vector<std::pair<unsigned long long, unsigned long long>> out;
-      -        out.reserve(m_set.size());
-      -        for (auto const& itv : m_set) {
-      -            unsigned long long l = itv.lower();
-      -            unsigned long long r = itv.upper();
-      -            out.emplace_back(l, r);
-      -        }
-      -        return out;
-      -    }
-      -
-      -    std::vector<unsigned long long> to_indices() const {
-      -        std::vector<unsigned long long> out;
-      -        out.reserve(boost::icl::cardinality(m_set));
-      -        for (auto const& itv : m_set) {
-      -            unsigned long long l = itv.lower();
-      -            unsigned long long r = itv.upper();
-      -            for (unsigned long long v = l; v <= r; ++v) {
-      -                out.push_back(v);
-      -            }
-      -        }
-      -        return out;
-      -    }
-      -
-      -    bool operator==(const RangeSet& other) const {
-      -        return m_set == other.m_set;
-      -    }
-      -
-      -    std::string repr() const {
-      -        std::ostringstream oss;
-      -        oss << "RangeSet(";
-      -        bool first = true;
-      -        for (auto const& itv : m_set) {
-      -            if (!first) oss << ", ";
-      -            first = false;
-      -            oss << "[" << itv.lower() << ", " << itv.upper() << "]";
-      -        }
-      -        oss << ")";
-      -        return oss.str();
-      -    }
-      -
-      -private:
-      -    set_type m_set;
-      -};
-       
-       PYBIND11_MODULE(icl_rangeset, m) {
-           m.doc() = "Boost.ICL-backed RangeSet";
-
-      ``````diff
       diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
-      index 54f7380..9d69107 100644
+      index 8461730..1317130 100644
       --- a/python/aug25/models/precompute3_engine.cpp
       +++ b/python/aug25/models/precompute3_engine.cpp
-      @@ -14,20 +14,21 @@
-       #include <functional>
-       #include <memory>
-       #include "leveled_gss.hpp"
-      +#include "icl_rangeset.hpp"
-       
-       using namespace leveled_gss;
-       
-       namespace py = pybind11;
-       
-       struct Acc : public std::enable_shared_from_this<Acc> {
-           // terminals_union: tokenizer_state_id -> RangeSet of disallowed terminals
-      -    std::unordered_map<int, py::object> terminals_union;
-      +    std::unordered_map<int, RangeSet> terminals_union;
-           // current allowed LLM mask (RangeSet)
-      -    py::object llm_mask;
-      +    RangeSet llm_mask;
-       
-           bool operator==(const Acc& other) const {
-      -        if (!llm_mask.attr("__eq__")(other.llm_mask).cast<bool>()) return false;
-      +        if (!(llm_mask == other.llm_mask)) return false;
-               if (terminals_union.size() != other.terminals_union.size()) return false;
-               for (auto const& [key, val] : terminals_union) {
-                   auto it = other.terminals_union.find(key);
-      -            if (!val.attr("__eq__")(it->second).cast<bool>()) {
-      +            if (!(val == it->second)) {
-                       return false;
-                   }
-               }
-      @@ -39,18 +40,15 @@
-               n->terminals_union = terminals_union;
-               for (auto &kv : other->terminals_union) {
-                   int key = kv.first;
-      -            const py::object &v = kv.second;
-      +            const RangeSet &v = kv.second;
-                   auto it = n->terminals_union.find(key);
-                   if (it == n->terminals_union.end()) {
-                       n->terminals_union.emplace(key, v);
-                   } else {
-      -                it->second = it->second.attr("union")(v);
-      +                it->second = it->second.union_with(v);
-                   }
-               }
-               // Union llm masks
-      -        if (llm_mask.is_none()) n->llm_mask = other->llm_mask;
-      -        else if (other->llm_mask.is_none()) n->llm_mask = llm_mask;
-      -        else n->llm_mask = llm_mask.attr("union")(other->llm_mask);
-      +        n->llm_mask = llm_mask.union_with(other->llm_mask);
-               return n;
-           }
-       };
-      @@ -66,8 +64,7 @@
-                  py::dict arena_py,                     // uid -> node dict (children carry bitset JSON)
-                  py::dict possible_matches,             // tsid -> term_id -> _sep1.Bitset
-                  py::object all_internal_llm_tokens_bitset,
-      -           py::dict internal_to_original_map,
-      -           py::object RangeSetClass)
-      +           py::dict internal_to_original_map)
-               : tokenizer_(std::move(tokenizer)),
-                 tokenizer_initial_state_(tokenizer_initial_state),
-                 tokenizer_max_state_(tokenizer_max_state),
-      @@ -76,20 +73,20 @@
-                 pmc_(std::move(possible_matches)),
-                 all_internal_llm_tokens_bitset_(std::move(all_internal_llm_tokens_bitset)),
-      -          internal_to_original_map_(std::move(internal_to_original_map)),
-      -          RangeSetClass_(std::move(RangeSetClass)) {
-      +          internal_to_original_map_(std::move(internal_to_original_map)) {
-       
-               if (!ignore_terminal_id_or_none.is_none()) {
-                   ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
+      @@ -148,12 +148,38 @@
+                   q.push_back(Item{0, kv.first, std::move(kv.second)});
                }
        
-      -        // Cache RangeSet helpers
-      -        range_empty_ = RangeSetClass_.attr("empty");
-      -        range_from_indices_ = RangeSetClass_.attr("from_indices");
-      -        range_from_ranges_ = RangeSetClass_.attr("from_ranges");
-      -
-               // Universe RangeSet for get_mask init
-      -        universe_rangeset_ = range_from_ranges_(all_internal_llm_tokens_bitset_.attr("to_ranges")());
-      +        py::list ranges_py = all_internal_llm_tokens_bitset_.attr("to_ranges")();
-      +        std::vector<std::pair<unsigned long long, unsigned long long>> ranges_cpp;
-      +        ranges_cpp.reserve(py::len(ranges_py));
-      +        for (auto r : ranges_py) {
-      +            py::tuple t = py::cast<py::tuple>(r);
-      +            ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
-      +        }
-      +        universe_rangeset_ = RangeSet::from_ranges(ranges_cpp);
+      +        struct QItemKey {
+      +            int offset;
+      +            int tokenizer_sid;
+      +            std::uintptr_t gss_ptr;
+      +
+      +            bool operator==(const QItemKey& other) const {
+      +                return offset == other.offset &&
+      +                       tokenizer_sid == other.tokenizer_sid &&
+      +                       gss_ptr == other.gss_ptr;
+      +            }
+      +        };
+      +
+      +        struct QItemKeyHash {
+      +            std::size_t operator()(const QItemKey& k) const {
+      +                std::size_t h1 = std::hash<int>()(k.offset);
+      +                std::size_t h2 = std::hash<int>()(k.tokenizer_sid);
+      +                std::size_t h3 = std::hash<std::uintptr_t>()(k.gss_ptr);
+      +                return h1 ^ (h2 << 1) ^ (h3 << 2);
+      +            }
+      +        };
+      +        std::unordered_set<QItemKey, QItemKeyHash> visited_q_items;
+      +
+               // new states being built
+               std::unordered_map<int, std::vector<Leveled>> new_states_vec;
        
-               // Parse roots_map into C++ map
-               for (auto item : roots_map_py_) {
-      @@ -104,7 +101,7 @@
+               while (!q.empty()) {
+                   Item cur = std::move(q.front());
+                   q.pop_front();
+      +
+      +            QItemKey key{cur.offset, cur.tokenizer_sid, reinterpret_cast<std::uintptr_t>(cur.gss.inner.get())};
+      +            if (visited_q_items.count(key)) continue;
+      +            visited_q_items.insert(key);
        
-               // Initialize state: one GSS per tokenizer initial state with start parser state on stack
-               auto initial_acc = std::make_shared<Acc>();
-      -        initial_acc->llm_mask = range_empty_();
-      +        initial_acc->llm_mask = RangeSet::empty();
-               // terminals_union empty by default
-               std::vector<std::pair<std::vector<int>, std::shared_ptr<Acc>>> initial_stacks;
-               initial_stacks.emplace_back(std::vector<int>{}, initial_acc);
-      @@ -115,7 +112,7 @@
-           void commit(py::bytes token_bytes) {
-               // Build terminals_map and state_map
-               std::string token = token_bytes; // implicit cast via pybind11
-      -        std::unordered_map<int, py::object> terminals_map; // sid -> RangeSet of matched terminals
-      +        std::unordered_map<int, RangeSet> terminals_map; // sid -> RangeSet of matched terminals
-               std::unordered_map<int, int> state_map;            // old_sid -> end_sid
-       
-               // 1) Probe tokenizer from each active state
-      @@ -136,8 +133,7 @@
-                       int terminal_id = py::cast<int>(tmt[0]);
-                       matched_terminals.push_back(static_cast<unsigned long long>(terminal_id));
-                   }
-      -            py::object matched_rs = range_from_indices_(matched_terminals);
-      -            terminals_map[tokenizer_sid] = matched_rs;
-      +            terminals_map[tokenizer_sid] = RangeSet::from_indices(matched_terminals);
-               }
-       
-               // 2) Prune and map per-state GSS (rename terminals_union keys according to state_map)
-      @@ -262,7 +258,7 @@
-                   enqueue(d, root);
-               }
-       
-      -        py::object final_mask = range_empty_();
-      +        RangeSet final_mask = RangeSet::empty();
-               std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> intersect_acc_memo;
-       
-               while (!depth_heap.empty()) {
-      @@ -280,7 +276,7 @@
-                       if (info.is_end) {
-                           auto reduced = gss_node.reduce_acc();
-                           if (reduced) {
-      -                        final_mask = final_mask.attr("union")(reduced->llm_mask);
-      +                        final_mask = final_mask.union_with(reduced->llm_mask);
-                           }
-                       }
-       
-      @@ -324,16 +320,15 @@
-       
-               // Convert internal mask indices to original
-               std::vector<unsigned long long> original_indices;
-      -        py::object idxs = final_mask.attr("to_indices")();
-      -        for (auto iobj : idxs) {
-      -            int i = py::cast<int>(iobj);
-      +        std::vector<unsigned long long> idxs = final_mask.to_indices();
-      +        for (auto i : idxs) {
-                   if (internal_to_original_map_.contains(py::int_(i))) {
-                       int mapped = py::cast<int>(internal_to_original_map_[py::int_(i)]);
-                       original_indices.push_back(static_cast<unsigned long long>(mapped));
-                   }
-               }
-      -        py::object res = range_from_indices_(original_indices);
-      -        return res;
-      +        // pybind11 will automatically convert the C++ RangeSet to the bound Python type
-      +        return py::cast(RangeSet::from_indices(original_indices));
-           }
-       
-       private:
-      @@ -357,7 +352,7 @@
-       
-           struct Edge {
-               int pop;
-      -        py::object llm_bv_rangeset; // icl_rangeset.RangeSet (for intersection)
-      +        RangeSet llm_bv_rangeset; // icl_rangeset.RangeSet (for intersection)
-               std::vector<DestEdge> dests;
-           };
-       
-      @@ -387,17 +382,10 @@
-           py::object all_internal_llm_tokens_bitset_;
-       
-           // Universe RangeSet
-      -    py::object universe_rangeset_;
-      +    RangeSet universe_rangeset_;
-       
-           py::dict internal_to_original_map_;
-       
-           // Current GLR state: tokenizer_state_id -> LeveledGSS
-           std::unordered_map<int, Leveled> state_;
-      -
-      -    // RangeSet helpers
-      -    py::object RangeSetClass_;
-      -    py::object range_empty_;
-      -    py::object range_from_indices_;
-      -    py::object range_from_ranges_;
-       
-           // Check membership in a vector of inclusive ranges (sorted, non-overlapping).
-           static bool contains_in_ranges(const std::vector<std::pair<int,int>>& ranges, int v) {
-      @@ -522,7 +510,14 @@
-       
-                       // Convert llm_bv_json -> _sep1.Bitset -> RangeSet
-                       py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(dumps(llm_bv_json));
-      -                py::object llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
-      +                py::list llm_ranges_py = llm_bv_bitset.attr("to_ranges")();
-      +                std::vector<std::pair<unsigned long long, unsigned long long>> llm_ranges_cpp;
-      +                llm_ranges_cpp.reserve(py::len(llm_ranges_py));
-      +                for (auto r : llm_ranges_py) {
-      +                    py::tuple t = py::cast<py::tuple>(r);
-      +                    llm_ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
-      +                }
-      +                RangeSet llm_bv_rs = RangeSet::from_ranges(llm_ranges_cpp);
-       
-                       std::vector<DestEdge> dests;
-                       py::object dest_map = entry[1];
-      @@ -555,16 +550,15 @@
-           // -----------------------------
-           // Leveled GSS transforms needed by algorithm
-           // -----------------------------
-      -    Leveled prune_by_terminals_map(const Leveled& g, const std::unordered_map<int, py::object>& terminals_map) {
-      +    Leveled prune_by_terminals_map(const Leveled& g, const std::unordered_map<int, RangeSet>& terminals_map) {
-               auto pred = [&](const std::shared_ptr<Acc>& acc) -> bool {
-      -            py::object rs_empty = range_empty_();
-      +            RangeSet rs_empty = RangeSet::empty();
-                   for (auto &kv : terminals_map) {
-                       int sid = kv.first;
-      -                const py::object &matched = kv.second;
-      +                const RangeSet &matched = kv.second;
-                       auto it = acc->terminals_union.find(sid);
-      -                py::object disallowed = (it != acc->terminals_union.end()) ? it->second : rs_empty;
-      -                py::object inter = matched.attr("intersection")(disallowed);
-      -                bool ok = inter.attr("is_empty")().cast<bool>();
-      +                const RangeSet &disallowed = (it != acc->terminals_union.end()) ? it->second : rs_empty;
-      +                RangeSet inter = matched.intersection_with(disallowed);
-      +                bool ok = inter.is_empty();
-                       if (!ok) return false;
-                   }
-                   return true;
-      @@ -576,14 +570,13 @@
-               auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
-                   auto na = std::make_shared<Acc>();
-                   na->llm_mask = acc->llm_mask;
-      -            py::object rs_empty = range_empty_();
-      +            RangeSet rs_empty = RangeSet::empty();
-                   for (auto &kv : acc->terminals_union) {
-                       int old_sid = kv.first;
-                       auto it = state_map.find(old_sid);
-                       if (it == state_map.end()) continue;
-                       int new_sid = it->second;
-      -                py::object src = kv.second;
-      -                py::object curr = na->terminals_union.count(new_sid) ? na->terminals_union[new_sid] : rs_empty;
-      -                na->terminals_union[new_sid] = curr.attr("union")(src);
-      +                const RangeSet& src = kv.second;
-      +                const RangeSet& curr = na->terminals_union.count(new_sid) ? na->terminals_union[new_sid] : rs_empty;
-      +                na->terminals_union[new_sid] = curr.union_with(src);
-                   }
-                   return na;
-               };
-      @@ -596,11 +589,9 @@
-                   na->llm_mask = acc->llm_mask;
-                   na->terminals_union = acc->terminals_union;
-                   std::vector<unsigned long long> idx{static_cast<unsigned long long>(terminal_id)};
-      -            py::object to_add = range_from_indices_(idx);
-      -            py::object rs_empty = range_empty_();
-      -            py::object curr = na->terminals_union.count(state_id) ? na->terminals_union[state_id] : rs_empty;
-      -            py::object new_bv = curr.attr("union")(to_add);
-      -            na->terminals_union[state_id] = new_bv;
-      +            RangeSet to_add = RangeSet::from_indices(idx);
-      +            const RangeSet& curr = na->terminals_union.count(state_id) ? na->terminals_union[state_id] : rs_empty;
-      +            na->terminals_union[state_id] = curr.union_with(to_add);
-                   return na;
-               };
-               return g.apply(transformer);
-      @@ -668,26 +659,34 @@
-           ) {
-               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
-                   // Build disallowed mask as RangeSet
-      -            py::object disallowed_llm_mask = range_empty_();
-      +            RangeSet disallowed_llm_mask = RangeSet::empty();
-       
-                   for (auto &kv : a->terminals_union) {
-                       int tsid = kv.first;
-                       if (tsid > tokenizer_max_state_) continue;
-                       if (!pmc_.contains(py::int_(tsid))) continue;
-       
-      -                py::dict terms_to_llm = py::cast<py::dict>(pmc_[py::int_(tsid)]);
-      -                py::object indices = kv.second.attr("to_indices")();
-      -                for (auto idx : indices) {
-      -                    int terminal_id = py::cast<int>(idx);
-      -                    if (terms_to_llm.contains(py::int_(terminal_id))) {
-      -                        py::object bit = py::reinterpret_borrow<py::object>(terms_to_llm[py::int_(terminal_id)]);
-      -                        py::object rs = range_from_ranges_(bit.attr("to_ranges")());
-      -                        disallowed_llm_mask = disallowed_llm_mask.attr("union")(rs);
-      +                py::dict terms_to_llm = py::cast<py::dict>(pmc_[py::int_(tsid)]);
-      +                for (const auto& range : kv.second.to_ranges()) {
-      +                    for (unsigned long long terminal_id_ull = range.first; ; ++terminal_id_ull) {
-      +                        int terminal_id = static_cast<int>(terminal_id_ull);
-      +                        if (terms_to_llm.contains(py::int_(terminal_id))) {
-      +                            py::object bit = py::reinterpret_borrow<py::object>(terms_to_llm[py::int_(terminal_id)]);
-      +                            py::list ranges_py = bit.attr("to_ranges")();
-      +                            std::vector<std::pair<unsigned long long, unsigned long long>> ranges_cpp;
-      +                            ranges_cpp.reserve(py::len(ranges_py));
-      +                            for (auto r : ranges_py) {
-      +                                py::tuple t = py::cast<py::tuple>(r);
-      +                                ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
-      +                            }
-      +                            RangeSet rs = RangeSet::from_ranges(ranges_cpp);
-      +                            disallowed_llm_mask = disallowed_llm_mask.union_with(rs);
-      +                        }
-      +                        if (terminal_id_ull == range.second) break;
-                           }
-                       }
-                   }
-       
-      -            py::object allowed_mask = universe_rangeset_.attr("difference")(disallowed_llm_mask);
-      +            RangeSet allowed_mask = universe_rangeset_.difference_with(disallowed_llm_mask);
-       
-                   auto na = std::make_shared<Acc>();
-                   na->llm_mask = allowed_mask;
-      @@ -698,13 +697,12 @@
-           }
-       
-           Leveled intersect_llm_mask(
-               const Leveled& g,
-      -        const py::object& limiter,
-      +        const RangeSet& limiter,
-               std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo
-           ) {
-               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
-      -            py::object new_mask = a->llm_mask.attr("intersection")(limiter);
-      -            bool is_empty_mask = new_mask.attr("is_empty")().cast<bool>();
-      +            RangeSet new_mask = a->llm_mask.intersection_with(limiter);
-      +            bool is_empty_mask = new_mask.is_empty();
-                   if (is_empty_mask) return std::shared_ptr<Acc>(nullptr);
-                   auto na = std::make_shared<Acc>(*a);
-                   na->llm_mask = new_mask;
-      @@ -718,7 +716,7 @@
-           m.doc() = "C++ engine for precompute3_model_cpp: commit() and get_mask(), Leveled GSS implementation";
-       
-           py::class_<Engine>(m, "Engine")
-      -        .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::dict,py::object,py::dict,py::object>(),
-      +        .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::dict,py::object,py::dict>(),
-                    py::arg("tokenizer"),
-                    py::arg("tokenizer_initial_state"),
-                    py::arg("tokenizer_max_state"),
-      @@ -728,8 +726,7 @@
-                    py::arg("arena_py"),
-                    py::arg("possible_matches"),
-                    py::arg("all_internal_llm_tokens_bitset"),
-      -             py::arg("internal_to_original_map"),
-      -             py::arg("RangeSetClass"))
-      +             py::arg("internal_to_original_map"))
-               .def("commit", &Engine::commit, py::arg("token_bytes"))
-               .def("get_mask", &Engine::get_mask);
-       }
-
-      ``````diff
-      diff --git a/python/aug25/models/precompute3_model_cpp.py b/python/aug25/models/precompute3_model_cpp.py
-      index 455e81d..599f36f 100644
-      --- a/python/aug25/models/precompute3_model_cpp.py
-      +++ b/python/aug25/models/precompute3_model_cpp.py
-      @@ -74,8 +74,7 @@
-                   model.arena,
-                   constraint.possible_matches(),                 # tsid -> term_id -> _sep1.Bitset
-                   constraint.all_internal_llm_tokens_bitset(),  # _sep1.Bitset universe
-      -            model.internal_to_original_map,               # int -> int
-      -            RangeSet                                       # icl_rangeset.RangeSet class
-      +            model.internal_to_original_map                # int -> int
-               )
-       
-               return model
+                   std::string suffix = token.substr(static_cast<size_t>(cur.offset));
+                   py::tuple result = tokenizer_.attr("execute_from_state")(py::bytes(suffix), cur.tokenizer_sid);
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/icl_rangeset.cpp
-      Applying patch to 'python/aug25/models/icl_rangeset.cpp' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/icl_rangeset.cpp.
-
-      --- Processing Diff Block 2 ---
       Identified target file: python/aug25/models/precompute3_engine.cpp
       Applying patch to 'python/aug25/models/precompute3_engine.cpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_engine.cpp.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: python/aug25/models/precompute3_model_cpp.py
-      Applying patch to 'python/aug25/models/precompute3_model_cpp.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_cpp.py.
     metadata:
-  - user: 'Changes committed with message: "Integrate C++ RangeSet into precompute3_engine
-      for performance"'
+  - user: 'Changes committed with message: "Fix: Add visited set to precompute3_engine
+      commit for improved scaling"'
     metadata:
 ...
