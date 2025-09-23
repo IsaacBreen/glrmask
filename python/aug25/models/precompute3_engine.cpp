@@ -21,6 +21,34 @@
 namespace py = pybind11;
 using leveled_gss::LeveledGSS;
 
+struct Acc : public std::enable_shared_from_this<Acc> {
+    // terminals_union: tokenizer_state_id -> RangeSet of disallowed terminals
+    std::unordered_map<int, py::object> terminals_union;
+    // current allowed LLM mask (RangeSet)
+    py::object llm_mask;
+
+    std::shared_ptr<Acc> merge(const std::shared_ptr<Acc>& other) const {
+        auto n = std::make_shared<Acc>();
+        // Merge terminals_union by RangeSet union per key
+        n->terminals_union = terminals_union;
+        for (auto &kv : other->terminals_union) {
+            int key = kv.first;
+            const py::object &v = kv.second;
+            auto it = n->terminals_union.find(key);
+            if (it == n->terminals_union.end()) {
+                n->terminals_union.emplace(key, v);
+            } else {
+                it->second = it->second.attr("union")(v);
+            }
+        }
+        // Union llm masks
+        if (llm_mask.is_none()) n->llm_mask = other->llm_mask;
+        else if (other->llm_mask.is_none()) n->llm_mask = llm_mask;
+        else n->llm_mask = llm_mask.attr("union")(other->llm_mask);
+        return n;
+    }
+};
+
 class Engine {
 public:
     Engine(py::object tokenizer,
@@ -352,34 +380,6 @@ private:
         std::vector<Edge> edges;
         bool is_end{false};
         int max_depth{0};
-    };
-
-    struct Acc : public std::enable_shared_from_this<Acc> {
-        // terminals_union: tokenizer_state_id -> RangeSet of disallowed terminals
-        std::unordered_map<int, py::object> terminals_union;
-        // current allowed LLM mask (RangeSet)
-        py::object llm_mask;
-
-        std::shared_ptr<Acc> merge(const std::shared_ptr<Acc>& other) const {
-            auto n = std::make_shared<Acc>();
-            // Merge terminals_union by RangeSet union per key
-            n->terminals_union = terminals_union;
-            for (auto &kv : other->terminals_union) {
-                int key = kv.first;
-                const py::object &v = kv.second;
-                auto it = n->terminals_union.find(key);
-                if (it == n->terminals_union.end()) {
-                    n->terminals_union.emplace(key, v);
-                } else {
-                    it->second = it->second.attr("union")(v);
-                }
-            }
-            // Union llm masks
-            if (llm_mask.is_none()) n->llm_mask = other->llm_mask;
-            else if (other->llm_mask.is_none()) n->llm_mask = llm_mask;
-            else n->llm_mask = llm_mask.attr("union")(other->llm_mask);
-            return n;
-        }
     };
 
     using Leveled = LeveledGSS<int, Acc>;
