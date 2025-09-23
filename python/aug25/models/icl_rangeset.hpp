@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <cstdint>
 #include <string>
 #include <sstream>
 #include <algorithm>
@@ -14,6 +15,12 @@ public:
         return RangeSet();
     }
 
+    // Fast constructor for a single index without allocating a vector
+    static RangeSet from_singleton(unsigned long long index) {
+        RangeSet rs;
+        rs.set.add(index);
+        return rs;
+    }
     static RangeSet from_indices(const std::vector<unsigned long long>& indices) {
         RangeSet rs;
         for (unsigned long long i : indices) {

@@ -206,9 +206,13 @@ _merge_children_by_depth(
     all_keys.reserve(c1.size() + c2.size());
     for (auto &kv : c1) all_keys.insert(kv.first);
     for (auto &kv : c2) all_keys.insert(kv.first);
+    merged_children.reserve(all_keys.size());
 
     for (auto &v : all_keys) {
         std::unordered_map<int, std::vector<NodePtr>> nodes_by_depth;
+        nodes_by_depth.reserve(
+            (c1.count(v) ? c1.at(v).size() : 0) + (c2.count(v) ? c2.at(v).size() : 0)
+        );
         auto it1 = c1.find(v);
         if (it1 != c1.end()) {
             for (auto &dkv : it1->second) nodes_by_depth[dkv.first].push_back(dkv.second);
@@ -250,6 +254,7 @@ static UpperBranchPtr<T, Acc> interface_to_upperbranch(const InterfacePtr<T, Acc
         const T& v = kv.first;
         const auto& kids = kv.second;
         std::unordered_map<int, UpperPtr<T, Acc>> v_map;
+        v_map.reserve(kids.size());
         for (auto &dkv : kids) {
             auto lchild = dkv.second;
             auto ci = std::make_shared<Interface<T, Acc>>(
@@ -275,9 +280,14 @@ template <typename T, typename Acc>
 static UpperPtr<T, Acc> try_promote(const UpperBranchPtr<T, Acc>& node) {
     // Collect all children
     std::vector<UpperPtr<T, Acc>> all_children;
-    for (auto &kv : *node->_children) {
-        for (auto &dkv : kv.second) {
-            all_children.push_back(dkv.second);
+    {
+        size_t approx = 0;
+        for (auto &kv : *node->_children) approx += kv.second.size();
+        all_children.reserve(approx);
+        for (auto &kv : *node->_children) {
+            for (auto &dkv : kv.second) {
+                all_children.push_back(dkv.second);
+            }
         }
     }
     if (all_children.empty()) {
@@ -424,6 +434,7 @@ static UpperPtr<T, Acc> lower_to_upper(const LowerPtr<T>& l, const std::shared_p
         const T& v = kv.first;
         const auto& kids = kv.second;
         std::unordered_map<int, UpperPtr<T, Acc>> v_map;
+        v_map.reserve(kids.size());
         for (auto &dkv : kids) {
             auto up_child = lower_to_upper<T, Acc>(dkv.second, acc);
             v_map[up_child->_max_depth] = up_child;
