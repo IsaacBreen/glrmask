@@ -464,10 +464,11 @@ public:
     static LeveledGSS from_stacks(const std::vector<std::pair<std::vector<T>, std::shared_ptr<Acc>>>& stacks) {
         // Canonicalize stacks: merge Acc for identical vectors
         struct VecHash {
-            size_t operator()(const std::vector<T>& v) const noexcept {
+            size_t operator()(const std::vector<T>& v) const {
                 size_t h = 1469598103934665603ULL;
-                for (auto &x : v) {
-                    h ^= static_cast<size_t>(x) + 0x9e3779b97f4a7c15ULL + (h<<6) + (h>>2);
+                std::hash<T> hasher;
+                for (const auto &x : v) {
+                    h ^= hasher(x) + 0x9e3779b97f4a7c15ULL + (h<<6) + (h>>2);
                 }
                 return h;
             }

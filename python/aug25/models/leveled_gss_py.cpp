@@ -6,6 +6,16 @@
 
 namespace py = pybind11;
 
+// Add this block after the includes
+namespace std {
+    template <>
+    struct hash<py::object> {
+        size_t operator()(const py::object& obj) const {
+            return py::hash(obj);
+        }
+    };
+}
+
 // Accumulator that wraps a Python object and calls its `merge` method.
 struct PyAcc : public std::enable_shared_from_this<PyAcc> {
     py::object value;
