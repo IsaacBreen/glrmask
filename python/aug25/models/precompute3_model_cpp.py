@@ -56,19 +56,25 @@ class Model(GraphProvider):
         model.glr_parser = constraint.glr_parser()
         model.tokenizer_initial_state = model.tokenizer.initial_state_id()
 
+        # Parse parser JSON directly from data (no Python-side dataclasses)
+        parser_data = data['parser']  # contains 'start_state_id' and 'stage_7_table'
+
         # Build id_to_token mapping (original LLM token map)
         model.id_to_token = {int(v): bytes(k) for k, v in data['llm_token_map']}
 
         # Keep internal->original token id map for final mask conversion (engine uses it too)
         model.internal_to_original_map = constraint.internal_to_original_map()
 
-        # Create the C++ Engine. Pass raw JSON string for fast C++-side parsing.
+        # Create the C++ Engine (self-contained algorithm in C++)
+        # Pass raw structures; the engine will parse/normalize as needed.
         model._engine = eng.Engine(
             model.tokenizer,
             model.tokenizer.initial_state_id(),
             model.tokenizer.max_state(),
             model.glr_parser.ignore_terminal_id if model.glr_parser.ignore_terminal_id is not None else None,
-            s,
+            parser_data,
+            dict(model.roots_map),
+            model.arena,
             constraint.possible_matches(),                 # tsid -> term_id -> _sep1.Bitset
             constraint.all_internal_llm_tokens_bitset(),  # _sep1.Bitset universe
             model.internal_to_original_map                # int -> int

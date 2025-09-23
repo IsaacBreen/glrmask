@@ -18,13 +18,11 @@
 #include <memory>
 #include "leveled_gss.hpp"
 
+#include <functional>
+#include <memory>
+#include "leveled_gss.hpp"
 #include "icl_rangeset.hpp"
 
-// Fast JSON parsing
-#include <nlohmann/json.hpp>
-
-
-using json = nlohmann::json;
 using namespace leveled_gss;
 
 namespace py = pybind11;
@@ -88,22 +86,25 @@ public:
            int tokenizer_initial_state,
            int tokenizer_max_state,
            py::object ignore_terminal_id_or_none,
-           const std::string& json_string,
+           py::dict parser_data,                  // JSON 'parser' object with start_state_id and stage_7_table
+           py::dict roots_map_py,                 // state_id -> root node id
+           py::dict arena_py,                     // uid -> node dict (children carry bitset JSON)
            py::dict possible_matches,             // tsid -> term_id -> _sep1.Bitset
            py::object all_internal_llm_tokens_bitset,
            py::dict internal_to_original_map)
         : tokenizer_(std::move(tokenizer)),
           tokenizer_initial_state_(tokenizer_initial_state),
           tokenizer_max_state_(tokenizer_max_state),
+          parser_data_(std::move(parser_data)),
+          roots_map_py_(std::move(roots_map_py)),
           pmc_(std::move(possible_matches)),
           all_internal_llm_tokens_bitset_(std::move(all_internal_llm_tokens_bitset)) {
-
-        json data = json::parse(json_string);
 
         if (!ignore_terminal_id_or_none.is_none()) {
             ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
         }
 
+        // Universe RangeSet for get_mask init
         {
             py::list ranges_py = all_internal_llm_tokens_bitset_.attr("to_ranges")();
             std::vector<std::pair<unsigned long long, unsigned long long>> ranges_cpp;
@@ -115,16 +116,21 @@ public:
             universe_rangeset_ = RangeSet::from_ranges(ranges_cpp);
         }
 
-        const auto& roots_map_json = data.at("precomputed3");
-        for (const auto& item : roots_map_json) {
-            roots_map_[item[0].get<int>()] = item[1].get<int>();
+        // Parse roots_map into C++ map
+        for (auto item : roots_map_py_) {
+            int sid = py::cast<int>(item.first);
+            int root = py::cast<int>(item.second);
+            roots_map_[sid] = root;
         }
 
-        parse_parser_table_from_json(data.at("parser"));
+        // Parse parser table from JSON dict
+        parse_parser_table_from_json(parser_data_);
 
-        parse_arena(data.at("trie3_god"));
+        // Parse arena using JSON-encoded bitsets; convert to Bitset and RangeSet
+        parse_arena(arena_py);
 
         // Pre-convert possible_matches into C++ RangeSet map (tsid -> term_id -> RangeSet)
+        // This avoids repeated Python calls during get_mask initialization.
         {
             py::module json = py::module::import("json");
             py::object sep1 = py::module::import("_sep1");
@@ -494,10 +500,12 @@ private:
     std::optional<int> ignore_terminal_id_;
 
     // Parser
+    py::dict parser_data_;
     int start_state_id_{0};
     std::unordered_map<int, Row> parser_; // state_id -> Row
 
     // Arena/trie
+    py::dict roots_map_py_;
     std::unordered_map<int, NodeInfo> arena_;
     std::unordered_map<int, int> roots_map_;
 
@@ -533,49 +541,63 @@ private:
     // -----------------------------
     // Parsing helpers
     // -----------------------------
-    static int json_to_int(const json& j) {
-        if (j.is_string()) {
-            return std::stoi(j.get<std::string>());
+    static int py_obj_to_int(py::handle obj) {
+        if (py::isinstance<py::int_>(obj)) {
+            return obj.cast<int>();
         }
-        return j.get<int>();
+        if (py::isinstance<py::str>(obj)) {
+            return std::stoi(obj.cast<std::string>());
+        }
+        throw py::type_error("Expected int or string representation of int");
     }
 
-    void parse_parser_table_from_json(const json& parser_data) {
-        start_state_id_ = parser_data.at("start_state_id").get<int>();
-        const json& table = parser_data.at("stage_7_table");
+    static bool is_py_dict(py::handle h) {
+        return py::isinstance<py::dict>(h);
+    }
 
-        for (const auto& row_item : table) {
-            const json& row_data = row_item[1];
-            int state_id = json_to_int(row_item[0]);
+    void parse_parser_table_from_json(const py::dict& parser_data) {
+        // parser_data: { 'start_state_id': int, 'stage_7_table': list[[state_id_str, row_data_dict], ...] }
+        start_state_id_ = py::cast<int>(parser_data["start_state_id"]);
+        py::list table = parser_data["stage_7_table"];
+
+        for (auto row_item : table) {
+            py::tuple row_tuple = py::cast<py::tuple>(row_item);
+            int state_id = py_obj_to_int(row_tuple[0]);
+            py::dict row_data = py::cast<py::dict>(row_tuple[1]);
 
             Row row;
 
             // actions
-            const json& actions_list = row_data.at("shifts_and_reduces_full");
-            for (const auto& aitem : actions_list) {
-                int term_id = json_to_int(aitem[0]);
-                const json& action = aitem[1];
-                std::string variant = action.at("variant").get<std::string>();
+            py::list actions_list = row_data["shifts_and_reduces_full"];
+            for (auto aitem : actions_list) {
+                py::tuple a = py::cast<py::tuple>(aitem);
+                int term_id = py_obj_to_int(a[0]);
+                py::dict action = py::cast<py::dict>(a[1]);
+
+                std::string variant = py::cast<std::string>(action["variant"]);
                 ActionsOnTerminal aot;
 
                 if (variant == "Shift") {
                     aot.has_shift = true;
-                    aot.shift_state_id = action.at("state_id").get<int>();
+                    aot.shift_state_id = py::cast<int>(action["state_id"]);
                 } else if (variant == "Reduce") {
-                    int nt = action.at("nonterminal_id").get<int>();
-                    int len = action.at("len").get<int>();
+                    int nt = py::cast<int>(action["nonterminal_id"]);
+                    int len = py::cast<int>(action["len"]);
                     aot.reduces.emplace_back(nt, len);
                 } else if (variant == "Split") {
-                    if (action.contains("shift") && !action.at("shift").is_null()) {
+                    py::object shift_obj = action["shift"];
+                    if (!shift_obj.is_none()) {
                         aot.has_shift = true;
-                        aot.shift_state_id = action.at("shift").get<int>();
+                        aot.shift_state_id = py::cast<int>(shift_obj);
                     }
-                    const json& reduces = action.at("reduces");
-                    for (const auto& len_item : reduces) {
-                        int len = json_to_int(len_item[0]);
-                        const json& nts = len_item[1];
-                        for (const auto& nt_item : nts) {
-                            int nt = json_to_int(nt_item[0]);
+                    py::list reduces = action["reduces"];
+                    for (auto len_item : reduces) {
+                        py::tuple len_tuple = py::cast<py::tuple>(len_item);
+                        int len = py_obj_to_int(len_tuple[0]);
+                        py::list nts = py::cast<py::list>(len_tuple[1]);
+                        for (auto nt_item : nts) {
+                            py::tuple nt_tuple = py::cast<py::tuple>(nt_item);
+                            int nt = py_obj_to_int(nt_tuple[0]);
                             aot.reduces.emplace_back(nt, len);
                         }
                     }
@@ -584,11 +606,13 @@ private:
             }
 
             // gotos
-            const json& gotos_list = row_data.at("gotos");
-            for (const auto& gitem : gotos_list) {
-                int nt = json_to_int(gitem[0]);
-                if (gitem[1].contains("state_id") && !gitem[1].at("state_id").is_null()) {
-                    row.gotos[nt] = gitem[1].at("state_id").get<int>();
+            py::list gotos_list = row_data["gotos"];
+            for (auto gitem : gotos_list) {
+                py::tuple g = py::cast<py::tuple>(gitem);
+                int nt = py_obj_to_int(g[0]);
+                py::dict goto_data = py::cast<py::dict>(g[1]);
+                if (goto_data.contains("state_id") && !goto_data["state_id"].is_none()) {
+                    row.gotos[nt] = py::cast<int>(goto_data["state_id"]);
                 }
             }
 
@@ -596,23 +620,26 @@ private:
         }
     }
 
-    void parse_arena(const json& arena_json) {
+    void parse_arena(py::dict arena_py) {
+        py::module json = py::module::import("json");
+        py::object dumps = json.attr("dumps");
         py::object sep1 = py::module::import("_sep1");
         py::object BitsetClass = sep1.attr("Bitset");
 
-        const auto& arena_values = arena_json.at("values");
-        for (const auto& item : arena_values.items()) {
-            int uid = std::stoi(item.key());
-            const json& node = item.value();
+        for (auto item_handle : arena_py.attr("items")()) {
+            py::tuple item = py::cast<py::tuple>(item_handle);
+            int uid = py::cast<int>(item[0]);
+            py::dict node = py::cast<py::dict>(item[1]);
             NodeInfo info;
 
             // Determine if end node
             bool is_end = false;
             if (node.contains("value")) {
-                const auto& value_obj = node.at("value");
-                if (!value_obj.is_null()) {
-                    if (value_obj.contains("clean_end")) {
-                        is_end = value_obj.at("clean_end").get<bool>();
+                py::object value_obj = node["value"];
+                if (!value_obj.is_none()) {
+                    py::dict value = py::cast<py::dict>(value_obj);
+                    if (value.contains("clean_end")) {
+                        is_end = py::cast<bool>(value["clean_end"]);
                     }
                 }
             }
@@ -621,26 +648,28 @@ private:
             // Max depth
             int mdepth = 0;
             if (node.contains("max_depth")) {
-                mdepth = node.at("max_depth").get<int>();
+                mdepth = py::cast<int>(node["max_depth"]);
             }
             info.max_depth = mdepth;
 
             // Children: list of ((pop, llm_bv_json), [(dest_idx, state_bv_json), ...])
-            const json* children_obj_ptr = nullptr;
+            py::object children_obj;
             if (node.contains("children_bits")) {
-                children_obj_ptr = &node.at("children_bits");
+                children_obj = node["children_bits"];
             } else if (node.contains("children")) {
-                children_obj_ptr = &node.at("children");
+                children_obj = node["children"];
+            } else {
+                children_obj = py::list();
             }
-            if (!children_obj_ptr) continue;
 
-            for (const auto& entry : *children_obj_ptr) {
-                const auto& edge_key = entry[0];
-                int pop = edge_key[0].get<int>();
-                const auto& llm_bv_json = edge_key[1];
+            for (auto ch : children_obj) {
+                py::tuple entry = py::cast<py::tuple>(ch);
+                py::tuple edge_key = py::cast<py::tuple>(entry[0]);
+                int pop = py::cast<int>(edge_key[0]);
+                py::object llm_bv_json = edge_key[1];
 
                 // Convert llm_bv_json -> _sep1.Bitset -> RangeSet
-                py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(llm_bv_json.dump());
+                py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(dumps(llm_bv_json));
                 py::list llm_ranges_py = llm_bv_bitset.attr("to_ranges")();
                 std::vector<std::pair<unsigned long long, unsigned long long>> llm_ranges_cpp;
                 llm_ranges_cpp.reserve(py::len(llm_ranges_py));
@@ -651,12 +680,13 @@ private:
                 RangeSet llm_bv_rs = RangeSet::from_ranges(llm_ranges_cpp);
 
                 std::vector<DestEdge> dests;
-                const auto& dest_map = entry[1];
-                for (const auto& d : dest_map) {
-                    int dest_idx = d[0].get<int>();
-                    const auto& state_bv_json = d[1];
+                py::object dest_map = entry[1];
+                for (auto d : dest_map) {
+                    py::tuple dd = py::cast<py::tuple>(d);
+                    int dest_idx = py::cast<int>(dd[0]);
+                    py::object state_bv_json = dd[1];
 
-                    py::object state_bv = BitsetClass.attr("from_json_string")(state_bv_json.dump());
+                    py::object state_bv = BitsetClass.attr("from_json_string")(dumps(state_bv_json));
                     bool is_empty_bv = state_bv.attr("is_empty")().cast<bool>();
                     std::vector<std::pair<int,int>> ranges;
                     if (!is_empty_bv) {
@@ -862,12 +892,14 @@ PYBIND11_MODULE(precompute3_engine, m) {
     m.doc() = "C++ engine for precompute3_model_cpp: commit() and get_mask(), Leveled GSS implementation";
 
     py::class_<Engine>(m, "Engine")
-        .def(py::init<py::object,int,int,py::object,const std::string&,py::dict,py::object,py::dict>(),
+        .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::dict,py::object,py::dict>(),
              py::arg("tokenizer"),
              py::arg("tokenizer_initial_state"),
              py::arg("tokenizer_max_state"),
              py::arg("ignore_terminal_id_or_none"),
-             py::arg("json_string"),
+             py::arg("parser_data"),
+             py::arg("roots_map_py"),
+             py::arg("arena_py"),
              py::arg("possible_matches"),
              py::arg("all_internal_llm_tokens_bitset"),
              py::arg("internal_to_original_map"))
