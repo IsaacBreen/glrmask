@@ -9,7 +9,7 @@ local_system:
       import heapq
       import collections
       import time
-      from typing import Dict, List, Tuple, Optional, Union
+      from typing import Dict, List, Tuple, Optional, Union, Any, TypedDict
       from dataclasses import dataclass, field
 
       from ..common_interface import GraphProvider, RangeSet
@@ -56,6 +56,17 @@ local_system:
           table: Dict[int, Row]
 
 
+      class ArenaValue(TypedDict, total=False):
+          clean_end: bool
+
+
+      class ArenaNode(TypedDict, total=False):
+          max_depth: int
+          children: List[Tuple[Tuple[int, RangeSet], List[Tuple[int, RangeSet]]]]
+          llm_bv_union: RangeSet
+          value: ArenaValue
+
+
       @dataclass(frozen=True, eq=False)
       class PyAcc:
           terminals_union: Dict[int, RangeSet]
@@ -92,27 +103,31 @@ local_system:
               return self.llm_mask.is_empty()
 
 
+      @dataclass
       class Model(GraphProvider):
           """
           Precomputed trie model (third-generation), simplified and concise.
           """
+          roots_map_raw: List[Tuple[int, int]]
+          arena: Dict[int, Any]  # This is Dict[int, ArenaNode] after __post_init__
 
-          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
-              self.arena: Dict[int, dict] = arena
-              self.id_to_token: Dict[int, bytes] = {}
-              self.max_depth: Dict[int, int] = {}
-              self.possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = None
-              self.tokenizer: Optional[ffi.Regex] = None
-              self.glr_parser: Optional[ffi.GLRParser] = None
-              self.ignore_terminal_id: Optional[int] = None
-              self.parser_table: Optional[ParserTable] = None
-              self.state: Dict[int, GSS] = {}
-              self.internal_to_original_map: Dict[int, int] = {}
-              self.all_internal_llm_tokens_bitset: Optional[RangeSet] = None
-              self.tokenizer_initial_state: Optional[int] = None
-              self.tokenizer_max_state: Optional[int] = None
-              self.all_terminals_bitset: Optional[RangeSet] = None
+          roots_map: Dict[int, int] = field(init=False)
+          id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
+          max_depth: Dict[int, int] = field(init=False, default_factory=dict)
+          possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = field(init=False, default=None)
+          tokenizer: Optional[ffi.Regex] = field(init=False, default=None)
+          glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
+          ignore_terminal_id: Optional[int] = field(init=False, default=None)
+          parser_table: Optional[ParserTable] = field(init=False, default=None)
+          state: Dict[int, GSS] = field(init=False, default_factory=dict)
+          internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
+          all_internal_llm_tokens_bitset: Optional[RangeSet] = field(init=False, default=None)
+          tokenizer_initial_state: Optional[int] = field(init=False, default=None)
+          tokenizer_max_state: Optional[int] = field(init=False, default=None)
+          all_terminals_bitset: Optional[RangeSet] = field(init=False, default=None)
+
+          def __post_init__(self):
+              self.roots_map = {int(s): int(r) for s, r in self.roots_map_raw}
 
               dumps = json.dumps
               bs_from_json = ffi.Bitset.from_json_string
@@ -705,6 +720,114 @@ local_system:
                   node["children"] = new_children
                   node["llm_bv_union"] = llm_bv_union
 
+          def _optimize_trie(self):
+              """
+              Prunes the precomputed trie by removing edges that are unreachable
+              based on a static analysis of possible parser states.
+              """
+              print("Optimizing trie...")
+              # 1. Build reverse transitions map for pops
+              rev_transitions = collections.defaultdict(set)
+              for state_id, row in self.parser_table.table.items():
+                  # Gotos
+                  for nt_id, goto_state_id in row.gotos.items():
+                      rev_transitions[goto_state_id].add(state_id)
+                  # Shifts
+                  for term_id, action in row.actions.items():
+                      shift_to = None
+                      if isinstance(action, int):
+                          shift_to = action
+                      elif isinstance(action, Split) and action.shift is not None:
+                          shift_to = action.shift
+
+                      if shift_to is not None:
+                          rev_transitions[shift_to].add(state_id)
+
+              # Memoization for pop transformation
+              pop_memo = {}
+              def transform(states, pop_count):
+                  states_tuple = tuple(sorted(list(states)))
+                  if (states_tuple, pop_count) in pop_memo:
+                      return pop_memo[(states_tuple, pop_count)]
+
+                  if pop_count == 0:
+                      return states
+
+                  prev_states = transform(states, pop_count - 1)
+                  if not prev_states:
+                      pop_memo[(states_tuple, pop_count)] = set()
+                      return set()
+
+                  next_states = set()
+                  for s in prev_states:
+                      next_states.update(rev_transitions.get(s, set()))
+
+                  pop_memo[(states_tuple, pop_count)] = next_states
+                  return next_states
+
+              # 2. Dataflow analysis to find alive parser states at each trie node
+              alive_states = collections.defaultdict(set)
+              worklist = collections.deque()
+
+              all_parser_states = set(self.parser_table.table.keys())
+
+              for root_node_id in set(self.roots_map.values()):
+                  if not alive_states[root_node_id]:
+                      alive_states[root_node_id] = all_parser_states
+                      worklist.append(root_node_id)
+
+              while worklist:
+                  node_id = worklist.popleft()
+                  node = self.arena.get(node_id)
+                  if not node or not node.get("children"):
+                      continue
+
+                  current_states = alive_states[node_id]
+
+                  for (pop, llm_bv), dests in node["children"]:
+                      popped_states = transform(current_states, pop)
+                      if not popped_states:
+                          continue
+
+                      for dest_idx, state_bv in dests:
+                          edge_states = set(state_bv.to_indices())
+                          propagated_states = popped_states.intersection(edge_states)
+
+                          if propagated_states:
+                              if not propagated_states.issubset(alive_states[dest_idx]):
+                                  alive_states[dest_idx].update(propagated_states)
+                                  if dest_idx not in worklist:
+                                      worklist.append(dest_idx)
+
+              # 3. Prune the trie
+              for node_id, node in self.arena.items():
+                  if not node.get("children"):
+                      continue
+
+                  new_children = []
+                  current_states = alive_states.get(node_id)
+                  if not current_states:
+                      node["children"] = []
+                      continue
+
+                  for (pop, llm_bv), dests in node["children"]:
+                      popped_states = transform(current_states, pop)
+                      if not popped_states:
+                          continue
+
+                      new_dests = []
+                      popped_states_rs = RangeSet.from_indices(list(popped_states))
+                      for dest_idx, state_bv in dests:
+                          new_state_bv = state_bv.intersection(popped_states_rs)
+
+                          if not new_state_bv.is_empty():
+                              new_dests.append((dest_idx, new_state_bv))
+
+                      if new_dests:
+                          new_children.append(((pop, llm_bv), new_dests))
+
+                  node["children"] = new_children
+
           @staticmethod
           def from_json_string(s: str) -> 'Model':
               data = json.loads(s)
@@ -780,6 +903,9 @@ local_system:
               # Convert universe LLM tokens bitset to RangeSet
               all_internal = constraint.all_internal_llm_tokens_bitset()
               model.all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
+
+              model._optimize_trie()
+
               return model
 
           @profile
@@ -1158,7 +1284,7 @@ messages:
       import heapq
       import collections
       import time
-      from typing import Dict, List, Tuple, Optional, Union
+      from typing import Dict, List, Tuple, Optional, Union, Any, TypedDict
       from dataclasses import dataclass, field
 
       from ..common_interface import GraphProvider, RangeSet
@@ -1205,6 +1331,17 @@ messages:
           table: Dict[int, Row]
 
 
+      class ArenaValue(TypedDict, total=False):
+          clean_end: bool
+
+
+      class ArenaNode(TypedDict, total=False):
+          max_depth: int
+          children: List[Tuple[Tuple[int, RangeSet], List[Tuple[int, RangeSet]]]]
+          llm_bv_union: RangeSet
+          value: ArenaValue
+
+
       @dataclass(frozen=True, eq=False)
       class PyAcc:
           terminals_union: Dict[int, RangeSet]
@@ -1241,27 +1378,31 @@ messages:
               return self.llm_mask.is_empty()
 
 
+      @dataclass
       class Model(GraphProvider):
           """
           Precomputed trie model (third-generation), simplified and concise.
           """
+          roots_map_raw: List[Tuple[int, int]]
+          arena: Dict[int, Any]  # This is Dict[int, ArenaNode] after __post_init__
 
-          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
-              self.arena: Dict[int, dict] = arena
-              self.id_to_token: Dict[int, bytes] = {}
-              self.max_depth: Dict[int, int] = {}
-              self.possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = None
-              self.tokenizer: Optional[ffi.Regex] = None
-              self.glr_parser: Optional[ffi.GLRParser] = None
-              self.ignore_terminal_id: Optional[int] = None
-              self.parser_table: Optional[ParserTable] = None
-              self.state: Dict[int, GSS] = {}
-              self.internal_to_original_map: Dict[int, int] = {}
-              self.all_internal_llm_tokens_bitset: Optional[RangeSet] = None
-              self.tokenizer_initial_state: Optional[int] = None
-              self.tokenizer_max_state: Optional[int] = None
-              self.all_terminals_bitset: Optional[RangeSet] = None
+          roots_map: Dict[int, int] = field(init=False)
+          id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
+          max_depth: Dict[int, int] = field(init=False, default_factory=dict)
+          possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = field(init=False, default=None)
+          tokenizer: Optional[ffi.Regex] = field(init=False, default=None)
+          glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
+          ignore_terminal_id: Optional[int] = field(init=False, default=None)
+          parser_table: Optional[ParserTable] = field(init=False, default=None)
+          state: Dict[int, GSS] = field(init=False, default_factory=dict)
+          internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
+          all_internal_llm_tokens_bitset: Optional[RangeSet] = field(init=False, default=None)
+          tokenizer_initial_state: Optional[int] = field(init=False, default=None)
+          tokenizer_max_state: Optional[int] = field(init=False, default=None)
+          all_terminals_bitset: Optional[RangeSet] = field(init=False, default=None)
+
+          def __post_init__(self):
+              self.roots_map = {int(s): int(r) for s, r in self.roots_map_raw}
 
               dumps = json.dumps
               bs_from_json = ffi.Bitset.from_json_string
@@ -1701,8 +1842,41 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: Add proper type hints for `Model`. Make it a dataclass. Don't just use `Dict[int,
-      dict]`. What dict? If it's a typed dict, use one.
+  - user: |-
+      I want to add optimization passes for the precompute.
+      Add a function for it.
+
+      It should work vaugely like this
+
+      Suppose we have just one LLM token. We can loop over all LLM tokens.
+      Ignore pops for now.
+
+      Consider one dest from one source
+      We have a set of states that can be alive at the source. Start at the root node.
+      We have a set of state IDs for which there's an edge from the source to the dest
+
+      If there's definitely an edge to the dest from the source no matter what state may actually be alive at the source, then we can remove ALL those edges.
+      If there's even one source state missing, one state that can alive at the source but doesn't have an edge from the source to the dest, we need to keep all the edges.
+      Conversely, consider there being an edge for a state that isn't in the alive set for the source. We can remove *that* edge on its own.
+
+      Now we need to generalize.
+      We have an LLM token bitset for each state ID. This is equivalent to looping over those LLM tokens.
+      I mean we need an algo that's equivalent, but much faster thanks to bitset parallelism.
+      Might be easier to write the loop out and then parallelize it.
+
+      Yes. Don't worry about parallelizing it. Just write a big loop over all LLM tokens.
+
+      ...
+
+      Now for pops, when we do a pop, we apply a transform to the states.
+      We have a state -> {set of states} mapping.
+      We obtain it by looking at each state A, look at its shifts, say we have shift to state B, draw a line from state A -> B
+      Do same with gotos.
+      Now reverse the arow directions. This becomes the map.
+      ie the set for state B will have state A in it.
+
+      On pop 1, we look at LLM token bv for alive state B, look it up, and add to the new transformed (state -> bv) map entries for the dest states, merging with bv union if already exists.
+      Pop n is just n x pop 1
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1721,250 +1895,263 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add proper type hints for the `Model` class and convert it to a dataclass, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to add the optimization pass, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      Here are the edits for `python/aug25/models/precompute3_model_pure_python.py`:
+      1.  **Open the file** `python/aug25/models/precompute3_model_pure_python.py`.
 
-      1.  **Update `typing` imports:**
-          In `python/aug25/models/precompute3_model_pure_python.py`, modify the import from `typing` to include `Any` and `TypedDict`.
+      2.  **Add the `_optimize_trie` method** to the `Model` class. This new method will contain the logic for analyzing and pruning the precomputed trie. A good place for it is right after the `__post_init__` method.
 
-          *Change this line:*
-          ```python
-          from typing import Dict, List, Tuple, Optional, Union
-          ```
-          *To this:*
-          ```python
-          from typing import Dict, List, Tuple, Optional, Union, Any, TypedDict
-          ```
+      3.  **Invoke the optimization** from the `from_json_string` static method. Add a call to `model._optimize_trie()` at the end of this method, just before the `return model` statement, to ensure the optimization runs when a model is loaded.
 
-      2.  **Define `TypedDict`s for Arena Structure:**
-          After the `ParserTable` dataclass definition, add two new `TypedDict` classes, `ArenaValue` and `ArenaNode`, to describe the structure of the items within the `arena` dictionary.
+      Here is the code for the new `_optimize_trie` method:
 
-          *Add the following code after the `ParserTable` class:*
-          ```python
-          class ArenaValue(TypedDict, total=False):
-              clean_end: bool
-
-
-          class ArenaNode(TypedDict, total=False):
-              max_depth: int
-              children: List[Tuple[Tuple[int, RangeSet], List[Tuple[int, RangeSet]]]]
-              llm_bv_union: RangeSet
-              value: ArenaValue
-          ```
-
-      3.  **Convert `Model` to a Dataclass:**
-          Refactor the `Model` class to be a `dataclass`. This involves replacing the `__init__` method with dataclass field declarations and moving the initialization logic to a `__post_init__` method.
-
-          *Replace the existing `Model` class definition and its `__init__` method with the following code:*
-          ```python
-          @dataclass
-          class Model(GraphProvider):
+      ```python
+          def _optimize_trie(self):
               """
-              Precomputed trie model (third-generation), simplified and concise.
+              Prunes the precomputed trie by removing edges that are unreachable
+              based on a static analysis of possible parser states.
               """
-              roots_map_raw: List[Tuple[int, int]]
-              arena: Dict[int, Any]  # This is Dict[int, ArenaNode] after __post_init__
+              print("Optimizing trie...")
+              # 1. Build reverse transitions map for pops
+              rev_transitions = collections.defaultdict(set)
+              for state_id, row in self.parser_table.table.items():
+                  # Gotos
+                  for nt_id, goto_state_id in row.gotos.items():
+                      rev_transitions[goto_state_id].add(state_id)
+                  # Shifts
+                  for term_id, action in row.actions.items():
+                      shift_to = None
+                      if isinstance(action, int):
+                          shift_to = action
+                      elif isinstance(action, Split) and action.shift is not None:
+                          shift_to = action.shift
 
-              roots_map: Dict[int, int] = field(init=False)
-              id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
-              max_depth: Dict[int, int] = field(init=False, default_factory=dict)
-              possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = field(init=False, default=None)
-              tokenizer: Optional[ffi.Regex] = field(init=False, default=None)
-              glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
-              ignore_terminal_id: Optional[int] = field(init=False, default=None)
-              parser_table: Optional[ParserTable] = field(init=False, default=None)
-              state: Dict[int, GSS] = field(init=False, default_factory=dict)
-              internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
-              all_internal_llm_tokens_bitset: Optional[RangeSet] = field(init=False, default=None)
-              tokenizer_initial_state: Optional[int] = field(init=False, default=None)
-              tokenizer_max_state: Optional[int] = field(init=False, default=None)
-              all_terminals_bitset: Optional[RangeSet] = field(init=False, default=None)
+                      if shift_to is not None:
+                          rev_transitions[shift_to].add(state_id)
 
-              def __post_init__(self):
-                  self.roots_map = {int(s): int(r) for s, r in self.roots_map_raw}
+              # Memoization for pop transformation
+              pop_memo = {}
+              def transform(states, pop_count):
+                  states_tuple = tuple(sorted(list(states)))
+                  if (states_tuple, pop_count) in pop_memo:
+                      return pop_memo[(states_tuple, pop_count)]
 
-                  dumps = json.dumps
-                  bs_from_json = ffi.Bitset.from_json_string
+                  if pop_count == 0:
+                      return states
 
-                  # Normalize arena children bitsets and cache max_depth
-                  for uid, node in self.arena.items():
-                      uid_int = int(uid)
-                      self.max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
+                  prev_states = transform(states, pop_count - 1)
+                  if not prev_states:
+                      pop_memo[(states_tuple, pop_count)] = set()
+                      return set()
 
-                      children = node.get("children") or []
-                      if not children:
-                          node["children"] = []
-                          node["llm_bv_union"] = RangeSet.empty()
+                  next_states = set()
+                  for s in prev_states:
+                      next_states.update(rev_transitions.get(s, set()))
+
+                  pop_memo[(states_tuple, pop_count)] = next_states
+                  return next_states
+
+              # 2. Dataflow analysis to find alive parser states at each trie node
+              alive_states = collections.defaultdict(set)
+              worklist = collections.deque()
+
+              all_parser_states = set(self.parser_table.table.keys())
+
+              for root_node_id in set(self.roots_map.values()):
+                  if not alive_states[root_node_id]:
+                      alive_states[root_node_id] = all_parser_states
+                      worklist.append(root_node_id)
+
+              while worklist:
+                  node_id = worklist.popleft()
+                  node = self.arena.get(node_id)
+                  if not node or not node.get("children"):
+                      continue
+
+                  current_states = alive_states[node_id]
+
+                  for (pop, llm_bv), dests in node["children"]:
+                      popped_states = transform(current_states, pop)
+                      if not popped_states:
                           continue
 
-                      new_children = []
-                      llm_bv_union = RangeSet.empty()
-                      for edge_key, dest_map in children:
-                          pop, llm_bv_json = edge_key
-                          llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
-                          # Convert to RangeSet for ffi-free operations in commit/get_mask
-                          llm_bv = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
-                          llm_bv_union = llm_bv_union.union(llm_bv)
-                          new_dest_map = []
-                          for dest_idx, state_bv_json in dest_map:
-                              state_bv_bitset = bs_from_json(dumps(state_bv_json))
-                              state_bv = RangeSet.from_ranges(state_bv_bitset.to_ranges())
-                              new_dest_map.append((int(dest_idx), state_bv))
-                          new_children.append(((int(pop), llm_bv), new_dest_map))
-                      node["children"] = new_children
-                      node["llm_bv_union"] = llm_bv_union
-          ```
+                      for dest_idx, state_bv in dests:
+                          edge_states = set(state_bv.to_indices())
+                          propagated_states = popped_states.intersection(edge_states)
+
+                          if propagated_states:
+                              if not propagated_states.issubset(alive_states[dest_idx]):
+                                  alive_states[dest_idx].update(propagated_states)
+                                  if dest_idx not in worklist:
+                                      worklist.append(dest_idx)
+
+              # 3. Prune the trie
+              for node_id, node in self.arena.items():
+                  if not node.get("children"):
+                      continue
+
+                  new_children = []
+                  current_states = alive_states.get(node_id)
+                  if not current_states:
+                      # This node is unreachable
+                      node["children"] = []
+                      continue
+
+                  for (pop, llm_bv), dests in node["children"]:
+                      popped_states = transform(current_states, pop)
+                      if not popped_states:
+                          continue # This edge is unreachable
+
+                      new_dests = []
+                      popped_states_rs = RangeSet.from_indices(list(popped_states))
+                      for dest_idx, state_bv in dests:
+                          new_state_bv = state_bv.intersection(popped_states_rs)
+
+                          if not new_state_bv.is_empty():
+                              new_dests.append((dest_idx, new_state_bv))
+
+                      if new_dests:
+                          new_children.append(((pop, llm_bv), new_dests))
+
+                  node["children"] = new_children
+      ```
 
       ### Git Diff
 
-      Here is the git diff to apply the changes described above.
+      Here is the git diff to apply these changes.
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      index 211111c..1111111 100644
+      index 211111c..118811c 100644
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -2,7 +2,7 @@
-       import heapq
-       import collections
-       import time
-      -from typing import Dict, List, Tuple, Optional, Union
-      +from typing import Dict, List, Tuple, Optional, Union, Any, TypedDict
-       from dataclasses import dataclass, field
+      @@ -181,6 +181,102 @@
+                   node["children"] = new_children
+                   node["llm_bv_union"] = llm_bv_union
        
-       from ..common_interface import GraphProvider, RangeSet
-      @@ -51,6 +51,19 @@
-           table: Dict[int, Row]
-       
-       
-      +class ArenaValue(TypedDict, total=False):
-      +    clean_end: bool
+      +    def _optimize_trie(self):
+      +        """
+      +        Prunes the precomputed trie by removing edges that are unreachable
+      +        based on a static analysis of possible parser states.
+      +        """
+      +        print("Optimizing trie...")
+      +        # 1. Build reverse transitions map for pops
+      +        rev_transitions = collections.defaultdict(set)
+      +        for state_id, row in self.parser_table.table.items():
+      +            # Gotos
+      +            for nt_id, goto_state_id in row.gotos.items():
+      +                rev_transitions[goto_state_id].add(state_id)
+      +            # Shifts
+      +            for term_id, action in row.actions.items():
+      +                shift_to = None
+      +                if isinstance(action, int):
+      +                    shift_to = action
+      +                elif isinstance(action, Split) and action.shift is not None:
+      +                    shift_to = action.shift
       +
+      +                if shift_to is not None:
+      +                    rev_transitions[shift_to].add(state_id)
       +
-      +class ArenaNode(TypedDict, total=False):
-      +    max_depth: int
-      +    children: List[Tuple[Tuple[int, RangeSet], List[Tuple[int, RangeSet]]]]
-      +    llm_bv_union: RangeSet
-      +    value: ArenaValue
+      +        # Memoization for pop transformation
+      +        pop_memo = {}
+      +        def transform(states, pop_count):
+      +            states_tuple = tuple(sorted(list(states)))
+      +            if (states_tuple, pop_count) in pop_memo:
+      +                return pop_memo[(states_tuple, pop_count)]
       +
+      +            if pop_count == 0:
+      +                return states
       +
-       @dataclass(frozen=True, eq=False)
-       class PyAcc:
-           terminals_union: Dict[int, RangeSet]
-      @@ -85,55 +98,61 @@
-               return self.llm_mask.is_empty()
-       
-       
-      +@dataclass
-       class Model(GraphProvider):
-           """
-           Precomputed trie model (third-generation), simplified and concise.
-           """
-      -
-      -    def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-      -        self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
-      -        self.arena: Dict[int, dict] = arena
-      -        self.id_to_token: Dict[int, bytes] = {}
-      -        self.max_depth: Dict[int, int] = {}
-      -        self.possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = None
-      -        self.tokenizer: Optional[ffi.Regex] = None
-      -        self.glr_parser: Optional[ffi.GLRParser] = None
-      -        self.ignore_terminal_id: Optional[int] = None
-      -        self.parser_table: Optional[ParserTable] = None
-      -        self.state: Dict[int, GSS] = {}
-      -        self.internal_to_original_map: Dict[int, int] = {}
-      -        self.all_internal_llm_tokens_bitset: Optional[RangeSet] = None
-      -        self.tokenizer_initial_state: Optional[int] = None
-      -        self.tokenizer_max_state: Optional[int] = None
-      -        self.all_terminals_bitset: Optional[RangeSet] = None
-      -
-      -        dumps = json.dumps
-      -        bs_from_json = ffi.Bitset.from_json_string
-      -
-      -        # Normalize arena children bitsets and cache max_depth
-      -        for uid, node in self.arena.items():
-      -            uid_int = int(uid)
-      -            self.max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
-      -
-      -            children = node.get("children") or []
-      -            if not children:
-      -                node["children"] = []
-      -                node["llm_bv_union"] = RangeSet.empty()
-      -                continue
-      -
-      -            new_children = []
-      -            llm_bv_union = RangeSet.empty()
-      -            for edge_key, dest_map in children:
-      -                pop, llm_bv_json = edge_key
-      -                llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
-      -                # Convert to RangeSet for ffi-free operations in commit/get_mask
-      -                llm_bv = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
-      -                llm_bv_union = llm_bv_union.union(llm_bv)
-      -                new_dest_map = []
-      -                for dest_idx, state_bv_json in dest_map:
-      -                    state_bv_bitset = bs_from_json(dumps(state_bv_json))
-      -                    state_bv = RangeSet.from_ranges(state_bv_bitset.to_ranges())
-      -                    new_dest_map.append((int(dest_idx), state_bv))
-      -                new_children.append(((int(pop), llm_bv), new_dest_map))
-      -            node["children"] = new_children
-      -            node["llm_bv_union"] = llm_bv_union
-      +    roots_map_raw: List[Tuple[int, int]]
-      +    arena: Dict[int, Any]  # This is Dict[int, ArenaNode] after __post_init__
+      +            prev_states = transform(states, pop_count - 1)
+      +            if not prev_states:
+      +                pop_memo[(states_tuple, pop_count)] = set()
+      +                return set()
       +
-      +    roots_map: Dict[int, int] = field(init=False)
-      +    id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
-      +    max_depth: Dict[int, int] = field(init=False, default_factory=dict)
-      +    possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = field(init=False, default=None)
-      +    tokenizer: Optional[ffi.Regex] = field(init=False, default=None)
-      +    glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
-      +    ignore_terminal_id: Optional[int] = field(init=False, default=None)
-      +    parser_table: Optional[ParserTable] = field(init=False, default=None)
-      +    state: Dict[int, GSS] = field(init=False, default_factory=dict)
-      +    internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
-      +    all_internal_llm_tokens_bitset: Optional[RangeSet] = field(init=False, default=None)
-      +    tokenizer_initial_state: Optional[int] = field(init=False, default=None)
-      +    tokenizer_max_state: Optional[int] = field(init=False, default=None)
-      +    all_terminals_bitset: Optional[RangeSet] = field(init=False, default=None)
+      +            next_states = set()
+      +            for s in prev_states:
+      +                next_states.update(rev_transitions.get(s, set()))
       +
-      +    def __post_init__(self):
-      +        self.roots_map = {int(s): int(r) for s, r in self.roots_map_raw}
+      +            pop_memo[(states_tuple, pop_count)] = next_states
+      +            return next_states
       +
-      +        dumps = json.dumps
-      +        bs_from_json = ffi.Bitset.from_json_string
+      +        # 2. Dataflow analysis to find alive parser states at each trie node
+      +        alive_states = collections.defaultdict(set)
+      +        worklist = collections.deque()
       +
-      +        # Normalize arena children bitsets and cache max_depth
-      +        for uid, node in self.arena.items():
-      +            uid_int = int(uid)
-      +            self.max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
+      +        all_parser_states = set(self.parser_table.table.keys())
       +
-      +            children = node.get("children") or []
-      +            if not children:
-      +                node["children"] = []
-      +                node["llm_bv_union"] = RangeSet.empty()
+      +        for root_node_id in set(self.roots_map.values()):
+      +            if not alive_states[root_node_id]:
+      +                alive_states[root_node_id] = all_parser_states
+      +                worklist.append(root_node_id)
+      +
+      +        while worklist:
+      +            node_id = worklist.popleft()
+      +            node = self.arena.get(node_id)
+      +            if not node or not node.get("children"):
+      +                continue
+      +
+      +            current_states = alive_states[node_id]
+      +
+      +            for (pop, llm_bv), dests in node["children"]:
+      +                popped_states = transform(current_states, pop)
+      +                if not popped_states:
+      +                    continue
+      +
+      +                for dest_idx, state_bv in dests:
+      +                    edge_states = set(state_bv.to_indices())
+      +                    propagated_states = popped_states.intersection(edge_states)
+      +
+      +                    if propagated_states:
+      +                        if not propagated_states.issubset(alive_states[dest_idx]):
+      +                            alive_states[dest_idx].update(propagated_states)
+      +                            if dest_idx not in worklist:
+      +                                worklist.append(dest_idx)
+      +
+      +        # 3. Prune the trie
+      +        for node_id, node in self.arena.items():
+      +            if not node.get("children"):
       +                continue
       +
       +            new_children = []
-      +            llm_bv_union = RangeSet.empty()
-      +            for edge_key, dest_map in children:
-      +                pop, llm_bv_json = edge_key
-      +                llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
-      +                # Convert to RangeSet for ffi-free operations in commit/get_mask
-      +                llm_bv = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
-      +                llm_bv_union = llm_bv_union.union(llm_bv)
-      +                new_dest_map = []
-      +                for dest_idx, state_bv_json in dest_map:
-      +                    state_bv_bitset = bs_from_json(dumps(state_bv_json))
-      +                    state_bv = RangeSet.from_ranges(state_bv_bitset.to_ranges())
-      +                    new_dest_map.append((int(dest_idx), state_bv))
-      +                new_children.append(((int(pop), llm_bv), new_dest_map))
+      +            current_states = alive_states.get(node_id)
+      +            if not current_states:
+      +                node["children"] = []
+      +                continue
+      +
+      +            for (pop, llm_bv), dests in node["children"]:
+      +                popped_states = transform(current_states, pop)
+      +                if not popped_states:
+      +                    continue
+      +
+      +                new_dests = []
+      +                popped_states_rs = RangeSet.from_indices(list(popped_states))
+      +                for dest_idx, state_bv in dests:
+      +                    new_state_bv = state_bv.intersection(popped_states_rs)
+      +
+      +                    if not new_state_bv.is_empty():
+      +                        new_dests.append((dest_idx, new_state_bv))
+      +
+      +                if new_dests:
+      +                    new_children.append(((pop, llm_bv), new_dests))
+      +
       +            node["children"] = new_children
-      +            node["llm_bv_union"] = llm_bv_union
-       
+      +
            @staticmethod
            def from_json_string(s: str) -> 'Model':
+               data = json.loads(s)
+      @@ -256,6 +352,9 @@
+               # Convert universe LLM tokens bitset to RangeSet
+               all_internal = constraint.all_internal_llm_tokens_bitset()
+               model.all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
+      +
+      +        model._optimize_trie()
+      +
+               return model
+       
+           @profile
 
       ```
     metadata:
@@ -1977,7 +2164,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Convert Model to dataclass and
-      add type hints"'
+  - user: 'Changes committed with message: "feat: Add trie optimization pass to prune
+      unreachable edges"'
     metadata:
 ...
