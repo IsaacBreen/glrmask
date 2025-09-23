@@ -431,18 +431,16 @@ public:
 
         // values: node_id -> GSS
         std::unordered_map<int, Leveled> values;
-        // Max-heap storing {depth, node_id}
-        using HeapItem = std::pair<int, int>;
-        std::priority_queue<HeapItem, std::vector<HeapItem>, std::less<HeapItem>> depth_heap;
-        std::unordered_set<int> enqueued_nodes;
+        // todo buckets: depth -> set of nodes
+        std::unordered_map<int, std::set<int>> todo;
+        // min-heap for depths
+        std::priority_queue<int> depth_heap;
 
         auto enqueue = [&](int d, int n) {
-            stats.inc("get_mask.traversal.enqueues");
-            if (enqueued_nodes.count(n)) {
-                return;
-            }
-            enqueued_nodes.insert(n);
-            depth_heap.push({d, n});
+            auto &bucket = todo[d];
+            bool first = bucket.empty();
+            bucket.insert(n);
+            if (first) depth_heap.push(d);
         };
 
         // This memoization cache is critical for performance. It's shared across all GSSs
@@ -498,11 +496,15 @@ public:
         int max_depth_reached = 0;
         std::unordered_set<int> visited_nodes;
         while (!depth_heap.empty()) {
-            auto [depth, node] = depth_heap.top();
-            depth_heap.pop();
-            stats.inc("get_mask.traversal.depth_heap.pops");
+            int depth = depth_heap.top(); depth_heap.pop();
+            auto &bucket = todo[depth];
+
+            while (!bucket.empty()) {
+                int node = *bucket.begin();
+                bucket.erase(bucket.begin());
 
             max_depth_reached = std::max(max_depth_reached, depth);
+            stats.inc("get_mask.traversal.depth_heap.pops");
 
             stats.inc("get_mask.traversal.nodes_processed");
             visited_nodes.insert(node);
@@ -622,6 +624,8 @@ public:
                     enqueue(arena_.at(dnode).max_depth, dnode);
                 }
             }
+            }
+            todo.erase(depth);
         }
         stats.stop("get_mask.main_loop");
         stats.inc("get_mask.traversal.max_depth_reached", max_depth_reached);
@@ -1152,9 +1156,6 @@ private:
             if (new_mask.is_empty()) {
                 stats.inc("get_mask.intersect_and_prune.pruned_accs");
                 return nullptr;
-            }
-            if (new_mask == a->llm_mask) {
-                return a;
             }
             auto na = std::make_shared<Acc>();
             na->llm_mask = new_mask;
