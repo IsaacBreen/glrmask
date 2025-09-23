@@ -619,8 +619,6 @@ class Model(GraphProvider):
                         stats.start('get_mask.main_loop.edge.isolate_many')
                         child_gss: GSS = popped.isolate_many(values_to_keep)
                         stats.stop('get_mask.main_loop.edge.isolate_many')
-                        if child_gss.is_empty():
-                            continue
 
                         stats.inc('get_mask.intersect_and_prune.memo_size.sum', len(acc_memo))
                         if child_gss.is_empty():
