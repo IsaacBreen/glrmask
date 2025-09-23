@@ -48,20 +48,32 @@ struct Acc : public std::enable_shared_from_this<Acc> {
 
     std::shared_ptr<Acc> merge(const std::shared_ptr<Acc>& other) const {
         auto n = std::make_shared<Acc>();
-        // Merge terminals_union by RangeSet union per key
-        n->terminals_union = terminals_union;
-        for (auto &kv : other->terminals_union) {
-            int key = kv.first;
-            const RangeSet &v = kv.second;
-            auto it = n->terminals_union.find(key);
-            if (it == n->terminals_union.end()) {
-                n->terminals_union.emplace(key, v);
-            } else {
-                it->second = it->second.union_with(v);
-            }
-        }
         // Union llm masks
         n->llm_mask = llm_mask.union_with(other->llm_mask);
+
+        // Merge terminals_union by RangeSet union per key
+        // Optimization: copy the larger map, iterate the smaller one.
+        if (terminals_union.size() < other->terminals_union.size()) {
+            n->terminals_union = other->terminals_union;
+            for (const auto& [key, val] : terminals_union) {
+                auto it = n->terminals_union.find(key);
+                if (it == n->terminals_union.end()) {
+                    n->terminals_union.emplace(key, val);
+                } else {
+                    it->second = it->second.union_with(val);
+                }
+            }
+        } else {
+            n->terminals_union = terminals_union;
+            for (const auto& [key, val] : other->terminals_union) {
+                auto it = n->terminals_union.find(key);
+                if (it == n->terminals_union.end()) {
+                    n->terminals_union.emplace(key, val);
+                } else {
+                    it->second = it->second.union_with(val);
+                }
+            }
+        }
         return n;
     }
 };
@@ -433,11 +445,12 @@ public:
 
         // Convert internal mask indices to original
         std::vector<unsigned long long> original_indices;
-        std::vector<unsigned long long> idxs = final_mask.to_indices();
-        for (auto i : idxs) {
-            auto it = internal_to_original_map_cpp_.find(i);
-            if (it != internal_to_original_map_cpp_.end()) {
-                original_indices.push_back(it->second);
+        // Optimization: iterate over the map instead of expanding the rangeset,
+        // as the map size is bounded by vocab size.
+        original_indices.reserve(internal_to_original_map_cpp_.size());
+        for (const auto& [internal_id, original_id] : internal_to_original_map_cpp_) {
+            if (final_mask.contains(internal_id)) {
+                original_indices.push_back(original_id);
             }
         }
         return py::cast(RangeSet::from_indices(original_indices));
@@ -797,11 +810,7 @@ private:
             };
 
             auto handle_reduce = [&](int nt_id, int len, const Leveled& gss_to_reduce) {
-                Leveled popped_gss = gss_to_reduce;
-                for (int i = 0; i < len; ++i) {
-                    popped_gss = popped_gss.pop();
-                }
-
+                Leveled popped_gss = gss_to_reduce.popn(len);
                 std::unordered_set<int> from_states = popped_gss.peek();
                 for (int from_sid : from_states) {
                     auto goto_it = parser_.find(from_sid);
@@ -842,12 +851,12 @@ private:
                 if (it_ts == pmc_cpp_.end()) continue;
 
                 const auto &term_to_llm = it_ts->second;
-                // Iterate disallowed terminals for this tokenizer state and union precomputed RangeSets
-                for (auto term_id_ull : kv.second.to_indices()) {
-                    int term_id = static_cast<int>(term_id_ull);
-                    auto it_term = term_to_llm.find(term_id);
-                    if (it_term != term_to_llm.end()) {
-                        disallowed_llm_mask = disallowed_llm_mask.union_with(it_term->second);
+                // Optimization: iterate over the smaller set (terminals for this tokenizer state)
+                // and do fast lookups into the RangeSet of disallowed terminals, instead of
+                // expanding the RangeSet to a list of indices.
+                for (const auto& [term_id, llm_rangeset] : term_to_llm) {
+                    if (kv.second.contains(term_id)) {
+                        disallowed_llm_mask = disallowed_llm_mask.union_with(llm_rangeset);
                     }
                 }
             }
