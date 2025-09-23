@@ -278,44 +278,19 @@ public:
         stats.start("commit.prune_and_map_gss");
         std::unordered_map<int, Leveled> temp_states;
         temp_states.reserve(state_.size());
-        for (const auto &kv : state_) {
-            int tokenizer_sid = kv.first;
-            const Leveled &gss = kv.second;
+        {
+            py::gil_scoped_release release; // Release GIL for C++ heavy part
+            for (const auto &kv : state_) {
+                int tokenizer_sid = kv.first;
+                const Leveled &gss = kv.second;
 
-            auto mutator = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
-                // 1. Prune check from prune_by_terminals_map
-                RangeSet rs_empty = RangeSet::empty();
-                for (auto &kv_term : terminals_map) {
-                    int sid = kv_term.first;
-                    const RangeSet &matched = kv_term.second;
-                    auto it = acc->terminals_union.find(sid);
-                    const RangeSet &disallowed = (it != acc->terminals_union.end()) ? it->second : rs_empty;
-                    if (!matched.intersection_with(disallowed).is_empty()) {
-                        return nullptr; // Prune
+                Leveled pruned = prune_by_terminals_map(gss, terminals_map);
+                if (!pruned.is_empty()) {
+                    Leveled mapped = apply_state_map_to_gss(pruned, state_map);
+                    if (!mapped.is_empty()) {
+                        temp_states[tokenizer_sid] = std::move(mapped);
                     }
                 }
-
-                // 2. Mapping logic from apply_state_map_to_gss
-                auto na = std::make_shared<Acc>();
-                na->llm_mask = acc->llm_mask;
-                for (auto const& [old_sid, new_sid] : state_map) {
-                    auto it = acc->terminals_union.find(old_sid);
-                    if (it != acc->terminals_union.end()) {
-                        const RangeSet& bv_source = it->second;
-                        auto it_new = na->terminals_union.find(new_sid);
-                        if (it_new != na->terminals_union.end()) {
-                            it_new->second = it_new->second.union_with(bv_source);
-                        } else {
-                            na->terminals_union.emplace(new_sid, bv_source);
-                        }
-                    }
-                }
-                return na;
-            };
-
-            Leveled fused_gss = gss.apply_and_prune(mutator);
-            if (!fused_gss.is_empty()) {
-                temp_states[tokenizer_sid] = std::move(fused_gss);
             }
         }
         stats.stop("commit.prune_and_map_gss");
@@ -456,15 +431,16 @@ public:
 
         // values: node_id -> GSS
         std::unordered_map<int, Leveled> values;
-        // Max-heap for {depth, node_id} pairs.
-        std::priority_queue<std::pair<int, int>> pq;
-        std::unordered_set<int> enqueued_nodes;
+        // todo buckets: depth -> set of nodes
+        std::unordered_map<int, std::set<int>> todo;
+        // min-heap for depths
+        std::priority_queue<int> depth_heap;
 
         auto enqueue = [&](int d, int n) {
-            if (enqueued_nodes.find(n) == enqueued_nodes.end()) {
-                enqueued_nodes.insert(n);
-                pq.push({d, n});
-            }
+            auto &bucket = todo[d];
+            bool first = bucket.empty();
+            bucket.insert(n);
+            if (first) depth_heap.push(d);
         };
 
         // This memoization cache is critical for performance. It's shared across all GSSs
@@ -472,6 +448,7 @@ public:
         std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> init_acc_memo;
 
         values.reserve(state_.size());
+        todo.reserve(state_.size());
         // --- Initial GSS Stats ---
         stats.start("get_mask.initial_stats");
         std::unordered_set<std::shared_ptr<Acc>> all_initial_accs;
@@ -488,6 +465,7 @@ public:
         stats.stop("get_mask.initial_stats");
 
         stats.start("get_mask.seeding");
+        // Seed with initialized accs (compute allowed llm mask from terminals_union)
         for (auto &kv : state_) {
             int sid = kv.first;
             int root = 0;
@@ -517,11 +495,15 @@ public:
         stats.start("get_mask.main_loop");
         int max_depth_reached = 0;
         std::unordered_set<int> visited_nodes;
-        while (!pq.empty()) {
-            auto [depth, node] = pq.top();
-            pq.pop();
-            max_depth_reached = std::max(max_depth_reached, depth);
+        while (!depth_heap.empty()) {
+            int depth = depth_heap.top(); depth_heap.pop();
+            auto &bucket = todo[depth];
 
+            while (!bucket.empty()) {
+                int node = *bucket.begin();
+                bucket.erase(bucket.begin());
+
+            max_depth_reached = std::max(max_depth_reached, depth);
             stats.inc("get_mask.traversal.depth_heap.pops");
 
             stats.inc("get_mask.traversal.nodes_processed");
@@ -642,6 +624,8 @@ public:
                     enqueue(arena_.at(dnode).max_depth, dnode);
                 }
             }
+            }
+            todo.erase(depth);
         }
         stats.stop("get_mask.main_loop");
         stats.inc("get_mask.traversal.max_depth_reached", max_depth_reached);
@@ -963,6 +947,48 @@ private:
     // -----------------------------
     // Leveled GSS transforms needed by algorithm
     // -----------------------------
+    Leveled prune_by_terminals_map(const Leveled& g, const std::unordered_map<int, RangeSet>& terminals_map) {
+        auto pred = [&](const std::shared_ptr<Acc>& acc) -> bool {
+            RangeSet rs_empty = RangeSet::empty();
+            for (auto &kv : terminals_map) {
+                int sid = kv.first;
+                const RangeSet &matched = kv.second;
+                auto it = acc->terminals_union.find(sid);
+                const RangeSet &disallowed = (it != acc->terminals_union.end()) ? it->second : rs_empty;
+                RangeSet inter = matched.intersection_with(disallowed);
+                bool ok = inter.is_empty();
+                if (!ok) return false;
+            }
+            return true;
+        };
+        return g.prune(pred);
+    }
+
+    Leveled apply_state_map_to_gss(const Leveled& g, const std::unordered_map<int, int>& state_map) {
+        auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
+            auto na = std::make_shared<Acc>();
+            na->llm_mask = acc->llm_mask;
+            RangeSet rs_empty = RangeSet::empty();
+            // This logic must mirror the Python version to ensure terminals_union is pruned
+            // and does not grow indefinitely. We iterate over the small state_map, not the
+            // potentially large terminals_union.
+            for (auto const& [old_sid, new_sid] : state_map) {
+                auto it = acc->terminals_union.find(old_sid);
+                if (it != acc->terminals_union.end()) {
+                    const RangeSet& bv_source = it->second;
+                    auto it_new = na->terminals_union.find(new_sid);
+                    if (it_new != na->terminals_union.end()) {
+                        it_new->second = it_new->second.union_with(bv_source);
+                    } else {
+                        na->terminals_union.emplace(new_sid, bv_source);
+                    }
+                }
+            }
+            return na;
+        };
+        return g.apply(mapper);
+    }
+
     Leveled disallow_in_state(const Leveled& g, int state_id, int terminal_id) {
         auto transformer = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
             auto na = std::make_shared<Acc>();
@@ -1039,12 +1065,11 @@ private:
                 }
             };
 
-            if ((action.has_shift && !action.reduces.empty()) || action.reduces.size() > 1) {
-                stats.inc("_process_token.splits");
-            }
-
             if (action.has_shift) {
                 handle_shift(action.shift_state_id, state_gss);
+                if (!action.reduces.empty()) {
+                    stats.inc("_process_token.splits");
+                }
             }
             for (auto &rd : action.reduces) {
                 handle_reduce(rd.first, rd.second, state_gss);
