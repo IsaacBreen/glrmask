@@ -472,7 +472,6 @@ public:
         std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> init_acc_memo;
 
         values.reserve(state_.size());
-        todo.reserve(state_.size());
         // --- Initial GSS Stats ---
         stats.start("get_mask.initial_stats");
         std::unordered_set<std::shared_ptr<Acc>> all_initial_accs;
