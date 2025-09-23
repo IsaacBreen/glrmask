@@ -61,13 +61,18 @@ local_system:
 
       PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
       CXX="${CXX:-c++}"
+      LDFLAGS=""
+      if [[ "$(uname)" == "Darwin" ]]; then
+        LDFLAGS="-undefined dynamic_lookup"
+      fi
 
       # Compile
       ${CXX} -O3 -std=c++17 -shared -fPIC \
         ${PYBIND_INCLUDES} \
         -I"${BOOST_DIR}" \
         "aug25/models/icl_rangeset.cpp" \
-        -o "aug25/models/icl_rangeset${EXT_SUFFIX}"
+        -o "aug25/models/icl_rangeset${EXT_SUFFIX}" \
+        ${LDFLAGS}
 
       echo "Build complete: python/aug25/models/icl_rangeset${EXT_SUFFIX}"
 
@@ -294,7 +299,7 @@ local_system:
       # 4) Run benchmarks comparing Rust baseline vs C++-accelerated model
       echo
       echo "Running benchmarks..."
-      bash run_benchmarks.sh "python/aug25/models/rust_model.py" "python/aug25/models/precompute3_model_cpp.py"
+      bash run_benchmarks.sh "aug25/models/rust_model.py" "aug25/models/precompute3_model_cpp.py"
     python/aug25/models/icl_rangeset.cpp: |
       #include <pybind11/pybind11.h>
       #include <pybind11/stl.h>
@@ -540,13 +545,18 @@ messages:
 
       PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
       CXX="${CXX:-c++}"
+      LDFLAGS=""
+      if [[ "$(uname)" == "Darwin" ]]; then
+        LDFLAGS="-undefined dynamic_lookup"
+      fi
 
       # Compile
       ${CXX} -O3 -std=c++17 -shared -fPIC \
         ${PYBIND_INCLUDES} \
         -I"${BOOST_DIR}" \
         "aug25/models/icl_rangeset.cpp" \
-        -o "aug25/models/icl_rangeset${EXT_SUFFIX}"
+        -o "aug25/models/icl_rangeset${EXT_SUFFIX}" \
+        ${LDFLAGS}
 
       echo "Build complete: python/aug25/models/icl_rangeset${EXT_SUFFIX}"
 
@@ -714,488 +724,12 @@ messages:
       [notice] A new release of pip is available: 25.0.1 -> 25.2
       [notice] To update, run: pip install --upgrade pip
       Building C++ extension (Boost.ICL RangeSet) ...
-      Undefined symbols for architecture arm64:
-        "_PyBaseObject_Type", referenced from:
-            pybind11::detail::make_object_base_type(_typeobject*) in icl_rangeset-1f8853.o
-        "_PyBool_Type", referenced from:
-            pybind11::detail::all_type_info_populate(_typeobject*, std::__1::vector<pybind11::detail::type_info*, std::__1::allocator<pybind11::detail::type_info*>>&) in icl_rangeset-1f8853.o
-            pybind11::detail::all_type_info_populate(_typeobject*, std::__1::vector<pybind11::detail::type_info*, std::__1::allocator<pybind11::detail::type_info*>>&) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::detail::traverse_offset_bases(void*, pybind11::detail::type_info const*, pybind11::detail::instance*, bool (*)(void*, pybind11::detail::instance*)) in icl_rangeset-1f8853.o
-            pybind11::detail::generic_type::mark_parents_nonsimple(_typeobject*) in icl_rangeset-1f8853.o
-            _pybind11_getbuffer in icl_rangeset-1f8853.o
-        "_PyBuffer_Release", referenced from:
-            pybind11::buffer_info::~buffer_info() in icl_rangeset-1f8853.o
-        "_PyByteArray_AsString", referenced from:
-            bool pybind11::detail::string_caster<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, false>::load_raw<char>(std::__1::enable_if<std::is_same<char, char>::value, pybind11::handle>::type) in icl_rangeset-1f8853.o
-        "_PyByteArray_Size", referenced from:
-            bool pybind11::detail::string_caster<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, false>::load_raw<char>(std::__1::enable_if<std::is_same<char, char>::value, pybind11::handle>::type) in icl_rangeset-1f8853.o
-        "_PyByteArray_Type", referenced from:
-            bool pybind11::detail::string_caster<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, false>::load_raw<char>(std::__1::enable_if<std::is_same<char, char>::value, pybind11::handle>::type) in icl_rangeset-1f8853.o
-            bool pybind11::detail::string_caster<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, false>::load_raw<char>(std::__1::enable_if<std::is_same<char, char>::value, pybind11::handle>::type) in icl_rangeset-1f8853.o
-        "_PyBytes_AsString", referenced from:
-            bool pybind11::detail::string_caster<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, false>::load_raw<char>(std::__1::enable_if<std::is_same<char, char>::value, pybind11::handle>::type) in icl_rangeset-1f8853.o
-        "_PyBytes_AsStringAndSize", referenced from:
-            pybind11::detail::error_fetch_and_normalize::format_value_and_trace() const in icl_rangeset-1f8853.o
-            pybind11::detail::error_fetch_and_normalize::format_value_and_trace() const in icl_rangeset-1f8853.o
-            pybind11::str::operator std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>() const in icl_rangeset-1f8853.o
-            pybind11::detail::cpp_conduit_method(pybind11::handle, pybind11::bytes const&, pybind11::capsule const&, pybind11::bytes const&) in icl_rangeset-1f8853.o
-            pybind11::detail::cpp_conduit_method(pybind11::handle, pybind11::bytes const&, pybind11::capsule const&, pybind11::bytes const&) in icl_rangeset-1f8853.o
-            std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>::basic_string<pybind11::bytes, 0>(pybind11::bytes const&) in icl_rangeset-1f8853.o
-        "_PyBytes_FromString", referenced from:
-            pybind11::detail::try_raw_pointer_ephemeral_from_cpp_conduit(pybind11::handle, std::type_info const*) in icl_rangeset-1f8853.o
-            pybind11::detail::try_raw_pointer_ephemeral_from_cpp_conduit(pybind11::handle, std::type_info const*) in icl_rangeset-1f8853.o
-        "_PyBytes_Size", referenced from:
-            bool pybind11::detail::string_caster<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, false>::load_raw<char>(std::__1::enable_if<std::is_same<char, char>::value, pybind11::handle>::type) in icl_rangeset-1f8853.o
-        "_PyCFunction_Type", referenced from:
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-        "_PyCMethod_New", referenced from:
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-        "_PyCallable_Check", referenced from:
-            pybind11::detail::try_get_cpp_conduit_method(_object*) in icl_rangeset-1f8853.o
-        "_PyCapsule_GetContext", referenced from:
-            pybind11::capsule::initialize_with_void_ptr_destructor(void const*, char const*, void (*)(void*))::'lambda'(_object*)::operator()(_object*) const in icl_rangeset-1f8853.o
-        "_PyCapsule_GetName", referenced from:
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-            pybind11::detail::function_record* pybind11::capsule::get_pointer<pybind11::detail::function_record>() const in icl_rangeset-1f8853.o
-            pybind11::capsule::get_name_in_error_scope(_object*) in icl_rangeset-1f8853.o
-            pybind11::detail::cpp_conduit_method(pybind11::handle, pybind11::bytes const&, pybind11::capsule const&, pybind11::bytes const&) in icl_rangeset-1f8853.o
-            pybind11::detail::type_info* pybind11::capsule::get_pointer<pybind11::detail::type_info>() const in icl_rangeset-1f8853.o
-            void* pybind11::capsule::get_pointer<void>() const in icl_rangeset-1f8853.o
-            std::type_info const* pybind11::capsule::get_pointer<std::type_info const>() const in icl_rangeset-1f8853.o
-            ...
-        "_PyCapsule_GetPointer", referenced from:
-            pybind11::detail::get_internals() in icl_rangeset-1f8853.o
-            pybind11::detail::function_record* pybind11::capsule::get_pointer<pybind11::detail::function_record>() const in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::capsule::initialize_with_void_ptr_destructor(void const*, char const*, void (*)(void*))::'lambda'(_object*)::operator()(_object*) const in icl_rangeset-1f8853.o
-            pybind11::detail::type_info* pybind11::capsule::get_pointer<pybind11::detail::type_info>() const in icl_rangeset-1f8853.o
-            void* pybind11::capsule::get_pointer<void>() const in icl_rangeset-1f8853.o
-            std::type_info const* pybind11::capsule::get_pointer<std::type_info const>() const in icl_rangeset-1f8853.o
-            ...
-        "_PyCapsule_New", referenced from:
-            pybind11::capsule::capsule(void const*, char const*, void (*)(_object*)) in icl_rangeset-1f8853.o
-            pybind11::capsule::capsule(void const*, char const*, void (*)(void*)) in icl_rangeset-1f8853.o
-        "_PyCapsule_SetContext", referenced from:
-            pybind11::capsule::capsule(void const*, char const*, void (*)(void*)) in icl_rangeset-1f8853.o
-        "_PyCapsule_SetPointer", referenced from:
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-        "_PyCapsule_Type", referenced from:
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::detail::try_raw_pointer_ephemeral_from_cpp_conduit(pybind11::handle, std::type_info const*) in icl_rangeset-1f8853.o
-            bool pybind11::detail::argument_loader<pybind11::handle, pybind11::bytes const&, pybind11::capsule const&, pybind11::bytes const&>::load_impl_sequence<0ul, 1ul, 2ul, 3ul>(pybind11::detail::function_call&, std::__1::integer_sequence<unsigned long, 0ul, 1ul, 2ul, 3ul>) in icl_rangeset-1f8853.o
-        "_PyDict_Copy", referenced from:
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-        "_PyDict_DelItemString", referenced from:
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-        "_PyDict_GetItemWithError", referenced from:
-            pybind11::detail::dict_getitemstring(_object*, char const*) in icl_rangeset-1f8853.o
-        "_PyDict_New", referenced from:
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-        "_PyDict_Next", referenced from:
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-        "_PyDict_Size", referenced from:
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-        "_PyDict_Type", referenced from:
-            pybind11::dict::dict(pybind11::object&&) in icl_rangeset-1f8853.o
-        "_PyErr_Clear", referenced from:
-            pybind11::detail::error_fetch_and_normalize::format_value_and_trace() const in icl_rangeset-1f8853.o
-            pybind11::detail::string_caster<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, false>::load(pybind11::handle, bool) in icl_rangeset-1f8853.o
-            pybind11::class_<RangeSet>& pybind11::class_<RangeSet>::def_static<RangeSet (*)(), char [25]>(char const*, RangeSet (*&&)(), char const (&) [25]) in icl_rangeset-1f8853.o
-            pybind11::class_<RangeSet>& pybind11::class_<RangeSet>::def_static<RangeSet (*)(std::__1::vector<int, std::__1::allocator<int>> const&), pybind11::arg, char [41]>(char const*, RangeSet (*&&)(std::__1::vector<int, std::__1::allocator<int>> const&), pybind11::arg const&, char const (&) [41]) in icl_rangeset-1f8853.o
-            pybind11::class_<RangeSet>& pybind11::class_<RangeSet>::def_static<RangeSet (*)(std::__1::vector<std::__1::pair<int, int>, std::__1::allocator<std::__1::pair<int, int>>> const&), pybind11::arg, char [70]>(char const*, RangeSet (*&&)(std::__1::vector<std::__1::pair<int, int>, std::__1::allocator<std::__1::pair<int, int>>> const&), pybind11::arg const&, char const (&) [70]) in icl_rangeset-1f8853.o
-            pybind11::class_<RangeSet>& pybind11::class_<RangeSet>::def<RangeSet (RangeSet::*)(RangeSet const&) const, pybind11::arg, char [35]>(char const*, RangeSet (RangeSet::*&&)(RangeSet const&) const, pybind11::arg const&, char const (&) [35]) in icl_rangeset-1f8853.o
-            pybind11::class_<RangeSet>& pybind11::class_<RangeSet>::def<RangeSet (RangeSet::*)(RangeSet const&) const, pybind11::arg, char [42]>(char const*, RangeSet (RangeSet::*&&)(RangeSet const&) const, pybind11::arg const&, char const (&) [42]) in icl_rangeset-1f8853.o
-            ...
-        "_PyErr_Fetch", referenced from:
-            pybind11::detail::get_internals() in icl_rangeset-1f8853.o
-            pybind11::raise_from(_object*, char const*) in icl_rangeset-1f8853.o
-            pybind11::raise_from(_object*, char const*) in icl_rangeset-1f8853.o
-            pybind11::error_already_set::m_fetched_error_deleter(pybind11::detail::error_fetch_and_normalize*) in icl_rangeset-1f8853.o
-            pybind11::error_already_set::what() const in icl_rangeset-1f8853.o
-            pybind11::detail::error_fetch_and_normalize::error_fetch_and_normalize(char const*) in icl_rangeset-1f8853.o
-            pybind11::capsule::initialize_with_void_ptr_destructor(void const*, char const*, void (*)(void*))::'lambda'(_object*)::operator()(_object*) const in icl_rangeset-1f8853.o
-            ...
-        "_PyErr_Format", referenced from:
-            _PyInit_icl_rangeset in icl_rangeset-1f8853.o
-            _pybind11_meta_call in icl_rangeset-1f8853.o
-        "_PyErr_NormalizeException", referenced from:
-            pybind11::raise_from(_object*, char const*) in icl_rangeset-1f8853.o
-            pybind11::raise_from(_object*, char const*) in icl_rangeset-1f8853.o
-        "_PyErr_Occurred", referenced from:
-            pybind11::detail::get_internals() in icl_rangeset-1f8853.o
-            pybind11::module_::create_extension_module(char const*, char const*, PyModuleDef*, pybind11::mod_gil_not_used) in icl_rangeset-1f8853.o
-            pybind11::pybind11_fail(char const*) in icl_rangeset-1f8853.o
-            pybind11::raise_from(_object*, char const*) in icl_rangeset-1f8853.o
-            pybind11::raise_from(_object*, char const*) in icl_rangeset-1f8853.o
-            pybind11::pybind11_fail(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&) in icl_rangeset-1f8853.o
-            pybind11::detail::dict_getitemstring(_object*, char const*) in icl_rangeset-1f8853.o
-            ...
-        "_PyErr_Restore", referenced from:
-            pybind11::detail::get_internals() in icl_rangeset-1f8853.o
-            pybind11::error_scope::~error_scope() in icl_rangeset-1f8853.o
-            pybind11::raise_from(_object*, char const*) in icl_rangeset-1f8853.o
-            pybind11::error_already_set::m_fetched_error_deleter(pybind11::detail::error_fetch_and_normalize*) in icl_rangeset-1f8853.o
-            pybind11::error_already_set::what() const in icl_rangeset-1f8853.o
-            pybind11::detail::error_fetch_and_normalize::restore() in icl_rangeset-1f8853.o
-            pybind11::capsule::initialize_with_void_ptr_destructor(void const*, char const*, void (*)(void*))::'lambda'(_object*)::operator()(_object*) const in icl_rangeset-1f8853.o
-            ...
-        "_PyErr_SetString", referenced from:
-            _PyInit_icl_rangeset in icl_rangeset-1f8853.o
-            pybind11::raise_from(_object*, char const*) in icl_rangeset-1f8853.o
-            pybind11::cast_error::set_error() const in icl_rangeset-1f8853.o
-            pybind11::detail::raise_err(_object*, char const*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            ...
-        "_PyErr_WarnEx", referenced from:
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-        "_PyErr_WriteUnraisable", referenced from:
-            pybind11::capsule::get_name_in_error_scope(_object*) in icl_rangeset-1f8853.o
-        "_PyEval_AcquireThread", referenced from:
-            pybind11::gil_scoped_acquire::gil_scoped_acquire() in icl_rangeset-1f8853.o
-        "_PyEval_SaveThread", referenced from:
-            pybind11::gil_scoped_acquire::~gil_scoped_acquire() in icl_rangeset-1f8853.o
-        "_PyExc_BufferError", referenced from:
-            _pybind11_getbuffer in icl_rangeset-1f8853.o
-            _pybind11_getbuffer in icl_rangeset-1f8853.o
-            _pybind11_getbuffer in icl_rangeset-1f8853.o
-        "_PyExc_FutureWarning", referenced from:
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-        "_PyExc_ImportError", referenced from:
-            _PyInit_icl_rangeset in icl_rangeset-1f8853.o
-            _PyInit_icl_rangeset in icl_rangeset-1f8853.o
-            _PyInit_icl_rangeset in icl_rangeset-1f8853.o
-        "_PyExc_IndexError", referenced from:
-            pybind11::detail::translate_exception(std::exception_ptr) in icl_rangeset-1f8853.o
-        "_PyExc_MemoryError", referenced from:
-            pybind11::detail::translate_exception(std::exception_ptr) in icl_rangeset-1f8853.o
-        "_PyExc_OverflowError", referenced from:
-            pybind11::detail::translate_exception(std::exception_ptr) in icl_rangeset-1f8853.o
-        "_PyExc_RuntimeError", referenced from:
-            pybind11::detail::translate_exception(std::exception_ptr) in icl_rangeset-1f8853.o
-            pybind11::detail::translate_exception(std::exception_ptr) in icl_rangeset-1f8853.o
-            pybind11::detail::translate_exception(std::exception_ptr) in icl_rangeset-1f8853.o
-            pybind11::cast_error::set_error() const in icl_rangeset-1f8853.o
-            pybind11::reference_cast_error::set_error() const in icl_rangeset-1f8853.o
-        "_PyExc_SystemError", referenced from:
-            pybind11::detail::get_internals() in icl_rangeset-1f8853.o
-            pybind11::detail::get_python_state_dict() in icl_rangeset-1f8853.o
-            pybind11::detail::try_translate_exceptions() in icl_rangeset-1f8853.o
-        "_PyExc_TypeError", referenced from:
-            _pybind11_meta_call in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            _pybind11_object_init in icl_rangeset-1f8853.o
-            pybind11::detail::type_caster_generic::src_and_type(void const*, std::type_info const&, std::type_info const*) in icl_rangeset-1f8853.o
-        "_PyExc_ValueError", referenced from:
-            pybind11::detail::translate_exception(std::exception_ptr) in icl_rangeset-1f8853.o
-            pybind11::detail::translate_exception(std::exception_ptr) in icl_rangeset-1f8853.o
-            pybind11::detail::translate_exception(std::exception_ptr) in icl_rangeset-1f8853.o
-            pybind11::detail::translate_exception(std::exception_ptr) in icl_rangeset-1f8853.o
-        "_PyException_SetCause", referenced from:
-            pybind11::raise_from(_object*, char const*) in icl_rangeset-1f8853.o
-        "_PyException_SetContext", referenced from:
-            pybind11::raise_from(_object*, char const*) in icl_rangeset-1f8853.o
-        "_PyException_SetTraceback", referenced from:
-            pybind11::raise_from(_object*, char const*) in icl_rangeset-1f8853.o
-        "_PyFloat_Type", referenced from:
-            pybind11::detail::type_caster<int, void>::load(pybind11::handle, bool) in icl_rangeset-1f8853.o
-            pybind11::detail::type_caster<int, void>::load(pybind11::handle, bool) in icl_rangeset-1f8853.o
-        "_PyFrame_GetBack", referenced from:
-            pybind11::detail::error_fetch_and_normalize::format_value_and_trace() const in icl_rangeset-1f8853.o
-        "_PyFrame_GetCode", referenced from:
-            pybind11::detail::error_fetch_and_normalize::format_value_and_trace() const in icl_rangeset-1f8853.o
-        "_PyFrame_GetLineNumber", referenced from:
-            pybind11::detail::error_fetch_and_normalize::format_value_and_trace() const in icl_rangeset-1f8853.o
-        "_PyGILState_Check", referenced from:
-            pybind11::handle::inc_ref() const & in icl_rangeset-1f8853.o
-            pybind11::handle::dec_ref() const & in icl_rangeset-1f8853.o
-            pybind11::object pybind11::detail::object_api<pybind11::detail::accessor<pybind11::detail::accessor_policies::str_attr>>::operator()<(pybind11::return_value_policy)1, pybind11::handle const&>(pybind11::handle const&) const in icl_rangeset-1f8853.o
-            pybind11::cpp_function::destruct(pybind11::detail::function_record*, bool) in icl_rangeset-1f8853.o
-            pybind11::object pybind11::detail::object_api<pybind11::detail::accessor<pybind11::detail::accessor_policies::str_attr>>::operator()<(pybind11::return_value_policy)1, char const* const&>(char const* const&) const in icl_rangeset-1f8853.o
-            pybind11::object pybind11::detail::object_api<pybind11::handle>::operator()<(pybind11::return_value_policy)1, pybind11::bytes, pybind11::capsule&, pybind11::bytes>(pybind11::bytes&&, pybind11::capsule&, pybind11::bytes&&) const in icl_rangeset-1f8853.o
-            pybind11::object pybind11::detail::object_api<pybind11::detail::accessor<pybind11::detail::accessor_policies::str_attr>>::operator()<(pybind11::return_value_policy)1, char const (&) [9]>(char const (&) [9]) const in icl_rangeset-1f8853.o
-            ...
-        "_PyGILState_Ensure", referenced from:
-            pybind11::detail::get_internals() in icl_rangeset-1f8853.o
-        "_PyGILState_GetThisThreadState", referenced from:
-            pybind11::gil_scoped_acquire::gil_scoped_acquire() in icl_rangeset-1f8853.o
-        "_PyGILState_Release", referenced from:
-            pybind11::detail::get_internals() in icl_rangeset-1f8853.o
-            pybind11::detail::get_internals() in icl_rangeset-1f8853.o
-        "_PyIndex_Check", referenced from:
-            pybind11::detail::type_caster<int, void>::load(pybind11::handle, bool) in icl_rangeset-1f8853.o
-        "_PyInstanceMethod_New", referenced from:
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-        "_PyInstanceMethod_Type", referenced from:
-            _pybind11_meta_getattro in icl_rangeset-1f8853.o
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-            pybind11::detail::try_get_cpp_conduit_method(_object*) in icl_rangeset-1f8853.o
-        "_PyInterpreterState_Get", referenced from:
-            pybind11::detail::get_python_state_dict() in icl_rangeset-1f8853.o
-        "_PyInterpreterState_GetDict", referenced from:
-            pybind11::detail::get_python_state_dict() in icl_rangeset-1f8853.o
-        "_PyList_GetItem", referenced from:
-            pybind11::detail::accessor<pybind11::detail::accessor_policies::list_item>::get_cache() const in icl_rangeset-1f8853.o
-        "_PyList_New", referenced from:
-            pybind11::detail::type_record::type_record() in icl_rangeset-1f8853.o
-            pybind11::handle pybind11::detail::list_caster<std::__1::vector<std::__1::pair<int, int>, std::__1::allocator<std::__1::pair<int, int>>>, std::__1::pair<int, int>>::cast<std::__1::vector<std::__1::pair<int, int>, std::__1::allocator<std::__1::pair<int, int>>>>(std::__1::vector<std::__1::pair<int, int>, std::__1::allocator<std::__1::pair<int, int>>>&&, pybind11::return_value_policy, pybind11::handle) in icl_rangeset-1f8853.o
-            pybind11::handle pybind11::detail::list_caster<std::__1::vector<int, std::__1::allocator<int>>, int>::cast<std::__1::vector<int, std::__1::allocator<int>>>(std::__1::vector<int, std::__1::allocator<int>>&&, pybind11::return_value_policy, pybind11::handle) in icl_rangeset-1f8853.o
-        "_PyList_Size", referenced from:
-            pybind11::detail::error_fetch_and_normalize::format_value_and_trace() const in icl_rangeset-1f8853.o
-            pybind11::detail::generic_type::initialize(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-            pybind11::detail::generic_type::initialize(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-        "_PyLong_AsLong", referenced from:
-            pybind11::detail::type_caster<int, void>::load(pybind11::handle, bool) in icl_rangeset-1f8853.o
-        "_PyLong_FromSsize_t", referenced from:
-            pybind11::handle pybind11::detail::tuple_caster<std::__1::pair, int, int>::cast_impl<std::__1::pair<int, int>, 0ul, 1ul>(std::__1::pair<int, int>&&, pybind11::return_value_policy, pybind11::handle, std::__1::integer_sequence<unsigned long, 0ul, 1ul>) in icl_rangeset-1f8853.o
-            pybind11::handle pybind11::detail::tuple_caster<std::__1::pair, int, int>::cast_impl<std::__1::pair<int, int>, 0ul, 1ul>(std::__1::pair<int, int>&&, pybind11::return_value_policy, pybind11::handle, std::__1::integer_sequence<unsigned long, 0ul, 1ul>) in icl_rangeset-1f8853.o
-            pybind11::handle pybind11::detail::list_caster<std::__1::vector<int, std::__1::allocator<int>>, int>::cast<std::__1::vector<int, std::__1::allocator<int>>>(std::__1::vector<int, std::__1::allocator<int>>&&, pybind11::return_value_policy, pybind11::handle) in icl_rangeset-1f8853.o
-        "_PyLong_Type", referenced from:
-            pybind11::detail::all_type_info_populate(_typeobject*, std::__1::vector<pybind11::detail::type_info*, std::__1::allocator<pybind11::detail::type_info*>>&) in icl_rangeset-1f8853.o
-            pybind11::detail::all_type_info_populate(_typeobject*, std::__1::vector<pybind11::detail::type_info*, std::__1::allocator<pybind11::detail::type_info*>>&) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::detail::traverse_offset_bases(void*, pybind11::detail::type_info const*, pybind11::detail::instance*, bool (*)(void*, pybind11::detail::instance*)) in icl_rangeset-1f8853.o
-            pybind11::detail::generic_type::mark_parents_nonsimple(_typeobject*) in icl_rangeset-1f8853.o
-            _pybind11_getbuffer in icl_rangeset-1f8853.o
-        "_PyMem_Calloc", referenced from:
-            pybind11::detail::instance::allocate_layout() in icl_rangeset-1f8853.o
-        "_PyMem_Free", referenced from:
-            pybind11::detail::instance::deallocate_layout() in icl_rangeset-1f8853.o
-        "_PyModule_Create2", referenced from:
-            pybind11::module_::create_extension_module(char const*, char const*, PyModuleDef*, pybind11::mod_gil_not_used) in icl_rangeset-1f8853.o
-        "_PyModule_Type", referenced from:
-            pybind11::detail::make_new_python_type(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-            pybind11::detail::make_new_python_type(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-        "_PyNumber_Check", referenced from:
-            pybind11::detail::type_caster<int, void>::load(pybind11::handle, bool) in icl_rangeset-1f8853.o
-        "_PyNumber_Long", referenced from:
-            pybind11::detail::type_caster<int, void>::load(pybind11::handle, bool) in icl_rangeset-1f8853.o
-        "_PyObject_CallFunctionObjArgs", referenced from:
-            pybind11::dict::dict(pybind11::object&&) in icl_rangeset-1f8853.o
-        "_PyObject_CallObject", referenced from:
-            pybind11::object pybind11::detail::object_api<pybind11::detail::accessor<pybind11::detail::accessor_policies::str_attr>>::operator()<(pybind11::return_value_policy)1, pybind11::handle const&>(pybind11::handle const&) const in icl_rangeset-1f8853.o
-            pybind11::object pybind11::detail::object_api<pybind11::detail::accessor<pybind11::detail::accessor_policies::str_attr>>::operator()<(pybind11::return_value_policy)1, char const* const&>(char const* const&) const in icl_rangeset-1f8853.o
-            pybind11::object pybind11::detail::object_api<pybind11::handle>::operator()<(pybind11::return_value_policy)1, pybind11::bytes, pybind11::capsule&, pybind11::bytes>(pybind11::bytes&&, pybind11::capsule&, pybind11::bytes&&) const in icl_rangeset-1f8853.o
-            pybind11::object pybind11::detail::object_api<pybind11::detail::accessor<pybind11::detail::accessor_policies::str_attr>>::operator()<(pybind11::return_value_policy)1, char const (&) [9]>(char const (&) [9]) const in icl_rangeset-1f8853.o
-        "_PyObject_ClearWeakRefs", referenced from:
-            pybind11::detail::clear_instance(_object*) in icl_rangeset-1f8853.o
-        "_PyObject_GC_UnTrack", referenced from:
-            _pybind11_object_dealloc in icl_rangeset-1f8853.o
-        "_PyObject_GenericGetDict", referenced from:
-            pybind11::detail::enable_dynamic_attributes(_heaptypeobject*)::getset in icl_rangeset-1f8853.o
-        "_PyObject_GenericSetDict", referenced from:
-            pybind11::detail::enable_dynamic_attributes(_heaptypeobject*)::getset in icl_rangeset-1f8853.o
-        "_PyObject_GetAttr", referenced from:
-            pybind11::detail::try_get_cpp_conduit_method(_object*) in icl_rangeset-1f8853.o
-        "_PyObject_GetAttrString", referenced from:
-            pybind11::detail::error_fetch_and_normalize::format_value_and_trace() const in icl_rangeset-1f8853.o
-            pybind11::detail::accessor<pybind11::detail::accessor_policies::str_attr>::get_cache() const in icl_rangeset-1f8853.o
-            pybind11::class_<RangeSet>& pybind11::class_<RangeSet>::def_static<RangeSet (*)(), char [25]>(char const*, RangeSet (*&&)(), char const (&) [25]) in icl_rangeset-1f8853.o
-            pybind11::class_<RangeSet>& pybind11::class_<RangeSet>::def_static<RangeSet (*)(std::__1::vector<int, std::__1::allocator<int>> const&), pybind11::arg, char [41]>(char const*, RangeSet (*&&)(std::__1::vector<int, std::__1::allocator<int>> const&), pybind11::arg const&, char const (&) [41]) in icl_rangeset-1f8853.o
-            pybind11::class_<RangeSet>& pybind11::class_<RangeSet>::def_static<RangeSet (*)(std::__1::vector<std::__1::pair<int, int>, std::__1::allocator<std::__1::pair<int, int>>> const&), pybind11::arg, char [70]>(char const*, RangeSet (*&&)(std::__1::vector<std::__1::pair<int, int>, std::__1::allocator<std::__1::pair<int, int>>> const&), pybind11::arg const&, char const (&) [70]) in icl_rangeset-1f8853.o
-            pybind11::class_<RangeSet>& pybind11::class_<RangeSet>::def<RangeSet (RangeSet::*)(RangeSet const&) const, pybind11::arg, char [35]>(char const*, RangeSet (RangeSet::*&&)(RangeSet const&) const, pybind11::arg const&, char const (&) [35]) in icl_rangeset-1f8853.o
-            pybind11::class_<RangeSet>& pybind11::class_<RangeSet>::def<RangeSet (RangeSet::*)(RangeSet const&) const, pybind11::arg, char [42]>(char const*, RangeSet (RangeSet::*&&)(RangeSet const&) const, pybind11::arg const&, char const (&) [42]) in icl_rangeset-1f8853.o
-            ...
-        "_PyObject_HasAttrString", referenced from:
-            pybind11::detail::error_fetch_and_normalize::error_fetch_and_normalize(char const*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-            pybind11::detail::generic_type::initialize(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-            pybind11::detail::make_new_python_type(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-            pybind11::detail::make_new_python_type(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-            pybind11::detail::make_new_python_type(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-            ...
-        "_PyObject_IsInstance", referenced from:
-            _pybind11_meta_setattro in icl_rangeset-1f8853.o
-            _pybind11_meta_setattro in icl_rangeset-1f8853.o
-        "_PyObject_Malloc", referenced from:
-            pybind11::detail::make_new_python_type(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-        "_PyObject_Repr", referenced from:
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-        "_PyObject_SetAttr", referenced from:
-            pybind11::class_<RangeSet>& pybind11::class_<RangeSet>::def_static<RangeSet (*)(), char [25]>(char const*, RangeSet (*&&)(), char const (&) [25]) in icl_rangeset-1f8853.o
-            pybind11::class_<RangeSet>& pybind11::class_<RangeSet>::def_static<RangeSet (*)(std::__1::vector<int, std::__1::allocator<int>> const&), pybind11::arg, char [41]>(char const*, RangeSet (*&&)(std::__1::vector<int, std::__1::allocator<int>> const&), pybind11::arg const&, char const (&) [41]) in icl_rangeset-1f8853.o
-            pybind11::class_<RangeSet>& pybind11::class_<RangeSet>::def_static<RangeSet (*)(std::__1::vector<std::__1::pair<int, int>, std::__1::allocator<std::__1::pair<int, int>>> const&), pybind11::arg, char [70]>(char const*, RangeSet (*&&)(std::__1::vector<std::__1::pair<int, int>, std::__1::allocator<std::__1::pair<int, int>>> const&), pybind11::arg const&, char const (&) [70]) in icl_rangeset-1f8853.o
-            pybind11::detail::add_class_method(pybind11::object&, char const*, pybind11::cpp_function const&) in icl_rangeset-1f8853.o
-        "_PyObject_SetAttrString", referenced from:
-            pybind11::detail::make_static_property_type() in icl_rangeset-1f8853.o
-            pybind11::detail::make_default_metaclass() in icl_rangeset-1f8853.o
-            pybind11::detail::make_object_base_type(_typeobject*) in icl_rangeset-1f8853.o
-            void pybind11::detail::accessor<pybind11::detail::accessor_policies::str_attr>::operator=<char const (&) [26]>(char const (&) [26]) && in icl_rangeset-1f8853.o
-            pybind11::detail::generic_type::initialize(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-            pybind11::detail::make_new_python_type(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-            pybind11::detail::make_new_python_type(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-            ...
-        "_PyObject_SetItem", referenced from:
-            pybind11::detail::get_internals() in icl_rangeset-1f8853.o
-        "_PyObject_Str", referenced from:
-            pybind11::detail::error_fetch_and_normalize::format_value_and_trace() const in icl_rangeset-1f8853.o
-            pybind11::str::str(pybind11::handle) in icl_rangeset-1f8853.o
-            pybind11::str::str(pybind11::object&&) in icl_rangeset-1f8853.o
-            pybind11::str::str(pybind11::object const&) in icl_rangeset-1f8853.o
-        "_PyProperty_Type", referenced from:
-            pybind11::detail::make_static_property_type() in icl_rangeset-1f8853.o
-            _pybind11_static_get in icl_rangeset-1f8853.o
-            _pybind11_static_set in icl_rangeset-1f8853.o
-        "_PySequence_Check", referenced from:
-            pybind11::detail::list_caster<std::__1::vector<int, std::__1::allocator<int>>, int>::load(pybind11::handle, bool) in icl_rangeset-1f8853.o
-            pybind11::detail::list_caster<std::__1::vector<std::__1::pair<int, int>, std::__1::allocator<std::__1::pair<int, int>>>, std::__1::pair<int, int>>::load(pybind11::handle, bool) in icl_rangeset-1f8853.o
-            pybind11::detail::tuple_caster<std::__1::pair, int, int>::load(pybind11::handle, bool) in icl_rangeset-1f8853.o
-        "_PySequence_GetItem", referenced from:
-            pybind11::detail::accessor<pybind11::detail::accessor_policies::sequence_item>::get_cache() const in icl_rangeset-1f8853.o
-        "_PySequence_Size", referenced from:
-            pybind11::detail::list_caster<std::__1::vector<int, std::__1::allocator<int>>, int>::load(pybind11::handle, bool) in icl_rangeset-1f8853.o
-            void pybind11::detail::list_caster<std::__1::vector<int, std::__1::allocator<int>>, int>::reserve_maybe<std::__1::vector<int, std::__1::allocator<int>>, 0>(pybind11::sequence const&, std::__1::vector<int, std::__1::allocator<int>>*) in icl_rangeset-1f8853.o
-            pybind11::detail::list_caster<std::__1::vector<std::__1::pair<int, int>, std::__1::allocator<std::__1::pair<int, int>>>, std::__1::pair<int, int>>::load(pybind11::handle, bool) in icl_rangeset-1f8853.o
-            void pybind11::detail::list_caster<std::__1::vector<std::__1::pair<int, int>, std::__1::allocator<std::__1::pair<int, int>>>, std::__1::pair<int, int>>::reserve_maybe<std::__1::vector<std::__1::pair<int, int>, std::__1::allocator<std::__1::pair<int, int>>>, 0>(pybind11::sequence const&, std::__1::vector<std::__1::pair<int, int>, std::__1::allocator<std::__1::pair<int, int>>>*) in icl_rangeset-1f8853.o
-            pybind11::detail::tuple_caster<std::__1::pair, int, int>::load(pybind11::handle, bool) in icl_rangeset-1f8853.o
-        "_PySequence_Tuple", referenced from:
-            pybind11::tuple::tuple(pybind11::object const&) in icl_rangeset-1f8853.o
-        "_PyStaticMethod_New", referenced from:
-            pybind11::staticmethod::staticmethod(pybind11::object&&) in icl_rangeset-1f8853.o
-        "_PyStaticMethod_Type", referenced from:
-            pybind11::staticmethod::staticmethod(pybind11::object&&) in icl_rangeset-1f8853.o
-        "_PyThreadState_Clear", referenced from:
-            pybind11::gil_scoped_acquire::dec_ref() in icl_rangeset-1f8853.o
-        "_PyThreadState_DeleteCurrent", referenced from:
-            pybind11::gil_scoped_acquire::dec_ref() in icl_rangeset-1f8853.o
-        "_PyThreadState_Get", referenced from:
-            pybind11::detail::get_internals() in icl_rangeset-1f8853.o
-        "_PyThreadState_New", referenced from:
-            pybind11::gil_scoped_acquire::gil_scoped_acquire() in icl_rangeset-1f8853.o
-        "_PyThread_tss_create", referenced from:
-            pybind11::detail::get_internals() in icl_rangeset-1f8853.o
-            pybind11::detail::get_internals() in icl_rangeset-1f8853.o
-        "_PyThread_tss_get", referenced from:
-            pybind11::gil_scoped_acquire::gil_scoped_acquire() in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::detail::loader_life_support::~loader_life_support() in icl_rangeset-1f8853.o
-            pybind11::detail::loader_life_support::add_patient(pybind11::handle) in icl_rangeset-1f8853.o
-        "_PyThread_tss_set", referenced from:
-            pybind11::detail::get_internals() in icl_rangeset-1f8853.o
-            pybind11::gil_scoped_acquire::gil_scoped_acquire() in icl_rangeset-1f8853.o
-            pybind11::gil_scoped_acquire::dec_ref() in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::detail::loader_life_support::~loader_life_support() in icl_rangeset-1f8853.o
-        "_PyTuple_GetItem", referenced from:
-            pybind11::detail::accessor<pybind11::detail::accessor_policies::tuple_item>::get_cache() const in icl_rangeset-1f8853.o
-        "_PyTuple_New", referenced from:
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::tuple pybind11::make_tuple<(pybind11::return_value_policy)1, pybind11::handle const&>(pybind11::handle const&) in icl_rangeset-1f8853.o
-            pybind11::tuple pybind11::make_tuple<(pybind11::return_value_policy)1, char const* const&>(char const* const&) in icl_rangeset-1f8853.o
-            pybind11::tuple pybind11::make_tuple<(pybind11::return_value_policy)1, pybind11::bytes, pybind11::capsule&, pybind11::bytes>(pybind11::bytes&&, pybind11::capsule&, pybind11::bytes&&) in icl_rangeset-1f8853.o
-            pybind11::tuple pybind11::make_tuple<(pybind11::return_value_policy)1, char const (&) [9]>(char const (&) [9]) in icl_rangeset-1f8853.o
-            ...
-        "_PyTuple_SetItem", referenced from:
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-        "_PyTuple_Size", referenced from:
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::detail::make_new_python_type(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-            pybind11::detail::make_new_python_type(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-        "_PyType_IsSubtype", referenced from:
-            bool pybind11::detail::string_caster<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, false>::load_raw<char>(std::__1::enable_if<std::is_same<char, char>::value, pybind11::handle>::type) in icl_rangeset-1f8853.o
-            _pybind11_meta_call in icl_rangeset-1f8853.o
-            pybind11::detail::all_type_info_populate(_typeobject*, std::__1::vector<pybind11::detail::type_info*, std::__1::allocator<pybind11::detail::type_info*>>&) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::detail::make_new_python_type(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-            ...
-        "_PyType_Ready", referenced from:
-            pybind11::detail::make_static_property_type() in icl_rangeset-1f8853.o
-            pybind11::detail::make_default_metaclass() in icl_rangeset-1f8853.o
-            pybind11::detail::make_object_base_type(_typeobject*) in icl_rangeset-1f8853.o
-            pybind11::detail::make_new_python_type(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-        "_PyType_Type", referenced from:
-            pybind11::detail::make_static_property_type() in icl_rangeset-1f8853.o
-            pybind11::detail::make_default_metaclass() in icl_rangeset-1f8853.o
-            _pybind11_meta_call in icl_rangeset-1f8853.o
-            _pybind11_meta_setattro in icl_rangeset-1f8853.o
-            _pybind11_meta_getattro in icl_rangeset-1f8853.o
-            _pybind11_meta_dealloc in icl_rangeset-1f8853.o
-        "_PyUnicode_AsEncodedString", referenced from:
-            pybind11::detail::error_fetch_and_normalize::format_value_and_trace() const in icl_rangeset-1f8853.o
-            pybind11::detail::error_fetch_and_normalize::format_value_and_trace() const in icl_rangeset-1f8853.o
-        "_PyUnicode_AsUTF8AndSize", referenced from:
-            pybind11::detail::string_caster<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, false>::load(pybind11::handle, bool) in icl_rangeset-1f8853.o
-        "_PyUnicode_AsUTF8String", referenced from:
-            pybind11::str::operator std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>() const in icl_rangeset-1f8853.o
-        "_PyUnicode_DecodeUTF8", referenced from:
-            pybind11::detail::type_caster<char, void>::cast(char const*, pybind11::return_value_policy, pybind11::handle) in icl_rangeset-1f8853.o
-            void pybind11::cpp_function::initialize<pybind11::cpp_function::cpp_function<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, RangeSet, pybind11::name, pybind11::is_method, pybind11::sibling>(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> (RangeSet::*)() const, pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(RangeSet const*), std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, RangeSet const*, pybind11::name, pybind11::is_method, pybind11::sibling>(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>&&, RangeSet (*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(pybind11::detail::function_call&)::operator()(pybind11::detail::function_call&) const in icl_rangeset-1f8853.o
-        "_PyUnicode_FromFormat", referenced from:
-            pybind11::detail::make_new_python_type(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-        "_PyUnicode_FromString", referenced from:
-            pybind11::detail::make_static_property_type() in icl_rangeset-1f8853.o
-            pybind11::detail::make_default_metaclass() in icl_rangeset-1f8853.o
-            pybind11::detail::make_object_base_type(_typeobject*) in icl_rangeset-1f8853.o
-            pybind11::detail::dict_getitemstring(_object*, char const*) in icl_rangeset-1f8853.o
-            pybind11::str::str(char const*) in icl_rangeset-1f8853.o
-            pybind11::detail::make_new_python_type(pybind11::detail::type_record const&) in icl_rangeset-1f8853.o
-        "_PyWeakref_NewRef", referenced from:
-            pybind11::weakref::weakref(pybind11::handle, pybind11::handle) in icl_rangeset-1f8853.o
-        "_Py_GetVersion", referenced from:
-            _PyInit_icl_rangeset in icl_rangeset-1f8853.o
-        "__PyObject_GetDictPtr", referenced from:
-            _pybind11_traverse in icl_rangeset-1f8853.o
-            _pybind11_clear in icl_rangeset-1f8853.o
-            pybind11::detail::clear_instance(_object*) in icl_rangeset-1f8853.o
-        "__PyThreadState_UncheckedGet", referenced from:
-            pybind11::gil_scoped_acquire::gil_scoped_acquire() in icl_rangeset-1f8853.o
-            pybind11::gil_scoped_acquire::dec_ref() in icl_rangeset-1f8853.o
-        "__PyType_Lookup", referenced from:
-            _pybind11_meta_setattro in icl_rangeset-1f8853.o
-            _pybind11_meta_getattro in icl_rangeset-1f8853.o
-            pybind11::detail::try_get_cpp_conduit_method(_object*) in icl_rangeset-1f8853.o
-        "__Py_Dealloc", referenced from:
-            pybind11::raise_from(_object*, char const*) in icl_rangeset-1f8853.o
-            pybind11::raise_from(_object*, char const*) in icl_rangeset-1f8853.o
-            pybind11::handle::dec_ref() const & in icl_rangeset-1f8853.o
-            pybind11::detail::error_fetch_and_normalize::format_value_and_trace() const in icl_rangeset-1f8853.o
-            pybind11::detail::error_fetch_and_normalize::format_value_and_trace() const in icl_rangeset-1f8853.o
-            pybind11::detail::dict_getitemstring(_object*, char const*) in icl_rangeset-1f8853.o
-            _pybind11_clear in icl_rangeset-1f8853.o
-            ...
-        "__Py_FalseStruct", referenced from:
-            pybind11::detail::type_caster<bool, void>& pybind11::detail::load_type<bool, void>(pybind11::detail::type_caster<bool, void>&, pybind11::handle const&) in icl_rangeset-1f8853.o
-            void pybind11::cpp_function::initialize<pybind11::cpp_function::cpp_function<bool, RangeSet, int, pybind11::name, pybind11::is_method, pybind11::sibling, pybind11::arg, char [39]>(bool (RangeSet::*)(int) const, pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&, pybind11::arg const&, char const (&) [39])::'lambda'(RangeSet const*, int), bool, RangeSet const*, int, pybind11::name, pybind11::is_method, pybind11::sibling, pybind11::arg, char [39]>(bool&&, RangeSet (*)(int), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&, pybind11::arg const&, char const (&) [39])::'lambda'(pybind11::detail::function_call&)::operator()(pybind11::detail::function_call&) const in icl_rangeset-1f8853.o
-            void pybind11::cpp_function::initialize<pybind11::cpp_function::cpp_function<bool, RangeSet, pybind11::name, pybind11::is_method, pybind11::sibling, char [25]>(bool (RangeSet::*)() const, pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&, char const (&) [25])::'lambda'(RangeSet const*), bool, RangeSet const*, pybind11::name, pybind11::is_method, pybind11::sibling, char [25]>(bool&&, RangeSet (*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&, char const (&) [25])::'lambda'(pybind11::detail::function_call&)::operator()(pybind11::detail::function_call&) const in icl_rangeset-1f8853.o
-            void pybind11::cpp_function::initialize<pybind11::cpp_function::cpp_function<bool, RangeSet, RangeSet const&, pybind11::name, pybind11::is_method, pybind11::sibling>(bool (RangeSet::*)(RangeSet const&) const, pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(RangeSet const*, RangeSet const&), bool, RangeSet const*, RangeSet const&, pybind11::name, pybind11::is_method, pybind11::sibling>(bool&&, RangeSet (*)(RangeSet const&), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(pybind11::detail::function_call&)::operator()(pybind11::detail::function_call&) const in icl_rangeset-1f8853.o
-        "__Py_NoneStruct", referenced from:
-            pybind11::cpp_function::initialize_generic(std::__1::unique_ptr<pybind11::detail::function_record, pybind11::cpp_function::InitializingFunctionRecordDeleter>&&, char const*, std::type_info const* const*, unsigned long) in icl_rangeset-1f8853.o
-            void pybind11::cpp_function::initialize<pybind11::detail::all_type_info_get_cache(_typeobject*)::'lambda'(pybind11::handle), void, pybind11::handle>(pybind11::detail::all_type_info_get_cache(_typeobject*)::'lambda'(pybind11::handle)&&, void (*)(pybind11::handle))::'lambda'(pybind11::detail::function_call&)::operator()(pybind11::detail::function_call&) const in icl_rangeset-1f8853.o
-            void pybind11::cpp_function::initialize<pybind11::detail::all_type_info_get_cache(_typeobject*)::'lambda'(pybind11::handle), void, pybind11::handle>(pybind11::detail::all_type_info_get_cache(_typeobject*)::'lambda'(pybind11::handle)&&, void (*)(pybind11::handle))::'lambda'(pybind11::detail::function_call&)::operator()(pybind11::detail::function_call&) const in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-            ...
-        "__Py_NotImplementedStruct", referenced from:
-            pybind11::cpp_function::dispatcher(_object*, _object*, _object*) in icl_rangeset-1f8853.o
-        "__Py_TrueStruct", referenced from:
-            pybind11::detail::type_caster<bool, void>& pybind11::detail::load_type<bool, void>(pybind11::detail::type_caster<bool, void>&, pybind11::handle const&) in icl_rangeset-1f8853.o
-            void pybind11::cpp_function::initialize<pybind11::cpp_function::cpp_function<bool, RangeSet, int, pybind11::name, pybind11::is_method, pybind11::sibling, pybind11::arg, char [39]>(bool (RangeSet::*)(int) const, pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&, pybind11::arg const&, char const (&) [39])::'lambda'(RangeSet const*, int), bool, RangeSet const*, int, pybind11::name, pybind11::is_method, pybind11::sibling, pybind11::arg, char [39]>(bool&&, RangeSet (*)(int), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&, pybind11::arg const&, char const (&) [39])::'lambda'(pybind11::detail::function_call&)::operator()(pybind11::detail::function_call&) const in icl_rangeset-1f8853.o
-            void pybind11::cpp_function::initialize<pybind11::cpp_function::cpp_function<bool, RangeSet, pybind11::name, pybind11::is_method, pybind11::sibling, char [25]>(bool (RangeSet::*)() const, pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&, char const (&) [25])::'lambda'(RangeSet const*), bool, RangeSet const*, pybind11::name, pybind11::is_method, pybind11::sibling, char [25]>(bool&&, RangeSet (*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&, char const (&) [25])::'lambda'(pybind11::detail::function_call&)::operator()(pybind11::detail::function_call&) const in icl_rangeset-1f8853.o
-            void pybind11::cpp_function::initialize<pybind11::cpp_function::cpp_function<bool, RangeSet, RangeSet const&, pybind11::name, pybind11::is_method, pybind11::sibling>(bool (RangeSet::*)(RangeSet const&) const, pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(RangeSet const*, RangeSet const&), bool, RangeSet const*, RangeSet const&, pybind11::name, pybind11::is_method, pybind11::sibling>(bool&&, RangeSet (*)(RangeSet const&), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(pybind11::detail::function_call&)::operator()(pybind11::detail::function_call&) const in icl_rangeset-1f8853.o
-      ld: symbol(s) not found for architecture arm64
-      clang++: error: linker command failed with exit code 1 (use -v to see invocation)
+      Build complete: python/aug25/models/icl_rangeset.cpython-312-darwin.so
+
+      Running benchmarks...
+      Error: Model file not found: python/aug25/models/rust_model.py
+      ls python/aug25/models/rust_model.py
+       python/aug25/models/rust_model.py
     metadata:
   - user: Fix this
     metadata:
@@ -1216,81 +750,46 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! I see you're running into a linker error on macOS while building the C++ Python extension. Those "Undefined symbols" for `_Py...` functions are a classic sign that the linker isn't being told how to find the Python C API symbols.
-
-      The fix is to tell the linker that these symbols will be provided by the Python interpreter when it loads your extension. On macOS, this is done with the `-undefined dynamic_lookup` flag.
-
-      Here are the step-by-step instructions to fix your build script.
+      Hello! I see you're running into a "file not found" error when running your benchmark script. The issue is related to how file paths are being passed after changing directories. Here are the steps to fix it.
 
       ### Step-by-step Instructions
 
-      1.  **Open the build script for editing:**
-          Open the file `run_rust_and_cpp_models.sh`.
+      The error `Error: Model file not found: python/aug25/models/rust_model.py` occurs because the `run_rust_and_cpp_models.sh` script first changes the current directory to `python/` and then calls `run_benchmarks.sh` with paths that are also prefixed with `python/`. This results in an incorrect path like `python/python/aug25/models/rust_model.py`.
 
-      2.  **Add logic to set macOS-specific linker flags:**
-          In `run_rust_and_cpp_models.sh`, find the line `CXX="${CXX:-c++}"`. Immediately after it, add the following shell code to define a variable `LDFLAGS` that will be set correctly for macOS:
+      To fix this, you need to adjust the paths passed to `run_benchmarks.sh` to be relative to the `python/` directory.
 
+      1.  **Open the script file:**
+          Open `run_rust_and_cpp_models.sh` in your editor.
+
+      2.  **Locate the benchmark command:**
+          Go to the very end of the file to find this line:
           ```bash
-          LDFLAGS=""
-          if [[ "$(uname)" == "Darwin" ]]; then
-            LDFLAGS="-undefined dynamic_lookup"
-          fi
+          bash run_benchmarks.sh "python/aug25/models/rust_model.py" "python/aug25/models/precompute3_model_cpp.py"
           ```
 
-      3.  **Update the compilation command:**
-          Locate the `${CXX} ...` command that compiles the C++ extension. Modify it to append `${LDFLAGS}` at the end.
-
-          Change this:
+      3.  **Correct the model paths:**
+          Remove the `python/` prefix from both file paths in that command. The corrected line will be:
           ```bash
-          ${CXX} -O3 -std=c++17 -shared -fPIC \
-            ${PYBIND_INCLUDES} \
-            -I"${BOOST_DIR}" \
-            "aug25/models/icl_rangeset.cpp" \
-            -o "aug25/models/icl_rangeset${EXT_SUFFIX}"
+          bash run_benchmarks.sh "aug25/models/rust_model.py" "aug25/models/precompute3_model_cpp.py"
           ```
 
-          To this:
-          ```bash
-          ${CXX} -O3 -std=c++17 -shared -fPIC \
-            ${PYBIND_INCLUDES} \
-            -I"${BOOST_DIR}" \
-            "aug25/models/icl_rangeset.cpp" \
-            -o "aug25/models/icl_rangeset${EXT_SUFFIX}" \
-            ${LDFLAGS}
-          ```
-
-      After applying these changes, the script will pass the necessary flag to the linker on macOS, and the build should complete successfully.
+      After saving this change, the script should be able to correctly locate the model files and run the benchmarks.
 
       ### Git Diff
 
-      Here is the patch for the change described above:
+      Here is the git diff for the required change:
 
       ```diff
       diff --git a/run_rust_and_cpp_models.sh b/run_rust_and_cpp_models.sh
+      index 287f433..8f9e67d 100755
       --- a/run_rust_and_cpp_models.sh
       +++ b/run_rust_and_cpp_models.sh
-      @@ -46,12 +46,18 @@
-       PY
-       )"
-       
-       PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
-       CXX="${CXX:-c++}"
-      +LDFLAGS=""
-      +if [[ "$(uname)" == "Darwin" ]]; then
-      +  LDFLAGS="-undefined dynamic_lookup"
-      +fi
-       
-       # Compile
-       ${CXX} -O3 -std=c++17 -shared -fPIC \
-         ${PYBIND_INCLUDES} \
-         -I"${BOOST_DIR}" \
-         "aug25/models/icl_rangeset.cpp" \
-      -  -o "aug25/models/icl_rangeset${EXT_SUFFIX}"
-      +  -o "aug25/models/icl_rangeset${EXT_SUFFIX}" \
-      +  ${LDFLAGS}
-       
-       echo "Build complete: python/aug25/models/icl_rangeset${EXT_SUFFIX}"
-       
+      @@ -62,4 +62,4 @@
+       # 4) Run benchmarks comparing Rust baseline vs C++-accelerated model
+       echo
+       echo "Running benchmarks..."
+      -bash run_benchmarks.sh "python/aug25/models/rust_model.py" "python/aug25/models/precompute3_model_cpp.py"
+      +bash run_benchmarks.sh "aug25/models/rust_model.py" "aug25/models/precompute3_model_cpp.py"
 
       ```
     metadata:
@@ -1303,7 +802,6 @@ messages:
       Applying patch to 'run_rust_and_cpp_models.sh' using custom patcher...
       Successfully applied patch and wrote to run_rust_and_cpp_models.sh.
     metadata:
-  - user: 'Changes committed with message: "build: Add macOS linker flag for dynamic
-      symbol lookup"'
+  - user: 'Changes committed with message: "Fix: Correct model paths in run_rust_and_cpp_models.sh"'
     metadata:
 ...
