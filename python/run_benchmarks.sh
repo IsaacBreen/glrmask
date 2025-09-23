@@ -29,6 +29,13 @@ set -euo pipefail
 : "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
 : "${CODE_FILE:="./src/example_code.js"}"
 
+# --- PYTHONPATH setup ---
+# The script is run from the project root. The python modules are in the 'python' directory.
+# We add the 'python' directory to PYTHONPATH so that compiled extension modules (like leveled_gss_cpp)
+# can be found via top-level imports.
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
 # --- Argument Validation ---
 if [ "$#" -lt 1 ]; then
     echo "Usage: $0 <baseline_model.py> <model1.py> [model2.py ...]"
