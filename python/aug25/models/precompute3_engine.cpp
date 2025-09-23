@@ -86,22 +86,23 @@ public:
           parser_data_(std::move(parser_data)),
           roots_map_py_(std::move(roots_map_py)),
           pmc_(std::move(possible_matches)),
-          all_internal_llm_tokens_bitset_(std::move(all_internal_llm_tokens_bitset)),
-          internal_to_original_map_(std::move(internal_to_original_map)) {
+          all_internal_llm_tokens_bitset_(std::move(all_internal_llm_tokens_bitset)) {
 
         if (!ignore_terminal_id_or_none.is_none()) {
             ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
         }
 
         // Universe RangeSet for get_mask init
-        py::list ranges_py = all_internal_llm_tokens_bitset_.attr("to_ranges")();
-        std::vector<std::pair<unsigned long long, unsigned long long>> ranges_cpp;
-        ranges_cpp.reserve(py::len(ranges_py));
-        for (auto r : ranges_py) {
-            py::tuple t = py::cast<py::tuple>(r);
-            ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
+        {
+            py::list ranges_py = all_internal_llm_tokens_bitset_.attr("to_ranges")();
+            std::vector<std::pair<unsigned long long, unsigned long long>> ranges_cpp;
+            ranges_cpp.reserve(py::len(ranges_py));
+            for (auto r : ranges_py) {
+                py::tuple t = py::cast<py::tuple>(r);
+                ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
+            }
+            universe_rangeset_ = RangeSet::from_ranges(ranges_cpp);
         }
-        universe_rangeset_ = RangeSet::from_ranges(ranges_cpp);
 
         // Parse roots_map into C++ map
         for (auto item : roots_map_py_) {
@@ -147,7 +148,7 @@ public:
 
         // Pre-convert internal_to_original_map into a C++ unordered_map for fast lookups
         {
-            for (auto item_handle : internal_to_original_map_.attr("items")()) {
+            for (auto item_handle : internal_to_original_map.attr("items")()) {
                 py::tuple item = py::cast<py::tuple>(item_handle);
                 unsigned long long internal_id = py::cast<unsigned long long>(item[0]);
                 unsigned long long original_id = py::cast<unsigned long long>(item[1]);
@@ -880,7 +881,7 @@ PYBIND11_MODULE(precompute3_engine, m) {
     m.doc() = "C++ engine for precompute3_model_cpp: commit() and get_mask(), Leveled GSS implementation";
 
     py::class_<Engine>(m, "Engine")
-        .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::object,py::dict>(),
+        .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::dict,py::object,py::dict>(),
              py::arg("tokenizer"),
              py::arg("tokenizer_initial_state"),
              py::arg("tokenizer_max_state"),
@@ -894,4 +895,3 @@ PYBIND11_MODULE(precompute3_engine, m) {
         .def("commit", &Engine::commit, py::arg("token_bytes"))
         .def("get_mask", &Engine::get_mask);
 }
-
