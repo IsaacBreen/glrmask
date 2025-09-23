@@ -812,7 +812,11 @@ public:
                         for (auto &u : all_upper_children) popped.push_back(_popn_upper(u, k - 1));
                         UpperPtr<T, Acc> merged = popped[0];
                         for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-                        res = merged;
+                        if (merged->is_interface()) {
+                            res = merged;
+                        } else {
+                            res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                        }
                     }
                 }
                 memo_upper[key] = res;
