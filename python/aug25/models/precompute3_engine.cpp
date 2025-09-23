@@ -296,7 +296,7 @@ public:
             visited_q_items.insert(key);
 
             ssize_t suffix_len = token_len - cur.offset;
-            py::memoryview suffix_view = py::memoryview::from_memory(token_data + cur.offset, suffix_len, true /* readonly */);
+            py::memoryview suffix_view = py::memoryview::from_memory(token_data + cur.offset, suffix_len);
             ExecResult cached_res;
             auto cache_key = std::make_pair(cur.offset, cur.tokenizer_sid);
             auto it = exec_cache.find(cache_key);
