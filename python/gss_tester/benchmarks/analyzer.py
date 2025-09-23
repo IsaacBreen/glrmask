@@ -63,8 +63,10 @@ def analyze_sweeps(results: List[Dict[str, Any]], out_dir: Path):
     plots_dir = out_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    print("\n--- Scaling Analysis (sweeps) ---")
-    for doc in sweeps:
+    print("\n--- **Scaling Analysis (sweeps)** ---")
+    for i, doc in enumerate(sweeps):
+        if i > 0:
+            print("-" * 60)
         impl = doc.get("implementation", "(unknown)")
         sweep = doc["sweep"]
         workload = sweep["workload"]
@@ -82,9 +84,10 @@ def analyze_sweeps(results: List[Dict[str, Any]], out_dir: Path):
                 phases_union.add(ph["name"])
         phases = sorted(phases_union)
 
-        print(f"\nImplementation: {impl}")
-        print(f"Sweep: workload={workload}, axis={axis}, values={vals}")
+        print(f"\n**Implementation:** {impl}")
+        print(f"**Sweep:** workload={workload}, axis={axis}, values={vals}")
         ideal_map = expectations.get(workload, {}).get(axis, {})
+        max_phase_len = max(len(p) for p in phases) if phases else 0
 
         # Build x,y series per phase
         x = []
@@ -109,21 +112,22 @@ def analyze_sweeps(results: List[Dict[str, Any]], out_dir: Path):
             continue
 
         # Fit exponents per phase and print
-        print("  Measured exponents (log-log slope) per phase:")
+        print("\n  **Measured exponents (log-log slope) per phase:**")
         for p in phases:
             b, a, r2 = _loglog_fit(x, phase_ys[p])
             if b is None:
-                print(f"    - {p}: insufficient data")
+                print(f"    - {p:<{max_phase_len}}: insufficient data")
                 continue
             ideal = ideal_map.get(p)
             if ideal is None:
-                print(f"    - {p}: slope={b:.3f}, r2={r2:.3f} (no ideal)")
+                print(f"    - {p:<{max_phase_len}}: slope={b:7.3f}, r2={r2:.3f} (no ideal)")
             else:
                 delta = abs(b - ideal)
                 status = "OK" if delta <= 0.25 else "DRIFT"
-                print(f"    - {p}: slope={b:.3f}, r2={r2:.3f}, ideal={ideal:.2f} -> {status}")
+                print(f"    - {p:<{max_phase_len}}: slope={b:7.3f}, r2={r2:.3f}, ideal={ideal:.2f} -> {status}")
 
         # Plot log-log per phase
+        plotted_anything = False
         try:
             import matplotlib.pyplot as plt
             for p in phases:
@@ -131,6 +135,9 @@ def analyze_sweeps(results: List[Dict[str, Any]], out_dir: Path):
                 valid = [(xi, yi) for xi, yi in zip(x, y) if xi > 0 and yi > 0]
                 if len(valid) < 2:
                     continue
+                if not plotted_anything:
+                    print("\n  **Plots:**")
+                    plotted_anything = True
                 xs, ys = zip(*valid)
                 b, a, r2 = _loglog_fit(list(xs), list(ys))
                 plt.figure(figsize=(6, 4))
@@ -156,7 +163,7 @@ def analyze_sweeps(results: List[Dict[str, Any]], out_dir: Path):
                 out_path = plots_dir / f"sweep_{workload}_{axis}_{p}.png"
                 plt.savefig(out_path)
                 plt.close()
-                print(f"  Saved sweep plot: {out_path}")
+                print(f"    - Saved: {out_path.name}")
         except Exception as e:
             print(f"  Note: Sweep plotting skipped ({e}).")
 
@@ -174,10 +181,10 @@ def summarize(results: List[Dict[str, Any]], out_dir: Path, make_plots: bool = T
         for w in doc["workloads"]:
             grouped[w["workload"]][impl_name].append(w)
 
-    print("--- Benchmark Summary ---")
+    print("--- **Benchmark Summary** ---")
     print(f"Loaded {len(results)} result file(s) across {len(impls)} implementation(s).")
     for workload, impl_map in grouped.items():
-        print(f"\nWorkload: {workload}")
+        print(f"\n**Workload:** {workload}")
         for impl, runs in impl_map.items():
             ok = sum(1 for r in runs if r.get("outcome") == "ok")
             aborted = sum(1 for r in runs if r.get("outcome") == "aborted")
@@ -241,7 +248,7 @@ def summarize(results: List[Dict[str, Any]], out_dir: Path, make_plots: bool = T
             out_path = plots_dir / f"{workload}_scaling.png"
             plt.savefig(out_path)
             plt.close()
-            print(f"Saved plot: {out_path}")
+            print(f"  - Saved plot: {out_path.name}")
 
             # Per-phase stacked bars for the last run of each impl
             plt.figure(figsize=(9, 5))
@@ -281,7 +288,7 @@ def summarize(results: List[Dict[str, Any]], out_dir: Path, make_plots: bool = T
             out_path = plots_dir / f"{workload}_phase_breakdown.png"
             plt.savefig(out_path)
             plt.close()
-            print(f"Saved plot: {out_path}")
+            print(f"  - Saved plot: {out_path.name}")
 
     except Exception as e:
         print(f"Note: Plotting skipped or failed ({e}). You can install matplotlib and numpy for plots.")
