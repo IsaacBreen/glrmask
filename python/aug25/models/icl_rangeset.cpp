@@ -14,8 +14,8 @@ namespace py = pybind11;
 
 class RangeSet {
 public:
-    using interval_type = boost::icl::discrete_interval<int>;
-    using set_type = boost::icl::interval_set<int>;
+    using interval_type = boost::icl::discrete_interval<unsigned long long>;
+    using set_type = boost::icl::interval_set<unsigned long long>;
 
     RangeSet() = default;
 
@@ -23,26 +23,26 @@ public:
         return RangeSet();
     }
 
-    static RangeSet from_indices(const std::vector<int>& indices) {
+    static RangeSet from_indices(const std::vector<unsigned long long>& indices) {
         RangeSet rs;
-        for (int v : indices) {
+        for (unsigned long long v : indices) {
             rs.m_set.add(interval_type::closed(v, v));
         }
         return rs;
     }
 
-    static RangeSet from_ranges(const std::vector<std::pair<int,int>>& ranges) {
+    static RangeSet from_ranges(const std::vector<std::pair<unsigned long long, unsigned long long>>& ranges) {
         RangeSet rs;
         for (auto const& pr : ranges) {
-            int l = pr.first;
-            int r = pr.second;
+            unsigned long long l = pr.first;
+            unsigned long long r = pr.second;
             if (r < l) std::swap(l, r);
             rs.m_set.add(interval_type::closed(l, r));
         }
         return rs;
     }
 
-    bool contains(int v) const {
+    bool contains(unsigned long long v) const {
         return boost::icl::contains(m_set, v);
     }
 
@@ -69,24 +69,24 @@ public:
         return m_set.empty();
     }
 
-    std::vector<std::pair<int,int>> to_ranges() const {
-        std::vector<std::pair<int,int>> out;
+    std::vector<std::pair<unsigned long long, unsigned long long>> to_ranges() const {
+        std::vector<std::pair<unsigned long long, unsigned long long>> out;
         out.reserve(m_set.size());
         for (auto const& itv : m_set) {
-            int l = itv.lower();
-            int r = itv.upper();
+            unsigned long long l = itv.lower();
+            unsigned long long r = itv.upper();
             out.emplace_back(l, r);
         }
         return out;
     }
 
-    std::vector<int> to_indices() const {
-        std::vector<int> out;
+    std::vector<unsigned long long> to_indices() const {
+        std::vector<unsigned long long> out;
         out.reserve(boost::icl::cardinality(m_set));
         for (auto const& itv : m_set) {
-            int l = itv.lower();
-            int r = itv.upper();
-            for (int v = l; v <= r; ++v) {
+            unsigned long long l = itv.lower();
+            unsigned long long r = itv.upper();
+            for (unsigned long long v = l; v <= r; ++v) {
                 out.push_back(v);
             }
         }
