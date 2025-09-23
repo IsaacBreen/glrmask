@@ -103,6 +103,9 @@ class PyAcc:
             llm_mask=self.llm_mask.union(other.llm_mask),
         )
 
+    def is_empty(self):
+        return self.llm_mask.is_empty()
+
 
 class Model(GraphProvider):
     """
@@ -563,6 +566,35 @@ class Model(GraphProvider):
                             stats.inc('get_mask.traversal.edge.popped_empty')
                             continue
 
+                        # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                        acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
+
+                        def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                            stats.inc('get_mask.intersect_and_prune.calls')
+                            if acc in acc_memo:
+                                stats.inc('get_mask.intersect_and_prune.memo_hits')
+                                return acc_memo[acc]
+
+                            # stats.inc('get_mask.data.llm_mask_before_intersect.len.sum', len(acc.llm_mask))
+                            stats.start('get_mask.intersect_and_prune.intersection')
+                            new_mask = acc.llm_mask.intersection(llm_bv)
+                            stats.stop('get_mask.intersect_and_prune.intersection')
+                            stats.inc('get_mask.data.llm_mask_after_intersect.len.sum', len(new_mask))
+
+                            if new_mask.is_empty():
+                                stats.inc('get_mask.intersect_and_prune.pruned_accs')
+                                result = None
+                            else:
+                                result = PyAcc(
+                                    terminals_union=acc.terminals_union,
+                                    llm_mask=new_mask
+                                )
+                            acc_memo[acc] = result
+                            return result
+
+                        stats.start('get_mask.main_loop.edge.apply_and_prune')
+                        popped = popped.apply_and_prune(intersect_and_prune)
+
                         for dest_idx, state_bv in dests:
                             stats.inc('get_mask.traversal.dests_traversed')
                             stats.inc('get_mask.data.state_bv_on_edge.len.sum', len(state_bv))
@@ -581,38 +613,13 @@ class Model(GraphProvider):
                             if child_gss.is_empty():
                                 continue
 
-                            # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                            acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
-
-                            def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                                stats.inc('get_mask.intersect_and_prune.calls')
-                                if acc in acc_memo:
-                                    stats.inc('get_mask.intersect_and_prune.memo_hits')
-                                    return acc_memo[acc]
-
-                                # stats.inc('get_mask.data.llm_mask_before_intersect.len.sum', len(acc.llm_mask))
-                                stats.start('get_mask.intersect_and_prune.intersection')
-                                new_mask = acc.llm_mask.intersection(llm_bv)
-                                stats.stop('get_mask.intersect_and_prune.intersection')
-                                stats.inc('get_mask.data.llm_mask_after_intersect.len.sum', len(new_mask))
-
-                                if new_mask.is_empty():
-                                    stats.inc('get_mask.intersect_and_prune.pruned_accs')
-                                    result = None
-                                else:
-                                    result = PyAcc(
-                                        terminals_union=acc.terminals_union,
-                                        llm_mask=new_mask
-                                    )
-                                acc_memo[acc] = result
-                                return result
-
-                            stats.start('get_mask.main_loop.edge.apply_and_prune')
-                            child_gss = child_gss.apply_and_prune(intersect_and_prune)
                             stats.stop('get_mask.main_loop.edge.apply_and_prune')
                             stats.inc('get_mask.intersect_and_prune.memo_size.sum', len(acc_memo))
                             if child_gss.is_empty():
                                 stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
+                                continue
+
+                            if child_gss.reduce_acc().is_empty():
                                 continue
 
                             d: int = int(dest_idx)
