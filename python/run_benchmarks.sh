@@ -78,6 +78,9 @@ echo "---"
 
 # --- Run Benchmarks ---
 echo "Starting benchmark runs..."
+# Define the ASAN library path at the top of the loop for clarity
+ASAN_LIB="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/lib/darwin/libclang_rt.asan_osx_dynamic.dylib"
+
 for model_to_benchmark in "${ALL_MODELS[@]}"; do
     echo
     echo ">>> Running benchmark for: $(basename "$model_to_benchmark")"
@@ -87,14 +90,18 @@ for model_to_benchmark in "${ALL_MODELS[@]}"; do
         --model "$model_to_benchmark"
         --output "$RESULTS_DIR")
     echo "${cmd[*]}"
-    if "${cmd[@]}"; then
-        echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
-    else
-        exit_code=$?
-        # Exit code 130 is from SIGINT (Ctrl+C)
-        if [ $exit_code -eq 130 ]; then
+    # Prepend the environment variable ONLY for the C++ model
+    if [[ "$model_to_benchmark" == *"precompute3_model_cpp.py"* ]]; then
+        echo ">>> Running with AddressSanitizer..."
+        if DYLD_INSERT_LIBRARIES="$ASAN_LIB" "${cmd[@]}"; then
+            echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
+        else
             echo
-            echo ">>> Benchmark for $(basename "$model_to_benchmark") interrupted. Skipping."
+            echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
+        fi
+    else
+        if "${cmd[@]}"; then
+            echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
         else
             echo
             echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
