@@ -86,8 +86,10 @@ public:
         for (auto const& itv : m_set) {
             unsigned long long l = itv.lower();
             unsigned long long r = itv.upper();
-            for (unsigned long long v = l; v <= r; ++v) {
+            // This loop is written to be safe even if r is ULLONG_MAX
+            for (unsigned long long v = l; ; ++v) {
                 out.push_back(v);
+                if (v == r) break;
             }
         }
         return out;
