@@ -497,7 +497,7 @@ private:
                         int len = py::cast<int>(len_item[0]);
                         py::dict nts = py::cast<py::dict>(len_item[1]);
                         for (auto nt_item_handle : nts) {
-                            int nt_id = py::cast<int>(nt_item_handle);
+                            int nt_id = py::cast<int>(nt_item_handle.first);
                             aot.reduces.emplace_back(nt_id, len);
                         }
                     }
