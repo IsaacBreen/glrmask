@@ -11,7 +11,7 @@ set -euo pipefail
 #   - curl, tar, a C++17 compiler (clang++ or g++)
 #   - Python with pip
 #
-# It downloads Boost headers locally (no system install needed), builds the extension in-place,
+# It downloads Boost headers locally (no system install needed), builds the extensions in-place,
 # and then runs the provided run_benchmarks.sh script.
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,8 +40,8 @@ fi
 echo "Installing pybind11 (local user)..."
 python3 -m pip install --user --quiet pybind11
 
-# 3) Build the C++ extension in place
-echo "Building C++ extension (Boost.ICL RangeSet) ..."
+# 3) Build the C++ extensions in place
+echo "Building C++ extensions ..."
 cd "${PROJECT_ROOT}/python"
 
 # Compute extension suffix and includes via pybind11
@@ -58,7 +58,7 @@ if [[ "$(uname)" == "Darwin" ]]; then
   LDFLAGS="-undefined dynamic_lookup"
 fi
 
-# Compile
+# Compile icl_rangeset (Boost.ICL-backed RangeSet)
 ${CXX} -O3 -std=c++17 -shared -fPIC \
   ${PYBIND_INCLUDES} \
   -I"${BOOST_DIR}" \
@@ -66,7 +66,16 @@ ${CXX} -O3 -std=c++17 -shared -fPIC \
   -o "aug25/models/icl_rangeset${EXT_SUFFIX}" \
   ${LDFLAGS}
 
-echo "Build complete: python/aug25/models/icl_rangeset${EXT_SUFFIX}"
+# Compile precompute3_engine (C++ commit/get_mask engine)
+${CXX} -O3 -std=c++17 -shared -fPIC \
+  ${PYBIND_INCLUDES} \
+  "aug25/models/precompute3_engine.cpp" \
+  -o "aug25/models/precompute3_engine${EXT_SUFFIX}" \
+  ${LDFLAGS}
+
+echo "Build complete:"
+echo " - python/aug25/models/icl_rangeset${EXT_SUFFIX}"
+echo " - python/aug25/models/precompute3_engine${EXT_SUFFIX}"
 
 # 4) Run benchmarks comparing Rust baseline vs C++-accelerated model
 echo
