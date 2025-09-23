@@ -16,10 +16,7 @@
 #include <functional>
 #include <memory>
 
-#include "leveled_gss.hpp"
-
 namespace py = pybind11;
-using leveled_gss::LeveledGSS;
 
 struct Acc : public std::enable_shared_from_this<Acc> {
     // terminals_union: tokenizer_state_id -> RangeSet of disallowed terminals
@@ -48,6 +45,10 @@ struct Acc : public std::enable_shared_from_this<Acc> {
         return n;
     }
 };
+
+#include "leveled_gss.hpp"
+
+using leveled_gss::LeveledGSS;
 
 class Engine {
 public:
