@@ -323,7 +323,7 @@ static UpperPtr<T, Acc> merge_upperbranches(const UpperBranchPtr<T, Acc>& a, con
 // Merge interfaces; if same Acc pointer, merge Lower children only; otherwise convert and merge as branches
 template <typename T, typename Acc>
 static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const InterfacePtr<T, Acc>& b) {
-    if (a->acc.get() == b->acc.get() || &a->_children == &b->_children) {
+    if (a->acc.get() == b->acc.get()) {
         auto merged_children = _merge_children_by_depth<LowerPtr<T>, std::function<LowerPtr<T>(LowerPtr<T>, LowerPtr<T>)>, T>(
             a->_children, b->_children,
             [](LowerPtr<T> l1, LowerPtr<T> l2) { return merge_lower<T>(l1, l2); }
@@ -869,22 +869,43 @@ public:
                     auto itf = std::static_pointer_cast<Interface<T, Acc>>(node);
                     auto new_acc = apply_func(itf->acc);
                     auto new_empty = itf->empty ? apply_func(itf->empty) : std::shared_ptr<Acc>(nullptr);
+                    if (new_acc.get() == itf->acc.get() && new_empty.get() == itf->empty.get()) {
+                        memo[nid] = node;
+                        return node;
+                    }
                     auto res = std::make_shared<Interface<T, Acc>>(itf->_children, new_acc, new_empty);
                     memo[nid] = res;
                     return res;
                 } else {
                     auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
                     auto new_empty = ub->empty ? apply_func(ub->empty) : std::shared_ptr<Acc>(nullptr);
+                    bool changed = (new_empty.get() != ub->empty.get());
                     UpperChildren<T, Acc> new_children;
+
                     for (auto &kv : ub->_children) {
                         const T& v = kv.first;
+                        const auto& kids = kv.second;
                         std::unordered_map<int, UpperPtr<T, Acc>> new_kids;
+                        bool child_map_changed = false;
                         for (auto &dkv : kv.second) {
                             auto new_child = transform(dkv.second);
+                            if (new_child.get() != dkv.second.get()) child_map_changed = true;
                             new_kids[new_child->_max_depth] = new_child;
                         }
-                        if (!new_kids.empty()) new_children[v] = std::move(new_kids);
+
+                        if (child_map_changed) {
+                            changed = true;
+                            if (!new_kids.empty()) new_children[v] = std::move(new_kids);
+                        } else {
+                            new_children[v] = kids;
+                        }
                     }
+
+                    if (!changed) {
+                        memo[nid] = node;
+                        return node;
+                    }
+
                     auto res = std::make_shared<UpperBranch<T, Acc>>(std::move(new_children), new_empty);
                     auto promoted = try_promote<T, Acc>(res);
                     memo[nid] = promoted;
@@ -1023,22 +1044,44 @@ public:
                         memo[nid] = promoted;
                         return promoted;
                     }
+                    // keep_acc is true. Check if anything changed.
+                    if (new_acc.get() == itf->acc.get() && new_empty.get() == itf->empty.get()) {
+                        memo[nid] = node;
+                        return node;
+                    }
                     auto res = std::make_shared<Interface<T, Acc>>(itf->_children, new_acc, new_empty);
                     memo[nid] = res;
                     return res;
                 } else {
                     auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
                     auto new_empty = ub->empty ? mutate_acc(ub->empty) : std::shared_ptr<Acc>(nullptr);
+                    bool changed = (new_empty.get() != ub->empty.get());
                     UpperChildren<T, Acc> new_children;
                     for (auto &kv : ub->_children) {
                         const T& v = kv.first;
+                        const auto& kids = kv.second;
                         std::unordered_map<int, UpperPtr<T, Acc>> new_kids;
+                        bool child_map_changed = false;
                         for (auto &dkv : kv.second) {
                             auto new_child = transform(dkv.second);
+                            if (new_child.get() != dkv.second.get()) child_map_changed = true;
                             if (new_child) new_kids[new_child->_max_depth] = new_child;
                         }
-                        if (!new_kids.empty()) new_children[v] = std::move(new_kids);
+                        if (new_kids.size() != kids.size()) child_map_changed = true;
+
+                        if (child_map_changed) {
+                            changed = true;
+                            if (!new_kids.empty()) new_children[v] = std::move(new_kids);
+                        } else {
+                            new_children[v] = kids;
+                        }
                     }
+
+                    if (!changed) {
+                        memo[nid] = node;
+                        return node;
+                    }
+
                     if (new_children.empty() && !new_empty) {
                         memo[nid] = nullptr;
                         return nullptr;
