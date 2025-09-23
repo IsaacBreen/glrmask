@@ -893,6 +893,12 @@ public:
                     bool keep_empty = (itf->empty && predicate(itf->empty));
                     auto new_empty = keep_empty ? itf->empty : std::shared_ptr<Acc>(nullptr);
 
+                    // Fast path: if nothing changed, return original node to preserve sharing.
+                    if (keep_acc && new_empty.get() == itf->empty.get()) {
+                        memo[nid] = node;
+                        return node;
+                    }
+
                     if (!keep_acc && !keep_empty) {
                         memo[nid] = nullptr;
                         return nullptr;

@@ -3237,30 +3237,19 @@ local_system:
                       auto itm = memo_upper.find(key);
                       if (itm != memo_upper.end()) return itm->second;
 
-                      // Collect children
-                      std::vector<UpperPtr<T, Acc>> all_children;
-                      if (!node->is_interface()) {
-                          auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                          for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_children.push_back(dkv.second);
-                      }
-                      if (all_children.empty()) {
-                          auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                          memo_upper[key] = res;
-                          return res;
-                      }
-
                       UpperPtr<T, Acc> res;
                       if (node->is_interface()) {
                           auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
                           // pop from lowers
-                          std::vector<LowerPtr<T>> lowers;
-                          for (auto &kv : it->_children) for (auto &dkv : kv.second) lowers.push_back(dkv.second);
-                          if (lowers.empty()) {
+                          std::vector<LowerPtr<T>> all_lower_children;
+                          for (auto &kv : it->_children) for (auto &dkv : kv.second) all_lower_children.push_back(dkv.second);
+
+                          if (all_lower_children.empty()) {
                               res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
                           } else {
                               std::vector<LowerPtr<T>> popped;
-                              popped.reserve(lowers.size());
-                              for (auto &l : lowers) popped.push_back(_popn_lower(l, k - 1));
+                              popped.reserve(all_lower_children.size());
+                              for (auto &l : all_lower_children) popped.push_back(_popn_lower(l, k - 1));
                               LowerPtr<T> merged = popped[0];
                               for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower<T>(merged, popped[i]);
                               auto new_empty = merged->empty ? it->acc : std::shared_ptr<Acc>(nullptr);
@@ -3272,15 +3261,22 @@ local_system:
                           }
                       } else {
                           auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                          std::vector<UpperPtr<T, Acc>> popped;
-                          popped.reserve(all_children.size());
-                          for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
-                          UpperPtr<T, Acc> merged = popped[0];
-                          for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-                          if (merged->is_interface()) {
-                              res = merged;
+                          std::vector<UpperPtr<T, Acc>> all_upper_children;
+                          for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_upper_children.push_back(dkv.second);
+
+                          if (all_upper_children.empty()) {
+                              res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
                           } else {
-                              res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                              std::vector<UpperPtr<T, Acc>> popped;
+                              popped.reserve(all_upper_children.size());
+                              for (auto &u : all_upper_children) popped.push_back(_popn_upper(u, k - 1));
+                              UpperPtr<T, Acc> merged = popped[0];
+                              for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
+                              if (merged->is_interface()) {
+                                  res = merged;
+                              } else {
+                                  res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                              }
                           }
                       }
                       memo_upper[key] = res;
@@ -7103,6 +7099,12 @@ local_system:
                           bool keep_empty = (itf->empty && predicate(itf->empty));
                           auto new_empty = keep_empty ? itf->empty : std::shared_ptr<Acc>(nullptr);
 
+                          // Fast path: if nothing changed, return original node to preserve sharing.
+                          if (keep_acc && new_empty.get() == itf->empty.get()) {
+                              memo[nid] = node;
+                              return node;
+                          }
+
                           if (!keep_acc && !keep_empty) {
                               memo[nid] = nullptr;
                               return nullptr;
@@ -10691,30 +10693,19 @@ messages:
                       auto itm = memo_upper.find(key);
                       if (itm != memo_upper.end()) return itm->second;
 
-                      // Collect children
-                      std::vector<UpperPtr<T, Acc>> all_children;
-                      if (!node->is_interface()) {
-                          auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                          for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_children.push_back(dkv.second);
-                      }
-                      if (all_children.empty()) {
-                          auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                          memo_upper[key] = res;
-                          return res;
-                      }
-
                       UpperPtr<T, Acc> res;
                       if (node->is_interface()) {
                           auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
                           // pop from lowers
-                          std::vector<LowerPtr<T>> lowers;
-                          for (auto &kv : it->_children) for (auto &dkv : kv.second) lowers.push_back(dkv.second);
-                          if (lowers.empty()) {
+                          std::vector<LowerPtr<T>> all_lower_children;
+                          for (auto &kv : it->_children) for (auto &dkv : kv.second) all_lower_children.push_back(dkv.second);
+
+                          if (all_lower_children.empty()) {
                               res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
                           } else {
                               std::vector<LowerPtr<T>> popped;
-                              popped.reserve(lowers.size());
-                              for (auto &l : lowers) popped.push_back(_popn_lower(l, k - 1));
+                              popped.reserve(all_lower_children.size());
+                              for (auto &l : all_lower_children) popped.push_back(_popn_lower(l, k - 1));
                               LowerPtr<T> merged = popped[0];
                               for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower<T>(merged, popped[i]);
                               auto new_empty = merged->empty ? it->acc : std::shared_ptr<Acc>(nullptr);
@@ -10726,15 +10717,22 @@ messages:
                           }
                       } else {
                           auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                          std::vector<UpperPtr<T, Acc>> popped;
-                          popped.reserve(all_children.size());
-                          for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
-                          UpperPtr<T, Acc> merged = popped[0];
-                          for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-                          if (merged->is_interface()) {
-                              res = merged;
+                          std::vector<UpperPtr<T, Acc>> all_upper_children;
+                          for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_upper_children.push_back(dkv.second);
+
+                          if (all_upper_children.empty()) {
+                              res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
                           } else {
-                              res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                              std::vector<UpperPtr<T, Acc>> popped;
+                              popped.reserve(all_upper_children.size());
+                              for (auto &u : all_upper_children) popped.push_back(_popn_upper(u, k - 1));
+                              UpperPtr<T, Acc> merged = popped[0];
+                              for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
+                              if (merged->is_interface()) {
+                                  res = merged;
+                              } else {
+                                  res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                              }
                           }
                       }
                       memo_upper[key] = res;
@@ -11166,162 +11164,11 @@ messages:
     metadata:
       filename: run_rust_and_cpp_models.sh
   - user: |-
-      bash run_rust_and_cpp_models.sh
-      Installing pybind11 (local user)...
-      ^[i
-      [notice] A new release of pip is available: 25.0.1 -> 25.2
-      [notice] To update, run: pip install --upgrade pip
-      Building C++ extensions ...
-      Build complete:
-       - python/aug25/models/icl_rangeset.cpython-312-darwin.so
-       - python/aug25/models/precompute3_engine.cpython-312-darwin.so
-
-      Running benchmarks...
-      Benchmark results will be saved in: benchmark_results/2025-09-23_11-33-19
-      ---
-      Baseline Model: python/aug25/models/rust_model.py
-      Other Models: python/aug25/models/precompute3_model_cpp.py
-      Constraint File: ./.cache/test_vocabs/js_grammar_constraint.json.gz
-      Code: ./src/example_code.js
-      ---
-      Starting benchmark runs...
-
-      >>> Running benchmark for: rust_model.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/rust_model.py --output benchmark_results/2025-09-23_11-33-19
-      --- Setting up benchmark environment ---
-      Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
-      Loading model from: python/aug25/models/rust_model.py
-      Model loaded in 3.2230 seconds.
-      Loading and tokenizing code from: src/example_code.js
-      Tokenized into 25 tokens.
-
-      --- Running benchmark (25 steps) ---
-      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 25/25 [00:07<00:00,  3.16it/s, commit]
-      --- Benchmark finished ---
-
-      Benchmark results saved to: benchmark_results/2025-09-23_11-33-19/rust_model_results.json
-      >>> Finished benchmark for: rust_model.py
-
-      >>> Running benchmark for: precompute3_model_cpp.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/precompute3_model_cpp.py --output benchmark_results/2025-09-23_11-33-19
-      >>> Running with AddressSanitizer...
-      python(66000,0x1f1024800) malloc: nano zone abandoned due to inability to reserve vm space.
-      --- Setting up benchmark environment ---
-      Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
-      Loading model from: python/aug25/models/precompute3_model_cpp.py
-      Model loaded in 37.5412 seconds.
-      Loading and tokenizing code from: src/example_code.js
-      Tokenized into 25 tokens.
-
-      --- Running benchmark (25 steps) ---
-      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 25/25 [00:01<00:00, 15.82it/s, commit]
-      --- Benchmark finished ---
-
-      Benchmark results saved to: benchmark_results/2025-09-23_11-33-19/precompute3_model_cpp_results.json
-      >>> Finished benchmark for: precompute3_model_cpp.py
-
-      All benchmark runs completed.
-      ---
-      Analyzing results and generating plots...
-      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-23_11-33-19/precompute3_model_cpp_results.json benchmark_results/2025-09-23_11-33-19/rust_model_results.json --baseline rust_model --output-dir benchmark_results/2025-09-23_11-33-19/analysis
-      Selected baseline: rust_model
-      Mask mismatch at token index 4 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 5 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 6 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 7 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 8 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 9 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 10 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 11 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 12 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 13 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 14 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 15 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 16 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 17 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 18 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 19 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 20 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 21 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 22 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 23 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 24 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      --- Benchmark Summary ---
-                            equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
-      model                                                                                                                              
-      precompute3_model_cpp          ❌                   21     25    62.5244  147.5820    0.5408    0.5809  336.4514  473.2762  504.6811
-      rust_model                     ✅                    0     25   315.5221  885.6535   30.4013   77.5128  303.6189 3649.6422 4396.4469
-
-      Baseline: rust_model
-      ✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch
-
-      Saving plots to benchmark_results/2025-09-23_11-33-19/analysis...
-      Saved linear scale plot to benchmark_results/2025-09-23_11-33-19/analysis/timings_per_token_linear.png
-      Saved log scale plot to benchmark_results/2025-09-23_11-33-19/analysis/timings_per_token_log.png
-      Saved box plot to benchmark_results/2025-09-23_11-33-19/analysis/timings_distribution_boxplot.png
-      Saved commit linear scale plot to benchmark_results/2025-09-23_11-33-19/analysis/commit_timings_per_token_linear.png
-      Saved commit log scale plot to benchmark_results/2025-09-23_11-33-19/analysis/commit_timings_per_token_log.png
-      Saved combined linear scale plot to benchmark_results/2025-09-23_11-33-19/analysis/combined_timings_per_token_linear.png
-      Saved combined log scale plot to benchmark_results/2025-09-23_11-33-19/analysis/combined_timings_per_token_log.png
-      Saved stacked area plot to benchmark_results/2025-09-23_11-33-19/analysis/timings_stacked_area.png
-      Saved total time linear scale plot to benchmark_results/2025-09-23_11-33-19/analysis/total_timings_per_token_linear.png
-      Saved total time log scale plot to benchmark_results/2025-09-23_11-33-19/analysis/total_timings_per_token_log.png
-
-      ---
-      Benchmark analysis complete.
-      Baseline: rust_model
-      Summary printed above. Plots are saved in: benchmark_results/2025-09-23_11-33-19/analysis
-      Full JSON results are in: benchmark_results/2025-09-23_11-33-19
-    metadata:
-  - user: This is meant to be a super-fast C++ implementation of precompute3_model_pure_python_standalone.py.
-      Careful attention was paid in the Python version to ensure that everything scaled
-      well - most critically the GSS code, which is arguably the trickiest bit. It
-      is critical that the C++ code scales as well as the Python code. We want to
-      translate the Python leveled GSS as faithfully as possible. (Don't modify precompute3_model_pure_python_standalone.py
-      - it's here only for reference.) Currently, it fails. Here's the output. Fix
-      it.
+      This was meant to be a super-fast C++ implementation of `precompute3_model_pure_python_standalone.py`. However, turns out it is not anywhere near as fast.
+      More specifically, the C++ version scales very poorly. The Python version scales well. Careful attention was paid in the Python version to ensure that everything scaled well - most critically the GSS code which goes to great lengths to keep shared nodes shared and ensure operations touch as little of the GSS as possible, which is arguably the trickiest bit.
+      Obviously the C++ code departs from the Python version in some significant ways.
+      Analyse the differences.
+      What is the cause of the poor scaling?
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -11340,416 +11187,64 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! I see you're running into an issue where your C++ accelerated model is producing incorrect masks. The benchmark results clearly show a divergence from the baseline, with the C++ version outputting empty masks after a few tokens. This kind of rapid state loss often points to a problem in the core state management logic, which in this case is the `LeveledGSS` implementation.
+      Based on my analysis of the C++ and Python implementations, the primary cause of the poor scaling in the C++ version is a missing optimization in the `LeveledGSS::prune` method. The Python version includes a critical check to avoid reconstructing `Interface` nodes if no changes are made, thereby preserving the structural sharing of the GSS. The C++ version lacks this check, leading to unnecessary allocations and copies, which degrades performance, especially as the GSS grows in complexity.
 
-      After a careful review of the C++ code against the Python reference implementation, I've located a critical bug in the `popn` method within `python/aug25/models/leveled_gss.hpp`. The logic for handling `Interface` nodes was flawed, causing it to prematurely return an empty GSS, effectively wiping out all active parser states.
+      Here are the step-by-step instructions to fix the issue, followed by the corresponding git diff.
 
-      Here are the steps to fix the issue:
+      ### Step-by-Step Instructions
 
-      ### Step-by-step Instructions
+      1.  **Open the C++ LeveledGSS Header File**
 
-      1.  **Open `python/aug25/models/leveled_gss.hpp`:**
-          Navigate to the file containing the C++ `LeveledGSS` implementation.
+          Open the file `python/aug25/models/leveled_gss.hpp`.
 
-      2.  **Locate the `popn` method:**
-          Find the `LeveledGSS::popn` method. Inside it, there is a lambda function named `_popn_upper`.
+      2.  **Locate the `prune` Method**
 
-      3.  **Refactor the `_popn_upper` lambda:**
-          The current implementation incorrectly collects children only for `UpperBranch` nodes, causing `Interface` nodes to be handled incorrectly. You need to restructure it to handle `Interface` and `UpperBranch` nodes in separate blocks, each collecting its own children before processing.
+          Navigate to the `prune` method inside the `LeveledGSS` class template. Inside this method, you will find a `transform` lambda function.
 
-          Replace the body of the `_popn_upper` lambda (from line 622 to 678) with the corrected logic that properly handles both node types. The corrected code will first check the node type, then collect children, and only then proceed with the pop logic.
+      3.  **Modify the `Interface` Pruning Logic**
 
-      Here is the git diff with the necessary changes.
+          Within the `transform` lambda, find the `if (node->is_interface())` block. Inside this block, after the line that calculates `new_empty`, you will add a "fast path" check. This check compares the modified state with the original state and returns the original node if nothing has changed, preventing unnecessary reconstruction.
 
-      ### Git Diffs
+          **Insert the following code snippet:**
+
+          ```cpp
+                          // Fast path: if nothing changed, return original node to preserve sharing.
+                          if (keep_acc && new_empty.get() == itf->empty.get()) {
+                              memo[nid] = node;
+                              return node;
+                          }
+          ```
+
+          This code should be placed immediately after this line:
+          `auto new_empty = keep_empty ? itf->empty : std::shared_ptr<Acc>(nullptr);`
+
+          And before this line:
+          `if (!keep_acc && !keep_empty) {`
+
+      This single change will significantly improve the performance and scaling of the C++ implementation by preserving the shared structure of the GSS, just like the Python version does.
+
+      ### Git Diff
+
+      Here is the git patch to apply the fix.
 
       ```diff
       diff --git a/python/aug25/models/leveled_gss.hpp b/python/aug25/models/leveled_gss.hpp
-      index 327072e..e888022 100644
+      index 4554f67..f721528 100644
       --- a/python/aug25/models/leveled_gss.hpp
       +++ b/python/aug25/models/leveled_gss.hpp
-      @@ -621,57 +621,56 @@
-                       auto itm = memo_upper.find(key);
-                       if (itm != memo_upper.end()) return itm->second;
+      @@ -628,6 +628,12 @@
+                           bool keep_empty = (itf->empty && predicate(itf->empty));
+                           auto new_empty = keep_empty ? itf->empty : std::shared_ptr<Acc>(nullptr);
        
-      -                // Collect children
-      -                std::vector<UpperPtr<T, Acc>> all_children;
-      -                if (!node->is_interface()) {
-      -                    auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-      -                    for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_children.push_back(dkv.second);
-      -                }
-      -                if (all_children.empty()) {
-      -                    auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-      -                    memo_upper[key] = res;
-      -                    return res;
-      -                }
-      -
-                       UpperPtr<T, Acc> res;
-                       if (node->is_interface()) {
-                           auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
-                           // pop from lowers
-      -                    std::vector<LowerPtr<T>> lowers;
-      -                    for (auto &kv : it->_children) for (auto &dkv : kv.second) lowers.push_back(dkv.second);
-      -                    if (lowers.empty()) {
-      +                    std::vector<LowerPtr<T>> all_lower_children;
-      +                    for (auto &kv : it->_children) for (auto &dkv : kv.second) all_lower_children.push_back(dkv.second);
+      +                    // Fast path: if nothing changed, return original node to preserve sharing.
+      +                    if (keep_acc && new_empty.get() == itf->empty.get()) {
+      +                        memo[nid] = node;
+      +                        return node;
+      +                    }
       +
-      +                    if (all_lower_children.empty()) {
-                               res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                           } else {
-                               std::vector<LowerPtr<T>> popped;
-      -                        popped.reserve(lowers.size());
-      -                        for (auto &l : lowers) popped.push_back(_popn_lower(l, k - 1));
-      +                        popped.reserve(all_lower_children.size());
-      +                        for (auto &l : all_lower_children) popped.push_back(_popn_lower(l, k - 1));
-                               LowerPtr<T> merged = popped[0];
-      -                        for (size_t i = 1; i < popped.size(); ++i) res = merge_lower<T>(res, popped[i]);
-      +                        for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower<T>(merged, popped[i]);
-                               auto new_empty = merged->empty ? it->acc : std::shared_ptr<Acc>(nullptr);
-                               if (merged->_children.empty() && !new_empty) {
-                                   res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                               } else {
-                                   res = std::make_shared<Interface<T, Acc>>(merged->_children, it->acc, new_empty);
-                               }
-                           }
-                       } else {
-                           auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-      -                    std::vector<UpperPtr<T, Acc>> popped;
-      -                    popped.reserve(all_children.size());
-      -                    for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
-      -                    UpperPtr<T, Acc> merged = popped[0];
-      -                    for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-      -                    if (merged->is_interface()) {
-      -                        res = merged;
-      +                    std::vector<UpperPtr<T, Acc>> all_upper_children;
-      +                    for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_upper_children.push_back(dkv.second);
-      +
-      +                    if (all_upper_children.empty()) {
-      +                        res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                           } else {
-      -                        res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
-      +                        std::vector<UpperPtr<T, Acc>> popped;
-      +                        popped.reserve(all_upper_children.size());
-      +                        for (auto &u : all_upper_children) popped.push_back(_popn_upper(u, k - 1));
-      +                        UpperPtr<T, Acc> merged = popped[0];
-      +                        for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-      +                        if (merged->is_interface()) {
-      +                            res = merged;
-      +                        } else {
-      +                            res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
-      +                        }
-                           }
-                       }
-                       memo_upper[key] = res;
-                       return res;
-                   };
-       
-               return LeveledGSS(_popn_upper(inner, n));
-           }
-       
-
-      ```
-
-      After applying this patch, rebuild the C++ extensions and run the benchmarks again. The mask mismatches should be resolved, and the C++ model should now behave identically to the Python reference implementation.
-    metadata:
-  - user: |-
-      Failed Hunk:
-
-      ```diff
-      @@ -621,57 +621,56 @@
-                       auto itm = memo_upper.find(key);
-                       if (itm != memo_upper.end()) return itm->second;
-       
-      -                // Collect children
-      -                std::vector<UpperPtr<T, Acc>> all_children;
-      -                if (!node->is_interface()) {
-      -                    auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-      -                    for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_children.push_back(dkv.second);
-      -                }
-      -                if (all_children.empty()) {
-      -                    auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-      -                    memo_upper[key] = res;
-      -                    return res;
-      -                }
-      -
-                       UpperPtr<T, Acc> res;
-                       if (node->is_interface()) {
-                           auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
-                           // pop from lowers
-      -                    std::vector<LowerPtr<T>> lowers;
-      -                    for (auto &kv : it->_children) for (auto &dkv : kv.second) lowers.push_back(dkv.second);
-      -                    if (lowers.empty()) {
-      +                    std::vector<LowerPtr<T>> all_lower_children;
-      +                    for (auto &kv : it->_children) for (auto &dkv : kv.second) all_lower_children.push_back(dkv.second);
-      +
-      +                    if (all_lower_children.empty()) {
-                               res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                           } else {
-                               std::vector<LowerPtr<T>> popped;
-      -                        popped.reserve(lowers.size());
-      -                        for (auto &l : lowers) popped.push_back(_popn_lower(l, k - 1));
-      +                        popped.reserve(all_lower_children.size());
-      +                        for (auto &l : all_lower_children) popped.push_back(_popn_lower(l, k - 1));
-                               LowerPtr<T> merged = popped[0];
-      -                        for (size_t i = 1; i < popped.size(); ++i) res = merge_lower<T>(res, popped[i]);
-      +                        for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower<T>(merged, popped[i]);
-                               auto new_empty = merged->empty ? it->acc : std::shared_ptr<Acc>(nullptr);
-                               if (merged->_children.empty() && !new_empty) {
-                                   res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                               } else {
-                                   res = std::make_shared<Interface<T, Acc>>(merged->_children, it->acc, new_empty);
-                               }
-                           }
-                       } else {
-                           auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-      -                    std::vector<UpperPtr<T, Acc>> popped;
-      -                    popped.reserve(all_children.size());
-      -                    for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
-      -                    UpperPtr<T, Acc> merged = popped[0];
-      -                    for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-      -                    if (merged->is_interface()) {
-      -                        res = merged;
-      +                    std::vector<UpperPtr<T, Acc>> all_upper_children;
-      +                    for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_upper_children.push_back(dkv.second);
-      +
-      +                    if (all_upper_children.empty()) {
-      +                        res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                           } else {
-      -                        res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
-      +                        std::vector<UpperPtr<T, Acc>> popped;
-      +                        popped.reserve(all_upper_children.size());
-      +                        for (auto &u : all_upper_children) popped.push_back(_popn_upper(u, k - 1));
-      +                        UpperPtr<T, Acc> merged = popped[0];
-      +                        for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-      +                        if (merged->is_interface()) {
-      +                            res = merged;
-      +                        } else {
-      +                            res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
-      +                        }
-                           }
-                       }
-                       memo_upper[key] = res;
-                       return res;
-                   };
-       
-               return LeveledGSS(_popn_upper(inner, n));
-           }
-       
-      ```
-
-      Expected Context (from patch):
-
-      ```diff
-                      auto itm = memo_upper.find(key);
-                      if (itm != memo_upper.end()) return itm->second;
-
-                      // Collect children
-                      std::vector<UpperPtr<T, Acc>> all_children;
-                      if (!node->is_interface()) {
-                          auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                          for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_children.push_back(dkv.second);
-                      }
-                      if (all_children.empty()) {
-                          auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                          memo_upper[key] = res;
-                          return res;
-                      }
-
-                      UpperPtr<T, Acc> res;
-                      if (node->is_interface()) {
-                          auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
-                          // pop from lowers
-                          std::vector<LowerPtr<T>> lowers;
-                          for (auto &kv : it->_children) for (auto &dkv : kv.second) lowers.push_back(dkv.second);
-                          if (lowers.empty()) {
-                              res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                          } else {
-                              std::vector<LowerPtr<T>> popped;
-                              popped.reserve(lowers.size());
-                              for (auto &l : lowers) popped.push_back(_popn_lower(l, k - 1));
-                              LowerPtr<T> merged = popped[0];
-                              for (size_t i = 1; i < popped.size(); ++i) res = merge_lower<T>(res, popped[i]);
-                              auto new_empty = merged->empty ? it->acc : std::shared_ptr<Acc>(nullptr);
-                              if (merged->_children.empty() && !new_empty) {
-                                  res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                              } else {
-                                  res = std::make_shared<Interface<T, Acc>>(merged->_children, it->acc, new_empty);
-                              }
-                          }
-                      } else {
-                          auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                          std::vector<UpperPtr<T, Acc>> popped;
-                          popped.reserve(all_children.size());
-                          for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
-                          UpperPtr<T, Acc> merged = popped[0];
-                          for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-                          if (merged->is_interface()) {
-                              res = merged;
-                          } else {
-                              res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
-                          }
-                      }
-                      memo_upper[key] = res;
-                      return res;
-                  };
-
-              return LeveledGSS(_popn_upper(inner, n));
-          }
-      ```
-
-      Nearest Match in `python/aug25/models/leveled_gss.hpp` (found at line 719 with 98.21% similarity, shown with padding):
-
-      ```objective-c
-
-              std::function<UpperPtr<T, Acc>(const UpperPtr<T, Acc>&, int)> _popn_upper =
-                  [&](const UpperPtr<T, Acc>& node, int k) -> UpperPtr<T, Acc> {
-                      if (k == 0) return node;
-                      Key key{reinterpret_cast<std::uintptr_t>(node.get()), k};
-                      auto itm = memo_upper.find(key);
-                      if (itm != memo_upper.end()) return itm->second;
-
-                      // Collect children
-                      std::vector<UpperPtr<T, Acc>> all_children;
-                      if (!node->is_interface()) {
-                          auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                          for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_children.push_back(dkv.second);
-                      }
-                      if (all_children.empty()) {
-                          auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                          memo_upper[key] = res;
-                          return res;
-                      }
-
-                      UpperPtr<T, Acc> res;
-                      if (node->is_interface()) {
-                          auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
-                          // pop from lowers
-                          std::vector<LowerPtr<T>> lowers;
-                          for (auto &kv : it->_children) for (auto &dkv : kv.second) lowers.push_back(dkv.second);
-                          if (lowers.empty()) {
-                              res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                          } else {
-                              std::vector<LowerPtr<T>> popped;
-                              popped.reserve(lowers.size());
-                              for (auto &l : lowers) popped.push_back(_popn_lower(l, k - 1));
-                              LowerPtr<T> merged = popped[0];
-                              for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower<T>(merged, popped[i]);
-                              auto new_empty = merged->empty ? it->acc : std::shared_ptr<Acc>(nullptr);
-                              if (merged->_children.empty() && !new_empty) {
-                                  res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                              } else {
-                                  res = std::make_shared<Interface<T, Acc>>(merged->_children, it->acc, new_empty);
-                              }
-                          }
-                      } else {
-                          auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                          std::vector<UpperPtr<T, Acc>> popped;
-                          popped.reserve(all_children.size());
-                          for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
-                          UpperPtr<T, Acc> merged = popped[0];
-                          for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-                          if (merged->is_interface()) {
-                              res = merged;
-                          } else {
-                              res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
-                          }
-                      }
-                      memo_upper[key] = res;
-                      return res;
-                  };
-
-              return LeveledGSS(_popn_upper(inner, n));
-          }
-
-          bool is_empty() const {
-              if (!inner->is_interface()) {
-                  auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
-                  return ub->_children.empty() && !ub->empty;
-              }
-      ```
-
-      The git diff hunk above failed to apply to the file `python/aug25/models/leveled_gss.hpp`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
-      Do not include any other text or explanation outside the code block.
-    metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/python/aug25/models/leveled_gss.hpp b/python/aug25/models/leveled_gss.hpp
-      index 327072e..e888022 100644
-      --- a/python/aug25/models/leveled_gss.hpp
-      +++ b/python/aug25/models/leveled_gss.hpp
-      @@ -719,51 +719,47 @@
-                       auto itm = memo_upper.find(key);
-                       if (itm != memo_upper.end()) return itm->second;
-       
-      -                // Collect children
-      -                std::vector<UpperPtr<T, Acc>> all_children;
-      -                if (!node->is_interface()) {
-      -                    auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-      -                    for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_children.push_back(dkv.second);
-      -                }
-      -                if (all_children.empty()) {
-      -                    auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-      -                    memo_upper[key] = res;
-      -                    return res;
-      -                }
-      -
-                       UpperPtr<T, Acc> res;
-                       if (node->is_interface()) {
-                           auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
-                           // pop from lowers
-      -                    std::vector<LowerPtr<T>> lowers;
-      -                    for (auto &kv : it->_children) for (auto &dkv : kv.second) lowers.push_back(dkv.second);
-      -                    if (lowers.empty()) {
-      +                    std::vector<LowerPtr<T>> all_lower_children;
-      +                    for (auto &kv : it->_children) for (auto &dkv : kv.second) all_lower_children.push_back(dkv.second);
-      +
-      +                    if (all_lower_children.empty()) {
-                               res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                           } else {
-                               std::vector<LowerPtr<T>> popped;
-      -                        popped.reserve(lowers.size());
-      -                        for (auto &l : lowers) popped.push_back(_popn_lower(l, k - 1));
-      +                        popped.reserve(all_lower_children.size());
-      +                        for (auto &l : all_lower_children) popped.push_back(_popn_lower(l, k - 1));
-                               LowerPtr<T> merged = popped[0];
-                               for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower<T>(merged, popped[i]);
-                               auto new_empty = merged->empty ? it->acc : std::shared_ptr<Acc>(nullptr);
-                               if (merged->_children.empty() && !new_empty) {
-                                   res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                               } else {
-                                   res = std::make_shared<Interface<T, Acc>>(merged->_children, it->acc, new_empty);
-                               }
-                           }
-                       } else {
-                           auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-      -                    std::vector<UpperPtr<T, Acc>> popped;
-      -                    popped.reserve(all_children.size());
-      -                    for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
-      -                    UpperPtr<T, Acc> merged = popped[0];
-      -                    for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-      -                    if (merged->is_interface()) {
-      -                        res = merged;
-      +                    std::vector<UpperPtr<T, Acc>> all_upper_children;
-      +                    for (auto &kv : ub->_children) for (auto &dkv : kv.second) all_upper_children.push_back(dkv.second);
-      +
-      +                    if (all_upper_children.empty()) {
-      +                        res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                           } else {
-      -                        res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
-      +                        std::vector<UpperPtr<T, Acc>> popped;
-      +                        popped.reserve(all_upper_children.size());
-      +                        for (auto &u : all_upper_children) popped.push_back(_popn_upper(u, k - 1));
-      +                        UpperPtr<T, Acc> merged = popped[0];
-      +                        for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-      +                        if (merged->is_interface()) {
-      +                            res = merged;
-      +                        } else {
-      +                            res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
-      +                        }
-                           }
-                       }
-                       memo_upper[key] = res;
-                       return res;
+                           if (!keep_acc && !keep_empty) {
+                               memo[nid] = nullptr;
+                               return nullptr;
 
       ```
     metadata:
@@ -11762,7 +11257,7 @@ messages:
       Applying patch to 'python/aug25/models/leveled_gss.hpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/leveled_gss.hpp.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correct LeveledGSS popn logic for
-      Interface nodes"'
+  - user: 'Changes committed with message: "perf: Improve LeveledGSS pruning by avoiding
+      unnecessary node reconstruction"'
     metadata:
 ...
