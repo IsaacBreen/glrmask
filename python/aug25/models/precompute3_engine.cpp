@@ -37,7 +37,7 @@ struct Acc : public std::enable_shared_from_this<Acc> {
         if (terminals_union.size() != other.terminals_union.size()) return false;
         for (auto const& [key, val] : terminals_union) {
             auto it = other.terminals_union.find(key);
-            if (!(val == it->second)) {
+            if (it == other.terminals_union.end() || !(val == it->second)) {
                 return false;
             }
         }
@@ -678,14 +678,21 @@ private:
             auto na = std::make_shared<Acc>();
             na->llm_mask = acc->llm_mask;
             RangeSet rs_empty = RangeSet::empty();
-            for (auto &kv : acc->terminals_union) {
-                int old_sid = kv.first;
-                auto it = state_map.find(old_sid);
-                if (it == state_map.end()) continue;
-                int new_sid = it->second;
-                const RangeSet& src = kv.second;
-                const RangeSet& curr = na->terminals_union.count(new_sid) ? na->terminals_union[new_sid] : rs_empty;
-                na->terminals_union[new_sid] = curr.union_with(src);
+
+            // This logic must mirror the Python version to ensure terminals_union is pruned
+            // and does not grow indefinitely. We iterate over the small state_map, not the
+            // potentially large terminals_union.
+            for (auto const& [old_sid, new_sid] : state_map) {
+                auto it = acc->terminals_union.find(old_sid);
+                if (it != acc->terminals_union.end()) {
+                    const RangeSet& bv_source = it->second;
+                    auto it_new = na->terminals_union.find(new_sid);
+                    if (it_new != na->terminals_union.end()) {
+                        it_new->second = it_new->second.union_with(bv_source);
+                    } else {
+                        na->terminals_union.emplace(new_sid, bv_source);
+                    }
+                }
             }
             return na;
         };
