@@ -53,13 +53,21 @@ PY
 
 PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
 CXX="${CXX:-c++}"
+CXXFLAGS="-O3 -DNDEBUG -std=c++17 -shared -fPIC"
 LDFLAGS=""
 if [[ "$(uname)" == "Darwin" ]]; then
   LDFLAGS="-undefined dynamic_lookup"
 fi
 
+# Optional ASan (opt-in)
+if [[ "${SANITIZE:-0}" == "1" ]]; then
+  echo "Building with AddressSanitizer (SANITIZE=1)"
+  CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c++17 -shared -fPIC"
+  LDFLAGS="${LDFLAGS} -fsanitize=address"
+fi
+
 # Compile icl_rangeset (Boost.ICL-backed RangeSet)
-${CXX} -g -O0 -fsanitize=address -std=c++17 -shared -fPIC \
+${CXX} ${CXXFLAGS} \
   ${PYBIND_INCLUDES} \
   -I"${BOOST_DIR}" \
   "aug25/models/icl_rangeset.cpp" \
@@ -67,7 +75,7 @@ ${CXX} -g -O0 -fsanitize=address -std=c++17 -shared -fPIC \
   ${LDFLAGS}
 
 # Compile precompute3_engine (C++ commit/get_mask engine)
-${CXX} -g -O0 -fsanitize=address -std=c++17 -shared -fPIC \
+${CXX} ${CXXFLAGS} \
   ${PYBIND_INCLUDES} \
   "aug25/models/precompute3_engine.cpp" \
   -o "aug25/models/precompute3_engine${EXT_SUFFIX}" \

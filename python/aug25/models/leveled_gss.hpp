@@ -360,7 +360,10 @@ template <typename T, typename Acc>
 static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const InterfacePtr<T, Acc>& b) {
     if (a.get() == b.get()) return a;
 
-    if (a->acc.get() == b->acc.get() || (*(a->acc) == *(b->acc)) || a->_children.get() == b->_children.get()) {
+    // Prefer cheap pointer checks; defer expensive content equality to last.
+    if (a->acc.get() == b->acc.get() ||
+        a->_children.get() == b->_children.get() ||
+        (*(a->acc) == *(b->acc))) {
         auto merged_children = _merge_children_by_depth<LowerPtr<T>, std::function<LowerPtr<T>(LowerPtr<T>, LowerPtr<T>)>, T>(
             *a->_children, *b->_children,
             [](LowerPtr<T> l1, LowerPtr<T> l2) { return merge_lower<T>(l1, l2); }
@@ -938,6 +941,7 @@ public:
                     auto new_empty = ub->empty ? apply_func(ub->empty) : std::shared_ptr<Acc>(nullptr);
                     bool changed = (new_empty.get() != ub->empty.get());
                     auto new_children = std::make_shared<UpperChildren<T, Acc>>();
+                    bool any_child_map_changed = false;
 
                     for (auto &kv : *ub->_children) {
                         const T& v = kv.first;
@@ -952,6 +956,7 @@ public:
 
                         if (child_map_changed) {
                             changed = true;
+                            any_child_map_changed = true;
                             if (!new_kids.empty()) (*new_children)[v] = std::move(new_kids);
                         } else {
                             (*new_children)[v] = kids;
@@ -961,6 +966,14 @@ public:
                     if (!changed) {
                         memo[nid] = node;
                         return node;
+                    }
+
+                    // If only empty changed, preserve children pointer identity to trigger fast-path merges.
+                    if (!any_child_map_changed) {
+                        auto res = std::make_shared<UpperBranch<T, Acc>>(ub->_children, new_empty);
+                        auto promoted = try_promote<T, Acc>(res);
+                        memo[nid] = promoted;
+                        return promoted;
                     }
 
                     auto res = std::make_shared<UpperBranch<T, Acc>>(std::move(new_children), new_empty);
@@ -1013,6 +1026,7 @@ public:
                     auto new_empty = (ub->empty && predicate(ub->empty)) ? ub->empty : std::shared_ptr<Acc>(nullptr);
                     bool changed = (new_empty.get() != ub->empty.get());
                     auto new_children = std::make_shared<UpperChildren<T, Acc>>();
+                    bool any_child_map_changed = false;
 
                     for (auto &kv : *ub->_children) {
                         const T& v = kv.first;
@@ -1028,6 +1042,7 @@ public:
 
                         if (child_map_changed) {
                             changed = true;
+                            any_child_map_changed = true;
                             if (!new_kids.empty()) (*new_children)[v] = std::move(new_kids);
                         } else {
                             (*new_children)[v] = kids;
@@ -1037,6 +1052,19 @@ public:
                     if (!changed) {
                         memo[nid] = node;
                         return node;
+                    }
+                    if (!any_child_map_changed) {
+                        // Only empty changed; reuse children pointer to preserve identity.
+                        // If children are empty too and new_empty was removed, node is pruned.
+                        bool children_empty = ub->_children->empty();
+                        if (children_empty && !new_empty) {
+                            memo[nid] = nullptr;
+                            return nullptr;
+                        }
+                        auto res = std::make_shared<UpperBranch<T, Acc>>(ub->_children, new_empty);
+                        auto promoted = try_promote<T, Acc>(res);
+                        memo[nid] = promoted;
+                        return promoted;
                     }
                     if (new_children->empty() && !new_empty) {
                         memo[nid] = nullptr;
@@ -1114,6 +1142,7 @@ public:
                     auto new_empty = ub->empty ? mutate_acc(ub->empty) : std::shared_ptr<Acc>(nullptr);
                     bool changed = (new_empty.get() != ub->empty.get());
                     auto new_children = std::make_shared<UpperChildren<T, Acc>>();
+                    bool any_child_map_changed = false;
                     for (auto &kv : *ub->_children) {
                         const T& v = kv.first;
                         const auto& kids = kv.second;
@@ -1128,6 +1157,7 @@ public:
 
                         if (child_map_changed) {
                             changed = true;
+                            any_child_map_changed = true;
                             if (!new_kids.empty()) (*new_children)[v] = std::move(new_kids);
                         } else {
                             (*new_children)[v] = kids;
@@ -1139,6 +1169,18 @@ public:
                         return node;
                     }
 
+                    if (!any_child_map_changed) {
+                        // Only empty changed; reuse children pointer to preserve identity.
+                        bool children_empty = ub->_children->empty();
+                        if (children_empty && !new_empty) {
+                            memo[nid] = nullptr;
+                            return nullptr;
+                        }
+                        auto res = std::make_shared<UpperBranch<T, Acc>>(ub->_children, new_empty);
+                        auto promoted = try_promote<T, Acc>(res);
+                        memo[nid] = promoted;
+                        return promoted;
+                    }
                     if (new_children->empty() && !new_empty) {
                         memo[nid] = nullptr;
                         return nullptr;

@@ -326,12 +326,16 @@ public:
                     Leveled popped = gss_node.popn(e.pop);
                     if (popped.is_empty()) continue;
 
+                    // Compute top states once per edge
+                    std::unordered_set<int> top = popped.peek();
+
                     for (const DestEdge &de : e.dests) {
-                        // Determine which top states to keep
+                        // Determine which top states to keep for this destination
                         std::unordered_set<int> keep;
-                        std::unordered_set<int> top = popped.peek();
                         for (int top_sid : top) {
-                            if (state_matches_bitset(de.state_bv, top_sid)) keep.insert(top_sid);
+                            if (de.wildcard || contains_in_ranges(de.state_ranges, top_sid)) {
+                                keep.insert(top_sid);
+                            }
                         }
                         if (keep.empty()) continue;
 
@@ -388,7 +392,8 @@ private:
 
     struct DestEdge {
         int dest_idx;
-        py::object state_bv; // _sep1.Bitset
+        bool wildcard{false}; // empty bitset -> matches all
+        std::vector<std::pair<int,int>> state_ranges; // inclusive ranges
     };
 
     struct Edge {
@@ -442,6 +447,20 @@ private:
     py::object range_from_indices_;
     py::object range_from_ranges_;
 
+    // Check membership in a vector of inclusive ranges (sorted, non-overlapping).
+    static bool contains_in_ranges(const std::vector<std::pair<int,int>>& ranges, int v) {
+        // Binary search by upper_bound on end values
+        int lo = 0;
+        int hi = static_cast<int>(ranges.size()) - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >> 1;
+            const auto& pr = ranges[mid];
+            if (v < pr.first) hi = mid - 1;
+            else if (v > pr.second) lo = mid + 1;
+            else return true;
+        }
+        return false;
+    }
     // -----------------------------
     // Parsing helpers
     // -----------------------------
@@ -584,7 +603,19 @@ private:
                     py::object state_bv_json = dd[1];
 
                     py::object state_bv = BitsetClass.attr("from_json_string")(dumps(state_bv_json));
-                    dests.push_back(DestEdge{dest_idx, state_bv});
+                    bool wildcard = state_bv.attr("is_empty")().cast<bool>();
+                    std::vector<std::pair<int,int>> ranges;
+                    if (!wildcard) {
+                        py::object py_ranges = state_bv.attr("to_ranges")();
+                        ranges.reserve(py::len(py_ranges));
+                        for (auto it : py_ranges) {
+                            py::tuple t = py::cast<py::tuple>(it);
+                            int l = py::cast<int>(t[0]);
+                            int r = py::cast<int>(t[1]);
+                            ranges.emplace_back(l, r);
+                        }
+                    }
+                    dests.push_back(DestEdge{dest_idx, wildcard, std::move(ranges)});
                 }
 
                 Edge e{pop, llm_bv_rs, std::move(dests)};
@@ -648,13 +679,6 @@ private:
             return na;
         };
         return g.apply(transformer);
-    }
-
-    bool state_matches_bitset(const py::object& bitset, int sid) const {
-        // Treat empty bitset as wildcard (matches all)
-        bool empty = bitset.attr("is_empty")().cast<bool>();
-        if (empty) return true;
-        return bitset.attr("contains")(py::int_(sid)).cast<bool>();
     }
 
     Leveled process_token(const Leveled& g, int terminal_id) {
