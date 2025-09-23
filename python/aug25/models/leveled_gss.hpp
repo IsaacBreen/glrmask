@@ -451,6 +451,13 @@ public:
     explicit LeveledGSS(const UpperPtr<T, Acc>& u) : inner(u) {}
     explicit LeveledGSS(UpperPtr<T, Acc>&& u) : inner(std::move(u)) {}
 
+    // Rule of 5
+    LeveledGSS(const LeveledGSS& other) = default;
+    LeveledGSS(LeveledGSS&& other) noexcept = default;
+    LeveledGSS& operator=(const LeveledGSS& other) = default;
+    LeveledGSS& operator=(LeveledGSS&& other) noexcept = default;
+    ~LeveledGSS() = default;
+
     static LeveledGSS from_stacks(const std::vector<std::pair<std::vector<T>, std::shared_ptr<Acc>>>& stacks) {
         // Canonicalize stacks: merge Acc for identical vectors
         struct VecHash {
@@ -844,86 +851,6 @@ public:
                 (*filtered)[value] = itc->second;
                 auto res = std::make_shared<Interface<T, Acc>>(std::move(filtered), it->acc, std::shared_ptr<Acc>(nullptr));
                 return LeveledGSS(res);
-            }
-        }
-    }
-
-    LeveledGSS isolate_none() const {
-        // Keep only empty stacks (value == None)
-        std::shared_ptr<Acc> empty_acc;
-        if (!inner->is_interface()) {
-            auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
-            empty_acc = ub->empty;
-        } else {
-            auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
-            empty_acc = it->empty;
-        }
-        auto new_root = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, empty_acc);
-        return LeveledGSS(try_promote<T, Acc>(new_root));
-    }
-
-    LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
-        std::shared_ptr<Acc> new_empty = nullptr;
-        if (!inner->is_interface()) {
-            auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
-            auto filtered_children = std::make_shared<UpperChildren<T, Acc>>();
-            for (auto &kv : *ub->_children) {
-                if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
-            }
-            auto res = std::make_shared<UpperBranch<T, Acc>>(std::move(filtered_children), new_empty);
-            return LeveledGSS(try_promote<T, Acc>(res));
-        } else {
-            auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
-            auto filtered_children = std::make_shared<LowerChildren<T>>();
-            for (auto &kv : *it->_children) {
-                if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
-            }
-            if (!filtered_children->empty()) {
-                auto res = std::make_shared<Interface<T, Acc>>(std::move(filtered_children), it->acc, new_empty);
-                return LeveledGSS(res);
-            } else {
-                auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, new_empty);
-                return LeveledGSS(try_promote<T, Acc>(res));
-            }
-        }
-    }
-
-    LeveledGSS isolate_none() const {
-        // Keep only empty stacks (value == None)
-        std::shared_ptr<Acc> empty_acc;
-        if (!inner->is_interface()) {
-            auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
-            empty_acc = ub->empty;
-        } else {
-            auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
-            empty_acc = it->empty;
-        }
-        auto new_root = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, empty_acc);
-        return LeveledGSS(try_promote<T, Acc>(new_root));
-    }
-
-    LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
-        std::shared_ptr<Acc> new_empty = nullptr;
-        if (!inner->is_interface()) {
-            auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
-            auto filtered_children = std::make_shared<UpperChildren<T, Acc>>();
-            for (auto &kv : *ub->_children) {
-                if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
-            }
-            auto res = std::make_shared<UpperBranch<T, Acc>>(std::move(filtered_children), new_empty);
-            return LeveledGSS(try_promote<T, Acc>(res));
-        } else {
-            auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
-            auto filtered_children = std::make_shared<LowerChildren<T>>();
-            for (auto &kv : *it->_children) {
-                if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
-            }
-            if (!filtered_children->empty()) {
-                auto res = std::make_shared<Interface<T, Acc>>(std::move(filtered_children), it->acc, new_empty);
-                return LeveledGSS(res);
-            } else {
-                auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, new_empty);
-                return LeveledGSS(try_promote<T, Acc>(res));
             }
         }
     }

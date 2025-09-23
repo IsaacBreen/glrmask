@@ -5,6 +5,7 @@ local_system:
     - python/aug25/models/model_abc.py
     - python/aug25/models/precompute3_model_cpp.py
     - python/aug25/models/icl_rangeset.cpp
+    - python/aug25/models/leveled_gss_py.cpp
     - python/aug25/models/precompute3_engine.cpp
     - python/aug25/models/leveled_gss.hpp
     - run_rust_and_cpp_models.sh
@@ -1728,6 +1729,182 @@ local_system:
               .def("__eq__", &RangeSet::operator==)
               ;
       }
+    python/aug25/models/leveled_gss_py.cpp: |
+      #include <pybind11/pybind11.h>
+      #include <pybind11/stl.h>
+      #include <pybind11/functional.h>
+
+      #include "leveled_gss.hpp"
+
+      namespace py = pybind11;
+
+      // Accumulator that wraps a Python object and calls its `merge` method.
+      struct PyAcc : public std::enable_shared_from_this<PyAcc> {
+          py::object value;
+
+          PyAcc(py::object v) : value(std::move(v)) {}
+
+          std::shared_ptr<PyAcc> merge(const std::shared_ptr<PyAcc>& other) const {
+              py::object new_value = value.attr("merge")(other->value);
+              return std::make_shared<PyAcc>(new_value);
+          }
+
+          bool operator==(const PyAcc& other) const {
+              return value.attr("__eq__")(other.value).cast<bool>();
+          }
+      };
+
+      using GSS_T = py::object;
+      using GSS_Acc = PyAcc;
+      using CppGSS = leveled_gss::LeveledGSS<GSS_T, GSS_Acc>;
+
+      // Wrapper class to be exposed to Python
+      class LeveledGssPyWrapper {
+      public:
+          CppGSS gss;
+
+          LeveledGssPyWrapper(CppGSS g) : gss(std::move(g)) {}
+
+          static LeveledGssPyWrapper from_stacks(const py::list& stacks_py) {
+              std::vector<std::pair<std::vector<GSS_T>, std::shared_ptr<GSS_Acc>>> stacks_cpp;
+              stacks_cpp.reserve(stacks_py.size());
+              for (auto handle : stacks_py) {
+                  py::tuple t = handle.cast<py::tuple>();
+                  std::vector<GSS_T> vals = t[0].cast<std::vector<GSS_T>>();
+                  auto acc = std::make_shared<GSS_Acc>(t[1].cast<py::object>());
+                  stacks_cpp.emplace_back(std::move(vals), std::move(acc));
+              }
+              return LeveledGssPyWrapper(CppGSS::from_stacks(stacks_cpp));
+          }
+
+          py::list to_stacks() const {
+              auto stacks_cpp = gss.to_stacks();
+              py::list stacks_py;
+              for (const auto& p : stacks_cpp) {
+                  stacks_py.append(py::make_tuple(p.first, p.second->value));
+              }
+              return stacks_py;
+          }
+
+          LeveledGssPyWrapper push(const GSS_T& value) const {
+              return LeveledGssPyWrapper(gss.push(value));
+          }
+
+          LeveledGssPyWrapper pop() const {
+              return LeveledGssPyWrapper(gss.pop());
+          }
+          
+          LeveledGssPyWrapper popn(int n) const {
+              return LeveledGssPyWrapper(gss.popn(n));
+          }
+
+          bool is_empty() const {
+              return gss.is_empty();
+          }
+
+          LeveledGssPyWrapper isolate(py::object value) const {
+              if (value.is_none()) {
+                  return LeveledGssPyWrapper(gss.isolate_none());
+              }
+              return LeveledGssPyWrapper(gss.isolate(value.cast<GSS_T>()));
+          }
+
+          LeveledGssPyWrapper isolate_many(const py::list& values) const {
+              std::unordered_set<GSS_T> values_set;
+              bool has_none = false;
+              for (auto v_obj : values) {
+                  if (v_obj.is_none()) {
+                      has_none = true;
+                  } else {
+                      values_set.insert(v_obj.cast<GSS_T>());
+                  }
+              }
+              
+              CppGSS result_gss = gss.isolate_many(values_set);
+              if (has_none) {
+                  CppGSS none_gss = gss.isolate_none();
+                  result_gss = result_gss.merge(none_gss);
+              }
+              return LeveledGssPyWrapper(result_gss);
+          }
+
+          LeveledGssPyWrapper apply(const py::function& func) const {
+              auto cpp_func = [&](const std::shared_ptr<GSS_Acc>& acc) -> std::shared_ptr<GSS_Acc> {
+                  py::object new_val = func(acc->value);
+                  return std::make_shared<GSS_Acc>(new_val);
+              };
+              return LeveledGssPyWrapper(gss.apply(cpp_func));
+          }
+
+          LeveledGssPyWrapper prune(const py::function& predicate) const {
+              auto cpp_predicate = [&](const std::shared_ptr<GSS_Acc>& acc) -> bool {
+                  return predicate(acc->value).cast<bool>();
+              };
+              return LeveledGssPyWrapper(gss.prune(cpp_predicate));
+          }
+
+          LeveledGssPyWrapper apply_and_prune(const py::function& mutator) const {
+              auto cpp_mutator = [&](const std::shared_ptr<GSS_Acc>& acc) -> std::shared_ptr<GSS_Acc> {
+                  py::object result = mutator(acc->value);
+                  if (result.is_none()) {
+                      return nullptr;
+                  }
+                  return std::make_shared<GSS_Acc>(result);
+              };
+              return LeveledGssPyWrapper(gss.apply_and_prune(cpp_mutator));
+          }
+
+          LeveledGssPyWrapper merge(const LeveledGssPyWrapper& other) const {
+              return LeveledGssPyWrapper(gss.merge(other.gss));
+          }
+
+          static LeveledGssPyWrapper merge_many(const py::list& gss_list) {
+              std::vector<CppGSS> gsses;
+              gsses.reserve(gss_list.size());
+              for (auto g_obj : gss_list) {
+                  gsses.push_back(g_obj.cast<LeveledGssPyWrapper>().gss);
+              }
+              return LeveledGssPyWrapper(CppGSS::merge_many(gsses));
+          }
+
+          py::set peek() const {
+              auto tops = gss.peek();
+              py::set result;
+              for (const auto& t : tops) {
+                  result.add(t);
+              }
+              return result;
+          }
+
+          py::object reduce_acc() const {
+              auto acc = gss.reduce_acc();
+              if (acc) {
+                  return acc->value;
+              }
+              return py::none();
+          }
+      };
+
+      PYBIND11_MODULE(leveled_gss_cpp, m) {
+          m.doc() = "pybind11 wrapper for LeveledGSS C++ implementation";
+
+          py::class_<LeveledGssPyWrapper>(m, "LeveledGssCpp")
+              .def_static("from_stacks", &LeveledGssPyWrapper::from_stacks)
+              .def("to_stacks", &LeveledGssPyWrapper::to_stacks)
+              .def("push", &LeveledGssPyWrapper::push)
+              .def("pop", &LeveledGssPyWrapper::pop)
+              .def("popn", &LeveledGssPyWrapper::popn)
+              .def("is_empty", &LeveledGssPyWrapper::is_empty)
+              .def("isolate", &LeveledGssPyWrapper::isolate)
+              .def("isolate_many", &LeveledGssPyWrapper::isolate_many)
+              .def("apply", &LeveledGssPyWrapper::apply)
+              .def("prune", &LeveledGssPyWrapper::prune)
+              .def("apply_and_prune", &LeveledGssPyWrapper::apply_and_prune)
+              .def("merge", &LeveledGssPyWrapper::merge)
+              .def_static("merge_many", &LeveledGssPyWrapper::merge_many)
+              .def("peek", &LeveledGssPyWrapper::peek)
+              .def("reduce_acc", &LeveledGssPyWrapper::reduce_acc);
+      }
     python/aug25/models/precompute3_engine.cpp: |
       #include <pybind11/pybind11.h>
       #include <pybind11/stl.h>
@@ -3373,6 +3550,86 @@ local_system:
                       (*filtered)[value] = itc->second;
                       auto res = std::make_shared<Interface<T, Acc>>(std::move(filtered), it->acc, std::shared_ptr<Acc>(nullptr));
                       return LeveledGSS(res);
+                  }
+              }
+          }
+
+          LeveledGSS isolate_none() const {
+              // Keep only empty stacks (value == None)
+              std::shared_ptr<Acc> empty_acc;
+              if (!inner->is_interface()) {
+                  auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+                  empty_acc = ub->empty;
+              } else {
+                  auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+                  empty_acc = it->empty;
+              }
+              auto new_root = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, empty_acc);
+              return LeveledGSS(try_promote<T, Acc>(new_root));
+          }
+
+          LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
+              std::shared_ptr<Acc> new_empty = nullptr;
+              if (!inner->is_interface()) {
+                  auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+                  auto filtered_children = std::make_shared<UpperChildren<T, Acc>>();
+                  for (auto &kv : *ub->_children) {
+                      if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
+                  }
+                  auto res = std::make_shared<UpperBranch<T, Acc>>(std::move(filtered_children), new_empty);
+                  return LeveledGSS(try_promote<T, Acc>(res));
+              } else {
+                  auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+                  auto filtered_children = std::make_shared<LowerChildren<T>>();
+                  for (auto &kv : *it->_children) {
+                      if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
+                  }
+                  if (!filtered_children->empty()) {
+                      auto res = std::make_shared<Interface<T, Acc>>(std::move(filtered_children), it->acc, new_empty);
+                      return LeveledGSS(res);
+                  } else {
+                      auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, new_empty);
+                      return LeveledGSS(try_promote<T, Acc>(res));
+                  }
+              }
+          }
+
+          LeveledGSS isolate_none() const {
+              // Keep only empty stacks (value == None)
+              std::shared_ptr<Acc> empty_acc;
+              if (!inner->is_interface()) {
+                  auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+                  empty_acc = ub->empty;
+              } else {
+                  auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+                  empty_acc = it->empty;
+              }
+              auto new_root = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, empty_acc);
+              return LeveledGSS(try_promote<T, Acc>(new_root));
+          }
+
+          LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
+              std::shared_ptr<Acc> new_empty = nullptr;
+              if (!inner->is_interface()) {
+                  auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+                  auto filtered_children = std::make_shared<UpperChildren<T, Acc>>();
+                  for (auto &kv : *ub->_children) {
+                      if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
+                  }
+                  auto res = std::make_shared<UpperBranch<T, Acc>>(std::move(filtered_children), new_empty);
+                  return LeveledGSS(try_promote<T, Acc>(res));
+              } else {
+                  auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+                  auto filtered_children = std::make_shared<LowerChildren<T>>();
+                  for (auto &kv : *it->_children) {
+                      if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
+                  }
+                  if (!filtered_children->empty()) {
+                      auto res = std::make_shared<Interface<T, Acc>>(std::move(filtered_children), it->acc, new_empty);
+                      return LeveledGSS(res);
+                  } else {
+                      auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, new_empty);
+                      return LeveledGSS(try_promote<T, Acc>(res));
                   }
               }
           }
@@ -5549,6 +5806,182 @@ local_system:
               .def("__eq__", &RangeSet::operator==)
               ;
       }
+    python/aug25/models/leveled_gss_py.cpp: |
+      #include <pybind11/pybind11.h>
+      #include <pybind11/stl.h>
+      #include <pybind11/functional.h>
+
+      #include "leveled_gss.hpp"
+
+      namespace py = pybind11;
+
+      // Accumulator that wraps a Python object and calls its `merge` method.
+      struct PyAcc : public std::enable_shared_from_this<PyAcc> {
+          py::object value;
+
+          PyAcc(py::object v) : value(std::move(v)) {}
+
+          std::shared_ptr<PyAcc> merge(const std::shared_ptr<PyAcc>& other) const {
+              py::object new_value = value.attr("merge")(other->value);
+              return std::make_shared<PyAcc>(new_value);
+          }
+
+          bool operator==(const PyAcc& other) const {
+              return value.attr("__eq__")(other.value).cast<bool>();
+          }
+      };
+
+      using GSS_T = py::object;
+      using GSS_Acc = PyAcc;
+      using CppGSS = leveled_gss::LeveledGSS<GSS_T, GSS_Acc>;
+
+      // Wrapper class to be exposed to Python
+      class LeveledGssPyWrapper {
+      public:
+          CppGSS gss;
+
+          LeveledGssPyWrapper(CppGSS g) : gss(std::move(g)) {}
+
+          static LeveledGssPyWrapper from_stacks(const py::list& stacks_py) {
+              std::vector<std::pair<std::vector<GSS_T>, std::shared_ptr<GSS_Acc>>> stacks_cpp;
+              stacks_cpp.reserve(stacks_py.size());
+              for (auto handle : stacks_py) {
+                  py::tuple t = handle.cast<py::tuple>();
+                  std::vector<GSS_T> vals = t[0].cast<std::vector<GSS_T>>();
+                  auto acc = std::make_shared<GSS_Acc>(t[1].cast<py::object>());
+                  stacks_cpp.emplace_back(std::move(vals), std::move(acc));
+              }
+              return LeveledGssPyWrapper(CppGSS::from_stacks(stacks_cpp));
+          }
+
+          py::list to_stacks() const {
+              auto stacks_cpp = gss.to_stacks();
+              py::list stacks_py;
+              for (const auto& p : stacks_cpp) {
+                  stacks_py.append(py::make_tuple(p.first, p.second->value));
+              }
+              return stacks_py;
+          }
+
+          LeveledGssPyWrapper push(const GSS_T& value) const {
+              return LeveledGssPyWrapper(gss.push(value));
+          }
+
+          LeveledGssPyWrapper pop() const {
+              return LeveledGssPyWrapper(gss.pop());
+          }
+          
+          LeveledGssPyWrapper popn(int n) const {
+              return LeveledGssPyWrapper(gss.popn(n));
+          }
+
+          bool is_empty() const {
+              return gss.is_empty();
+          }
+
+          LeveledGssPyWrapper isolate(py::object value) const {
+              if (value.is_none()) {
+                  return LeveledGssPyWrapper(gss.isolate_none());
+              }
+              return LeveledGssPyWrapper(gss.isolate(value.cast<GSS_T>()));
+          }
+
+          LeveledGssPyWrapper isolate_many(const py::list& values) const {
+              std::unordered_set<GSS_T> values_set;
+              bool has_none = false;
+              for (auto v_obj : values) {
+                  if (v_obj.is_none()) {
+                      has_none = true;
+                  } else {
+                      values_set.insert(v_obj.cast<GSS_T>());
+                  }
+              }
+              
+              CppGSS result_gss = gss.isolate_many(values_set);
+              if (has_none) {
+                  CppGSS none_gss = gss.isolate_none();
+                  result_gss = result_gss.merge(none_gss);
+              }
+              return LeveledGssPyWrapper(result_gss);
+          }
+
+          LeveledGssPyWrapper apply(const py::function& func) const {
+              auto cpp_func = [&](const std::shared_ptr<GSS_Acc>& acc) -> std::shared_ptr<GSS_Acc> {
+                  py::object new_val = func(acc->value);
+                  return std::make_shared<GSS_Acc>(new_val);
+              };
+              return LeveledGssPyWrapper(gss.apply(cpp_func));
+          }
+
+          LeveledGssPyWrapper prune(const py::function& predicate) const {
+              auto cpp_predicate = [&](const std::shared_ptr<GSS_Acc>& acc) -> bool {
+                  return predicate(acc->value).cast<bool>();
+              };
+              return LeveledGssPyWrapper(gss.prune(cpp_predicate));
+          }
+
+          LeveledGssPyWrapper apply_and_prune(const py::function& mutator) const {
+              auto cpp_mutator = [&](const std::shared_ptr<GSS_Acc>& acc) -> std::shared_ptr<GSS_Acc> {
+                  py::object result = mutator(acc->value);
+                  if (result.is_none()) {
+                      return nullptr;
+                  }
+                  return std::make_shared<GSS_Acc>(result);
+              };
+              return LeveledGssPyWrapper(gss.apply_and_prune(cpp_mutator));
+          }
+
+          LeveledGssPyWrapper merge(const LeveledGssPyWrapper& other) const {
+              return LeveledGssPyWrapper(gss.merge(other.gss));
+          }
+
+          static LeveledGssPyWrapper merge_many(const py::list& gss_list) {
+              std::vector<CppGSS> gsses;
+              gsses.reserve(gss_list.size());
+              for (auto g_obj : gss_list) {
+                  gsses.push_back(g_obj.cast<LeveledGssPyWrapper>().gss);
+              }
+              return LeveledGssPyWrapper(CppGSS::merge_many(gsses));
+          }
+
+          py::set peek() const {
+              auto tops = gss.peek();
+              py::set result;
+              for (const auto& t : tops) {
+                  result.add(t);
+              }
+              return result;
+          }
+
+          py::object reduce_acc() const {
+              auto acc = gss.reduce_acc();
+              if (acc) {
+                  return acc->value;
+              }
+              return py::none();
+          }
+      };
+
+      PYBIND11_MODULE(leveled_gss_cpp, m) {
+          m.doc() = "pybind11 wrapper for LeveledGSS C++ implementation";
+
+          py::class_<LeveledGssPyWrapper>(m, "LeveledGssCpp")
+              .def_static("from_stacks", &LeveledGssPyWrapper::from_stacks)
+              .def("to_stacks", &LeveledGssPyWrapper::to_stacks)
+              .def("push", &LeveledGssPyWrapper::push)
+              .def("pop", &LeveledGssPyWrapper::pop)
+              .def("popn", &LeveledGssPyWrapper::popn)
+              .def("is_empty", &LeveledGssPyWrapper::is_empty)
+              .def("isolate", &LeveledGssPyWrapper::isolate)
+              .def("isolate_many", &LeveledGssPyWrapper::isolate_many)
+              .def("apply", &LeveledGssPyWrapper::apply)
+              .def("prune", &LeveledGssPyWrapper::prune)
+              .def("apply_and_prune", &LeveledGssPyWrapper::apply_and_prune)
+              .def("merge", &LeveledGssPyWrapper::merge)
+              .def_static("merge_many", &LeveledGssPyWrapper::merge_many)
+              .def("peek", &LeveledGssPyWrapper::peek)
+              .def("reduce_acc", &LeveledGssPyWrapper::reduce_acc);
+      }
     python/aug25/models/precompute3_engine.cpp: |
       #include <pybind11/pybind11.h>
       #include <pybind11/stl.h>
@@ -6801,6 +7234,13 @@ local_system:
           explicit LeveledGSS(const UpperPtr<T, Acc>& u) : inner(u) {}
           explicit LeveledGSS(UpperPtr<T, Acc>&& u) : inner(std::move(u)) {}
 
+          // Rule of 5
+          LeveledGSS(const LeveledGSS& other) = default;
+          LeveledGSS(LeveledGSS&& other) noexcept = default;
+          LeveledGSS& operator=(const LeveledGSS& other) = default;
+          LeveledGSS& operator=(LeveledGSS&& other) noexcept = default;
+          ~LeveledGSS() = default;
+
           static LeveledGSS from_stacks(const std::vector<std::pair<std::vector<T>, std::shared_ptr<Acc>>>& stacks) {
               // Canonicalize stacks: merge Acc for identical vectors
               struct VecHash {
@@ -7662,7 +8102,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -9439,6 +9879,187 @@ messages:
     metadata:
       filename: python/aug25/models/icl_rangeset.cpp
   - user: |-
+      ```cpp 'python/aug25/models/leveled_gss_py.cpp'
+      #include <pybind11/pybind11.h>
+      #include <pybind11/stl.h>
+      #include <pybind11/functional.h>
+
+      #include "leveled_gss.hpp"
+
+      namespace py = pybind11;
+
+      // Accumulator that wraps a Python object and calls its `merge` method.
+      struct PyAcc : public std::enable_shared_from_this<PyAcc> {
+          py::object value;
+
+          PyAcc(py::object v) : value(std::move(v)) {}
+
+          std::shared_ptr<PyAcc> merge(const std::shared_ptr<PyAcc>& other) const {
+              py::object new_value = value.attr("merge")(other->value);
+              return std::make_shared<PyAcc>(new_value);
+          }
+
+          bool operator==(const PyAcc& other) const {
+              return value.attr("__eq__")(other.value).cast<bool>();
+          }
+      };
+
+      using GSS_T = py::object;
+      using GSS_Acc = PyAcc;
+      using CppGSS = leveled_gss::LeveledGSS<GSS_T, GSS_Acc>;
+
+      // Wrapper class to be exposed to Python
+      class LeveledGssPyWrapper {
+      public:
+          CppGSS gss;
+
+          LeveledGssPyWrapper(CppGSS g) : gss(std::move(g)) {}
+
+          static LeveledGssPyWrapper from_stacks(const py::list& stacks_py) {
+              std::vector<std::pair<std::vector<GSS_T>, std::shared_ptr<GSS_Acc>>> stacks_cpp;
+              stacks_cpp.reserve(stacks_py.size());
+              for (auto handle : stacks_py) {
+                  py::tuple t = handle.cast<py::tuple>();
+                  std::vector<GSS_T> vals = t[0].cast<std::vector<GSS_T>>();
+                  auto acc = std::make_shared<GSS_Acc>(t[1].cast<py::object>());
+                  stacks_cpp.emplace_back(std::move(vals), std::move(acc));
+              }
+              return LeveledGssPyWrapper(CppGSS::from_stacks(stacks_cpp));
+          }
+
+          py::list to_stacks() const {
+              auto stacks_cpp = gss.to_stacks();
+              py::list stacks_py;
+              for (const auto& p : stacks_cpp) {
+                  stacks_py.append(py::make_tuple(p.first, p.second->value));
+              }
+              return stacks_py;
+          }
+
+          LeveledGssPyWrapper push(const GSS_T& value) const {
+              return LeveledGssPyWrapper(gss.push(value));
+          }
+
+          LeveledGssPyWrapper pop() const {
+              return LeveledGssPyWrapper(gss.pop());
+          }
+          
+          LeveledGssPyWrapper popn(int n) const {
+              return LeveledGssPyWrapper(gss.popn(n));
+          }
+
+          bool is_empty() const {
+              return gss.is_empty();
+          }
+
+          LeveledGssPyWrapper isolate(py::object value) const {
+              if (value.is_none()) {
+                  return LeveledGssPyWrapper(gss.isolate_none());
+              }
+              return LeveledGssPyWrapper(gss.isolate(value.cast<GSS_T>()));
+          }
+
+          LeveledGssPyWrapper isolate_many(const py::list& values) const {
+              std::unordered_set<GSS_T> values_set;
+              bool has_none = false;
+              for (auto v_obj : values) {
+                  if (v_obj.is_none()) {
+                      has_none = true;
+                  } else {
+                      values_set.insert(v_obj.cast<GSS_T>());
+                  }
+              }
+              
+              CppGSS result_gss = gss.isolate_many(values_set);
+              if (has_none) {
+                  CppGSS none_gss = gss.isolate_none();
+                  result_gss = result_gss.merge(none_gss);
+              }
+              return LeveledGssPyWrapper(result_gss);
+          }
+
+          LeveledGssPyWrapper apply(const py::function& func) const {
+              auto cpp_func = [&](const std::shared_ptr<GSS_Acc>& acc) -> std::shared_ptr<GSS_Acc> {
+                  py::object new_val = func(acc->value);
+                  return std::make_shared<GSS_Acc>(new_val);
+              };
+              return LeveledGssPyWrapper(gss.apply(cpp_func));
+          }
+
+          LeveledGssPyWrapper prune(const py::function& predicate) const {
+              auto cpp_predicate = [&](const std::shared_ptr<GSS_Acc>& acc) -> bool {
+                  return predicate(acc->value).cast<bool>();
+              };
+              return LeveledGssPyWrapper(gss.prune(cpp_predicate));
+          }
+
+          LeveledGssPyWrapper apply_and_prune(const py::function& mutator) const {
+              auto cpp_mutator = [&](const std::shared_ptr<GSS_Acc>& acc) -> std::shared_ptr<GSS_Acc> {
+                  py::object result = mutator(acc->value);
+                  if (result.is_none()) {
+                      return nullptr;
+                  }
+                  return std::make_shared<GSS_Acc>(result);
+              };
+              return LeveledGssPyWrapper(gss.apply_and_prune(cpp_mutator));
+          }
+
+          LeveledGssPyWrapper merge(const LeveledGssPyWrapper& other) const {
+              return LeveledGssPyWrapper(gss.merge(other.gss));
+          }
+
+          static LeveledGssPyWrapper merge_many(const py::list& gss_list) {
+              std::vector<CppGSS> gsses;
+              gsses.reserve(gss_list.size());
+              for (auto g_obj : gss_list) {
+                  gsses.push_back(g_obj.cast<LeveledGssPyWrapper>().gss);
+              }
+              return LeveledGssPyWrapper(CppGSS::merge_many(gsses));
+          }
+
+          py::set peek() const {
+              auto tops = gss.peek();
+              py::set result;
+              for (const auto& t : tops) {
+                  result.add(t);
+              }
+              return result;
+          }
+
+          py::object reduce_acc() const {
+              auto acc = gss.reduce_acc();
+              if (acc) {
+                  return acc->value;
+              }
+              return py::none();
+          }
+      };
+
+      PYBIND11_MODULE(leveled_gss_cpp, m) {
+          m.doc() = "pybind11 wrapper for LeveledGSS C++ implementation";
+
+          py::class_<LeveledGssPyWrapper>(m, "LeveledGssCpp")
+              .def_static("from_stacks", &LeveledGssPyWrapper::from_stacks)
+              .def("to_stacks", &LeveledGssPyWrapper::to_stacks)
+              .def("push", &LeveledGssPyWrapper::push)
+              .def("pop", &LeveledGssPyWrapper::pop)
+              .def("popn", &LeveledGssPyWrapper::popn)
+              .def("is_empty", &LeveledGssPyWrapper::is_empty)
+              .def("isolate", &LeveledGssPyWrapper::isolate)
+              .def("isolate_many", &LeveledGssPyWrapper::isolate_many)
+              .def("apply", &LeveledGssPyWrapper::apply)
+              .def("prune", &LeveledGssPyWrapper::prune)
+              .def("apply_and_prune", &LeveledGssPyWrapper::apply_and_prune)
+              .def("merge", &LeveledGssPyWrapper::merge)
+              .def_static("merge_many", &LeveledGssPyWrapper::merge_many)
+              .def("peek", &LeveledGssPyWrapper::peek)
+              .def("reduce_acc", &LeveledGssPyWrapper::reduce_acc);
+      }
+
+      ```
+    metadata:
+      filename: python/aug25/models/leveled_gss_py.cpp
+  - user: |-
       ```cpp 'python/aug25/models/precompute3_engine.cpp'
       #include <pybind11/pybind11.h>
       #include <pybind11/stl.h>
@@ -11133,6 +11754,86 @@ messages:
               }
           }
 
+          LeveledGSS isolate_none() const {
+              // Keep only empty stacks (value == None)
+              std::shared_ptr<Acc> empty_acc;
+              if (!inner->is_interface()) {
+                  auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+                  empty_acc = ub->empty;
+              } else {
+                  auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+                  empty_acc = it->empty;
+              }
+              auto new_root = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, empty_acc);
+              return LeveledGSS(try_promote<T, Acc>(new_root));
+          }
+
+          LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
+              std::shared_ptr<Acc> new_empty = nullptr;
+              if (!inner->is_interface()) {
+                  auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+                  auto filtered_children = std::make_shared<UpperChildren<T, Acc>>();
+                  for (auto &kv : *ub->_children) {
+                      if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
+                  }
+                  auto res = std::make_shared<UpperBranch<T, Acc>>(std::move(filtered_children), new_empty);
+                  return LeveledGSS(try_promote<T, Acc>(res));
+              } else {
+                  auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+                  auto filtered_children = std::make_shared<LowerChildren<T>>();
+                  for (auto &kv : *it->_children) {
+                      if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
+                  }
+                  if (!filtered_children->empty()) {
+                      auto res = std::make_shared<Interface<T, Acc>>(std::move(filtered_children), it->acc, new_empty);
+                      return LeveledGSS(res);
+                  } else {
+                      auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, new_empty);
+                      return LeveledGSS(try_promote<T, Acc>(res));
+                  }
+              }
+          }
+
+          LeveledGSS isolate_none() const {
+              // Keep only empty stacks (value == None)
+              std::shared_ptr<Acc> empty_acc;
+              if (!inner->is_interface()) {
+                  auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+                  empty_acc = ub->empty;
+              } else {
+                  auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+                  empty_acc = it->empty;
+              }
+              auto new_root = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, empty_acc);
+              return LeveledGSS(try_promote<T, Acc>(new_root));
+          }
+
+          LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
+              std::shared_ptr<Acc> new_empty = nullptr;
+              if (!inner->is_interface()) {
+                  auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+                  auto filtered_children = std::make_shared<UpperChildren<T, Acc>>();
+                  for (auto &kv : *ub->_children) {
+                      if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
+                  }
+                  auto res = std::make_shared<UpperBranch<T, Acc>>(std::move(filtered_children), new_empty);
+                  return LeveledGSS(try_promote<T, Acc>(res));
+              } else {
+                  auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+                  auto filtered_children = std::make_shared<LowerChildren<T>>();
+                  for (auto &kv : *it->_children) {
+                      if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
+                  }
+                  if (!filtered_children->empty()) {
+                      auto res = std::make_shared<Interface<T, Acc>>(std::move(filtered_children), it->acc, new_empty);
+                      return LeveledGSS(res);
+                  } else {
+                      auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, new_empty);
+                      return LeveledGSS(try_promote<T, Acc>(res));
+                  }
+              }
+          }
+
           // Apply: Acc -> NewAcc (but we keep Acc type same for simplicity here)
           LeveledGSS apply(
               const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& func,
@@ -11557,31 +12258,71 @@ messages:
     metadata:
       filename: run_rust_and_cpp_models.sh
   - user: |-
-      This was meant to be a super-fast C++ implementation of `precompute3_model_pure_python_standalone.py`. However, turns out it is not anywhere near as fast.
-      More specifically, the C++ version scales very poorly. The Python version scales well. Careful attention was paid in the Python version to ensure that everything scaled well. For example, the GSS code goes to great lengths to keep shared nodes shared and ensure operations touch as little of the GSS as possible.
-      Fix it.
+      bash run_rust_and_cpp_models.sh
+      Installing pybind11 (local user)...
 
-      This was meant to be a super-fast C++ implementation of `python/gss_tester/implementations/leveled_impl.py` (without extra stuff like stats). However, turns out it is not anywhere near as fast.
-      More specifically, the C++ version scales very poorly. The Python version scales well. Careful attention was paid in the Python version to ensure that everything scaled well. For example, the GSS code goes to great lengths to keep shared nodes shared and ensure operations touch as little of the GSS as possible.
-      Fix it.
-
-      I suspect it might be something to do with unnecessarily creating data leading to point check 'fast paths' not triggering when they should. ie having more copies of an object in memory than we necessarily should.
-      I'm not sure what causes this.
-      But there's a lot of places in the code where we check `is` on nodes, e.g.
-      ```python
-      def _merge_children_by_depth(
-          c1: Dict[T, Dict[int, Node]],
-          c2: Dict[T, Dict[int, Node]],
-          merge_func: Callable[[Node, Node], Node],
-      ) -> Dict[T, Dict[int, Node]]:
-          if c1 is c2:
-              return c1
-      ```
-      This takes advantage of the fact that if the subtree pointers are equal, the merge will be unchanged. And there are other such things.
-      But of course if `c1 is c2` isn't true because, say, we unnecessarily created a new node when we could reuse one, then obviously this wouldn't work.
-      If we do this, it shouldn't be necessary to use a memo cache anywhere except in `popn`, `apply`, `prune`, and `apply_and_prune`.
-
-      Of course, it could be something else. I dunno.
+      [notice] A new release of pip is available: 25.0.1 -> 25.2
+      [notice] To update, run: pip install --upgrade pip
+      Building C++ extensions ...
+      In file included from aug25/models/precompute3_engine.cpp:18:
+      aug25/models/leveled_gss.hpp:891:16: error: class member cannot be redeclared
+        891 |     LeveledGSS isolate_none() const {
+            |                ^
+      aug25/models/leveled_gss.hpp:851:16: note: previous definition is here
+        851 |     LeveledGSS isolate_none() const {
+            |                ^
+      aug25/models/leveled_gss.hpp:905:16: error: class member cannot be redeclared
+        905 |     LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
+            |                ^
+      aug25/models/leveled_gss.hpp:865:16: note: previous definition is here
+        865 |     LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
+            |                ^
+      aug25/models/leveled_gss.hpp:931:16: error: class member cannot be redeclared
+        931 |     LeveledGSS isolate_none() const {
+            |                ^
+      aug25/models/leveled_gss.hpp:851:16: note: previous definition is here
+        851 |     LeveledGSS isolate_none() const {
+            |                ^
+      aug25/models/leveled_gss.hpp:945:16: error: class member cannot be redeclared
+        945 |     LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
+            |                ^
+      aug25/models/leveled_gss.hpp:865:16: note: previous definition is here
+        865 |     LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
+            |                ^
+      In file included from aug25/models/precompute3_engine.cpp:1:
+      In file included from /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/pybind11.h:12:
+      In file included from /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/detail/class.h:12:
+      In file included from /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/attr.h:13:
+      In file included from /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/detail/common.h:317:
+      In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/forward_list:1592:
+      In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/functional:557:
+      In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__functional/boyer_moore_searcher.h:28:
+      In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/unordered_map:595:
+      /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__hash_table:1559:23: error: cannot initialize object parameter of type 'std::__hash_node_base<std::__hash_node<std::__hash_value_type<int, leveled_gss::LeveledGSS<int, Acc>>, void *> *>' with an expression of type 'std::__hash_node<std::__hash_value_type<int, leveled_gss::LeveledGSS<int, Acc>>, void *>'
+       1559 |       __pn->__next_ = __h.get()->__ptr();
+            |                       ^~~~~~~~~
+      /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/unordered_map:1743:8: note: in instantiation of function template specialization 'std::__hash_table<std::__hash_value_type<int, leveled_gss::LeveledGSS<int, Acc>>, std::__unordered_map_hasher<int, std::__hash_value_type<int, leveled_gss::LeveledGSS<int, Acc>>, std::hash<int>, std::equal_to<int>>, std::__unordered_map_equal<int, std::__hash_value_type<int, leveled_gss::LeveledGSS<int, Acc>>, std::equal_to<int>, std::hash<int>>, std::allocator<std::__hash_value_type<int, leveled_gss::LeveledGSS<int, Acc>>>>::__emplace_unique_key_args<int, const std::piecewise_construct_t &, std::tuple<const int &>, std::tuple<>>' requested here
+       1743 |       .__emplace_unique_key_args(__k, piecewise_construct, std::forward_as_tuple(__k), std::forward_as_tuple())
+            |        ^
+      aug25/models/precompute3_engine.cpp:123:15: note: in instantiation of member function 'std::unordered_map<int, leveled_gss::LeveledGSS<int, Acc>>::operator[]' requested here
+        123 |         state_[tokenizer_initial_state_] = std::move(init);
+            |               ^
+      In file included from aug25/models/precompute3_engine.cpp:1:
+      In file included from /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/pybind11.h:12:
+      In file included from /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/detail/class.h:12:
+      In file included from /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/attr.h:13:
+      In file included from /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/site-packages/pybind11/include/pybind11/detail/common.h:317:
+      In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/forward_list:1592:
+      In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/functional:557:
+      In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__functional/boyer_moore_searcher.h:28:
+      In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/unordered_map:595:
+      /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__hash_table:1563:79: error: cannot initialize object parameter of type 'std::__hash_node_base<std::__hash_node<std::__hash_value_type<int, leveled_gss::LeveledGSS<int, Acc>>, void *> *>' with an expression of type 'std::__hash_node<std::__hash_value_type<int, leveled_gss::LeveledGSS<int, Acc>>, void *>'
+       1563 |         __bucket_list_[std::__constrain_hash(__h->__next_->__hash(), __bc)] = __h.get()->__ptr();
+            |                                                                               ^~~~~~~~~
+      /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__hash_table:1568:12: error: static_cast from 'pointer' (aka 'std::__hash_node<std::__hash_value_type<int, leveled_gss::LeveledGSS<int, Acc>>, void *> *') to '__next_pointer' (aka 'std::__hash_node_base<std::__hash_node<std::__hash_value_type<int, leveled_gss::LeveledGSS<int, Acc>>, void *> *> *'), which are not related by inheritance, is not allowed
+       1568 |     __nd = static_cast<__next_pointer>(__h.release());
+            |            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      7 errors generated.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -11600,437 +12341,167 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are targeted, incremental changes to fix the scaling problems by reducing unnecessary allocations and Python-interop overhead, and by preserving structural sharing so pointer-identity fast paths can trigger.
+      Hello! I see you're running into some C++ compilation errors. These seem to stem from a couple of issues in the `leveled_gss.hpp` header file: redeclared functions due to a copy-paste error, and the `LeveledGSS` class not being explicitly defined as copyable/movable, which can cause problems with STL containers like `std::unordered_map`.
 
-      High-level overview of what we’re changing:
-      - Build in Release by default (O3, NDEBUG). Make ASan optional via SANITIZE=1. The current O0 + ASan build is drastically slower.
-      - In leveled_gss.hpp:
-        - Reuse children maps when only the “empty” accumulator changes, preserving pointer identity and enabling fast “is-equal” short-circuits during merges.
-        - Reorder an expensive content-equality check in merge_interfaces to run only if cheaper pointer checks fail.
-      - In precompute3_engine.cpp:
-        - Convert parser dest state bitsets to pure C++ ranges once at parse time, so we avoid Python calls for membership tests during get_mask.
-        - Compute popped.peek() once per edge (not once per dest), reducing repeated work.
-        - Keep all behavior identical to the Python reference.
+      Here are the step-by-step instructions to fix these issues, followed by the git diff.
 
-      Step-by-step instructions
+      ### Step-by-step Instructions
 
-      1) Build in Release by default; make ASan optional.
-      - File: run_rust_and_cpp_models.sh
-      - Replace the hardcoded -O0 -fsanitize=address with -O3 -DNDEBUG, and gate sanitizer under SANITIZE=1.
-      - This alone removes a massive constant-factor slowdown from running address sanitizer on every benchmark.
+      #### 1. Fix `leveled_gss.hpp`
 
-      2) Preserve structural sharing and avoid unnecessary equality checks in the C++ GSS.
-      - File: python/aug25/models/leveled_gss.hpp
-      - In merge_interfaces, reorder the condition to check:
-        1) a->acc pointer equality, then
-        2) children pointer equality, and only then
-        3) expensive content equality of Acc.
-        This reduces costly Acc::operator== calls.
-      - In apply, prune, and apply_and_prune:
-        - If only the node’s “empty” accumulator changed (children untouched), build the new UpperBranch reusing the original children shared_ptr. This preserves pointer identity for the children map so downstream merges see “the same” children and hit fast-paths.
-        - Keep existing correctness (promotion is still applied).
+      I will make two changes to this file:
 
-      3) Avoid Python calls during get_mask for state membership checks and avoid repeated peek() calculations per dest.
-      - File: python/aug25/models/precompute3_engine.cpp
-      - At parse time, convert each dest’s Bitset to:
-        - a boolean wildcard (empty bitset means “all states”),
-        - and a C++ vector of inclusive ranges for non-empty bitsets.
-      - Introduce a lightweight C++ contains_in_ranges helper.
-      - In get_mask, call contains_in_ranges (or use wildcard) instead of bitset.contains (Python), and compute popped.peek() once per edge before iterating dests.
-      - Everything else remains identical to the reference behavior.
+      1.  **Add "Rule of Five" Special Member Functions:** To ensure the `LeveledGSS` class behaves correctly when used inside `std::unordered_map`, I'll explicitly default its copy/move constructors and assignment operators.
+      2.  **Remove Duplicated Functions:** I'll remove the duplicated definitions of the `isolate_none` and `isolate_many` methods that are causing the redeclaration errors.
 
-      After applying patches
-      - Rebuild via: bash run_rust_and_cpp_models.sh
-      - Then run your benchmark script as before. You should now see:
-        - Much lower Python-interop overhead in get_mask.
-        - Pointer identity fast-paths triggers in merges.
-        - Release build performance instead of debug+ASan performance.
+      Here are the edits:
 
-      Git patches
+      *   **Open the file `python/aug25/models/leveled_gss.hpp`**.
 
-      diff --git a/run_rust_and_cpp_models.sh b/run_rust_and_cpp_models.sh
-      index 82a4b5a..f8e8c70 100755
-      --- a/run_rust_and_cpp_models.sh
-      +++ b/run_rust_and_cpp_models.sh
-      @@ -58,22 +58,37 @@ cd "${PROJECT_ROOT}/python"
-       EXT_SUFFIX="$(python3 - << 'PY'
-       import sysconfig
-       print(sysconfig.get_config_var("EXT_SUFFIX"))
-       PY
-       )"
-       
-       PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
-       CXX="${CXX:-c++}"
-      -LDFLAGS=""
-      +CXXFLAGS="-O3 -DNDEBUG -std=c++17 -shared -fPIC"
-      +LDFLAGS=""
-       if [[ "$(uname)" == "Darwin" ]]; then
-         LDFLAGS="-undefined dynamic_lookup"
-       fi
-       
-      +# Optional ASan (opt-in)
-      +if [[ "${SANITIZE:-0}" == "1" ]]; then
-      +  echo "Building with AddressSanitizer (SANITIZE=1)"
-      +  CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c++17 -shared -fPIC"
-      +  LDFLAGS="${LDFLAGS} -fsanitize=address"
-      +fi
-      +
-       # Compile icl_rangeset (Boost.ICL-backed RangeSet)
-      -${CXX} -g -O0 -fsanitize=address -std=c++17 -shared -fPIC \
-      +${CXX} ${CXXFLAGS} \
-         ${PYBIND_INCLUDES} \
-         -I"${BOOST_DIR}" \
-         "aug25/models/icl_rangeset.cpp" \
-         -o "aug25/models/icl_rangeset${EXT_SUFFIX}" \
-         ${LDFLAGS}
-       
-       # Compile precompute3_engine (C++ commit/get_mask engine)
-      -${CXX} -g -O0 -fsanitize=address -std=c++17 -shared -fPIC \
-      +${CXX} ${CXXFLAGS} \
-         ${PYBIND_INCLUDES} \
-         "aug25/models/precompute3_engine.cpp" \
-         -o "aug25/models/precompute3_engine${EXT_SUFFIX}" \
-         ${LDFLAGS}
-       
-       echo "Build complete:"
-       echo " - python/aug25/models/icl_rangeset${EXT_SUFFIX}"
-       echo " - python/aug25/models/precompute3_engine${EXT_SUFFIX}"
+      *   **First**, locate the `LeveledGSS` class definition around line 527. Add the following block of code right after the existing constructors (around line 534):
+
+          ```cpp
+              // Rule of 5
+              LeveledGSS(const LeveledGSS& other) = default;
+              LeveledGSS(LeveledGSS&& other) noexcept = default;
+              LeveledGSS& operator=(const LeveledGSS& other) = default;
+              LeveledGSS& operator=(LeveledGSS&& other) noexcept = default;
+              ~LeveledGSS() = default;
+          ```
+
+      *   **Second**, scroll down to the end of the first definition of the `isolate_many` method, which should be around line 889. Delete the entire block of code containing the four duplicated function definitions that follow it. This block starts around line 891 and ends around line 959, just before the comment `// Apply: Acc -> NewAcc ...`.
+
+          The block to delete starts with:
+          ```cpp
+          LeveledGSS isolate_none() const {
+          ```
+          ...and ends with the closing brace of the last duplicated `isolate_many` function.
+
+      After applying these changes, the compilation should succeed.
+
+      ### Git Diffs
+
+      Here is the git diff for the changes described above.
+
+      ```diff
       diff --git a/python/aug25/models/leveled_gss.hpp b/python/aug25/models/leveled_gss.hpp
-      index 64f6a13..a2e0d6a 100644
+      index 92c8130..a22b793 100644
       --- a/python/aug25/models/leveled_gss.hpp
       +++ b/python/aug25/models/leveled_gss.hpp
-      @@ -292,10 +292,12 @@ static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const In
-           if (a.get() == b.get()) return a;
+      @@ -531,6 +531,13 @@
+           explicit LeveledGSS(const UpperPtr<T, Acc>& u) : inner(u) {}
+           explicit LeveledGSS(UpperPtr<T, Acc>&& u) : inner(std::move(u)) {}
        
-      -    if (a->acc.get() == b->acc.get() || (*(a->acc) == *(b->acc)) || a->_children.get() == b->_children.get()) {
-      +    // Prefer cheap pointer checks; defer expensive content equality to last.
-      +    if (a->acc.get() == b->acc.get() ||
-      +        a->_children.get() == b->_children.get() ||
-      +        (*(a->acc) == *(b->acc))) {
-               auto merged_children = _merge_children_by_depth<LowerPtr<T>, std::function<LowerPtr<T>(LowerPtr<T>, LowerPtr<T>)>, T>(
-                   *a->_children, *b->_children,
-                   [](LowerPtr<T> l1, LowerPtr<T> l2) { return merge_lower<T>(l1, l2); }
-               );
-               auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
-               auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
-      @@ -409,28 +411,45 @@ class LeveledGSS {
-                       } else {
-                           auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                           auto new_empty = ub->empty ? apply_func(ub->empty) : std::shared_ptr<Acc>(nullptr);
-      -                    bool changed = (new_empty.get() != ub->empty.get());
-      -                    auto new_children = std::make_shared<UpperChildren<T, Acc>>();
-      +                    bool changed = (new_empty.get() != ub->empty.get());
-      +                    auto new_children = std::make_shared<UpperChildren<T, Acc>>();
-      +                    bool any_child_map_changed = false;
-       
-                           for (auto &kv : *ub->_children) {
-                               const T& v = kv.first;
-                               const auto& kids = kv.second;
-                               std::unordered_map<int, UpperPtr<T, Acc>> new_kids;
-                               bool child_map_changed = false;
-                               for (auto &dkv : kv.second) {
-                                   auto new_child = transform(dkv.second);
-                                   if (new_child.get() != dkv.second.get()) child_map_changed = true;
-                                   new_kids[new_child->_max_depth] = new_child;
-                               }
-       
-                               if (child_map_changed) {
-                                   changed = true;
-      +                            any_child_map_changed = true;
-                                   if (!new_kids.empty()) (*new_children)[v] = std::move(new_kids);
-                               } else {
-                                   (*new_children)[v] = kids;
-                               }
-                           }
-       
-                           if (!changed) {
-                               memo[nid] = node;
-                               return node;
-                           }
-       
-      -                    auto res = std::make_shared<UpperBranch<T, Acc>>(std::move(new_children), new_empty);
-      +                    // If only empty changed, preserve children pointer identity to trigger fast-path merges.
-      +                    if (!any_child_map_changed) {
-      +                        auto res = std::make_shared<UpperBranch<T, Acc>>(ub->_children, new_empty);
-      +                        auto promoted = try_promote<T, Acc>(res);
-      +                        memo[nid] = promoted;
-      +                        return promoted;
-      +                    }
+      +    // Rule of 5
+      +    LeveledGSS(const LeveledGSS& other) = default;
+      +    LeveledGSS(LeveledGSS&& other) noexcept = default;
+      +    LeveledGSS& operator=(const LeveledGSS& other) = default;
+      +    LeveledGSS& operator=(LeveledGSS&& other) noexcept = default;
+      +    ~LeveledGSS() = default;
       +
-      +                    auto res = std::make_shared<UpperBranch<T, Acc>>(std::move(new_children), new_empty);
-                           auto promoted = try_promote<T, Acc>(res);
-                           memo[nid] = promoted;
-                           return promoted;
-                       }
-                   };
-       
-               return LeveledGSS(transform(inner));
-      @@ -459,28 +478,46 @@ class LeveledGSS {
-                       } else {
-                           auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                           auto new_empty = (ub->empty && predicate(ub->empty)) ? ub->empty : std::shared_ptr<Acc>(nullptr);
-      -                    bool changed = (new_empty.get() != ub->empty.get());
-      -                    auto new_children = std::make_shared<UpperChildren<T, Acc>>();
-      +                    bool changed = (new_empty.get() != ub->empty.get());
-      +                    auto new_children = std::make_shared<UpperChildren<T, Acc>>();
-      +                    bool any_child_map_changed = false;
-       
-                           for (auto &kv : *ub->_children) {
-                               const T& v = kv.first;
-                               const auto& kids = kv.second;
-                               std::unordered_map<int, UpperPtr<T, Acc>> new_kids;
-                               bool child_map_changed = false;
-                               for (auto &dkv : kids) {
-                                   auto new_child = transform(dkv.second);
-                                   if (new_child.get() != dkv.second.get()) child_map_changed = true;
-                                   if (new_child) new_kids[new_child->_max_depth] = new_child;
-                               }
-                               if (new_kids.size() != kids.size()) child_map_changed = true;
-       
-                               if (child_map_changed) {
-                                   changed = true;
-      +                            any_child_map_changed = true;
-                                   if (!new_kids.empty()) (*new_children)[v] = std::move(new_kids);
-                               } else {
-                                   (*new_children)[v] = kids;
-                               }
-                           }
-       
-                           if (!changed) {
-                               memo[nid] = node;
-                               return node;
-                           }
-      -                    if (new_children->empty() && !new_empty) {
-      +                    if (!any_child_map_changed) {
-      +                        // Only empty changed; reuse children pointer to preserve identity.
-      +                        // If children are empty too and new_empty was removed, node is pruned.
-      +                        bool children_empty = ub->_children->empty();
-      +                        if (children_empty && !new_empty) {
-      +                            memo[nid] = nullptr;
-      +                            return nullptr;
-      +                        }
-      +                        auto res = std::make_shared<UpperBranch<T, Acc>>(ub->_children, new_empty);
-      +                        auto promoted = try_promote<T, Acc>(res);
-      +                        memo[nid] = promoted;
-      +                        return promoted;
-      +                    }
-      +                    if (new_children->empty() && !new_empty) {
-                               memo[nid] = nullptr;
-                               return nullptr;
-                           }
-      @@ -522,28 +559,46 @@ class LeveledGSS {
-                       } else {
-                           auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
-                           auto new_empty = ub->empty ? mutate_acc(ub->empty) : std::shared_ptr<Acc>(nullptr);
-      -                    bool changed = (new_empty.get() != ub->empty.get());
-      -                    auto new_children = std::make_shared<UpperChildren<T, Acc>>();
-      +                    bool changed = (new_empty.get() != ub->empty.get());
-      +                    auto new_children = std::make_shared<UpperChildren<T, Acc>>();
-      +                    bool any_child_map_changed = false;
-                           for (auto &kv : *ub->_children) {
-                               const T& v = kv.first;
-                               const auto& kids = kv.second;
-                               std::unordered_map<int, UpperPtr<T, Acc>> new_kids;
-                               bool child_map_changed = false;
-                               for (auto &dkv : kv.second) {
-                                   auto new_child = transform(dkv.second);
-                                   if (new_child.get() != dkv.second.get()) child_map_changed = true;
-                                   if (new_child) new_kids[new_child->_max_depth] = new_child;
-                               }
-                               if (new_kids.size() != kids.size()) child_map_changed = true;
-       
-                               if (child_map_changed) {
-                                   changed = true;
-      +                            any_child_map_changed = true;
-                                   if (!new_kids.empty()) (*new_children)[v] = std::move(new_kids);
-                               } else {
-                                   (*new_children)[v] = kids;
-                               }
-                           }
-       
-                           if (!changed) {
-                               memo[nid] = node;
-                               return node;
-                           }
-       
-      -                    if (new_children->empty() && !new_empty) {
-      +                    if (!any_child_map_changed) {
-      +                        // Only empty changed; reuse children pointer to preserve identity.
-      +                        bool children_empty = ub->_children->empty();
-      +                        if (children_empty && !new_empty) {
-      +                            memo[nid] = nullptr;
-      +                            return nullptr;
-      +                        }
-      +                        auto res = std::make_shared<UpperBranch<T, Acc>>(ub->_children, new_empty);
-      +                        auto promoted = try_promote<T, Acc>(res);
-      +                        memo[nid] = promoted;
-      +                        return promoted;
-      +                    }
-      +                    if (new_children->empty() && !new_empty) {
-                               memo[nid] = nullptr;
-                               return nullptr;
-                           }
-      diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
-      index 0f7a3a1..fe9e4a1 100644
-      --- a/python/aug25/models/precompute3_engine.cpp
-      +++ b/python/aug25/models/precompute3_engine.cpp
-      @@ -212,12 +212,17 @@ private:
-           };
-       
-           struct DestEdge {
-               int dest_idx;
-      -        py::object state_bv; // _sep1.Bitset
-      +        bool wildcard{false}; // empty bitset -> matches all
-      +        std::vector<std::pair<int,int>> state_ranges; // inclusive ranges
-           };
-       
-           struct Edge {
-               int pop;
-               py::object llm_bv_rangeset; // icl_rangeset.RangeSet (for intersection)
-               std::vector<DestEdge> dests;
-           };
-       
-      @@ -244,6 +249,19 @@ private:
-           py::object range_from_indices_;
-           py::object range_from_ranges_;
-       
-      +    // Check membership in a vector of inclusive ranges (sorted, non-overlapping).
-      +    static bool contains_in_ranges(const std::vector<std::pair<int,int>>& ranges, int v) {
-      +        // Binary search by upper_bound on end values
-      +        int lo = 0;
-      +        int hi = static_cast<int>(ranges.size()) - 1;
-      +        while (lo <= hi) {
-      +            int mid = (lo + hi) >> 1;
-      +            const auto& pr = ranges[mid];
-      +            if (v < pr.first) hi = mid - 1;
-      +            else if (v > pr.second) lo = mid + 1;
-      +            else return true;
-      +        }
-      +        return false;
-      +    }
-           // -----------------------------
-           // Parsing helpers
-           // -----------------------------
-      @@ -336,13 +354,23 @@ private:
-                           py::tuple dd = py::cast<py::tuple>(d);
-                           int dest_idx = py::cast<int>(dd[0]);
-                           py::object state_bv_json = dd[1];
-       
-      -                    py::object state_bv = BitsetClass.attr("from_json_string")(dumps(state_bv_json));
-      -                    dests.push_back(DestEdge{dest_idx, state_bv});
-      +                    py::object state_bv = BitsetClass.attr("from_json_string")(dumps(state_bv_json));
-      +                    bool wildcard = state_bv.attr("is_empty")().cast<bool>();
-      +                    std::vector<std::pair<int,int>> ranges;
-      +                    if (!wildcard) {
-      +                        py::object py_ranges = state_bv.attr("to_ranges")();
-      +                        ranges.reserve(py::len(py_ranges));
-      +                        for (auto it : py_ranges) {
-      +                            py::tuple t = py::cast<py::tuple>(it);
-      +                            int l = py::cast<int>(t[0]);
-      +                            int r = py::cast<int>(t[1]);
-      +                            ranges.emplace_back(l, r);
-      +                        }
-      +                    }
-      +                    dests.push_back(DestEdge{dest_idx, wildcard, std::move(ranges)});
-                       }
-       
-                       Edge e{pop, llm_bv_rs, std::move(dests)};
-                       info.edges.push_back(std::move(e));
-                   }
-      @@ -410,13 +438,6 @@ private:
-               return g.apply(transformer);
+           static LeveledGSS from_stacks(const std::vector<std::pair<std::vector<T>, std::shared_ptr<Acc>>>& stacks) {
+               // Canonicalize stacks: merge Acc for identical vectors
+               struct VecHash {
+      @@ -886,72 +893,6 @@
+               }
            }
        
-      -    bool state_matches_bitset(const py::object& bitset, int sid) const {
-      -        // Treat empty bitset as wildcard (matches all)
-      -        bool empty = bitset.attr("is_empty")().cast<bool>();
-      -        if (empty) return true;
-      -        return bitset.attr("contains")(py::int_(sid)).cast<bool>();
+      -    LeveledGSS isolate_none() const {
+      -        // Keep only empty stacks (value == None)
+      -        std::shared_ptr<Acc> empty_acc;
+      -        if (!inner->is_interface()) {
+      -            auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+      -            empty_acc = ub->empty;
+      -        } else {
+      -            auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+      -            empty_acc = it->empty;
+      -        }
+      -        auto new_root = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, empty_acc);
+      -        return LeveledGSS(try_promote<T, Acc>(new_root));
       -    }
       -
-           Leveled process_token(const Leveled& g, int terminal_id) {
-               // heads_by_state: state_id -> vector<Leveled>
-               std::unordered_map<int, std::vector<Leveled>> heads_by_state;
-      @@ -520,16 +541,20 @@ public:
-                       for (const Edge &e : info.edges) {
-                           Leveled popped = gss_node.popn(e.pop);
-                           if (popped.is_empty()) continue;
-       
-      +                    // Compute top states once per edge
-      +                    std::unordered_set<int> top = popped.peek();
-      +
-                           for (const DestEdge &de : e.dests) {
-      -                        // Determine which top states to keep
-      +                        // Determine which top states to keep for this destination
-                               std::unordered_set<int> keep;
-      -                        std::unordered_set<int> top = popped.peek();
-      -                        for (int top_sid : top) {
-      -                            if (state_matches_bitset(de.state_bv, top_sid)) keep.insert(top_sid);
-      -                        }
-      +                        for (int top_sid : top) {
-      +                            if (de.wildcard || contains_in_ranges(de.state_ranges, top_sid)) {
-      +                                keep.insert(top_sid);
-      +                            }
-      +                        }
-                               if (keep.empty()) continue;
-       
-                               Leveled child = popped.isolate_many(keep);
-                               if (child.is_empty()) continue;
-       
-                               // intersect_and_prune with edge's llm_bv (as RangeSet)
-                               Leveled child2 = intersect_llm_mask(child, e.llm_bv_rangeset, &intersect_acc_memo);
-                               if (child2.is_empty()) continue;
-       
-                               int dnode = de.dest_idx;
-                               auto it_child = values.find(dnode);
-                               if (it_child != values.end()) {
-                                   values[dnode] = values[dnode].merge(child2);
-                               } else {
-                                   values[dnode] = std::move(child2);
-                               }
-                               enqueue(arena_.at(dnode).max_depth, dnode);
-                           }
-                       }
-                   }
-                   // Clean up bucket
-                   todo.erase(depth);
-               }
-       
-               // Convert internal mask indices to original
-               std::vector<unsigned long long> original_indices;
-               py::object idxs = final_mask.attr("to_indices")();
-               for (auto iobj : idxs) {
-                   int i = py::cast<int>(iobj);
-                   if (internal_to_original_map_.contains(py::int_(i))) {
-                       int mapped = py::cast<int>(internal_to_original_map_[py::int_(i)]);
-                       original_indices.push_back(static_cast<unsigned long long>(mapped));
-                   }
-               }
-               py::object res = range_from_indices_(original_indices);
-               return res;
-           }
+      -    LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
+      -        std::shared_ptr<Acc> new_empty = nullptr;
+      -        if (!inner->is_interface()) {
+      -            auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+      -            auto filtered_children = std::make_shared<UpperChildren<T, Acc>>();
+      -            for (auto &kv : *ub->_children) {
+      -                if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
+      -            }
+      -            auto res = std::make_shared<UpperBranch<T, Acc>>(std::move(filtered_children), new_empty);
+      -            return LeveledGSS(try_promote<T, Acc>(res));
+      -        } else {
+      -            auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+      -            auto filtered_children = std::make_shared<LowerChildren<T>>();
+      -            for (auto &kv : *it->_children) {
+      -                if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
+      -            }
+      -            if (!filtered_children->empty()) {
+      -                auto res = std::make_shared<Interface<T, Acc>>(std::move(filtered_children), it->acc, new_empty);
+      -                return LeveledGSS(res);
+      -            } else {
+      -                auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, new_empty);
+      -                return LeveledGSS(try_promote<T, Acc>(res));
+      -            }
+      -        }
+      -    }
+      -
+      -    LeveledGSS isolate_none() const {
+      -        // Keep only empty stacks (value == None)
+      -        std::shared_ptr<Acc> empty_acc;
+      -        if (!inner->is_interface()) {
+      -            auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+      -            empty_acc = ub->empty;
+      -        } else {
+      -            auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+      -            empty_acc = it->empty;
+      -        }
+      -        auto new_root = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, empty_acc);
+      -        return LeveledGSS(try_promote<T, Acc>(new_root));
+      -    }
+      -
+      -    LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
+      -        std::shared_ptr<Acc> new_empty = nullptr;
+      -        if (!inner->is_interface()) {
+      -            auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+      -            auto filtered_children = std::make_shared<UpperChildren<T, Acc>>();
+      -            for (auto &kv : *ub->_children) {
+      -                if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
+      -            }
+      -            auto res = std::make_shared<UpperBranch<T, Acc>>(std::move(filtered_children), new_empty);
+      -            return LeveledGSS(try_promote<T, Acc>(res));
+      -        } else {
+      -            auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+      -            auto filtered_children = std::make_shared<LowerChildren<T>>();
+      -            for (auto &kv : *it->_children) {
+      -                if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
+      -            }
+      -            if (!filtered_children->empty()) {
+      -                auto res = std::make_shared<Interface<T, Acc>>(std::move(filtered_children), it->acc, new_empty);
+      -                return LeveledGSS(res);
+      -            } else {
+      -                auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, new_empty);
+      -                return LeveledGSS(try_promote<T, Acc>(res));
+      -            }
+      -        }
+      -    }
+      -
+           // Apply: Acc -> NewAcc (but we keep Acc type same for simplicity here)
+           LeveledGSS apply(
+               const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& func,
 
-      What changed and why
-
-      - run_rust_and_cpp_models.sh:
-        - Default to Release (-O3 -DNDEBUG). ASan is now opt-in via SANITIZE=1. The prior O0 + ASan build was a primary cause of “not anywhere near as fast.”
-
-      - leveled_gss.hpp:
-        - merge_interfaces: Moved expensive content equality check (*(a->acc) == *(b->acc)) after pointer checks (acc pointer equality and children pointer equality). This reduces heavy Acc equality checks across many merges.
-        - apply/prune/apply_and_prune: When only the “empty” accumulator changes and children don’t, we reuse the original children shared_ptr when creating the new UpperBranch. This preserves identity of the children map, so later merges see pointer-equal children maps and can short-circuit. This mirrors how the Python version benefits from object identity to avoid deep work.
-
-      - precompute3_engine.cpp:
-        - parse_arena: Dest state bitsets are converted into native C++ ranges plus a wildcard flag. No Python calls in tight membership tests during get_mask anymore.
-        - get_mask: Compute popped.peek() once per edge; check dest membership with C++ contains_in_ranges (or wildcard) rather than Python bitset.contains calls.
-        - Removed state_matches_bitset which did Python calls; replaced with native checks.
-
-      These changes keep the algorithm semantically identical to your proven Python version but cut down on Python interop and unnecessary data churn, which are the typical culprits behind the poor scaling you observed.
+      ```
     metadata:
-  - user: |-
+  - user: |
       Apply result (git-llm mode):
-      No git diff blocks (```diff) found in the last assistant message.
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/leveled_gss.hpp
+      Applying patch to 'python/aug25/models/leveled_gss.hpp' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/leveled_gss.hpp.
     metadata:
-  - user: 'Changes committed with message: "feat: Add isolate_none and isolate_many
-      to LeveledGSS"'
+  - user: 'Changes committed with message: "Fix: Add Rule of 5 and remove duplicate
+      functions in LeveledGSS"'
     metadata:
 ...
