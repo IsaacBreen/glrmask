@@ -199,13 +199,7 @@ _merge_children_by_depth(
             for (size_t i = 1; i < vec.size(); ++i) {
                 merged = merge_func(merged, vec[i]);
             }
-            int md = 0;
-            if constexpr (std::is_same<NodePtr, UpperPtr<TKey, Acc>>::value) {
-                md = merged->_max_depth;
-            } else {
-                md = merged->_max_depth;
-            }
-            v_out[md] = merged;
+            v_out[merged->_max_depth] = merged;
         }
         merged_children[v] = std::move(v_out);
     }
