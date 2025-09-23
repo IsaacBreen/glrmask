@@ -36,17 +36,14 @@ public:
           tokenizer_max_state_(tokenizer_max_state),
           parser_data_(std::move(parser_data)),
           roots_map_py_(std::move(roots_map_py)),
-          pmc_(std::move(possible_matches)),
           internal_to_original_map_(std::move(internal_to_original_map)) {
 
         if (!ignore_terminal_id_or_none.is_none()) {
             ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
         }
 
-        py::object range_from_ranges_ = py::module::import("python.aug25.models.icl_rangeset").attr("RangeSet").attr("from_ranges");
-
         // Universe RangeSet for get_mask init
-        universe_rangeset_ = range_from_ranges_(all_internal_llm_tokens_bitset_.attr("to_ranges")());
+        universe_rangeset_ = bitset_to_rangeset(all_internal_llm_tokens_bitset);
 
         // Parse roots_map into C++ map
         for (auto item : roots_map_py_) {
@@ -60,6 +57,7 @@ public:
 
         // Parse arena using JSON-encoded bitsets; convert to Bitset and RangeSet
         parse_arena(arena_py);
+        parse_pmc(possible_matches);
 
         // Initialize state: one GSS per tokenizer initial state with start parser state on stack
         auto initial_acc = std::make_shared<Acc>();
