@@ -77,6 +77,7 @@ ${CXX} ${CXXFLAGS} \
 # Compile precompute3_engine (C++ commit/get_mask engine)
 ${CXX} ${CXXFLAGS} \
   ${PYBIND_INCLUDES} \
+  -I"${BOOST_DIR}" \
   "aug25/models/precompute3_engine.cpp" \
   -o "aug25/models/precompute3_engine${EXT_SUFFIX}" \
   ${LDFLAGS}
