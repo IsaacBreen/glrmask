@@ -59,7 +59,7 @@ if [[ "$(uname)" == "Darwin" ]]; then
 fi
 
 # Compile icl_rangeset (Boost.ICL-backed RangeSet)
-${CXX} -g -O0 -std=c++17 -shared -fPIC \
+${CXX} -g -O0 -fsanitize=address -std=c++17 -shared -fPIC \
   ${PYBIND_INCLUDES} \
   -I"${BOOST_DIR}" \
   "aug25/models/icl_rangeset.cpp" \
@@ -67,7 +67,7 @@ ${CXX} -g -O0 -std=c++17 -shared -fPIC \
   ${LDFLAGS}
 
 # Compile precompute3_engine (C++ commit/get_mask engine)
-${CXX} -g -O0 -std=c++17 -shared -fPIC \
+${CXX} -g -O0 -fsanitize=address -std=c++17 -shared -fPIC \
   ${PYBIND_INCLUDES} \
   "aug25/models/precompute3_engine.cpp" \
   -o "aug25/models/precompute3_engine${EXT_SUFFIX}" \
