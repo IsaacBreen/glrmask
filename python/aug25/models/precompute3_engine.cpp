@@ -428,27 +428,27 @@ public:
         stats.start("get_mask.total");
         py::gil_scoped_release release; // Release GIL for the whole C++ part
 
+
         // values: node_id -> GSS
         std::unordered_map<int, Leveled> values;
-        stats.inc("get_mask.initial_tokenizer_states", state_.size());
-
-
-        std::priority_queue<std::pair<int, int>> depth_heap; // {depth, node_id}
-        std::unordered_set<int> enqueued_nodes;
+        // todo buckets: depth -> set of nodes
+        std::unordered_map<int, std::set<int>> todo;
+        // min-heap for depths
+        std::priority_queue<int> depth_heap;
 
         auto enqueue = [&](int d, int n) {
-            if (enqueued_nodes.count(n)) {
-                return;
-            }
-            stats.inc("get_mask.traversal.enqueues");
-            enqueued_nodes.insert(n);
-            depth_heap.push({d, n});
+            auto &bucket = todo[d];
+            bool first = bucket.empty();
+            bucket.insert(n);
+            if (first) depth_heap.push(d);
         };
 
         // This memoization cache is critical for performance. It's shared across all GSSs
         // being initialized, mirroring the Python implementation's optimization.
         std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> init_acc_memo;
 
+        values.reserve(state_.size());
+        todo.reserve(state_.size());
         // --- Initial GSS Stats ---
         stats.start("get_mask.initial_stats");
         std::unordered_set<std::shared_ptr<Acc>> all_initial_accs;
@@ -496,10 +496,16 @@ public:
         int max_depth_reached = 0;
         std::unordered_set<int> visited_nodes;
         while (!depth_heap.empty()) {
-            auto [depth, node] = depth_heap.top();
-            depth_heap.pop();
+            int depth = depth_heap.top(); depth_heap.pop();
+            auto &bucket = todo[depth];
+
+            while (!bucket.empty()) {
+                int node = *bucket.begin();
+                bucket.erase(bucket.begin());
+
             max_depth_reached = std::max(max_depth_reached, depth);
             stats.inc("get_mask.traversal.depth_heap.pops");
+
             stats.inc("get_mask.traversal.nodes_processed");
             visited_nodes.insert(node);
 
@@ -563,10 +569,7 @@ public:
                 // Apply LLM limiter once per edge (not per destination) to avoid repeated
                 // expensive apply_and_prune work. The value-based acc_memo is critical
                 // for performance, replicating the Python version's key optimization.
-                std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>,
-                                   std::hash<std::shared_ptr<Acc>>,
-                                   std::equal_to<std::shared_ptr<Acc>>> acc_memo;
-                Leveled popped_limited = intersect_llm_mask(popped, llm_bv, acc_memo);
+                Leveled popped_limited = intersect_llm_mask(popped, llm_bv);
                 if (popped_limited.is_empty()) {
                     stats.inc("get_mask.traversal.edge.popped_pruned_empty");
                     continue;
@@ -597,7 +600,6 @@ public:
                     stats.start("get_mask.main_loop.edge.isolate_many");
                     Leveled child2 = popped_limited.isolate_many(keep);
                     stats.stop("get_mask.main_loop.edge.isolate_many");
-                    stats.inc("get_mask.intersect_and_prune.memo_size.sum", acc_memo.size());
 
                     if (child2.is_empty()) {
                         stats.inc("get_mask.traversal.edge.child_gss_pruned_empty");
@@ -622,6 +624,8 @@ public:
                     enqueue(arena_.at(dnode).max_depth, dnode);
                 }
             }
+            }
+            todo.erase(depth);
         }
         stats.stop("get_mask.main_loop");
         stats.inc("get_mask.traversal.max_depth_reached", max_depth_reached);
@@ -1136,10 +1140,7 @@ private:
 
     Leveled intersect_llm_mask(
         const Leveled& g,
-        const RangeSet& limiter,
-        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>,
-                           std::hash<std::shared_ptr<Acc>>,
-                           std::equal_to<std::shared_ptr<Acc>>>& value_memo
+        const RangeSet& limiter
     ) {
         auto& stats = Stats::get();
         stats.start("get_mask.main_loop.edge.apply_and_prune");
@@ -1147,29 +1148,18 @@ private:
         auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
             stats.inc("get_mask.intersect_and_prune.calls");
 
-            // Value-based memoization: check if we've already computed the result for an
-            // accumulator with this value.
-            auto it = value_memo.find(a);
-            if (it != value_memo.end()) {
-                stats.inc("get_mask.intersect_and_prune.memo_hits");
-                return it->second;
-            }
-
             stats.start("get_mask.intersect_and_prune.intersection");
             RangeSet new_mask = a->llm_mask.intersection_with(limiter);
             stats.stop("get_mask.intersect_and_prune.intersection");
             stats.inc("get_mask.data.llm_mask_after_intersect.len.sum", new_mask.size());
 
-            std::shared_ptr<Acc> result = nullptr;
-            if (!new_mask.is_empty()) {
-                auto na = std::make_shared<Acc>();
-                na->llm_mask = new_mask;
-                result = na;
-            } else {
+            if (new_mask.is_empty()) {
                 stats.inc("get_mask.intersect_and_prune.pruned_accs");
+                return nullptr;
             }
-            value_memo.emplace(a, result);
-            return result;
+            auto na = std::make_shared<Acc>();
+            na->llm_mask = new_mask;
+            return na;
         };
         auto result = g.apply_and_prune(mutator);
         stats.stop("get_mask.main_loop.edge.apply_and_prune");
