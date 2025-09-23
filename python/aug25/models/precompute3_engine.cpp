@@ -155,8 +155,8 @@ std::shared_ptr<UpperBranch<T, Acc>> interface_to_upperbranch(std::shared_ptr<In
     }
     
     auto new_empty = it->empty;
-    if (it->children.empty()) {
-        new_empty = _merge_optional_acc_impl<T, Acc>(it->empty, it->acc);
+    if (it->children.empty() && !it->empty) {
+        new_empty = it->acc;
     }
 
     return std::make_shared<UpperBranch<T, Acc>>(children, new_empty);
@@ -501,7 +501,10 @@ private:
             for (const auto& child : children) popped.push_back(_popn_upper(child, k - 1));
             auto merged = popped[0];
             for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper(merged, popped[i]);
-            return try_promote(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+            if (auto merged_ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(merged)) {
+                return try_promote(merged_ub);
+            }
+            return merged;
         }
         return create_empty().inner;
     }
