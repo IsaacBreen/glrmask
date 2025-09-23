@@ -23,6 +23,8 @@ if [ ! -d "python" ]; then
   exit 1
 fi
 
+export PYTHONPATH="${PROJECT_ROOT}/python:${PYTHONPATH:-}"
+
 # 2) Setup: download Boost headers locally and install pybind11
 BOOST_VERSION="1.83.0"
 BOOST_VER_UNDERSCORES="1_83_0"
@@ -74,6 +76,14 @@ ${CXX} ${CXXFLAGS} \
   -o "aug25/models/icl_rangeset${EXT_SUFFIX}" \
   ${LDFLAGS}
 
+# Compile leveled_gss_cpp (C++ LeveledGSS implementation)
+${CXX} ${CXXFLAGS} \
+  ${PYBIND_INCLUDES} \
+  -I"${BOOST_DIR}" \
+  "aug25/models/leveled_gss_py.cpp" \
+  -o "leveled_gss_cpp${EXT_SUFFIX}" \
+  ${LDFLAGS}
+
 # Compile precompute3_engine (C++ commit/get_mask engine)
 ${CXX} ${CXXFLAGS} \
   ${PYBIND_INCLUDES} \
@@ -84,6 +94,7 @@ ${CXX} ${CXXFLAGS} \
 
 echo "Build complete:"
 echo " - python/aug25/models/icl_rangeset${EXT_SUFFIX}"
+echo " - python/leveled_gss_cpp${EXT_SUFFIX}"
 echo " - python/aug25/models/precompute3_engine${EXT_SUFFIX}"
 
 # 4) Run benchmarks comparing Rust baseline vs C++-accelerated model
