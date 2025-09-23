@@ -1,1239 +1,446 @@
 local_system:
   attached_files:
-    - python/aug25/models/precompute3_model_pure_python.py
+    - python/run_benchmarks.sh
   conversation_file:
   compile_command:
   initial_file_contents:
-    python/aug25/models/precompute3_model_pure_python.py: |
-      import json
-      import heapq
-      import collections
-      import time
-      from typing import Dict, List, Tuple, Optional, Union, Any, TypedDict
-      from dataclasses import dataclass, field
-
-      from ..common_interface import GraphProvider, RangeSet
-      import _sep1 as ffi
-      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
-      # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
-
-
-      # Add a dummy profiler for when not running under kernprof
-      try:
-          # This will be injected by the kernprof script.
-          profile
-      except NameError:
-          # If not running under kernprof, create a dummy decorator.
-          def profile(func): return func
-
-
-      @dataclass(frozen=True)
-      class Reduce:
-          nonterminal_id: int
-          len: int
-          production_ids: Tuple[int, ...]
-
-
-      @dataclass(frozen=True)
-      class Split:
-          shift: Optional[int]
-          reduces: Dict[int, Dict[int, Tuple[int, ...]]]  # len -> nt_id -> pids
-
-
-      # Action can be a Shift (int), Reduce, or Split
-      Action = Union[int, Reduce, Split]
-
-
-      @dataclass
-      class Row:
-          actions: Dict[int, Action] = field(default_factory=dict)  # terminal_id -> Action
-          gotos: Dict[int, int] = field(default_factory=dict)  # nonterminal_id -> state_id
-
-
-      @dataclass
-      class ParserTable:
-          start_state_id: int
-          table: Dict[int, Row]
-
-
-      class ArenaValue(TypedDict, total=False):
-          clean_end: bool
-
-
-      class ArenaNode(TypedDict, total=False):
-          max_depth: int
-          children: List[Tuple[Tuple[int, RangeSet], List[Tuple[int, RangeSet]]]]
-          llm_bv_union: RangeSet
-          value: ArenaValue
-
-
-      @dataclass(frozen=True, eq=False)
-      class PyAcc:
-          terminals_union: Dict[int, RangeSet]
-          llm_mask: RangeSet
-
-          def __eq__(self, other):
-              if not isinstance(other, PyAcc):
-                  return NotImplemented
-              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
-
-          def __hash__(self):
-              # frozenset of items for hashable dict
-              return hash((len(self.terminals_union), self.llm_mask))
-
-          def merge(self, other: "PyAcc") -> "PyAcc":
-              # The dataclass is frozen, so we can't modify in-place.
-              # But terminals_union is a dict, which is mutable.
-              # We must be careful to create copies.
-              d1 = self.terminals_union
-              d2 = other.terminals_union
-              new_terminals_union = d1.copy()
-              for k, v in d2.items():
-                  if k in new_terminals_union:
-                      new_terminals_union[k] = new_terminals_union[k].union(v)
-                  else:
-                      new_terminals_union[k] = v
-
-              return PyAcc(
-                  terminals_union=new_terminals_union,
-                  llm_mask=self.llm_mask.union(other.llm_mask),
-              )
-
-          def is_empty(self):
-              return self.llm_mask.is_empty()
-
-
-      @dataclass
-      class Model(GraphProvider):
-          """
-          Precomputed trie model (third-generation), simplified and concise.
-          """
-          roots_map_raw: List[Tuple[int, int]]
-          arena: Dict[int, Any]  # This is Dict[int, ArenaNode] after __post_init__
-
-          roots_map: Dict[int, int] = field(init=False)
-          id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
-          max_depth: Dict[int, int] = field(init=False, default_factory=dict)
-          possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = field(init=False, default=None)
-          tokenizer: Optional[ffi.Regex] = field(init=False, default=None)
-          glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
-          ignore_terminal_id: Optional[int] = field(init=False, default=None)
-          parser_table: Optional[ParserTable] = field(init=False, default=None)
-          state: Dict[int, GSS] = field(init=False, default_factory=dict)
-          internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
-          all_internal_llm_tokens_bitset: Optional[RangeSet] = field(init=False, default=None)
-          tokenizer_initial_state: Optional[int] = field(init=False, default=None)
-          tokenizer_max_state: Optional[int] = field(init=False, default=None)
-          all_terminals_bitset: Optional[RangeSet] = field(init=False, default=None)
-
-          def __post_init__(self):
-              self.roots_map = {int(s): int(r) for s, r in self.roots_map_raw}
-
-              dumps = json.dumps
-              bs_from_json = ffi.Bitset.from_json_string
-
-              # Normalize arena children bitsets and cache max_depth
-              for uid, node in self.arena.items():
-                  uid_int = int(uid)
-                  self.max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
-
-                  children = node.get("children") or []
-                  if not children:
-                      node["children"] = []
-                      node["llm_bv_union"] = RangeSet.empty()
-                      continue
-
-                  new_children = []
-                  llm_bv_union = RangeSet.empty()
-                  for edge_key, dest_map in children:
-                      pop, llm_bv_json = edge_key
-                      llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
-                      # Convert to RangeSet for ffi-free operations in commit/get_mask
-                      llm_bv = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
-                      llm_bv_union = llm_bv_union.union(llm_bv)
-                      new_dest_map = []
-                      for dest_idx, state_bv_json in dest_map:
-                          state_bv_bitset = bs_from_json(dumps(state_bv_json))
-                          state_bv = RangeSet.from_ranges(state_bv_bitset.to_ranges())
-                          new_dest_map.append((int(dest_idx), state_bv))
-                      new_children.append(((int(pop), llm_bv), new_dest_map))
-                  node["children"] = new_children
-                  node["llm_bv_union"] = llm_bv_union
-
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              data = json.loads(s)
-              roots_map = data["precomputed3"]
-              arena_json = data["trie3_god"]
-              arena_values = arena_json.get("values", [])
-              arena = {int(k): v for k, v in arena_values}
-              model = Model(roots_map, arena)
-
-              # Load tokenizer and parser table from the full constraint JSON
-              constraint = ffi.GrammarConstraint.from_json_string(s)
-              model.tokenizer = constraint.tokenizer()
-              model.tokenizer_max_state = model.tokenizer.max_state()
-              model.glr_parser = constraint.glr_parser()
-              model.ignore_terminal_id = model.glr_parser.ignore_terminal_id
-              model.tokenizer_initial_state = model.tokenizer.initial_state_id()
-
-              parser_data = data['parser']
-              table_data = parser_data['stage_7_table']
-              start_state_id = parser_data['start_state_id']
-              py_table: Dict[int, Row] = {}
-              for state_id_str, row_data in table_data:
-                  state_id = int(state_id_str)
-                  py_row = Row()
-                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
-                      term_id = int(term_id_str)
-                      variant = action_data['variant']
-                      if variant == 'Shift':
-                          py_row.actions[term_id] = action_data['state_id']
-                      elif variant == 'Reduce':
-                          pids = tuple(sorted(action_data['production_ids']))
-                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
-                      elif variant == 'Split':
-                          shift = action_data['shift']
-                          reduces: Dict[int, Dict[int, Tuple[int, ...]]] = {}
-                          for len_str, nts_data in action_data['reduces']:
-                              len_int = int(len_str)
-                              nts: Dict[int, Tuple[int, ...]] = {}
-                              for nt_id_str, pids in nts_data:
-                                  nt_id_int = int(nt_id_str)
-                                  nts[nt_id_int] = tuple(sorted(pids))
-                              reduces[len_int] = nts
-                          py_row.actions[term_id] = Split(shift, reduces)
-                  for nt_id_str, goto_data in row_data['gotos']:
-                      nt_id = int(nt_id_str)
-                      if goto_data['state_id'] is not None:
-                          py_row.gotos[nt_id] = goto_data['state_id']
-                  py_table[state_id] = py_row
-              model.parser_table = ParserTable(start_state_id, py_table)
-
-              all_terminals = set()
-              for row in model.parser_table.table.values():
-                  all_terminals.update(row.actions.keys())
-              if model.ignore_terminal_id is not None:
-                  all_terminals.add(model.ignore_terminal_id)
-              model.all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
-
-              initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
-              initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
-              model.state = {model.tokenizer_initial_state: initial_gss}
-
-              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-              # Convert possible_matches_cache to RangeSet
-              pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
-              pmc_rs: Dict[int, Dict[int, RangeSet]] = {}
-              for tsid, inner in pmc_ffi.items():
-                  mapped: Dict[int, RangeSet] = {}
-                  for term_id, bit in inner.items():
-                      mapped[int(term_id)] = RangeSet.from_ranges(bit.to_ranges())
-                  pmc_rs[int(tsid)] = mapped
-              model.possible_matches_cache = pmc_rs
-              model.internal_to_original_map = constraint.internal_to_original_map()
-              # Convert universe LLM tokens bitset to RangeSet
-              all_internal = constraint.all_internal_llm_tokens_bitset()
-              model.all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
-              return model
-
-          @profile
-          def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, RangeSet]) -> GSS:
-              def predicate(acc: PyAcc) -> bool:
-                  disallowed_terminals_map = acc.terminals_union
-                  for state_id, matched_bv in terminals_map.items():
-                      disallowed_for_state = disallowed_terminals_map.get(state_id, RangeSet.empty())
-                      if not matched_bv.intersection(disallowed_for_state).is_empty():
-                          return False
-                  return True
-              return gss.prune(predicate)
-
-          @profile
-          def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
-              def apply_map(acc: PyAcc) -> PyAcc:
-                  old_map = acc.terminals_union
-                  new_bvs: Dict[int, RangeSet] = collections.defaultdict(RangeSet.empty)
-                  for old_sid, new_sid in state_map.items():
-                      bv_source = old_map.get(old_sid, RangeSet.empty())
-                      new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-
-                  return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
-              return gss.apply(apply_map)
-
-          @profile
-          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
-              def apply_disallow(acc: PyAcc) -> PyAcc:
-                  current_map = acc.terminals_union.copy()
-                  curr_bv = current_map.get(state_id, RangeSet.empty())
-                  to_add = RangeSet.from_indices([terminal_id])
-                  new_bv = curr_bv.union(to_add)
-                  current_map[state_id] = new_bv
-                  return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
-              return gss.apply(apply_disallow)
-
-          def get_root(self, state_id: int) -> int:
-              return self.roots_map[int(state_id)]
-
-          def is_end(self, node: int) -> bool:
-              return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
-
-          def iter_edges(self, node: int, token: int):
-              """
-              Explode packed transitions into (pop, state_id or None, dest_idx).
-              """
-              children = self.arena.get(node, {}).get("children") or []
-              for (pop, llm_bv), dests in children:
-                  if llm_bv.contains(token):
-                      for dest_idx, state_bv in dests:
-                          if state_bv.is_empty():
-                              yield (int(pop), None, int(dest_idx))
-                          else:
-                              for start, end in state_bv.to_ranges():
-                                  for sid in range(start, end + 1):
-                                      yield (int(pop), sid, int(dest_idx))
-
-          @profile
-          def commit(self, token_id: int):
-              t0 = time.perf_counter()
-              token_bytes = self.id_to_token[token_id]
-
-              # Build tokenizer maps
-              terminals_map: Dict[int, RangeSet] = {}
-              state_map: Dict[int, int] = {}
-              for tokenizer_sid in self.state.keys():
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  if end_state is not None:
-                      state_map[tokenizer_sid] = end_state
-                  matched_terminals = [terminal_id for terminal_id, _ in matches]
-                  terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
-
-              # Prune and map per-state GSS
-              temp_states: Dict[int, GSS] = {}
-              for tokenizer_sid, gss in self.state.items():
-                  pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-                  if not pruned_gss.is_empty():
-                      mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-                      temp_states[tokenizer_sid] = mapped_gss
-
-              current_state_for_processing = temp_states
-
-              new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
-              q = collections.deque()
-              for tokenizer_sid, gss in current_state_for_processing.items():
-                  q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
-
-              visited_q_items: set = set()
-
-              while q:
-                  offset, tokenizer_sid, gss = q.popleft()
-                  q_item_key = (offset, tokenizer_sid, id(gss))
-                  if q_item_key in visited_q_items:
-                      continue
-                  visited_q_items.add(q_item_key)
-
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-
-                  for terminal_id, width in matches:
-                      processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
-
-                      # Immediate re-match disallow
-                      if end_state is not None:
-                          accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
-                          if terminal_id in accessible_terms:
-                              processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
-
-                      if not processed_gss.is_empty():
-                          new_offset = offset + width
-                          next_tokenizer_sid = self.tokenizer_initial_state
-                          if new_offset == len(token_bytes):
-                              new_states[next_tokenizer_sid].append(processed_gss)
-                          else:
-                              q.append((new_offset, next_tokenizer_sid, processed_gss))
-
-                  if end_state is not None:
-                      new_states[end_state].append(gss)
-
-              merged_states = {
-                  sid: GSS.merge_many(gss_list)
-                  for sid, gss_list in new_states.items()
-                  if gss_list
-              }
-              merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
-
-              self.state = merged_states
-
-              t1 = time.perf_counter()
-              print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
-
-          @profile
-          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-              heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
-              for state_id in gss.peek():
-                  heads_by_state[state_id].append(gss.isolate(state_id))
-
-              shifted_gsses: List[GSS] = []
-
-              while heads_by_state:
-                  state_id, state_gsss = heads_by_state.popitem()
-                  state_gss = GSS.merge_many(state_gsss)
-                  row = self.parser_table.table.get(state_id)
-                  if not row:
-                      continue
-                  action = row.actions.get(terminal_id)
-                  if not action:
-                      continue
-
-                  def handle_shift(shift_to_state_id, gss_to_shift):
-                      shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
-
-                  def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
-                      popped_gss = gss_to_reduce
-                      for _ in range(reduce_action.len):
-                          popped_gss = popped_gss.pop()
-                      for from_state_id in popped_gss.peek():
-                          goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                          goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
-                          heads_by_state[goto_state_id].append(goto_gss)
-
-                  if isinstance(action, int):
-                      handle_shift(action, state_gss)
-                  elif isinstance(action, Reduce):
-                      handle_reduce(action, state_gss)
-                  elif isinstance(action, Split):
-                      if action.shift is not None:
-                          handle_shift(action.shift, state_gss)
-                      for length, nts in action.reduces.items():
-                          for nt_id, pids in nts.items():
-                              handle_reduce(Reduce(nt_id, length, pids), state_gss)
-
-              return GSS.merge_many(shifted_gsses)
-          def get_mask(self) -> RangeSet:
-              """
-              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-
-              Changes for get_mask_only:
-              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-                the forbidden terminals -> forbidden LLM tokens and taking the complement.
-              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
-              """
-              state_map: Dict[int, GSS] = self.state
-
-              all_ones: Optional[RangeSet] = self.all_internal_llm_tokens_bitset
-              final_mask: RangeSet = RangeSet.empty()
-
-              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
-              values: Dict[int, GSS] = {}
-              depth_heap: List[Tuple[int, int]] = []  # Stores (-depth, node_id)
-              enqueued_nodes: Set = set()
-
-              hp, hpop = heapq.heappush, heapq.heappop
-              roots_map: Dict[int, int] = self.roots_map
-              max_depth: Dict[int, int] = self.max_depth
-              arena: Dict[int, dict] = self.arena
-              is_end = self.is_end
-              pmc: Dict[int, Dict[int, RangeSet]] = self.possible_matches_cache or {}
-              max_state: int = self.tokenizer_max_state
-
-              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-              def initialize_acc(acc: PyAcc) -> PyAcc:
-                  # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                  disallowed_llm_mask = RangeSet.empty()
-                  disallowed_map = acc.terminals_union
-
-                  for tsid, disallowed_terminals in disallowed_map.items():
-                      if tsid > max_state or tsid not in pmc:
-                          continue
-                      terminals_to_llm = pmc[tsid]
-                      for terminal_id in disallowed_terminals.to_indices():
-                          if terminal_id in terminals_to_llm:
-                              disallowed_llm_mask = disallowed_llm_mask.union(
-                                  terminals_to_llm[terminal_id]
-                              )
-
-                  allowed_mask = (all_ones if all_ones is not None else RangeSet.empty()).difference(disallowed_llm_mask)
-                  return PyAcc(
-                      terminals_union={},  # consume
-                      llm_mask=allowed_mask,
-                  )
-
-              for sid, gss in state_map.items():
-                  r: int = roots_map[int(sid)]
-                  gss_initialized: GSS = gss.apply(initialize_acc)
-                  if r in values:
-                      values[r] = values[r].merge(gss_initialized)
-                  else:
-                      values[r] = gss_initialized
-
-                  d: int = max_depth[r]
-                  if r not in enqueued_nodes:
-                      enqueued_nodes.add(r)
-                      hp(depth_heap, (-d, r))
-
-              def enqueue(d: int, n: int) -> None:
-                  if n not in enqueued_nodes:
-                      enqueued_nodes.add(n)
-                      hp(depth_heap, (-d, n))
-
-              # Main loop
-              while depth_heap:
-                  neg_depth, node = hpop(depth_heap)
-                  gss_node: GSS = values.pop(node)
-
-                  # End-node handling: just union the allowed LLM tokens
-                  if is_end(node):
-                      reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                      if reduced_acc:
-                          final_mask = final_mask.union(reduced_acc.llm_mask)
-
-                  # Zombie traversal avoidance
-                  node_llm_bv_union = arena.get(node, {}).get("llm_bv_union", RangeSet.empty())
-                  potential_new_tokens = node_llm_bv_union.difference(final_mask)
-                  if potential_new_tokens.is_empty():
-                      continue
-
-                  gss_mask_acc = gss_node.reduce_acc()
-                  if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
-                      continue
-
-                  # Traverse edges and propagate masks
-                  edges = arena.get(node, {}).get("children") or []
-                  for (pop, llm_bv), dests in edges:
-                      llm_bv = llm_bv.difference(final_mask)
-                      if llm_bv.is_empty():
-                          continue
-
-                      popped: GSS = gss_node.popn(pop)
-                      if popped.is_empty():
-                          continue
-
-                      # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                      acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
-
-                      def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                          if acc in acc_memo:
-                              return acc_memo[acc]
-                          new_mask = acc.llm_mask.intersection(llm_bv)
-                          if new_mask.is_empty():
-                              result = None
-                          else:
-                              result = PyAcc(
-                                  terminals_union=acc.terminals_union,
-                                  llm_mask=new_mask
-                              )
-                          acc_memo[acc] = result
-                          return result
-
-                      popped = popped.apply_and_prune(intersect_and_prune)
-                      if popped.is_empty():
-                          continue
-
-                      reduced = popped.reduce_acc()
-                      if not reduced or reduced.is_empty():
-                          continue
-
-                      for dest_idx, state_bv in dests:
-                          peeked = popped.peek()
-                          values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-
-                          if not values_to_keep:
-                              continue
-
-                          child_gss: GSS = popped.isolate_many(values_to_keep)
-                          if child_gss.is_empty():
-                              continue
-
-                          reduced_child = child_gss.reduce_acc()
-                          if not reduced_child or reduced_child.is_empty():
-                              continue
-
-                          d: int = int(dest_idx)
-                          if d in values:
-                              values[d] = values[d].merge(child_gss)
-                          else:
-                              values[d] = child_gss
-                          enqueue(max_depth[d], d)
-
-
-              # Convert internal mask back to original IDs
-              original_indices: List[int] = []
-              for i in final_mask.to_indices():
-                  if i in self.internal_to_original_map:
-                      original_indices.append(self.internal_to_original_map[i])
-
-              return RangeSet.from_indices(original_indices)
+    python/run_benchmarks.sh: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # ==============================================================================
+      # run_benchmarks.sh
+      #
+      # A script to automate running benchmarks for multiple grammar constraint models,
+      # generating JSON results and analysis plots. This script runs each model once
+      # (no in-process reference/baseline). The analyzer is later told which result
+      # is the baseline to perform mask comparisons.
+      #
+      # This script should be run from the project root directory.
+      #
+      # Usage:
+      #   ./run_benchmarks.sh <baseline_model.py> <model1.py> [model2.py ...]
+      #
+      # Example:
+      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
+      #
+      # Environment Variables:
+      #   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
+      #                    (Default: ./.cache/test_vocabs/js_grammar_constraint.json.gz)
+      #   CODE_FILE:    Path to the code file to use as input.
+      #                 (Default: ./src/example_code.js)
+      # ==============================================================================
+
+      # --- Configuration ---
+      # Use environment variables if set, otherwise use defaults.
+      : "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
+      : "${CODE_FILE:="./src/example_code.js"}"
+
+      # --- PYTHONPATH setup ---
+      # The script is run from the project root. The python modules are in the 'python' directory.
+      # We add the 'python' directory to PYTHONPATH so that compiled extension modules (like leveled_gss_cpp)
+      # can be found via top-level imports.
+      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
+      # --- Argument Validation ---
+      if [ "$#" -lt 1 ]; then
+          echo "Usage: $0 <baseline_model.py> <model1.py> [model2.py ...]"
+          echo "Error: At least one model argument is required. The first is treated as the baseline."
+          exit 1
+      fi
+
+      BASELINE_MODEL="$1"
+      shift
+      COMPETITORS=("$@")
+
+      ALL_MODELS=("$BASELINE_MODEL" "${COMPETITORS[@]}")
+
+      # Check that all provided files exist
+      for file in "${ALL_MODELS[@]}"; do
+          if [ ! -f "$file" ]; then
+              echo "Error: Model file not found: $file"
+              exit 1
+          fi
+      done
+      if [ ! -f "$CONSTRAINT_FILE" ]; then
+          echo "Error: Constraint file not found: $CONSTRAINT_FILE"
+          exit 1
+      fi
+      if [ ! -f "$CODE_FILE" ]; then
+          echo "Error: Code file not found: $CODE_FILE"
+          exit 1
+      fi
+
+
+      # --- Setup ---
+      # Create a unique directory for this benchmark run's results.
+      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+      mkdir -p "$RESULTS_DIR"
+      echo "Benchmark results will be saved in: $RESULTS_DIR"
+      echo "---"
+      echo "Baseline Model: $BASELINE_MODEL"
+      if [ "${#COMPETITORS[@]}" -gt 0 ]; then
+        echo "Other Models: ${COMPETITORS[*]}"
+      else
+        echo "Other Models: (none)"
+      fi
+      echo "Constraint File: $CONSTRAINT_FILE"
+      echo "Code: $CODE_FILE"
+      echo "---"
+
+
+      # --- Automated C++ Build Process ---
+      echo "Ensuring C++ extensions are built..."
+
+      # Determine project root, assuming this script is in the 'python' directory.
+      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
+
+      # 1) Setup: download Boost headers locally and install pybind11
+      BOOST_VERSION="1.83.0"
+      BOOST_VER_UNDERSCORES="1_83_0"
+      BOOST_DIR="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}"
+      mkdir -p "${PROJECT_ROOT}/.build"
+
+      if [ ! -d "$BOOST_DIR" ]; then
+        BOOST_TGZ="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+        echo "Downloading Boost ${BOOST_VERSION} headers..."
+        curl -L -o "$BOOST_TGZ" "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+        echo "Extracting Boost..."
+        tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
+      fi
+
+      echo "Installing pybind11..."
+      python3 -m pip install --quiet pybind11
+
+      # 2) Build the C++ extensions in place
+      echo "Building C++ extensions..."
+
+      # Compute extension suffix and includes via pybind11
+      EXT_SUFFIX="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or ".so")')"
+      PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
+      CXX="${CXX:-c++}"
+      CXXFLAGS="-O3 -DNDEBUG -march=native -flto -std=c++17 -shared -fPIC"
+      LDFLAGS="-flto"
+      if [[ "$(uname)" == "Darwin" ]]; then
+        LDFLAGS="${LDFLAGS} -undefined dynamic_lookup"
+      fi
+
+      # Optional ASan (opt-in via SANITIZE=1 env var)
+      if [[ "${SANITIZE:-0}" == "1" ]]; then
+        echo "Building with AddressSanitizer (SANITIZE=1)"
+        CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c++17 -shared -fPIC"
+        LDFLAGS="${LDFLAGS} -fsanitize=address"
+      fi
+
+      # Control C++ stats collection. Default to enabled.
+      : "${ENABLE_CPP_STATS:=1}"
+      if [[ "${ENABLE_CPP_STATS}" == "1" ]]; then
+        echo "Building C++ with stats enabled (ENABLE_CPP_STATS=1)"
+        CXXFLAGS="${CXXFLAGS} -DENABLE_STATS"
+      else
+        echo "Building C++ with stats disabled (ENABLE_CPP_STATS=0)"
+      fi
+
+      # Change to python directory to run build commands with relative paths
+      ORIGINAL_CWD=$(pwd)
+      cd "$SCRIPT_DIR"
+
+      # Compile extensions. Paths are relative to the 'python' directory.
+      ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+        "aug25/models/icl_rangeset.cpp" -o "aug25/models/icl_rangeset${EXT_SUFFIX}" ${LDFLAGS}
+
+      ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+        "aug25/models/leveled_gss_py.cpp" -o "leveled_gss_cpp${EXT_SUFFIX}" ${LDFLAGS}
+
+      ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+        "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
+
+      # Change back to original directory
+      cd "$ORIGINAL_CWD"
+
+      echo "Build complete."
+      echo "---"
+
+      # --- Run Benchmarks ---
+      echo "Starting benchmark runs..."
+      # Define the ASAN library path at the top of the loop for clarity
+      ASAN_LIB="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/lib/darwin/libclang_rt.asan_osx_dynamic.dylib"
+
+      for model_to_benchmark in "${ALL_MODELS[@]}"; do
+          echo
+          echo ">>> Running benchmark for: $(basename "$model_to_benchmark")"
+          cmd=(python -m python.aug25.benchmark_runner
+              --code "$CODE_FILE"
+              --constraint-file "$CONSTRAINT_FILE"
+              --model "$model_to_benchmark"
+              --output "$RESULTS_DIR")
+          echo "${cmd[*]}"
+          # Prepend the environment variable ONLY for the C++ model
+          if [[ "$model_to_benchmark" == *"precompute3_model_cpp.py"* ]]; then
+              echo ">>> Running with AddressSanitizer..."
+              if DYLD_INSERT_LIBRARIES="$ASAN_LIB" "${cmd[@]}"; then
+                  echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
+              else
+                  exit_code=$?
+                  echo
+                  echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
+              fi
+          else
+              if "${cmd[@]}"; then
+                  echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
+              else
+                  exit_code=$?
+                  echo
+                  echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
+              fi
+          fi
+      done
+      echo
+      echo "All benchmark runs completed."
+      echo "---"
+
+
+      # --- Analyze Results ---
+      echo "Analyzing results and generating plots..."
+      PLOTS_DIR="${RESULTS_DIR}/analysis"
+      BASELINE_STEM="$(basename "$BASELINE_MODEL" .py)"
+      cmd=(python -m python.aug25.benchmark_analyzer
+          "${RESULTS_DIR}"/*.json
+          --baseline "$BASELINE_STEM"
+          --output-dir "$PLOTS_DIR")
+      echo "${cmd[*]}"
+      "${cmd[@]}"
+
+      echo
+      echo "---"
+      echo "Benchmark analysis complete."
+      echo "Baseline: $BASELINE_STEM"
+      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
+      echo "Full JSON results are in: $RESULTS_DIR"
   prev_file_contents:
-    python/aug25/models/precompute3_model_pure_python.py: |
-      import json
-      import heapq
-      import collections
-      import time
-      from typing import Dict, List, Tuple, Optional, Union, Any, TypedDict
-      from dataclasses import dataclass, field
-
-      from ..common_interface import GraphProvider, RangeSet
-      import _sep1 as ffi
-      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
-      # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
-
-
-      # Add a dummy profiler for when not running under kernprof
-      try:
-          # This will be injected by the kernprof script.
-          profile
-      except NameError:
-          # If not running under kernprof, create a dummy decorator.
-          def profile(func): return func
-
-
-      @dataclass(frozen=True)
-      class Reduce:
-          nonterminal_id: int
-          len: int
-          production_ids: Tuple[int, ...]
-
-
-      @dataclass(frozen=True)
-      class Split:
-          shift: Optional[int]
-          reduces: Dict[int, Dict[int, Tuple[int, ...]]]  # len -> nt_id -> pids
-
-
-      # Action can be a Shift (int), Reduce, or Split
-      Action = Union[int, Reduce, Split]
-
-
-      @dataclass
-      class Row:
-          actions: Dict[int, Action] = field(default_factory=dict)  # terminal_id -> Action
-          gotos: Dict[int, int] = field(default_factory=dict)  # nonterminal_id -> state_id
-
-
-      @dataclass
-      class ParserTable:
-          start_state_id: int
-          table: Dict[int, Row]
-
-
-      class ArenaValue(TypedDict, total=False):
-          clean_end: bool
-
-
-      class ArenaNode(TypedDict, total=False):
-          max_depth: int
-          children: List[Tuple[Tuple[int, RangeSet], List[Tuple[int, RangeSet]]]]
-          llm_bv_union: RangeSet
-          value: ArenaValue
-
-
-      @dataclass(frozen=True, eq=False)
-      class PyAcc:
-          terminals_union: Dict[int, RangeSet]
-          llm_mask: RangeSet
-
-          def __eq__(self, other):
-              if not isinstance(other, PyAcc):
-                  return NotImplemented
-              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
-
-          def __hash__(self):
-              # frozenset of items for hashable dict
-              return hash((len(self.terminals_union), self.llm_mask))
-
-          def merge(self, other: "PyAcc") -> "PyAcc":
-              # The dataclass is frozen, so we can't modify in-place.
-              # But terminals_union is a dict, which is mutable.
-              # We must be careful to create copies.
-              d1 = self.terminals_union
-              d2 = other.terminals_union
-              new_terminals_union = d1.copy()
-              for k, v in d2.items():
-                  if k in new_terminals_union:
-                      new_terminals_union[k] = new_terminals_union[k].union(v)
-                  else:
-                      new_terminals_union[k] = v
-
-              return PyAcc(
-                  terminals_union=new_terminals_union,
-                  llm_mask=self.llm_mask.union(other.llm_mask),
-              )
-
-          def is_empty(self):
-              return self.llm_mask.is_empty()
-
-
-      @dataclass
-      class Model(GraphProvider):
-          """
-          Precomputed trie model (third-generation), simplified and concise.
-          """
-          roots_map_raw: List[Tuple[int, int]]
-          arena: Dict[int, Any]  # This is Dict[int, ArenaNode] after __post_init__
-
-          roots_map: Dict[int, int] = field(init=False)
-          id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
-          max_depth: Dict[int, int] = field(init=False, default_factory=dict)
-          possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = field(init=False, default=None)
-          tokenizer: Optional[ffi.Regex] = field(init=False, default=None)
-          glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
-          ignore_terminal_id: Optional[int] = field(init=False, default=None)
-          parser_table: Optional[ParserTable] = field(init=False, default=None)
-          state: Dict[int, GSS] = field(init=False, default_factory=dict)
-          internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
-          all_internal_llm_tokens_bitset: Optional[RangeSet] = field(init=False, default=None)
-          tokenizer_initial_state: Optional[int] = field(init=False, default=None)
-          tokenizer_max_state: Optional[int] = field(init=False, default=None)
-          all_terminals_bitset: Optional[RangeSet] = field(init=False, default=None)
-
-          def __post_init__(self):
-              self.roots_map = {int(s): int(r) for s, r in self.roots_map_raw}
-
-              dumps = json.dumps
-              bs_from_json = ffi.Bitset.from_json_string
-
-              # Normalize arena children bitsets and cache max_depth
-              for uid, node in self.arena.items():
-                  uid_int = int(uid)
-                  self.max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
-
-                  children = node.get("children") or []
-                  if not children:
-                      node["children"] = []
-                      node["llm_bv_union"] = RangeSet.empty()
-                      continue
-
-                  new_children = []
-                  llm_bv_union = RangeSet.empty()
-                  for edge_key, dest_map in children:
-                      pop, llm_bv_json = edge_key
-                      llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
-                      # Convert to RangeSet for ffi-free operations in commit/get_mask
-                      llm_bv = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
-                      llm_bv_union = llm_bv_union.union(llm_bv)
-                      new_dest_map = []
-                      for dest_idx, state_bv_json in dest_map:
-                          state_bv_bitset = bs_from_json(dumps(state_bv_json))
-                          state_bv = RangeSet.from_ranges(state_bv_bitset.to_ranges())
-                          new_dest_map.append((int(dest_idx), state_bv))
-                      new_children.append(((int(pop), llm_bv), new_dest_map))
-                  node["children"] = new_children
-                  node["llm_bv_union"] = llm_bv_union
-
-          def _optimize_trie(self):
-              """
-              Prunes the precomputed trie by removing edges that are unreachable
-              based on a static analysis of possible parser states.
-              """
-              print("Optimizing trie...")
-              # 1. Build reverse transitions map for pops
-              rev_transitions = collections.defaultdict(set)
-              for state_id, row in self.parser_table.table.items():
-                  # Gotos
-                  for nt_id, goto_state_id in row.gotos.items():
-                      rev_transitions[goto_state_id].add(state_id)
-                  # Shifts
-                  for term_id, action in row.actions.items():
-                      shift_to = None
-                      if isinstance(action, int):
-                          shift_to = action
-                      elif isinstance(action, Split) and action.shift is not None:
-                          shift_to = action.shift
-
-                      if shift_to is not None:
-                          rev_transitions[shift_to].add(state_id)
-
-              # Memoization for pop transformation
-              pop_memo = {}
-              def transform(states, pop_count):
-                  states_tuple = tuple(sorted(list(states)))
-                  if (states_tuple, pop_count) in pop_memo:
-                      return pop_memo[(states_tuple, pop_count)]
-
-                  if pop_count == 0:
-                      return states
-
-                  prev_states = transform(states, pop_count - 1)
-                  if not prev_states:
-                      pop_memo[(states_tuple, pop_count)] = set()
-                      return set()
-
-                  next_states = set()
-                  for s in prev_states:
-                      next_states.update(rev_transitions.get(s, set()))
-
-                  pop_memo[(states_tuple, pop_count)] = next_states
-                  return next_states
-
-              # 2. Dataflow analysis to find alive parser states at each trie node
-              alive_states = collections.defaultdict(set)
-              worklist = collections.deque()
-
-              all_parser_states = set(self.parser_table.table.keys())
-
-              for root_node_id in set(self.roots_map.values()):
-                  if not alive_states[root_node_id]:
-                      alive_states[root_node_id] = all_parser_states
-                      worklist.append(root_node_id)
-
-              while worklist:
-                  node_id = worklist.popleft()
-                  node = self.arena.get(node_id)
-                  if not node or not node.get("children"):
-                      continue
-
-                  current_states = alive_states[node_id]
-
-                  for (pop, llm_bv), dests in node["children"]:
-                      popped_states = transform(current_states, pop)
-                      if not popped_states:
-                          continue
-
-                      for dest_idx, state_bv in dests:
-                          edge_states = set(state_bv.to_indices())
-                          propagated_states = popped_states.intersection(edge_states)
-
-                          if propagated_states:
-                              if not propagated_states.issubset(alive_states[dest_idx]):
-                                  alive_states[dest_idx].update(propagated_states)
-                                  if dest_idx not in worklist:
-                                      worklist.append(dest_idx)
-
-              # 3. Prune the trie
-              for node_id, node in self.arena.items():
-                  if not node.get("children"):
-                      continue
-
-                  new_children = []
-                  current_states = alive_states.get(node_id)
-                  if not current_states:
-                      node["children"] = []
-                      continue
-
-                  for (pop, llm_bv), dests in node["children"]:
-                      popped_states = transform(current_states, pop)
-                      if not popped_states:
-                          continue
-
-                      new_dests = []
-                      popped_states_rs = RangeSet.from_indices(list(popped_states))
-                      for dest_idx, state_bv in dests:
-                          new_state_bv = state_bv.intersection(popped_states_rs)
-
-                          if not new_state_bv.is_empty():
-                              new_dests.append((dest_idx, new_state_bv))
-
-                      if new_dests:
-                          new_children.append(((pop, llm_bv), new_dests))
-
-                  node["children"] = new_children
-
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              data = json.loads(s)
-              roots_map = data["precomputed3"]
-              arena_json = data["trie3_god"]
-              arena_values = arena_json.get("values", [])
-              arena = {int(k): v for k, v in arena_values}
-              model = Model(roots_map, arena)
-
-              # Load tokenizer and parser table from the full constraint JSON
-              constraint = ffi.GrammarConstraint.from_json_string(s)
-              model.tokenizer = constraint.tokenizer()
-              model.tokenizer_max_state = model.tokenizer.max_state()
-              model.glr_parser = constraint.glr_parser()
-              model.ignore_terminal_id = model.glr_parser.ignore_terminal_id
-              model.tokenizer_initial_state = model.tokenizer.initial_state_id()
-
-              parser_data = data['parser']
-              table_data = parser_data['stage_7_table']
-              start_state_id = parser_data['start_state_id']
-              py_table: Dict[int, Row] = {}
-              for state_id_str, row_data in table_data:
-                  state_id = int(state_id_str)
-                  py_row = Row()
-                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
-                      term_id = int(term_id_str)
-                      variant = action_data['variant']
-                      if variant == 'Shift':
-                          py_row.actions[term_id] = action_data['state_id']
-                      elif variant == 'Reduce':
-                          pids = tuple(sorted(action_data['production_ids']))
-                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
-                      elif variant == 'Split':
-                          shift = action_data['shift']
-                          reduces: Dict[int, Dict[int, Tuple[int, ...]]] = {}
-                          for len_str, nts_data in action_data['reduces']:
-                              len_int = int(len_str)
-                              nts: Dict[int, Tuple[int, ...]] = {}
-                              for nt_id_str, pids in nts_data:
-                                  nt_id_int = int(nt_id_str)
-                                  nts[nt_id_int] = tuple(sorted(pids))
-                              reduces[len_int] = nts
-                          py_row.actions[term_id] = Split(shift, reduces)
-                  for nt_id_str, goto_data in row_data['gotos']:
-                      nt_id = int(nt_id_str)
-                      if goto_data['state_id'] is not None:
-                          py_row.gotos[nt_id] = goto_data['state_id']
-                  py_table[state_id] = py_row
-              model.parser_table = ParserTable(start_state_id, py_table)
-
-              all_terminals = set()
-              for row in model.parser_table.table.values():
-                  all_terminals.update(row.actions.keys())
-              if model.ignore_terminal_id is not None:
-                  all_terminals.add(model.ignore_terminal_id)
-              model.all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
-
-              initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
-              initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
-              model.state = {model.tokenizer_initial_state: initial_gss}
-
-              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-              # Convert possible_matches_cache to RangeSet
-              pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
-              pmc_rs: Dict[int, Dict[int, RangeSet]] = {}
-              for tsid, inner in pmc_ffi.items():
-                  mapped: Dict[int, RangeSet] = {}
-                  for term_id, bit in inner.items():
-                      mapped[int(term_id)] = RangeSet.from_ranges(bit.to_ranges())
-                  pmc_rs[int(tsid)] = mapped
-              model.possible_matches_cache = pmc_rs
-              model.internal_to_original_map = constraint.internal_to_original_map()
-              # Convert universe LLM tokens bitset to RangeSet
-              all_internal = constraint.all_internal_llm_tokens_bitset()
-              model.all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
-
-              model._optimize_trie()
-
-              return model
-
-          @profile
-          def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, RangeSet]) -> GSS:
-              def predicate(acc: PyAcc) -> bool:
-                  disallowed_terminals_map = acc.terminals_union
-                  for state_id, matched_bv in terminals_map.items():
-                      disallowed_for_state = disallowed_terminals_map.get(state_id, RangeSet.empty())
-                      if not matched_bv.intersection(disallowed_for_state).is_empty():
-                          return False
-                  return True
-              return gss.prune(predicate)
-
-          @profile
-          def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
-              def apply_map(acc: PyAcc) -> PyAcc:
-                  old_map = acc.terminals_union
-                  new_bvs: Dict[int, RangeSet] = collections.defaultdict(RangeSet.empty)
-                  for old_sid, new_sid in state_map.items():
-                      bv_source = old_map.get(old_sid, RangeSet.empty())
-                      new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-
-                  return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
-              return gss.apply(apply_map)
-
-          @profile
-          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
-              def apply_disallow(acc: PyAcc) -> PyAcc:
-                  current_map = acc.terminals_union.copy()
-                  curr_bv = current_map.get(state_id, RangeSet.empty())
-                  to_add = RangeSet.from_indices([terminal_id])
-                  new_bv = curr_bv.union(to_add)
-                  current_map[state_id] = new_bv
-                  return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
-              return gss.apply(apply_disallow)
-
-          def get_root(self, state_id: int) -> int:
-              return self.roots_map[int(state_id)]
-
-          def is_end(self, node: int) -> bool:
-              return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
-
-          def iter_edges(self, node: int, token: int):
-              """
-              Explode packed transitions into (pop, state_id or None, dest_idx).
-              """
-              children = self.arena.get(node, {}).get("children") or []
-              for (pop, llm_bv), dests in children:
-                  if llm_bv.contains(token):
-                      for dest_idx, state_bv in dests:
-                          if state_bv.is_empty():
-                              yield (int(pop), None, int(dest_idx))
-                          else:
-                              for start, end in state_bv.to_ranges():
-                                  for sid in range(start, end + 1):
-                                      yield (int(pop), sid, int(dest_idx))
-
-          @profile
-          def commit(self, token_id: int):
-              t0 = time.perf_counter()
-              token_bytes = self.id_to_token[token_id]
-
-              # Build tokenizer maps
-              terminals_map: Dict[int, RangeSet] = {}
-              state_map: Dict[int, int] = {}
-              for tokenizer_sid in self.state.keys():
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  if end_state is not None:
-                      state_map[tokenizer_sid] = end_state
-                  matched_terminals = [terminal_id for terminal_id, _ in matches]
-                  terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
-
-              # Prune and map per-state GSS
-              temp_states: Dict[int, GSS] = {}
-              for tokenizer_sid, gss in self.state.items():
-                  pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-                  if not pruned_gss.is_empty():
-                      mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-                      temp_states[tokenizer_sid] = mapped_gss
-
-              current_state_for_processing = temp_states
-
-              new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
-              q = collections.deque()
-              for tokenizer_sid, gss in current_state_for_processing.items():
-                  q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
-
-              visited_q_items: set = set()
-
-              while q:
-                  offset, tokenizer_sid, gss = q.popleft()
-                  q_item_key = (offset, tokenizer_sid, id(gss))
-                  if q_item_key in visited_q_items:
-                      continue
-                  visited_q_items.add(q_item_key)
-
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-
-                  for terminal_id, width in matches:
-                      processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
-
-                      # Immediate re-match disallow
-                      if end_state is not None:
-                          accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
-                          if terminal_id in accessible_terms:
-                              processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
-
-                      if not processed_gss.is_empty():
-                          new_offset = offset + width
-                          next_tokenizer_sid = self.tokenizer_initial_state
-                          if new_offset == len(token_bytes):
-                              new_states[next_tokenizer_sid].append(processed_gss)
-                          else:
-                              q.append((new_offset, next_tokenizer_sid, processed_gss))
-
-                  if end_state is not None:
-                      new_states[end_state].append(gss)
-
-              merged_states = {
-                  sid: GSS.merge_many(gss_list)
-                  for sid, gss_list in new_states.items()
-                  if gss_list
-              }
-              merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
-
-              self.state = merged_states
-
-              t1 = time.perf_counter()
-              print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
-
-          @profile
-          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-              heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
-              for state_id in gss.peek():
-                  heads_by_state[state_id].append(gss.isolate(state_id))
-
-              shifted_gsses: List[GSS] = []
-
-              while heads_by_state:
-                  state_id, state_gsss = heads_by_state.popitem()
-                  state_gss = GSS.merge_many(state_gsss)
-                  row = self.parser_table.table.get(state_id)
-                  if not row:
-                      continue
-                  action = row.actions.get(terminal_id)
-                  if not action:
-                      continue
-
-                  def handle_shift(shift_to_state_id, gss_to_shift):
-                      shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
-
-                  def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
-                      popped_gss = gss_to_reduce
-                      for _ in range(reduce_action.len):
-                          popped_gss = popped_gss.pop()
-                      for from_state_id in popped_gss.peek():
-                          goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                          goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
-                          heads_by_state[goto_state_id].append(goto_gss)
-
-                  if isinstance(action, int):
-                      handle_shift(action, state_gss)
-                  elif isinstance(action, Reduce):
-                      handle_reduce(action, state_gss)
-                  elif isinstance(action, Split):
-                      if action.shift is not None:
-                          handle_shift(action.shift, state_gss)
-                      for length, nts in action.reduces.items():
-                          for nt_id, pids in nts.items():
-                              handle_reduce(Reduce(nt_id, length, pids), state_gss)
-
-              return GSS.merge_many(shifted_gsses)
-          def get_mask(self) -> RangeSet:
-              """
-              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-
-              Changes for get_mask_only:
-              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-                the forbidden terminals -> forbidden LLM tokens and taking the complement.
-              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
-              """
-              state_map: Dict[int, GSS] = self.state
-
-              all_ones: Optional[RangeSet] = self.all_internal_llm_tokens_bitset
-              final_mask: RangeSet = RangeSet.empty()
-
-              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
-              values: Dict[int, GSS] = {}
-              depth_heap: List[Tuple[int, int]] = []  # Stores (-depth, node_id)
-              enqueued_nodes: Set = set()
-
-              hp, hpop = heapq.heappush, heapq.heappop
-              roots_map: Dict[int, int] = self.roots_map
-              max_depth: Dict[int, int] = self.max_depth
-              arena: Dict[int, dict] = self.arena
-              is_end = self.is_end
-              pmc: Dict[int, Dict[int, RangeSet]] = self.possible_matches_cache or {}
-              max_state: int = self.tokenizer_max_state
-
-              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-              def initialize_acc(acc: PyAcc) -> PyAcc:
-                  # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                  disallowed_llm_mask = RangeSet.empty()
-                  disallowed_map = acc.terminals_union
-
-                  for tsid, disallowed_terminals in disallowed_map.items():
-                      if tsid > max_state or tsid not in pmc:
-                          continue
-                      terminals_to_llm = pmc[tsid]
-                      for terminal_id in disallowed_terminals.to_indices():
-                          if terminal_id in terminals_to_llm:
-                              disallowed_llm_mask = disallowed_llm_mask.union(
-                                  terminals_to_llm[terminal_id]
-                              )
-
-                  allowed_mask = (all_ones if all_ones is not None else RangeSet.empty()).difference(disallowed_llm_mask)
-                  return PyAcc(
-                      terminals_union={},  # consume
-                      llm_mask=allowed_mask,
-                  )
-
-              for sid, gss in state_map.items():
-                  r: int = roots_map[int(sid)]
-                  gss_initialized: GSS = gss.apply(initialize_acc)
-                  if r in values:
-                      values[r] = values[r].merge(gss_initialized)
-                  else:
-                      values[r] = gss_initialized
-
-                  d: int = max_depth[r]
-                  if r not in enqueued_nodes:
-                      enqueued_nodes.add(r)
-                      hp(depth_heap, (-d, r))
-
-              def enqueue(d: int, n: int) -> None:
-                  if n not in enqueued_nodes:
-                      enqueued_nodes.add(n)
-                      hp(depth_heap, (-d, n))
-
-              # Main loop
-              while depth_heap:
-                  neg_depth, node = hpop(depth_heap)
-                  gss_node: GSS = values.pop(node)
-
-                  # End-node handling: just union the allowed LLM tokens
-                  if is_end(node):
-                      reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                      if reduced_acc:
-                          final_mask = final_mask.union(reduced_acc.llm_mask)
-
-                  # Zombie traversal avoidance
-                  node_llm_bv_union = arena.get(node, {}).get("llm_bv_union", RangeSet.empty())
-                  potential_new_tokens = node_llm_bv_union.difference(final_mask)
-                  if potential_new_tokens.is_empty():
-                      continue
-
-                  gss_mask_acc = gss_node.reduce_acc()
-                  if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
-                      continue
-
-                  # Traverse edges and propagate masks
-                  edges = arena.get(node, {}).get("children") or []
-                  for (pop, llm_bv), dests in edges:
-                      llm_bv = llm_bv.difference(final_mask)
-                      if llm_bv.is_empty():
-                          continue
-
-                      popped: GSS = gss_node.popn(pop)
-                      if popped.is_empty():
-                          continue
-
-                      # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                      acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
-
-                      def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                          if acc in acc_memo:
-                              return acc_memo[acc]
-                          new_mask = acc.llm_mask.intersection(llm_bv)
-                          if new_mask.is_empty():
-                              result = None
-                          else:
-                              result = PyAcc(
-                                  terminals_union=acc.terminals_union,
-                                  llm_mask=new_mask
-                              )
-                          acc_memo[acc] = result
-                          return result
-
-                      popped = popped.apply_and_prune(intersect_and_prune)
-                      if popped.is_empty():
-                          continue
-
-                      reduced = popped.reduce_acc()
-                      if not reduced or reduced.is_empty():
-                          continue
-
-                      for dest_idx, state_bv in dests:
-                          peeked = popped.peek()
-                          values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-
-                          if not values_to_keep:
-                              continue
-
-                          child_gss: GSS = popped.isolate_many(values_to_keep)
-                          if child_gss.is_empty():
-                              continue
-
-                          reduced_child = child_gss.reduce_acc()
-                          if not reduced_child or reduced_child.is_empty():
-                              continue
-
-                          d: int = int(dest_idx)
-                          if d in values:
-                              values[d] = values[d].merge(child_gss)
-                          else:
-                              values[d] = child_gss
-                          enqueue(max_depth[d], d)
-
-
-              # Convert internal mask back to original IDs
-              original_indices: List[int] = []
-              for i in final_mask.to_indices():
-                  if i in self.internal_to_original_map:
-                      original_indices.append(self.internal_to_original_map[i])
-
-              return RangeSet.from_indices(original_indices)
+    python/run_benchmarks.sh: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # ==============================================================================
+      # run_benchmarks.sh
+      #
+      # A script to automate running benchmarks for multiple grammar constraint models,
+      # generating JSON results and analysis plots. This script runs each model once
+      # (no in-process reference/baseline). The analyzer is later told which result
+      # is the baseline to perform mask comparisons.
+      #
+      # This script should be run from the project root directory.
+      #
+      # Usage:
+      #   ./run_benchmarks.sh <baseline_model.py> <model1.py> [model2.py ...]
+      #
+      # Example:
+      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
+      #
+      # Environment Variables:
+      #   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
+      #                    (Default: ./.cache/test_vocabs/js_grammar_constraint.json.gz)
+      #   CODE_FILE:    Path to the code file to use as input.
+      #                 (Default: ./src/example_code.js)
+      # ==============================================================================
+
+      # --- Configuration ---
+      # Use environment variables if set, otherwise use defaults.
+      : "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
+      : "${CODE_FILE:="./src/example_code.js"}"
+      : "${SKIP_CPP_BUILD:=0}" # Set to 1 to disable C++ compilation
+
+      # --- PYTHONPATH setup ---
+      # The script is run from the project root. The python modules are in the 'python' directory.
+      # We add the 'python' directory to PYTHONPATH so that compiled extension modules (like leveled_gss_cpp)
+      # can be found via top-level imports.
+      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
+      # --- Argument Validation ---
+      if [ "$#" -lt 1 ]; then
+          echo "Usage: $0 <baseline_model.py> <model1.py> [model2.py ...]"
+          echo "Error: At least one model argument is required. The first is treated as the baseline."
+          exit 1
+      fi
+
+      BASELINE_MODEL="$1"
+      shift
+      COMPETITORS=("$@")
+
+      ALL_MODELS=("$BASELINE_MODEL" "${COMPETITORS[@]}")
+
+      # Check that all provided files exist
+      for file in "${ALL_MODELS[@]}"; do
+          if [ ! -f "$file" ]; then
+              echo "Error: Model file not found: $file"
+              exit 1
+          fi
+      done
+      if [ ! -f "$CONSTRAINT_FILE" ]; then
+          echo "Error: Constraint file not found: $CONSTRAINT_FILE"
+          exit 1
+      fi
+      if [ ! -f "$CODE_FILE" ]; then
+          echo "Error: Code file not found: $CODE_FILE"
+          exit 1
+      fi
+
+
+      # --- Setup ---
+      # Create a unique directory for this benchmark run's results.
+      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+      mkdir -p "$RESULTS_DIR"
+      echo "Benchmark results will be saved in: $RESULTS_DIR"
+      echo "---"
+      echo "Baseline Model: $BASELINE_MODEL"
+      if [ "${#COMPETITORS[@]}" -gt 0 ]; then
+        echo "Other Models: ${COMPETITORS[*]}"
+      else
+        echo "Other Models: (none)"
+      fi
+      echo "Constraint File: $CONSTRAINT_FILE"
+      echo "Code: $CODE_FILE"
+      echo "---"
+
+
+      if [[ "${SKIP_CPP_BUILD}" != "1" ]]; then
+        # --- Automated C++ Build Process ---
+        echo "Ensuring C++ extensions are built..."
+
+        # Determine project root, assuming this script is in the 'python' directory.
+        SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+        PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
+
+        # 1) Setup: download Boost headers locally and install pybind11
+        BOOST_VERSION="1.83.0"
+        BOOST_VER_UNDERSCORES="1_83_0"
+        BOOST_DIR="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}"
+        mkdir -p "${PROJECT_ROOT}/.build"
+
+        if [ ! -d "$BOOST_DIR" ]; then
+          BOOST_TGZ="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+          echo "Downloading Boost ${BOOST_VERSION} headers..."
+          curl -L -o "$BOOST_TGZ" "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+          echo "Extracting Boost..."
+          tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
+        fi
+
+        echo "Installing pybind11..."
+        python3 -m pip install --quiet pybind11
+
+        # 2) Build the C++ extensions in place
+        echo "Building C++ extensions..."
+
+        # Compute extension suffix and includes via pybind11
+        EXT_SUFFIX="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or ".so")')"
+        PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
+        CXX="${CXX:-c++}"
+        CXXFLAGS="-O3 -DNDEBUG -march=native -flto -std=c++17 -shared -fPIC"
+        LDFLAGS="-flto"
+        if [[ "$(uname)" == "Darwin" ]]; then
+          LDFLAGS="${LDFLAGS} -undefined dynamic_lookup"
+        fi
+
+        # Optional ASan (opt-in via SANITIZE=1 env var)
+        if [[ "${SANITIZE:-0}" == "1" ]]; then
+          echo "Building with AddressSanitizer (SANITIZE=1)"
+          CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c++17 -shared -fPIC"
+          LDFLAGS="${LDFLAGS} -fsanitize=address"
+        fi
+
+        # Control C++ stats collection. Default to enabled.
+        : "${ENABLE_CPP_STATS:=1}"
+        if [[ "${ENABLE_CPP_STATS}" == "1" ]]; then
+          echo "Building C++ with stats enabled (ENABLE_CPP_STATS=1)"
+          CXXFLAGS="${CXXFLAGS} -DENABLE_STATS"
+        else
+          echo "Building C++ with stats disabled (ENABLE_CPP_STATS=0)"
+        fi
+
+        # Change to python directory to run build commands with relative paths
+        ORIGINAL_CWD=$(pwd)
+        cd "$SCRIPT_DIR"
+
+        # Compile extensions. Paths are relative to the 'python' directory.
+        ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+          "aug25/models/icl_rangeset.cpp" -o "aug25/models/icl_rangeset${EXT_SUFFIX}" ${LDFLAGS}
+
+        ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+          "aug25/models/leveled_gss_py.cpp" -o "leveled_gss_cpp${EXT_SUFFIX}" ${LDFLAGS}
+
+        ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+          "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
+
+        # Change back to original directory
+        cd "$ORIGINAL_CWD"
+
+        echo "Build complete."
+        echo "---"
+      else
+        echo "Skipping C++ extension build (SKIP_CPP_BUILD=1)."
+        echo "---"
+      fi
+
+      # --- Run Benchmarks ---
+      echo "Starting benchmark runs..."
+      # Define the ASAN library path at the top of the loop for clarity
+      ASAN_LIB="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/lib/darwin/libclang_rt.asan_osx_dynamic.dylib"
+
+      for model_to_benchmark in "${ALL_MODELS[@]}"; do
+          echo
+          echo ">>> Running benchmark for: $(basename "$model_to_benchmark")"
+          cmd=(python -m python.aug25.benchmark_runner
+              --code "$CODE_FILE"
+              --constraint-file "$CONSTRAINT_FILE"
+              --model "$model_to_benchmark"
+              --output "$RESULTS_DIR")
+          echo "${cmd[*]}"
+          # Prepend the environment variable ONLY for the C++ model
+          if [[ "$model_to_benchmark" == *"precompute3_model_cpp.py"* ]]; then
+              echo ">>> Running with AddressSanitizer..."
+              if DYLD_INSERT_LIBRARIES="$ASAN_LIB" "${cmd[@]}"; then
+                  echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
+              else
+                  exit_code=$?
+                  echo
+                  echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
+              fi
+          else
+              if "${cmd[@]}"; then
+                  echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
+              else
+                  exit_code=$?
+                  echo
+                  echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
+              fi
+          fi
+      done
+      echo
+      echo "All benchmark runs completed."
+      echo "---"
+
+
+      # --- Analyze Results ---
+      echo "Analyzing results and generating plots..."
+      PLOTS_DIR="${RESULTS_DIR}/analysis"
+      BASELINE_STEM="$(basename "$BASELINE_MODEL" .py)"
+      cmd=(python -m python.aug25.benchmark_analyzer
+          "${RESULTS_DIR}"/*.json
+          --baseline "$BASELINE_STEM"
+          --output-dir "$PLOTS_DIR")
+      echo "${cmd[*]}"
+      "${cmd[@]}"
+
+      echo
+      echo "---"
+      echo "Benchmark analysis complete."
+      echo "Baseline: $BASELINE_STEM"
+      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
+      echo "Full JSON results are in: $RESULTS_DIR"
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -1279,604 +486,226 @@ messages:
       role: developer
       ephemeral: false
   - user: |-
-      ```python 'python/aug25/models/precompute3_model_pure_python.py'
-      import json
-      import heapq
-      import collections
-      import time
-      from typing import Dict, List, Tuple, Optional, Union, Any, TypedDict
-      from dataclasses import dataclass, field
-
-      from ..common_interface import GraphProvider, RangeSet
-      import _sep1 as ffi
-      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
-      # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
-
-
-      # Add a dummy profiler for when not running under kernprof
-      try:
-          # This will be injected by the kernprof script.
-          profile
-      except NameError:
-          # If not running under kernprof, create a dummy decorator.
-          def profile(func): return func
-
-
-      @dataclass(frozen=True)
-      class Reduce:
-          nonterminal_id: int
-          len: int
-          production_ids: Tuple[int, ...]
-
-
-      @dataclass(frozen=True)
-      class Split:
-          shift: Optional[int]
-          reduces: Dict[int, Dict[int, Tuple[int, ...]]]  # len -> nt_id -> pids
-
-
-      # Action can be a Shift (int), Reduce, or Split
-      Action = Union[int, Reduce, Split]
-
-
-      @dataclass
-      class Row:
-          actions: Dict[int, Action] = field(default_factory=dict)  # terminal_id -> Action
-          gotos: Dict[int, int] = field(default_factory=dict)  # nonterminal_id -> state_id
-
-
-      @dataclass
-      class ParserTable:
-          start_state_id: int
-          table: Dict[int, Row]
-
-
-      class ArenaValue(TypedDict, total=False):
-          clean_end: bool
-
-
-      class ArenaNode(TypedDict, total=False):
-          max_depth: int
-          children: List[Tuple[Tuple[int, RangeSet], List[Tuple[int, RangeSet]]]]
-          llm_bv_union: RangeSet
-          value: ArenaValue
-
-
-      @dataclass(frozen=True, eq=False)
-      class PyAcc:
-          terminals_union: Dict[int, RangeSet]
-          llm_mask: RangeSet
-
-          def __eq__(self, other):
-              if not isinstance(other, PyAcc):
-                  return NotImplemented
-              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
-
-          def __hash__(self):
-              # frozenset of items for hashable dict
-              return hash((len(self.terminals_union), self.llm_mask))
-
-          def merge(self, other: "PyAcc") -> "PyAcc":
-              # The dataclass is frozen, so we can't modify in-place.
-              # But terminals_union is a dict, which is mutable.
-              # We must be careful to create copies.
-              d1 = self.terminals_union
-              d2 = other.terminals_union
-              new_terminals_union = d1.copy()
-              for k, v in d2.items():
-                  if k in new_terminals_union:
-                      new_terminals_union[k] = new_terminals_union[k].union(v)
-                  else:
-                      new_terminals_union[k] = v
-
-              return PyAcc(
-                  terminals_union=new_terminals_union,
-                  llm_mask=self.llm_mask.union(other.llm_mask),
-              )
-
-          def is_empty(self):
-              return self.llm_mask.is_empty()
-
-
-      @dataclass
-      class Model(GraphProvider):
-          """
-          Precomputed trie model (third-generation), simplified and concise.
-          """
-          roots_map_raw: List[Tuple[int, int]]
-          arena: Dict[int, Any]  # This is Dict[int, ArenaNode] after __post_init__
-
-          roots_map: Dict[int, int] = field(init=False)
-          id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
-          max_depth: Dict[int, int] = field(init=False, default_factory=dict)
-          possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = field(init=False, default=None)
-          tokenizer: Optional[ffi.Regex] = field(init=False, default=None)
-          glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
-          ignore_terminal_id: Optional[int] = field(init=False, default=None)
-          parser_table: Optional[ParserTable] = field(init=False, default=None)
-          state: Dict[int, GSS] = field(init=False, default_factory=dict)
-          internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
-          all_internal_llm_tokens_bitset: Optional[RangeSet] = field(init=False, default=None)
-          tokenizer_initial_state: Optional[int] = field(init=False, default=None)
-          tokenizer_max_state: Optional[int] = field(init=False, default=None)
-          all_terminals_bitset: Optional[RangeSet] = field(init=False, default=None)
-
-          def __post_init__(self):
-              self.roots_map = {int(s): int(r) for s, r in self.roots_map_raw}
-
-              dumps = json.dumps
-              bs_from_json = ffi.Bitset.from_json_string
-
-              # Normalize arena children bitsets and cache max_depth
-              for uid, node in self.arena.items():
-                  uid_int = int(uid)
-                  self.max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
-
-                  children = node.get("children") or []
-                  if not children:
-                      node["children"] = []
-                      node["llm_bv_union"] = RangeSet.empty()
-                      continue
-
-                  new_children = []
-                  llm_bv_union = RangeSet.empty()
-                  for edge_key, dest_map in children:
-                      pop, llm_bv_json = edge_key
-                      llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
-                      # Convert to RangeSet for ffi-free operations in commit/get_mask
-                      llm_bv = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
-                      llm_bv_union = llm_bv_union.union(llm_bv)
-                      new_dest_map = []
-                      for dest_idx, state_bv_json in dest_map:
-                          state_bv_bitset = bs_from_json(dumps(state_bv_json))
-                          state_bv = RangeSet.from_ranges(state_bv_bitset.to_ranges())
-                          new_dest_map.append((int(dest_idx), state_bv))
-                      new_children.append(((int(pop), llm_bv), new_dest_map))
-                  node["children"] = new_children
-                  node["llm_bv_union"] = llm_bv_union
-
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              data = json.loads(s)
-              roots_map = data["precomputed3"]
-              arena_json = data["trie3_god"]
-              arena_values = arena_json.get("values", [])
-              arena = {int(k): v for k, v in arena_values}
-              model = Model(roots_map, arena)
-
-              # Load tokenizer and parser table from the full constraint JSON
-              constraint = ffi.GrammarConstraint.from_json_string(s)
-              model.tokenizer = constraint.tokenizer()
-              model.tokenizer_max_state = model.tokenizer.max_state()
-              model.glr_parser = constraint.glr_parser()
-              model.ignore_terminal_id = model.glr_parser.ignore_terminal_id
-              model.tokenizer_initial_state = model.tokenizer.initial_state_id()
-
-              parser_data = data['parser']
-              table_data = parser_data['stage_7_table']
-              start_state_id = parser_data['start_state_id']
-              py_table: Dict[int, Row] = {}
-              for state_id_str, row_data in table_data:
-                  state_id = int(state_id_str)
-                  py_row = Row()
-                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
-                      term_id = int(term_id_str)
-                      variant = action_data['variant']
-                      if variant == 'Shift':
-                          py_row.actions[term_id] = action_data['state_id']
-                      elif variant == 'Reduce':
-                          pids = tuple(sorted(action_data['production_ids']))
-                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
-                      elif variant == 'Split':
-                          shift = action_data['shift']
-                          reduces: Dict[int, Dict[int, Tuple[int, ...]]] = {}
-                          for len_str, nts_data in action_data['reduces']:
-                              len_int = int(len_str)
-                              nts: Dict[int, Tuple[int, ...]] = {}
-                              for nt_id_str, pids in nts_data:
-                                  nt_id_int = int(nt_id_str)
-                                  nts[nt_id_int] = tuple(sorted(pids))
-                              reduces[len_int] = nts
-                          py_row.actions[term_id] = Split(shift, reduces)
-                  for nt_id_str, goto_data in row_data['gotos']:
-                      nt_id = int(nt_id_str)
-                      if goto_data['state_id'] is not None:
-                          py_row.gotos[nt_id] = goto_data['state_id']
-                  py_table[state_id] = py_row
-              model.parser_table = ParserTable(start_state_id, py_table)
-
-              all_terminals = set()
-              for row in model.parser_table.table.values():
-                  all_terminals.update(row.actions.keys())
-              if model.ignore_terminal_id is not None:
-                  all_terminals.add(model.ignore_terminal_id)
-              model.all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
-
-              initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
-              initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
-              model.state = {model.tokenizer_initial_state: initial_gss}
-
-              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-              # Convert possible_matches_cache to RangeSet
-              pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
-              pmc_rs: Dict[int, Dict[int, RangeSet]] = {}
-              for tsid, inner in pmc_ffi.items():
-                  mapped: Dict[int, RangeSet] = {}
-                  for term_id, bit in inner.items():
-                      mapped[int(term_id)] = RangeSet.from_ranges(bit.to_ranges())
-                  pmc_rs[int(tsid)] = mapped
-              model.possible_matches_cache = pmc_rs
-              model.internal_to_original_map = constraint.internal_to_original_map()
-              # Convert universe LLM tokens bitset to RangeSet
-              all_internal = constraint.all_internal_llm_tokens_bitset()
-              model.all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
-              return model
-
-          @profile
-          def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, RangeSet]) -> GSS:
-              def predicate(acc: PyAcc) -> bool:
-                  disallowed_terminals_map = acc.terminals_union
-                  for state_id, matched_bv in terminals_map.items():
-                      disallowed_for_state = disallowed_terminals_map.get(state_id, RangeSet.empty())
-                      if not matched_bv.intersection(disallowed_for_state).is_empty():
-                          return False
-                  return True
-              return gss.prune(predicate)
-
-          @profile
-          def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
-              def apply_map(acc: PyAcc) -> PyAcc:
-                  old_map = acc.terminals_union
-                  new_bvs: Dict[int, RangeSet] = collections.defaultdict(RangeSet.empty)
-                  for old_sid, new_sid in state_map.items():
-                      bv_source = old_map.get(old_sid, RangeSet.empty())
-                      new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-
-                  return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
-              return gss.apply(apply_map)
-
-          @profile
-          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
-              def apply_disallow(acc: PyAcc) -> PyAcc:
-                  current_map = acc.terminals_union.copy()
-                  curr_bv = current_map.get(state_id, RangeSet.empty())
-                  to_add = RangeSet.from_indices([terminal_id])
-                  new_bv = curr_bv.union(to_add)
-                  current_map[state_id] = new_bv
-                  return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
-              return gss.apply(apply_disallow)
-
-          def get_root(self, state_id: int) -> int:
-              return self.roots_map[int(state_id)]
-
-          def is_end(self, node: int) -> bool:
-              return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
-
-          def iter_edges(self, node: int, token: int):
-              """
-              Explode packed transitions into (pop, state_id or None, dest_idx).
-              """
-              children = self.arena.get(node, {}).get("children") or []
-              for (pop, llm_bv), dests in children:
-                  if llm_bv.contains(token):
-                      for dest_idx, state_bv in dests:
-                          if state_bv.is_empty():
-                              yield (int(pop), None, int(dest_idx))
-                          else:
-                              for start, end in state_bv.to_ranges():
-                                  for sid in range(start, end + 1):
-                                      yield (int(pop), sid, int(dest_idx))
-
-          @profile
-          def commit(self, token_id: int):
-              t0 = time.perf_counter()
-              token_bytes = self.id_to_token[token_id]
-
-              # Build tokenizer maps
-              terminals_map: Dict[int, RangeSet] = {}
-              state_map: Dict[int, int] = {}
-              for tokenizer_sid in self.state.keys():
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  if end_state is not None:
-                      state_map[tokenizer_sid] = end_state
-                  matched_terminals = [terminal_id for terminal_id, _ in matches]
-                  terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
-
-              # Prune and map per-state GSS
-              temp_states: Dict[int, GSS] = {}
-              for tokenizer_sid, gss in self.state.items():
-                  pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-                  if not pruned_gss.is_empty():
-                      mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-                      temp_states[tokenizer_sid] = mapped_gss
-
-              current_state_for_processing = temp_states
-
-              new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
-              q = collections.deque()
-              for tokenizer_sid, gss in current_state_for_processing.items():
-                  q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
-
-              visited_q_items: set = set()
-
-              while q:
-                  offset, tokenizer_sid, gss = q.popleft()
-                  q_item_key = (offset, tokenizer_sid, id(gss))
-                  if q_item_key in visited_q_items:
-                      continue
-                  visited_q_items.add(q_item_key)
-
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-
-                  for terminal_id, width in matches:
-                      processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
-
-                      # Immediate re-match disallow
-                      if end_state is not None:
-                          accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
-                          if terminal_id in accessible_terms:
-                              processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
-
-                      if not processed_gss.is_empty():
-                          new_offset = offset + width
-                          next_tokenizer_sid = self.tokenizer_initial_state
-                          if new_offset == len(token_bytes):
-                              new_states[next_tokenizer_sid].append(processed_gss)
-                          else:
-                              q.append((new_offset, next_tokenizer_sid, processed_gss))
-
-                  if end_state is not None:
-                      new_states[end_state].append(gss)
-
-              merged_states = {
-                  sid: GSS.merge_many(gss_list)
-                  for sid, gss_list in new_states.items()
-                  if gss_list
-              }
-              merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
-
-              self.state = merged_states
-
-              t1 = time.perf_counter()
-              print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
-
-          @profile
-          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-              heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
-              for state_id in gss.peek():
-                  heads_by_state[state_id].append(gss.isolate(state_id))
-
-              shifted_gsses: List[GSS] = []
-
-              while heads_by_state:
-                  state_id, state_gsss = heads_by_state.popitem()
-                  state_gss = GSS.merge_many(state_gsss)
-                  row = self.parser_table.table.get(state_id)
-                  if not row:
-                      continue
-                  action = row.actions.get(terminal_id)
-                  if not action:
-                      continue
-
-                  def handle_shift(shift_to_state_id, gss_to_shift):
-                      shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
-
-                  def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
-                      popped_gss = gss_to_reduce
-                      for _ in range(reduce_action.len):
-                          popped_gss = popped_gss.pop()
-                      for from_state_id in popped_gss.peek():
-                          goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                          goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
-                          heads_by_state[goto_state_id].append(goto_gss)
-
-                  if isinstance(action, int):
-                      handle_shift(action, state_gss)
-                  elif isinstance(action, Reduce):
-                      handle_reduce(action, state_gss)
-                  elif isinstance(action, Split):
-                      if action.shift is not None:
-                          handle_shift(action.shift, state_gss)
-                      for length, nts in action.reduces.items():
-                          for nt_id, pids in nts.items():
-                              handle_reduce(Reduce(nt_id, length, pids), state_gss)
-
-              return GSS.merge_many(shifted_gsses)
-          def get_mask(self) -> RangeSet:
-              """
-              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-
-              Changes for get_mask_only:
-              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-                the forbidden terminals -> forbidden LLM tokens and taking the complement.
-              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
-              """
-              state_map: Dict[int, GSS] = self.state
-
-              all_ones: Optional[RangeSet] = self.all_internal_llm_tokens_bitset
-              final_mask: RangeSet = RangeSet.empty()
-
-              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
-              values: Dict[int, GSS] = {}
-              depth_heap: List[Tuple[int, int]] = []  # Stores (-depth, node_id)
-              enqueued_nodes: Set = set()
-
-              hp, hpop = heapq.heappush, heapq.heappop
-              roots_map: Dict[int, int] = self.roots_map
-              max_depth: Dict[int, int] = self.max_depth
-              arena: Dict[int, dict] = self.arena
-              is_end = self.is_end
-              pmc: Dict[int, Dict[int, RangeSet]] = self.possible_matches_cache or {}
-              max_state: int = self.tokenizer_max_state
-
-              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-              def initialize_acc(acc: PyAcc) -> PyAcc:
-                  # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                  disallowed_llm_mask = RangeSet.empty()
-                  disallowed_map = acc.terminals_union
-
-                  for tsid, disallowed_terminals in disallowed_map.items():
-                      if tsid > max_state or tsid not in pmc:
-                          continue
-                      terminals_to_llm = pmc[tsid]
-                      for terminal_id in disallowed_terminals.to_indices():
-                          if terminal_id in terminals_to_llm:
-                              disallowed_llm_mask = disallowed_llm_mask.union(
-                                  terminals_to_llm[terminal_id]
-                              )
-
-                  allowed_mask = (all_ones if all_ones is not None else RangeSet.empty()).difference(disallowed_llm_mask)
-                  return PyAcc(
-                      terminals_union={},  # consume
-                      llm_mask=allowed_mask,
-                  )
-
-              for sid, gss in state_map.items():
-                  r: int = roots_map[int(sid)]
-                  gss_initialized: GSS = gss.apply(initialize_acc)
-                  if r in values:
-                      values[r] = values[r].merge(gss_initialized)
-                  else:
-                      values[r] = gss_initialized
-
-                  d: int = max_depth[r]
-                  if r not in enqueued_nodes:
-                      enqueued_nodes.add(r)
-                      hp(depth_heap, (-d, r))
-
-              def enqueue(d: int, n: int) -> None:
-                  if n not in enqueued_nodes:
-                      enqueued_nodes.add(n)
-                      hp(depth_heap, (-d, n))
-
-              # Main loop
-              while depth_heap:
-                  neg_depth, node = hpop(depth_heap)
-                  gss_node: GSS = values.pop(node)
-
-                  # End-node handling: just union the allowed LLM tokens
-                  if is_end(node):
-                      reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                      if reduced_acc:
-                          final_mask = final_mask.union(reduced_acc.llm_mask)
-
-                  # Zombie traversal avoidance
-                  node_llm_bv_union = arena.get(node, {}).get("llm_bv_union", RangeSet.empty())
-                  potential_new_tokens = node_llm_bv_union.difference(final_mask)
-                  if potential_new_tokens.is_empty():
-                      continue
-
-                  gss_mask_acc = gss_node.reduce_acc()
-                  if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
-                      continue
-
-                  # Traverse edges and propagate masks
-                  edges = arena.get(node, {}).get("children") or []
-                  for (pop, llm_bv), dests in edges:
-                      llm_bv = llm_bv.difference(final_mask)
-                      if llm_bv.is_empty():
-                          continue
-
-                      popped: GSS = gss_node.popn(pop)
-                      if popped.is_empty():
-                          continue
-
-                      # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                      acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
-
-                      def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                          if acc in acc_memo:
-                              return acc_memo[acc]
-                          new_mask = acc.llm_mask.intersection(llm_bv)
-                          if new_mask.is_empty():
-                              result = None
-                          else:
-                              result = PyAcc(
-                                  terminals_union=acc.terminals_union,
-                                  llm_mask=new_mask
-                              )
-                          acc_memo[acc] = result
-                          return result
-
-                      popped = popped.apply_and_prune(intersect_and_prune)
-                      if popped.is_empty():
-                          continue
-
-                      reduced = popped.reduce_acc()
-                      if not reduced or reduced.is_empty():
-                          continue
-
-                      for dest_idx, state_bv in dests:
-                          peeked = popped.peek()
-                          values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-
-                          if not values_to_keep:
-                              continue
-
-                          child_gss: GSS = popped.isolate_many(values_to_keep)
-                          if child_gss.is_empty():
-                              continue
-
-                          reduced_child = child_gss.reduce_acc()
-                          if not reduced_child or reduced_child.is_empty():
-                              continue
-
-                          d: int = int(dest_idx)
-                          if d in values:
-                              values[d] = values[d].merge(child_gss)
-                          else:
-                              values[d] = child_gss
-                          enqueue(max_depth[d], d)
-
-
-              # Convert internal mask back to original IDs
-              original_indices: List[int] = []
-              for i in final_mask.to_indices():
-                  if i in self.internal_to_original_map:
-                      original_indices.append(self.internal_to_original_map[i])
-
-              return RangeSet.from_indices(original_indices)
+      ```shell 'python/run_benchmarks.sh'
+      #!/bin/bash
+      set -euo pipefail
+
+      # ==============================================================================
+      # run_benchmarks.sh
+      #
+      # A script to automate running benchmarks for multiple grammar constraint models,
+      # generating JSON results and analysis plots. This script runs each model once
+      # (no in-process reference/baseline). The analyzer is later told which result
+      # is the baseline to perform mask comparisons.
+      #
+      # This script should be run from the project root directory.
+      #
+      # Usage:
+      #   ./run_benchmarks.sh <baseline_model.py> <model1.py> [model2.py ...]
+      #
+      # Example:
+      #   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
+      #
+      # Environment Variables:
+      #   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
+      #                    (Default: ./.cache/test_vocabs/js_grammar_constraint.json.gz)
+      #   CODE_FILE:    Path to the code file to use as input.
+      #                 (Default: ./src/example_code.js)
+      # ==============================================================================
+
+      # --- Configuration ---
+      # Use environment variables if set, otherwise use defaults.
+      : "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
+      : "${CODE_FILE:="./src/example_code.js"}"
+
+      # --- PYTHONPATH setup ---
+      # The script is run from the project root. The python modules are in the 'python' directory.
+      # We add the 'python' directory to PYTHONPATH so that compiled extension modules (like leveled_gss_cpp)
+      # can be found via top-level imports.
+      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
+      # --- Argument Validation ---
+      if [ "$#" -lt 1 ]; then
+          echo "Usage: $0 <baseline_model.py> <model1.py> [model2.py ...]"
+          echo "Error: At least one model argument is required. The first is treated as the baseline."
+          exit 1
+      fi
+
+      BASELINE_MODEL="$1"
+      shift
+      COMPETITORS=("$@")
+
+      ALL_MODELS=("$BASELINE_MODEL" "${COMPETITORS[@]}")
+
+      # Check that all provided files exist
+      for file in "${ALL_MODELS[@]}"; do
+          if [ ! -f "$file" ]; then
+              echo "Error: Model file not found: $file"
+              exit 1
+          fi
+      done
+      if [ ! -f "$CONSTRAINT_FILE" ]; then
+          echo "Error: Constraint file not found: $CONSTRAINT_FILE"
+          exit 1
+      fi
+      if [ ! -f "$CODE_FILE" ]; then
+          echo "Error: Code file not found: $CODE_FILE"
+          exit 1
+      fi
+
+
+      # --- Setup ---
+      # Create a unique directory for this benchmark run's results.
+      RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
+      mkdir -p "$RESULTS_DIR"
+      echo "Benchmark results will be saved in: $RESULTS_DIR"
+      echo "---"
+      echo "Baseline Model: $BASELINE_MODEL"
+      if [ "${#COMPETITORS[@]}" -gt 0 ]; then
+        echo "Other Models: ${COMPETITORS[*]}"
+      else
+        echo "Other Models: (none)"
+      fi
+      echo "Constraint File: $CONSTRAINT_FILE"
+      echo "Code: $CODE_FILE"
+      echo "---"
+
+
+      # --- Automated C++ Build Process ---
+      echo "Ensuring C++ extensions are built..."
+
+      # Determine project root, assuming this script is in the 'python' directory.
+      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
+
+      # 1) Setup: download Boost headers locally and install pybind11
+      BOOST_VERSION="1.83.0"
+      BOOST_VER_UNDERSCORES="1_83_0"
+      BOOST_DIR="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}"
+      mkdir -p "${PROJECT_ROOT}/.build"
+
+      if [ ! -d "$BOOST_DIR" ]; then
+        BOOST_TGZ="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+        echo "Downloading Boost ${BOOST_VERSION} headers..."
+        curl -L -o "$BOOST_TGZ" "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+        echo "Extracting Boost..."
+        tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
+      fi
+
+      echo "Installing pybind11..."
+      python3 -m pip install --quiet pybind11
+
+      # 2) Build the C++ extensions in place
+      echo "Building C++ extensions..."
+
+      # Compute extension suffix and includes via pybind11
+      EXT_SUFFIX="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or ".so")')"
+      PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
+      CXX="${CXX:-c++}"
+      CXXFLAGS="-O3 -DNDEBUG -march=native -flto -std=c++17 -shared -fPIC"
+      LDFLAGS="-flto"
+      if [[ "$(uname)" == "Darwin" ]]; then
+        LDFLAGS="${LDFLAGS} -undefined dynamic_lookup"
+      fi
+
+      # Optional ASan (opt-in via SANITIZE=1 env var)
+      if [[ "${SANITIZE:-0}" == "1" ]]; then
+        echo "Building with AddressSanitizer (SANITIZE=1)"
+        CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c++17 -shared -fPIC"
+        LDFLAGS="${LDFLAGS} -fsanitize=address"
+      fi
+
+      # Control C++ stats collection. Default to enabled.
+      : "${ENABLE_CPP_STATS:=1}"
+      if [[ "${ENABLE_CPP_STATS}" == "1" ]]; then
+        echo "Building C++ with stats enabled (ENABLE_CPP_STATS=1)"
+        CXXFLAGS="${CXXFLAGS} -DENABLE_STATS"
+      else
+        echo "Building C++ with stats disabled (ENABLE_CPP_STATS=0)"
+      fi
+
+      # Change to python directory to run build commands with relative paths
+      ORIGINAL_CWD=$(pwd)
+      cd "$SCRIPT_DIR"
+
+      # Compile extensions. Paths are relative to the 'python' directory.
+      ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+        "aug25/models/icl_rangeset.cpp" -o "aug25/models/icl_rangeset${EXT_SUFFIX}" ${LDFLAGS}
+
+      ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+        "aug25/models/leveled_gss_py.cpp" -o "leveled_gss_cpp${EXT_SUFFIX}" ${LDFLAGS}
+
+      ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+        "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
+
+      # Change back to original directory
+      cd "$ORIGINAL_CWD"
+
+      echo "Build complete."
+      echo "---"
+
+      # --- Run Benchmarks ---
+      echo "Starting benchmark runs..."
+      # Define the ASAN library path at the top of the loop for clarity
+      ASAN_LIB="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/lib/darwin/libclang_rt.asan_osx_dynamic.dylib"
+
+      for model_to_benchmark in "${ALL_MODELS[@]}"; do
+          echo
+          echo ">>> Running benchmark for: $(basename "$model_to_benchmark")"
+          cmd=(python -m python.aug25.benchmark_runner
+              --code "$CODE_FILE"
+              --constraint-file "$CONSTRAINT_FILE"
+              --model "$model_to_benchmark"
+              --output "$RESULTS_DIR")
+          echo "${cmd[*]}"
+          # Prepend the environment variable ONLY for the C++ model
+          if [[ "$model_to_benchmark" == *"precompute3_model_cpp.py"* ]]; then
+              echo ">>> Running with AddressSanitizer..."
+              if DYLD_INSERT_LIBRARIES="$ASAN_LIB" "${cmd[@]}"; then
+                  echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
+              else
+                  exit_code=$?
+                  echo
+                  echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
+              fi
+          else
+              if "${cmd[@]}"; then
+                  echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
+              else
+                  exit_code=$?
+                  echo
+                  echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
+              fi
+          fi
+      done
+      echo
+      echo "All benchmark runs completed."
+      echo "---"
+
+
+      # --- Analyze Results ---
+      echo "Analyzing results and generating plots..."
+      PLOTS_DIR="${RESULTS_DIR}/analysis"
+      BASELINE_STEM="$(basename "$BASELINE_MODEL" .py)"
+      cmd=(python -m python.aug25.benchmark_analyzer
+          "${RESULTS_DIR}"/*.json
+          --baseline "$BASELINE_STEM"
+          --output-dir "$PLOTS_DIR")
+      echo "${cmd[*]}"
+      "${cmd[@]}"
+
+      echo
+      echo "---"
+      echo "Benchmark analysis complete."
+      echo "Baseline: $BASELINE_STEM"
+      echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
+      echo "Full JSON results are in: $RESULTS_DIR"
 
       ```
     metadata:
-      filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: |-
-      I want to add optimization passes for the precompute.
-      Add a function for it.
-
-      It should work vaugely like this
-
-      Suppose we have just one LLM token. We can loop over all LLM tokens.
-      Ignore pops for now.
-
-      Consider one dest from one source
-      We have a set of states that can be alive at the source. Start at the root node.
-      We have a set of state IDs for which there's an edge from the source to the dest
-
-      If there's definitely an edge to the dest from the source no matter what state may actually be alive at the source, then we can remove ALL those edges.
-      If there's even one source state missing, one state that can alive at the source but doesn't have an edge from the source to the dest, we need to keep all the edges.
-      Conversely, consider there being an edge for a state that isn't in the alive set for the source. We can remove *that* edge on its own.
-
-      Now we need to generalize.
-      We have an LLM token bitset for each state ID. This is equivalent to looping over those LLM tokens.
-      I mean we need an algo that's equivalent, but much faster thanks to bitset parallelism.
-      Might be easier to write the loop out and then parallelize it.
-
-      Yes. Don't worry about parallelizing it. Just write a big loop over all LLM tokens.
-
-      ...
-
-      Now for pops, when we do a pop, we apply a transform to the states.
-      We have a state -> {set of states} mapping.
-      We obtain it by looking at each state A, look at its shifts, say we have shift to state B, draw a line from state A -> B
-      Do same with gotos.
-      Now reverse the arow directions. This becomes the map.
-      ie the set for state B will have state A in it.
-
-      On pop 1, we look at LLM token bv for alive state B, look it up, and add to the new transformed (state -> bv) map entries for the dest states, merging with bv union if already exists.
-      Pop n is just n x pop 1
+      filename: python/run_benchmarks.sh
+  - user: Make it possible to disable compilation, e.g. if we're not using cpp.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1895,263 +724,238 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add the optimization pass, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to make the C++ compilation optional, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file** `python/aug25/models/precompute3_model_pure_python.py`.
+      I'll add a new environment variable, `SKIP_CPP_BUILD`, to control whether the C++ extensions are compiled.
 
-      2.  **Add the `_optimize_trie` method** to the `Model` class. This new method will contain the logic for analyzing and pruning the precomputed trie. A good place for it is right after the `__post_init__` method.
+      1.  **Open `python/run_benchmarks.sh` for editing.**
 
-      3.  **Invoke the optimization** from the `from_json_string` static method. Add a call to `model._optimize_trie()` at the end of this method, just before the `return model` statement, to ensure the optimization runs when a model is loaded.
+      2.  **Add the `SKIP_CPP_BUILD` configuration variable.**
+          In the configuration section at the top of the script, add a line to define `SKIP_CPP_BUILD`. By default, it will be `0`, meaning the build will run. Set it to `1` to skip the build.
 
-      Here is the code for the new `_optimize_trie` method:
+          In `python/run_benchmarks.sh`, find this section:
+          ```bash
+          # --- Configuration ---
+          # Use environment variables if set, otherwise use defaults.
+          : "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
+          : "${CODE_FILE:="./src/example_code.js"}"
+          ```
+          And add the new variable:
+          ```bash
+          : "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
+          : "${CODE_FILE:="./src/example_code.js"}"
+          : "${SKIP_CPP_BUILD:=0}" # Set to 1 to disable C++ compilation
+          ```
 
-      ```python
-          def _optimize_trie(self):
-              """
-              Prunes the precomputed trie by removing edges that are unreachable
-              based on a static analysis of possible parser states.
-              """
-              print("Optimizing trie...")
-              # 1. Build reverse transitions map for pops
-              rev_transitions = collections.defaultdict(set)
-              for state_id, row in self.parser_table.table.items():
-                  # Gotos
-                  for nt_id, goto_state_id in row.gotos.items():
-                      rev_transitions[goto_state_id].add(state_id)
-                  # Shifts
-                  for term_id, action in row.actions.items():
-                      shift_to = None
-                      if isinstance(action, int):
-                          shift_to = action
-                      elif isinstance(action, Split) and action.shift is not None:
-                          shift_to = action.shift
+      3.  **Make the C++ build process conditional.**
+          Next, wrap the entire C++ build process in an `if` statement that checks `SKIP_CPP_BUILD`.
 
-                      if shift_to is not None:
-                          rev_transitions[shift_to].add(state_id)
+          Find the section that begins with the comment `# --- Automated C++ Build Process ---` and ends just before `# --- Run Benchmarks ---`. Wrap this entire block as shown below.
 
-              # Memoization for pop transformation
-              pop_memo = {}
-              def transform(states, pop_count):
-                  states_tuple = tuple(sorted(list(states)))
-                  if (states_tuple, pop_count) in pop_memo:
-                      return pop_memo[(states_tuple, pop_count)]
+          **Before:**
+          ```bash
+          # --- Automated C++ Build Process ---
+          echo "Ensuring C++ extensions are built..."
+          
+          # ... all build commands ...
+          
+          echo "Build complete."
+          echo "---"
+          
+          # --- Run Benchmarks ---
+          ```
 
-                  if pop_count == 0:
-                      return states
+          **After:**
+          ```bash
+          if [[ "${SKIP_CPP_BUILD}" != "1" ]]; then
+            # --- Automated C++ Build Process ---
+            echo "Ensuring C++ extensions are built..."
+          
+            # ... all build commands ...
+          
+            echo "Build complete."
+            echo "---"
+          else
+            echo "Skipping C++ extension build (SKIP_CPP_BUILD=1)."
+            echo "---"
+          fi
+          
+          # --- Run Benchmarks ---
+          ```
 
-                  prev_states = transform(states, pop_count - 1)
-                  if not prev_states:
-                      pop_memo[(states_tuple, pop_count)] = set()
-                      return set()
+      You can now run the script with `SKIP_CPP_BUILD=1 ./python/run_benchmarks.sh ...` to skip the compilation step.
 
-                  next_states = set()
-                  for s in prev_states:
-                      next_states.update(rev_transitions.get(s, set()))
+      ### Git Diffs
 
-                  pop_memo[(states_tuple, pop_count)] = next_states
-                  return next_states
-
-              # 2. Dataflow analysis to find alive parser states at each trie node
-              alive_states = collections.defaultdict(set)
-              worklist = collections.deque()
-
-              all_parser_states = set(self.parser_table.table.keys())
-
-              for root_node_id in set(self.roots_map.values()):
-                  if not alive_states[root_node_id]:
-                      alive_states[root_node_id] = all_parser_states
-                      worklist.append(root_node_id)
-
-              while worklist:
-                  node_id = worklist.popleft()
-                  node = self.arena.get(node_id)
-                  if not node or not node.get("children"):
-                      continue
-
-                  current_states = alive_states[node_id]
-
-                  for (pop, llm_bv), dests in node["children"]:
-                      popped_states = transform(current_states, pop)
-                      if not popped_states:
-                          continue
-
-                      for dest_idx, state_bv in dests:
-                          edge_states = set(state_bv.to_indices())
-                          propagated_states = popped_states.intersection(edge_states)
-
-                          if propagated_states:
-                              if not propagated_states.issubset(alive_states[dest_idx]):
-                                  alive_states[dest_idx].update(propagated_states)
-                                  if dest_idx not in worklist:
-                                      worklist.append(dest_idx)
-
-              # 3. Prune the trie
-              for node_id, node in self.arena.items():
-                  if not node.get("children"):
-                      continue
-
-                  new_children = []
-                  current_states = alive_states.get(node_id)
-                  if not current_states:
-                      # This node is unreachable
-                      node["children"] = []
-                      continue
-
-                  for (pop, llm_bv), dests in node["children"]:
-                      popped_states = transform(current_states, pop)
-                      if not popped_states:
-                          continue # This edge is unreachable
-
-                      new_dests = []
-                      popped_states_rs = RangeSet.from_indices(list(popped_states))
-                      for dest_idx, state_bv in dests:
-                          new_state_bv = state_bv.intersection(popped_states_rs)
-
-                          if not new_state_bv.is_empty():
-                              new_dests.append((dest_idx, new_state_bv))
-
-                      if new_dests:
-                          new_children.append(((pop, llm_bv), new_dests))
-
-                  node["children"] = new_children
-      ```
-
-      ### Git Diff
-
-      Here is the git diff to apply these changes.
+      Here is the git diff to apply these changes:
 
       ```diff
-      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      index 211111c..118811c 100644
-      --- a/python/aug25/models/precompute3_model_pure_python.py
-      +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -181,6 +181,102 @@
-                   node["children"] = new_children
-                   node["llm_bv_union"] = llm_bv_union
+      diff --git a/python/run_benchmarks.sh b/python/run_benchmarks.sh
+      index 9111111..2222222 100755
+      --- a/python/run_benchmarks.sh
+      +++ b/python/run_benchmarks.sh
+      @@ -26,6 +26,7 @@
+       # Use environment variables if set, otherwise use defaults.
+       : "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
+       : "${CODE_FILE:="./src/example_code.js"}"
+      +: "${SKIP_CPP_BUILD:=0}" # Set to 1 to disable C++ compilation
        
-      +    def _optimize_trie(self):
-      +        """
-      +        Prunes the precomputed trie by removing edges that are unreachable
-      +        based on a static analysis of possible parser states.
-      +        """
-      +        print("Optimizing trie...")
-      +        # 1. Build reverse transitions map for pops
-      +        rev_transitions = collections.defaultdict(set)
-      +        for state_id, row in self.parser_table.table.items():
-      +            # Gotos
-      +            for nt_id, goto_state_id in row.gotos.items():
-      +                rev_transitions[goto_state_id].add(state_id)
-      +            # Shifts
-      +            for term_id, action in row.actions.items():
-      +                shift_to = None
-      +                if isinstance(action, int):
-      +                    shift_to = action
-      +                elif isinstance(action, Split) and action.shift is not None:
-      +                    shift_to = action.shift
-      +
-      +                if shift_to is not None:
-      +                    rev_transitions[shift_to].add(state_id)
-      +
-      +        # Memoization for pop transformation
-      +        pop_memo = {}
-      +        def transform(states, pop_count):
-      +            states_tuple = tuple(sorted(list(states)))
-      +            if (states_tuple, pop_count) in pop_memo:
-      +                return pop_memo[(states_tuple, pop_count)]
-      +
-      +            if pop_count == 0:
-      +                return states
-      +
-      +            prev_states = transform(states, pop_count - 1)
-      +            if not prev_states:
-      +                pop_memo[(states_tuple, pop_count)] = set()
-      +                return set()
-      +
-      +            next_states = set()
-      +            for s in prev_states:
-      +                next_states.update(rev_transitions.get(s, set()))
-      +
-      +            pop_memo[(states_tuple, pop_count)] = next_states
-      +            return next_states
-      +
-      +        # 2. Dataflow analysis to find alive parser states at each trie node
-      +        alive_states = collections.defaultdict(set)
-      +        worklist = collections.deque()
-      +
-      +        all_parser_states = set(self.parser_table.table.keys())
-      +
-      +        for root_node_id in set(self.roots_map.values()):
-      +            if not alive_states[root_node_id]:
-      +                alive_states[root_node_id] = all_parser_states
-      +                worklist.append(root_node_id)
-      +
-      +        while worklist:
-      +            node_id = worklist.popleft()
-      +            node = self.arena.get(node_id)
-      +            if not node or not node.get("children"):
-      +                continue
-      +
-      +            current_states = alive_states[node_id]
-      +
-      +            for (pop, llm_bv), dests in node["children"]:
-      +                popped_states = transform(current_states, pop)
-      +                if not popped_states:
-      +                    continue
-      +
-      +                for dest_idx, state_bv in dests:
-      +                    edge_states = set(state_bv.to_indices())
-      +                    propagated_states = popped_states.intersection(edge_states)
-      +
-      +                    if propagated_states:
-      +                        if not propagated_states.issubset(alive_states[dest_idx]):
-      +                            alive_states[dest_idx].update(propagated_states)
-      +                            if dest_idx not in worklist:
-      +                                worklist.append(dest_idx)
-      +
-      +        # 3. Prune the trie
-      +        for node_id, node in self.arena.items():
-      +            if not node.get("children"):
-      +                continue
-      +
-      +            new_children = []
-      +            current_states = alive_states.get(node_id)
-      +            if not current_states:
-      +                node["children"] = []
-      +                continue
-      +
-      +            for (pop, llm_bv), dests in node["children"]:
-      +                popped_states = transform(current_states, pop)
-      +                if not popped_states:
-      +                    continue
-      +
-      +                new_dests = []
-      +                popped_states_rs = RangeSet.from_indices(list(popped_states))
-      +                for dest_idx, state_bv in dests:
-      +                    new_state_bv = state_bv.intersection(popped_states_rs)
-      +
-      +                    if not new_state_bv.is_empty():
-      +                        new_dests.append((dest_idx, new_state_bv))
-      +
-      +                if new_dests:
-      +                    new_children.append(((pop, llm_bv), new_dests))
-      +
-      +            node["children"] = new_children
-      +
-           @staticmethod
-           def from_json_string(s: str) -> 'Model':
-               data = json.loads(s)
-      @@ -256,6 +352,9 @@
-               # Convert universe LLM tokens bitset to RangeSet
-               all_internal = constraint.all_internal_llm_tokens_bitset()
-               model.all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
-      +
-      +        model._optimize_trie()
-      +
-               return model
+       # --- PYTHONPATH setup ---
+       # The script is run from the project root. The python modules are in the 'python' directory.
+      @@ -67,71 +68,78 @@
+       echo "---"
        
-           @profile
+       
+      -# --- Automated C++ Build Process ---
+      -echo "Ensuring C++ extensions are built..."
+      +if [[ "${SKIP_CPP_BUILD}" != "1" ]]; then
+      +  # --- Automated C++ Build Process ---
+      +  echo "Ensuring C++ extensions are built..."
+       
+      -# Determine project root, assuming this script is in the 'python' directory.
+      -SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      -PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
+      +  # Determine project root, assuming this script is in the 'python' directory.
+      +  SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      +  PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
+       
+      -# 1) Setup: download Boost headers locally and install pybind11
+      -BOOST_VERSION="1.83.0"
+      -BOOST_VER_UNDERSCORES="1_83_0"
+      -BOOST_DIR="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}"
+      -mkdir -p "${PROJECT_ROOT}/.build"
+      +  # 1) Setup: download Boost headers locally and install pybind11
+      +  BOOST_VERSION="1.83.0"
+      +  BOOST_VER_UNDERSCORES="1_83_0"
+      +  BOOST_DIR="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}"
+      +  mkdir -p "${PROJECT_ROOT}/.build"
+       
+      -if [ ! -d "$BOOST_DIR" ]; then
+      -  BOOST_TGZ="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+      -  echo "Downloading Boost ${BOOST_VERSION} headers..."
+      -  curl -L -o "$BOOST_TGZ" "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+      -  echo "Extracting Boost..."
+      -  tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
+      +  if [ ! -d "$BOOST_DIR" ]; then
+      +    BOOST_TGZ="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+      +    echo "Downloading Boost ${BOOST_VERSION} headers..."
+      +    curl -L -o "$BOOST_TGZ" "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+      +    echo "Extracting Boost..."
+      +    tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
+      +  fi
+      +
+      +  echo "Installing pybind11..."
+      +  python3 -m pip install --quiet pybind11
+      +
+      +  # 2) Build the C++ extensions in place
+      +  echo "Building C++ extensions..."
+      +
+      +  # Compute extension suffix and includes via pybind11
+      +  EXT_SUFFIX="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or ".so")')"
+      +  PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
+      +  CXX="${CXX:-c++}"
+      +  CXXFLAGS="-O3 -DNDEBUG -march=native -flto -std=c++17 -shared -fPIC"
+      +  LDFLAGS="-flto"
+      +  if [[ "$(uname)" == "Darwin" ]]; then
+      +    LDFLAGS="${LDFLAGS} -undefined dynamic_lookup"
+      +  fi
+      +
+      +  # Optional ASan (opt-in via SANITIZE=1 env var)
+      +  if [[ "${SANITIZE:-0}" == "1" ]]; then
+      +    echo "Building with AddressSanitizer (SANITIZE=1)"
+      +    CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c++17 -shared -fPIC"
+      +    LDFLAGS="${LDFLAGS} -fsanitize=address"
+      +  fi
+      +
+      +  # Control C++ stats collection. Default to enabled.
+      +  : "${ENABLE_CPP_STATS:=1}"
+      +  if [[ "${ENABLE_CPP_STATS}" == "1" ]]; then
+      +    echo "Building C++ with stats enabled (ENABLE_CPP_STATS=1)"
+      +    CXXFLAGS="${CXXFLAGS} -DENABLE_STATS"
+      +  else
+      +    echo "Building C++ with stats disabled (ENABLE_CPP_STATS=0)"
+      +  fi
+      +
+      +  # Change to python directory to run build commands with relative paths
+      +  ORIGINAL_CWD=$(pwd)
+      +  cd "$SCRIPT_DIR"
+      +
+      +  # Compile extensions. Paths are relative to the 'python' directory.
+      +  ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+      +    "aug25/models/icl_rangeset.cpp" -o "aug25/models/icl_rangeset${EXT_SUFFIX}" ${LDFLAGS}
+      +
+      +  ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+      +    "aug25/models/leveled_gss_py.cpp" -o "leveled_gss_cpp${EXT_SUFFIX}" ${LDFLAGS}
+      +
+      +  ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+      +    "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
+      +
+      +  # Change back to original directory
+      +  cd "$ORIGINAL_CWD"
+      +
+      +  echo "Build complete."
+      +  echo "---"
+      +else
+      +  echo "Skipping C++ extension build (SKIP_CPP_BUILD=1)."
+      +  echo "---"
+       fi
+      -
+      -echo "Installing pybind11..."
+      -python3 -m pip install --quiet pybind11
+      -
+      -# 2) Build the C++ extensions in place
+      -echo "Building C++ extensions..."
+      -
+      -# Compute extension suffix and includes via pybind11
+      -EXT_SUFFIX="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or ".so")')"
+      -PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
+      -CXX="${CXX:-c++}"
+      -CXXFLAGS="-O3 -DNDEBUG -march=native -flto -std=c++17 -shared -fPIC"
+      -LDFLAGS="-flto"
+      -if [[ "$(uname)" == "Darwin" ]]; then
+      -  LDFLAGS="${LDFLAGS} -undefined dynamic_lookup"
+      -fi
+      -
+      -# Optional ASan (opt-in via SANITIZE=1 env var)
+      -if [[ "${SANITIZE:-0}" == "1" ]]; then
+      -  echo "Building with AddressSanitizer (SANITIZE=1)"
+      -  CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c++17 -shared -fPIC"
+      -  LDFLAGS="${LDFLAGS} -fsanitize=address"
+      -fi
+      -
+      -# Control C++ stats collection. Default to enabled.
+      -: "${ENABLE_CPP_STATS:=1}"
+      -if [[ "${ENABLE_CPP_STATS}" == "1" ]]; then
+      -  echo "Building C++ with stats enabled (ENABLE_CPP_STATS=1)"
+      -  CXXFLAGS="${CXXFLAGS} -DENABLE_STATS"
+      -else
+      -  echo "Building C++ with stats disabled (ENABLE_CPP_STATS=0)"
+      -fi
+      -
+      -# Change to python directory to run build commands with relative paths
+      -ORIGINAL_CWD=$(pwd)
+      -cd "$SCRIPT_DIR"
+      -
+      -# Compile extensions. Paths are relative to the 'python' directory.
+      -${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+      -  "aug25/models/icl_rangeset.cpp" -o "aug25/models/icl_rangeset${EXT_SUFFIX}" ${LDFLAGS}
+      -
+      -${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+      -  "aug25/models/leveled_gss_py.cpp" -o "leveled_gss_cpp${EXT_SUFFIX}" ${LDFLAGS}
+      -
+      -${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+      -  "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
+      -
+      -# Change back to original directory
+      -cd "$ORIGINAL_CWD"
+      -
+      -echo "Build complete."
+      -echo "---"
+       
+       # --- Run Benchmarks ---
+       echo "Starting benchmark runs..."
 
       ```
     metadata:
@@ -2160,11 +964,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model_pure_python.py
-      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
+      Identified target file: python/run_benchmarks.sh
+      Applying patch to 'python/run_benchmarks.sh' using custom patcher...
+      Successfully applied patch and wrote to python/run_benchmarks.sh.
     metadata:
-  - user: 'Changes committed with message: "feat: Add trie optimization pass to prune
-      unreachable edges"'
+  - user: 'Changes committed with message: "feat: Add option to skip C++ compilation
+      in run_benchmarks.sh"'
     metadata:
 ...

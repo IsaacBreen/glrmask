@@ -28,6 +28,7 @@ set -euo pipefail
 # Use environment variables if set, otherwise use defaults.
 : "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
 : "${CODE_FILE:="./src/example_code.js"}"
+: "${SKIP_CPP_BUILD:=0}" # Set to 1 to disable C++ compilation
 
 # --- PYTHONPATH setup ---
 # The script is run from the project root. The python modules are in the 'python' directory.
@@ -83,78 +84,83 @@ echo "Code: $CODE_FILE"
 echo "---"
 
 
-# --- Automated C++ Build Process ---
-echo "Ensuring C++ extensions are built..."
+if [[ "${SKIP_CPP_BUILD}" != "1" ]]; then
+  # --- Automated C++ Build Process ---
+  echo "Ensuring C++ extensions are built..."
 
-# Determine project root, assuming this script is in the 'python' directory.
-SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
+  # Determine project root, assuming this script is in the 'python' directory.
+  SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+  PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
 
-# 1) Setup: download Boost headers locally and install pybind11
-BOOST_VERSION="1.83.0"
-BOOST_VER_UNDERSCORES="1_83_0"
-BOOST_DIR="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}"
-mkdir -p "${PROJECT_ROOT}/.build"
+  # 1) Setup: download Boost headers locally and install pybind11
+  BOOST_VERSION="1.83.0"
+  BOOST_VER_UNDERSCORES="1_83_0"
+  BOOST_DIR="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}"
+  mkdir -p "${PROJECT_ROOT}/.build"
 
-if [ ! -d "$BOOST_DIR" ]; then
-  BOOST_TGZ="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
-  echo "Downloading Boost ${BOOST_VERSION} headers..."
-  curl -L -o "$BOOST_TGZ" "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
-  echo "Extracting Boost..."
-  tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
-fi
+  if [ ! -d "$BOOST_DIR" ]; then
+    BOOST_TGZ="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+    echo "Downloading Boost ${BOOST_VERSION} headers..."
+    curl -L -o "$BOOST_TGZ" "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+    echo "Extracting Boost..."
+    tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
+  fi
 
-echo "Installing pybind11..."
-python3 -m pip install --quiet pybind11
+  echo "Installing pybind11..."
+  python3 -m pip install --quiet pybind11
 
-# 2) Build the C++ extensions in place
-echo "Building C++ extensions..."
+  # 2) Build the C++ extensions in place
+  echo "Building C++ extensions..."
 
-# Compute extension suffix and includes via pybind11
-EXT_SUFFIX="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or ".so")')"
-PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
-CXX="${CXX:-c++}"
-CXXFLAGS="-O3 -DNDEBUG -march=native -flto -std=c++17 -shared -fPIC"
-LDFLAGS="-flto"
-if [[ "$(uname)" == "Darwin" ]]; then
-  LDFLAGS="${LDFLAGS} -undefined dynamic_lookup"
-fi
+  # Compute extension suffix and includes via pybind11
+  EXT_SUFFIX="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or ".so")')"
+  PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
+  CXX="${CXX:-c++}"
+  CXXFLAGS="-O3 -DNDEBUG -march=native -flto -std=c++17 -shared -fPIC"
+  LDFLAGS="-flto"
+  if [[ "$(uname)" == "Darwin" ]]; then
+    LDFLAGS="${LDFLAGS} -undefined dynamic_lookup"
+  fi
 
-# Optional ASan (opt-in via SANITIZE=1 env var)
-if [[ "${SANITIZE:-0}" == "1" ]]; then
-  echo "Building with AddressSanitizer (SANITIZE=1)"
-  CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c++17 -shared -fPIC"
-  LDFLAGS="${LDFLAGS} -fsanitize=address"
-fi
+  # Optional ASan (opt-in via SANITIZE=1 env var)
+  if [[ "${SANITIZE:-0}" == "1" ]]; then
+    echo "Building with AddressSanitizer (SANITIZE=1)"
+    CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c++17 -shared -fPIC"
+    LDFLAGS="${LDFLAGS} -fsanitize=address"
+  fi
 
-# Control C++ stats collection. Default to enabled.
-: "${ENABLE_CPP_STATS:=1}"
-if [[ "${ENABLE_CPP_STATS}" == "1" ]]; then
-  echo "Building C++ with stats enabled (ENABLE_CPP_STATS=1)"
-  CXXFLAGS="${CXXFLAGS} -DENABLE_STATS"
+  # Control C++ stats collection. Default to enabled.
+  : "${ENABLE_CPP_STATS:=1}"
+  if [[ "${ENABLE_CPP_STATS}" == "1" ]]; then
+    echo "Building C++ with stats enabled (ENABLE_CPP_STATS=1)"
+    CXXFLAGS="${CXXFLAGS} -DENABLE_STATS"
+  else
+    echo "Building C++ with stats disabled (ENABLE_CPP_STATS=0)"
+  fi
+
+  # Change to python directory to run build commands with relative paths
+  ORIGINAL_CWD=$(pwd)
+  cd "$SCRIPT_DIR"
+
+  # Compile extensions. Paths are relative to the 'python' directory.
+  ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+    "aug25/models/icl_rangeset.cpp" -o "aug25/models/icl_rangeset${EXT_SUFFIX}" ${LDFLAGS}
+
+  ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+    "aug25/models/leveled_gss_py.cpp" -o "leveled_gss_cpp${EXT_SUFFIX}" ${LDFLAGS}
+
+  ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+    "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
+
+  # Change back to original directory
+  cd "$ORIGINAL_CWD"
+
+  echo "Build complete."
+  echo "---"
 else
-  echo "Building C++ with stats disabled (ENABLE_CPP_STATS=0)"
+  echo "Skipping C++ extension build (SKIP_CPP_BUILD=1)."
+  echo "---"
 fi
-
-# Change to python directory to run build commands with relative paths
-ORIGINAL_CWD=$(pwd)
-cd "$SCRIPT_DIR"
-
-# Compile extensions. Paths are relative to the 'python' directory.
-${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
-  "aug25/models/icl_rangeset.cpp" -o "aug25/models/icl_rangeset${EXT_SUFFIX}" ${LDFLAGS}
-
-${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
-  "aug25/models/leveled_gss_py.cpp" -o "leveled_gss_cpp${EXT_SUFFIX}" ${LDFLAGS}
-
-${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
-  "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
-
-# Change back to original directory
-cd "$ORIGINAL_CWD"
-
-echo "Build complete."
-echo "---"
 
 # --- Run Benchmarks ---
 echo "Starting benchmark runs..."
