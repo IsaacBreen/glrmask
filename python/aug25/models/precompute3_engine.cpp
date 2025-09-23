@@ -560,9 +560,9 @@ private:
 
                 if (variant == "Shift") {
                     aot.has_shift = true;
-                    aot.shift_state_id = py::cast<int>(action["state_id"]);
+                    aot.shift_state_id = action.at("state_id").get<int>();
                 } else if (variant == "Reduce") {
-                    int nt = py::cast<int>(action["nonterminal_id"]);
+                    int nt = action.at("nonterminal_id").get<int>();
                     int len = action.at("len").get<int>();
                     aot.reduces.emplace_back(nt, len);
                 } else if (variant == "Split") {
