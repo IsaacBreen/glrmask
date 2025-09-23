@@ -72,4 +72,4 @@ echo "Build complete: python/aug25/models/icl_rangeset${EXT_SUFFIX}"
 echo
 echo "Running benchmarks..."
 cd "$PROJECT_ROOT"
-bash run_benchmarks.sh "python/aug25/models/rust_model.py" "python/aug25/models/precompute3_model_cpp.py"
+bash python/run_benchmarks.sh "python/aug25/models/rust_model.py" "python/aug25/models/precompute3_model_cpp.py"

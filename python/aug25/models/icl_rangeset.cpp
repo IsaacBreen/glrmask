@@ -82,6 +82,7 @@ public:
 
     std::vector<int> to_indices() const {
         std::vector<int> out;
+        out.reserve(boost::icl::cardinality(m_set));
         for (auto const& itv : m_set) {
             int l = itv.lower();
             int r = itv.upper();
