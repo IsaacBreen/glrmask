@@ -140,14 +140,17 @@ class Model(GraphProvider):
             children = node.get("children") or []
             if not children:
                 node["children"] = []
+                node["llm_bv_union"] = RangeSet.empty()
                 continue
 
             new_children = []
+            llm_bv_union = RangeSet.empty()
             for edge_key, dest_map in children:
                 pop, llm_bv_json = edge_key
                 llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
                 # Convert to RangeSet for ffi-free operations in commit/get_mask
                 llm_bv = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
+                llm_bv_union = llm_bv_union.union(llm_bv)
                 new_dest_map = []
                 for dest_idx, state_bv_json in dest_map:
                     state_bv_bitset = bs_from_json(dumps(state_bv_json))
@@ -155,6 +158,7 @@ class Model(GraphProvider):
                     new_dest_map.append((int(dest_idx), state_bv))
                 new_children.append(((int(pop), llm_bv), new_dest_map))
             node["children"] = new_children
+            node["llm_bv_union"] = llm_bv_union
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -540,6 +544,24 @@ class Model(GraphProvider):
                         stats.start('get_mask.main_loop.end_node.final_mask_union')
                         final_mask = final_mask.union(reduced_acc.llm_mask)
                         stats.stop('get_mask.main_loop.end_node.final_mask_union')
+
+                # Zombie traversal avoidance: if this node's edges can't possibly add
+                # to the final mask given the current GSS mask, skip it.
+                stats.start('get_mask.zombie_check')
+                node_llm_bv_union = arena.get(node, {}).get("llm_bv_union", RangeSet.empty())
+                # We only care about tokens that are not yet in the final mask.
+                potential_new_tokens = node_llm_bv_union.difference(final_mask)
+                if potential_new_tokens.is_empty():
+                    stats.inc('get_mask.zombie_check.skipped_nodes_no_potential')
+                    stats.stop('get_mask.zombie_check')
+                    continue
+
+                gss_mask_acc = gss_node.reduce_acc()
+                if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
+                    stats.inc('get_mask.zombie_check.skipped_nodes_no_overlap')
+                    stats.stop('get_mask.zombie_check')
+                    continue
+                stats.stop('get_mask.zombie_check')
 
                 # Traverse edges and propagate masks
                 edges = arena.get(node, {}).get("children") or []
