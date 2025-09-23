@@ -3419,6 +3419,16 @@ local_system:
               }
               return n;
           }
+
+          size_t hash() const {
+              size_t h = llm_mask.hash();
+              // This hash combines the mask's hash with hashes from the terminals_union map.
+              // The combination logic is chosen to distribute well.
+              for (const auto& [key, val] : terminals_union) {
+                  h ^= (std::hash<int>{}(key) << 1) ^ val.hash();
+              }
+              return h;
+          }
       };
 
 
@@ -3434,6 +3444,23 @@ local_system:
           }
       };
 
+      // Add std::hash and std::equal_to specializations for std::shared_ptr<Acc> to enable value-based hashing.
+      namespace std {
+          template <>
+          struct hash<std::shared_ptr<Acc>> {
+              size_t operator()(const std::shared_ptr<Acc>& a) const {
+                  return a ? a->hash() : 0;
+              }
+          };
+          template <>
+          struct equal_to<std::shared_ptr<Acc>> {
+              bool operator()(const std::shared_ptr<Acc>& lhs, const std::shared_ptr<Acc>& rhs) const {
+                  if (!lhs && !rhs) return true;
+                  if (!lhs || !rhs) return false;
+                  return *lhs == *rhs;
+              }
+          };
+      }
 
       class Engine {
       public:
@@ -3839,11 +3866,8 @@ local_system:
 
                   // Zombie traversal avoidance
                   stats.start("get_mask.zombie_check");
-                  RangeSet node_llm_bv_union = RangeSet::empty();
-                  for (const Edge& e : info.edges) {
-                      node_llm_bv_union = node_llm_bv_union.union_with(e.llm_bv_rangeset);
-                  }
-                  RangeSet potential_new_tokens = node_llm_bv_union.difference_with(final_mask);
+                  // Use the precomputed union of edge masks for this node.
+                  RangeSet potential_new_tokens = info.llm_bv_union.difference_with(final_mask);
                   if (potential_new_tokens.is_empty()) {
                       stats.inc("get_mask.zombie_check.skipped_nodes_no_potential");
                       stats.stop("get_mask.zombie_check");
@@ -3878,10 +3902,12 @@ local_system:
                       if (popped.is_empty()) { stats.inc("get_mask.traversal.edge.popped_empty"); continue; }
 
                       // Apply LLM limiter once per edge (not per destination) to avoid repeated
-                      // expensive apply_and_prune work. This mirrors the sharing-friendly structure
-                      // from the Python implementation.
-                      std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> acc_memo;
-                      Leveled popped_limited = intersect_llm_mask(popped, llm_bv, &acc_memo);
+                      // expensive apply_and_prune work. The value-based acc_memo is critical
+                      // for performance, replicating the Python version's key optimization.
+                      std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>,
+                                         std::hash<std::shared_ptr<Acc>>,
+                                         std::equal_to<std::shared_ptr<Acc>>> acc_memo;
+                      Leveled popped_limited = intersect_llm_mask(popped, llm_bv, acc_memo);
                       if (popped_limited.is_empty()) {
                           stats.inc("get_mask.traversal.edge.popped_pruned_empty");
                           continue;
@@ -3996,6 +4022,7 @@ local_system:
 
           struct NodeInfo {
               std::vector<Edge> edges;
+              RangeSet llm_bv_union;
               bool is_end{false};
               int max_depth{0};
           };
@@ -4205,6 +4232,8 @@ local_system:
                       children_obj = py::list();
                   }
 
+                  RangeSet node_llm_bv_union = RangeSet::empty();
+
                   for (auto ch : children_obj) {
                       py::tuple entry = py::cast<py::tuple>(ch);
                       py::tuple edge_key = py::cast<py::tuple>(entry[0]);
@@ -4221,6 +4250,7 @@ local_system:
                           llm_ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
                       }
                       RangeSet llm_bv_rs = RangeSet::from_ranges(llm_ranges_cpp);
+                      node_llm_bv_union = node_llm_bv_union.union_with(llm_bv_rs);
 
                       std::vector<DestEdge> dests;
                       py::object dest_map = entry[1];
@@ -4248,7 +4278,7 @@ local_system:
                       Edge e{pop, llm_bv_rs, std::move(dests)};
                       info.edges.push_back(std::move(e));
                   }
-
+                  info.llm_bv_union = std::move(node_llm_bv_union);
                   arena_[uid] = std::move(info);
               }
           }
@@ -4448,25 +4478,43 @@ local_system:
           Leveled intersect_llm_mask(
               const Leveled& g,
               const RangeSet& limiter,
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo = nullptr) {
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>,
+                                 std::hash<std::shared_ptr<Acc>>,
+                                 std::equal_to<std::shared_ptr<Acc>>>& value_memo
+          ) {
               auto& stats = Stats::get();
               stats.start("get_mask.main_loop.edge.apply_and_prune");
+
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   stats.inc("get_mask.intersect_and_prune.calls");
+
+                  // Value-based memoization: check if we've already computed the result for an
+                  // accumulator with this value.
+                  auto it = value_memo.find(a);
+                  if (it != value_memo.end()) {
+                      stats.inc("get_mask.intersect_and_prune.memo_hits");
+                      return it->second;
+                  }
+
                   stats.start("get_mask.intersect_and_prune.intersection");
                   RangeSet new_mask = a->llm_mask.intersection_with(limiter);
                   stats.stop("get_mask.intersect_and_prune.intersection");
                   stats.inc("get_mask.data.llm_mask_after_intersect.len.sum", new_mask.size());
-                  bool is_empty_mask = new_mask.is_empty();
-                  if (is_empty_mask) {
+
+                  std::shared_ptr<Acc> result = nullptr;
+                  if (!new_mask.is_empty()) {
+                      auto na = std::make_shared<Acc>();
+                      na->llm_mask = new_mask;
+                      result = na;
+                  } else {
                       stats.inc("get_mask.intersect_and_prune.pruned_accs");
-                      return std::shared_ptr<Acc>(nullptr);
                   }
-                  auto na = std::make_shared<Acc>();
-                  na->llm_mask = new_mask;
-                  return na;
+                  value_memo.emplace(a, result);
+                  return result;
               };
-              return g.apply_and_prune(mutator, acc_memo);
+              auto result = g.apply_and_prune(mutator);
+              stats.stop("get_mask.main_loop.edge.apply_and_prune");
+              return result;
           }
 
       };
@@ -4499,6 +4547,7 @@ local_system:
       #include <string>
       #include <sstream>
       #include <algorithm>
+      #include <boost/functional/hash.hpp>
       #include <boost/icl/interval_set.hpp>
       #include "stats.hpp"
 
@@ -4602,6 +4651,16 @@ local_system:
               return set == other.set;
           }
 
+          size_t hash() const {
+              size_t seed = 0;
+              // The hash needs to be order-independent of the intervals, but boost::icl::interval_set
+              // stores them in a sorted, non-overlapping way, so simple iteration is fine.
+              for (const auto& interval : set) {
+                  boost::hash_combine(seed, interval.lower());
+                  boost::hash_combine(seed, interval.upper());
+              }
+              return seed;
+          }
       private:
           boost::icl::interval_set<unsigned long long> set;
       };
@@ -8898,6 +8957,15 @@ local_system:
         LDFLAGS="${LDFLAGS} -fsanitize=address"
       fi
 
+      # Control C++ stats collection. Default to enabled.
+      : "${ENABLE_CPP_STATS:=1}"
+      if [[ "${ENABLE_CPP_STATS}" == "1" ]]; then
+        echo "Building C++ with stats enabled (ENABLE_CPP_STATS=1)"
+        CXXFLAGS="${CXXFLAGS} -DENABLE_STATS"
+      else
+        echo "Building C++ with stats disabled (ENABLE_CPP_STATS=0)"
+      fi
+
       # Change to python directory to run build commands with relative paths
       ORIGINAL_CWD=$(pwd)
       cd "$SCRIPT_DIR"
@@ -10531,6 +10599,7 @@ local_system:
       #include <string>
       #include <sstream>
       #include <algorithm>
+      #include <boost/functional/hash.hpp>
       #include <boost/icl/interval_set.hpp>
       #include "stats.hpp"
 
@@ -10634,6 +10703,16 @@ local_system:
               return set == other.set;
           }
 
+          size_t hash() const {
+              size_t seed = 0;
+              // The hash needs to be order-independent of the intervals, but boost::icl::interval_set
+              // stores them in a sorted, non-overlapping way, so simple iteration is fine.
+              for (const auto& interval : set) {
+                  boost::hash_combine(seed, interval.lower());
+                  boost::hash_combine(seed, interval.upper());
+              }
+              return seed;
+          }
       private:
           boost::icl::interval_set<unsigned long long> set;
       };
@@ -11950,7 +12029,7 @@ local_system:
       };
 
       } // namespace leveled_gss
-    python/aug25/models/stats.hpp: |
+    python/aug25/models/stats.hpp: |+
       #pragma once
 
       #include <iostream>
@@ -11969,14 +12048,19 @@ local_system:
           }
 
           void inc(const std::string& key, long long value = 1) {
+      #ifdef ENABLE_STATS
               counters_[key] += value;
+      #endif
           }
 
           void start(const std::string& key) {
+      #ifdef ENABLE_STATS
               timers_[key] = std::chrono::high_resolution_clock::now();
+      #endif
           }
 
           void stop(const std::string& key) {
+      #ifdef ENABLE_STATS
               auto it = timers_.find(key);
               if (it != timers_.end()) {
                   auto end_time = std::chrono::high_resolution_clock::now();
@@ -11984,17 +12068,21 @@ local_system:
                   durations_[key] += duration;
                   timers_.erase(it);
               }
+      #endif
           }
 
           void reset() {
+      #ifdef ENABLE_STATS
               counters_.clear();
               durations_.clear();
               timers_.clear();
+      #endif
           }
 
           void report() {
+      #ifdef ENABLE_STATS
               std::cout << "\n--- C++ Engine Stats Report ---\n";
-              
+
               std::vector<std::string> counter_keys;
               for (const auto& pair : counters_) {
                   counter_keys.push_back(pair.first);
@@ -12018,6 +12106,9 @@ local_system:
                   std::cout << "  " << std::left << std::setw(60) << key << ": " << std::fixed << std::setprecision(3) << ms << "\n";
               }
               std::cout << "---------------------------------\n" << std::endl;
+      #else
+              std::cout << "\n--- C++ Engine Stats Report (DISABLED) ---\n" << std::endl;
+      #endif
           }
 
       private:
@@ -12026,10 +12117,13 @@ local_system:
           Stats(const Stats&) = delete;
           Stats& operator=(const Stats&) = delete;
 
+      #ifdef ENABLE_STATS
           std::unordered_map<std::string, long long> counters_;
           std::unordered_map<std::string, long long> durations_; // in nanoseconds
           std::unordered_map<std::string, std::chrono::high_resolution_clock::time_point> timers_;
+      #endif
       };
+
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -15518,6 +15612,16 @@ messages:
               }
               return n;
           }
+
+          size_t hash() const {
+              size_t h = llm_mask.hash();
+              // This hash combines the mask's hash with hashes from the terminals_union map.
+              // The combination logic is chosen to distribute well.
+              for (const auto& [key, val] : terminals_union) {
+                  h ^= (std::hash<int>{}(key) << 1) ^ val.hash();
+              }
+              return h;
+          }
       };
 
 
@@ -15533,6 +15637,23 @@ messages:
           }
       };
 
+      // Add std::hash and std::equal_to specializations for std::shared_ptr<Acc> to enable value-based hashing.
+      namespace std {
+          template <>
+          struct hash<std::shared_ptr<Acc>> {
+              size_t operator()(const std::shared_ptr<Acc>& a) const {
+                  return a ? a->hash() : 0;
+              }
+          };
+          template <>
+          struct equal_to<std::shared_ptr<Acc>> {
+              bool operator()(const std::shared_ptr<Acc>& lhs, const std::shared_ptr<Acc>& rhs) const {
+                  if (!lhs && !rhs) return true;
+                  if (!lhs || !rhs) return false;
+                  return *lhs == *rhs;
+              }
+          };
+      }
 
       class Engine {
       public:
@@ -15938,11 +16059,8 @@ messages:
 
                   // Zombie traversal avoidance
                   stats.start("get_mask.zombie_check");
-                  RangeSet node_llm_bv_union = RangeSet::empty();
-                  for (const Edge& e : info.edges) {
-                      node_llm_bv_union = node_llm_bv_union.union_with(e.llm_bv_rangeset);
-                  }
-                  RangeSet potential_new_tokens = node_llm_bv_union.difference_with(final_mask);
+                  // Use the precomputed union of edge masks for this node.
+                  RangeSet potential_new_tokens = info.llm_bv_union.difference_with(final_mask);
                   if (potential_new_tokens.is_empty()) {
                       stats.inc("get_mask.zombie_check.skipped_nodes_no_potential");
                       stats.stop("get_mask.zombie_check");
@@ -15977,10 +16095,12 @@ messages:
                       if (popped.is_empty()) { stats.inc("get_mask.traversal.edge.popped_empty"); continue; }
 
                       // Apply LLM limiter once per edge (not per destination) to avoid repeated
-                      // expensive apply_and_prune work. This mirrors the sharing-friendly structure
-                      // from the Python implementation.
-                      std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> acc_memo;
-                      Leveled popped_limited = intersect_llm_mask(popped, llm_bv, &acc_memo);
+                      // expensive apply_and_prune work. The value-based acc_memo is critical
+                      // for performance, replicating the Python version's key optimization.
+                      std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>,
+                                         std::hash<std::shared_ptr<Acc>>,
+                                         std::equal_to<std::shared_ptr<Acc>>> acc_memo;
+                      Leveled popped_limited = intersect_llm_mask(popped, llm_bv, acc_memo);
                       if (popped_limited.is_empty()) {
                           stats.inc("get_mask.traversal.edge.popped_pruned_empty");
                           continue;
@@ -16095,6 +16215,7 @@ messages:
 
           struct NodeInfo {
               std::vector<Edge> edges;
+              RangeSet llm_bv_union;
               bool is_end{false};
               int max_depth{0};
           };
@@ -16304,6 +16425,8 @@ messages:
                       children_obj = py::list();
                   }
 
+                  RangeSet node_llm_bv_union = RangeSet::empty();
+
                   for (auto ch : children_obj) {
                       py::tuple entry = py::cast<py::tuple>(ch);
                       py::tuple edge_key = py::cast<py::tuple>(entry[0]);
@@ -16320,6 +16443,7 @@ messages:
                           llm_ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
                       }
                       RangeSet llm_bv_rs = RangeSet::from_ranges(llm_ranges_cpp);
+                      node_llm_bv_union = node_llm_bv_union.union_with(llm_bv_rs);
 
                       std::vector<DestEdge> dests;
                       py::object dest_map = entry[1];
@@ -16347,7 +16471,7 @@ messages:
                       Edge e{pop, llm_bv_rs, std::move(dests)};
                       info.edges.push_back(std::move(e));
                   }
-
+                  info.llm_bv_union = std::move(node_llm_bv_union);
                   arena_[uid] = std::move(info);
               }
           }
@@ -16547,25 +16671,43 @@ messages:
           Leveled intersect_llm_mask(
               const Leveled& g,
               const RangeSet& limiter,
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo = nullptr) {
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>,
+                                 std::hash<std::shared_ptr<Acc>>,
+                                 std::equal_to<std::shared_ptr<Acc>>>& value_memo
+          ) {
               auto& stats = Stats::get();
               stats.start("get_mask.main_loop.edge.apply_and_prune");
+
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   stats.inc("get_mask.intersect_and_prune.calls");
+
+                  // Value-based memoization: check if we've already computed the result for an
+                  // accumulator with this value.
+                  auto it = value_memo.find(a);
+                  if (it != value_memo.end()) {
+                      stats.inc("get_mask.intersect_and_prune.memo_hits");
+                      return it->second;
+                  }
+
                   stats.start("get_mask.intersect_and_prune.intersection");
                   RangeSet new_mask = a->llm_mask.intersection_with(limiter);
                   stats.stop("get_mask.intersect_and_prune.intersection");
                   stats.inc("get_mask.data.llm_mask_after_intersect.len.sum", new_mask.size());
-                  bool is_empty_mask = new_mask.is_empty();
-                  if (is_empty_mask) {
+
+                  std::shared_ptr<Acc> result = nullptr;
+                  if (!new_mask.is_empty()) {
+                      auto na = std::make_shared<Acc>();
+                      na->llm_mask = new_mask;
+                      result = na;
+                  } else {
                       stats.inc("get_mask.intersect_and_prune.pruned_accs");
-                      return std::shared_ptr<Acc>(nullptr);
                   }
-                  auto na = std::make_shared<Acc>();
-                  na->llm_mask = new_mask;
-                  return na;
+                  value_memo.emplace(a, result);
+                  return result;
               };
-              return g.apply_and_prune(mutator, acc_memo);
+              auto result = g.apply_and_prune(mutator);
+              stats.stop("get_mask.main_loop.edge.apply_and_prune");
+              return result;
           }
 
       };
@@ -16603,6 +16745,7 @@ messages:
       #include <string>
       #include <sstream>
       #include <algorithm>
+      #include <boost/functional/hash.hpp>
       #include <boost/icl/interval_set.hpp>
       #include "stats.hpp"
 
@@ -16706,6 +16849,16 @@ messages:
               return set == other.set;
           }
 
+          size_t hash() const {
+              size_t seed = 0;
+              // The hash needs to be order-independent of the intervals, but boost::icl::interval_set
+              // stores them in a sorted, non-overlapping way, so simple iteration is fine.
+              for (const auto& interval : set) {
+                  boost::hash_combine(seed, interval.lower());
+                  boost::hash_combine(seed, interval.upper());
+              }
+              return seed;
+          }
       private:
           boost::icl::interval_set<unsigned long long> set;
       };
@@ -18116,122 +18269,8 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/stats.hpp
-  - user: |-
-      ```
-
-      ### **Performance Counts & Counters**
-
-      This table shows the number of times specific operations were performed.
-
-      | Metric | Python Implementation | C++ Engine |
-      | :--- | :--- | :--- |
-      | **_process_token** | | |
-      | `_process_token.calls` | 1,346 | 1,346 |
-      | `_process_token.final_heads` | 966 | 966 |
-      | `_process_token.initial_heads` | 8,769 | 8,769 |
-      | `_process_token.loop_iterations` | 17,898 | 16,859 |
-      | `_process_token.reduce.new_heads` | 13,461 | 13,461 |
-      | `_process_token.reduces` | 8,967 | 7,928 |
-      | `_process_token.shifts` | 1,554 | 1,554 |
-      | `_process_token.splits` | 213 | 106 |
-      | **bitset** | | |
-      | `bitset.intersection.calls` | 487,372 | 1,476,911 |
-      | `bitset.union.calls` | 528,719 | 1,838,504 |
-      | **commit** | | |
-      | `commit.tokenizer_states_in` | 807 | 807 |
-      | `commit.tokenizer_states_out` | 809 | 809 |
-      | **get_mask** | | |
-      | `get_mask.data.llm_bv_on_edge.len.sum` | 66,655,440 | 187,090,975 |
-      | `get_mask.data.llm_mask_after_intersect.len.sum` | 79,201,476 | 4,625,939,872 |
-      | `get_mask.data.state_bv_on_edge.len.sum` | 34,226,280 | - |
-      | `get_mask.final_mask.internal_indices` | 5,839,560 | 5,635,980 |
-      | `get_mask.final_mask.original_indices` | 5,839,560 | 5,635,980 |
-      | `get_mask.gss.at_node.accs.sum` | 0 | 360,227 |
-      | `get_mask.initial.gss_heads.sum` | 6,949 | 6,949 |
-      | `get_mask.initial.terminals_union_size.sum` | - | 106,714 |
-      | `get_mask.initial.unique_accs` | 0 | 107,678 |
-      | `get_mask.initial_tokenizer_states` | 807 | 807 |
-      | `get_mask.initialize_acc.calls` | 143,883 | 107,678 |
-      | `get_mask.initialize_acc.disallowed_map_size.sum` | 201,942 | - |
-      | `get_mask.initialize_acc.disallowed_terminals_count.sum` | 142,806 | 106,714 |
-      | `get_mask.initialize_acc.disallowed_terminals_inner_loops` | 142,806 | 106,714 |
-      | `get_mask.initialize_acc.disallowed_terminals_loops` | 201,942 | - |
-      | `get_mask.intersect_and_prune.calls` | 55,347 | 943,796 |
-      | `get_mask.intersect_and_prune.memo_hits` | 159 | - |
-      | `get_mask.intersect_and_prune.memo_size.sum` | 64,100 | 453,062 |
-      | `get_mask.intersect_and_prune.pruned_accs` | 216 | 926 |
-      | `get_mask.seeding.gss_loops` | 807 | - |
-      | `get_mask.traversal.depth_heap.pops` | 45,028 | 124,795 |
-      | `get_mask.traversal.dests_blocks.sum` | 1,185,030 | 7,680,620 |
-      | `get_mask.traversal.dests_traversed` | 1,185,030 | 6,645,549 |
-      | `get_mask.traversal.edge.gss_merges` | 322 | 102,052 |
-      | `get_mask.traversal.edge.llm_bv_empty` | - | 63,730 |
-      | `get_mask.traversal.edge.popped_pruned_empty` | - | 486 |
-      | `get_mask.traversal.edge_blocks.sum` | 39,420 | 431,279 |
-      | `get_mask.traversal.edge_pop_val.0` | 39,420 | 284,399 |
-      | `get_mask.traversal.edge_pop_val.1` | - | 77,650 |
-      | `get_mask.traversal.edge_pop_val.2` | - | 2,160 |
-      | `get_mask.traversal.edge_pop_val.4` | - | 3,340 |
-      | `get_mask.traversal.edges_traversed` | 39,420 | 367,549 |
-      | `get_mask.traversal.end_nodes` | 270 | 270 |
-      | `get_mask.traversal.enqueues` | 45,511 | 124,795 |
-      | `get_mask.traversal.max_depth_reached` | 2,970 | 2,970 |
-      | `get_mask.traversal.nodes_processed` | 45,028 | 124,795 |
-      | `get_mask.traversal.nodes_visited.unique` | 45,028 | 124,795 |
-      | `get_mask.zombie_check.skipped_nodes_no_potential` | 44,488 | 24,932 |
-
-      ---
-
-      ### **Timings (in milliseconds)**
-
-      This table shows the time spent in various parts of the code. Lower is better.
-
-      | Metric (ms) | Python Implementation | C++ Engine |
-      | :--- | :--- | :--- |
-      | **_process_token** | | |
-      | `_process_token.total` | 1,232.374 | 296.408 |
-      | **commit** | | |
-      | `commit.build_tokenizer_maps` | 6.743 | 9.091 |
-      | `commit.main_loop` | 1,248.305 | 328.165 |
-      | `commit.merge_states` | 175.147 | 143.432 |
-      | `commit.prune_and_map_gss` | 3,178.098 | 916.170 |
-      | `commit.total` | 4,632.950 | 1,517.479 |
-      | **get_mask** | | |
-      | `get_mask.final_conversion` | 560.874 | 1,711.606 |
-      | `get_mask.final_conversion.from_indices` | 84.296 | 1,608.314 |
-      | `get_mask.final_conversion.to_indices` | 85.299 | 54.910 |
-      | `get_mask.initial_stats` | 1.572 | 127.326 |
-      | `get_mask.initialize_acc.difference` | 340.461 | 94.669 |
-      | `get_mask.initialize_acc.to_indices` | 79.484 | 98.655 |
-      | `get_mask.initialize_acc.total` | 759.278 | 504.956 |
-      | `get_mask.initialize_acc.union` | 0.792 | 0.293 |
-      | `get_mask.intersect_and_prune.intersection` | 145.278 | 6,169.961 |
-      | `get_mask.main_loop` | 3,147.058 | 41,266.379 |
-      | `get_mask.main_loop.edge.apply_and_prune` | 660.279 | - |
-      | `get_mask.main_loop.edge.gss_merge` | 18.163 | 3,755.906 |
-      | `get_mask.main_loop.edge.isolate_many` | 218.531 | 792.891 |
-      | `get_mask.main_loop.edge.peek_and_filter` | 1,047.655 | 471.431 |
-      | `get_mask.main_loop.edge.popn` | 13.802 | 771.657 |
-      | `get_mask.main_loop.end_node.final_mask_union` | 0.728 | 0.669 |
-      | `get_mask.main_loop.end_node.reduce_acc` | 0.870 | 15.365 |
-      | `get_mask.seeding` | 1,611.133 | 919.128 |
-      | `get_mask.seeding.gss.apply` | 1,574.064 | 836.063 |
-      | `get_mask.seeding.gss.merge` | 34.737 | 79.823 |
-      | `get_mask.total` | 5,323.881 | 44,025.876 |
-      | `get_mask.zombie_check` | 155.547 | 4,675.989 |
-      ```
-
-      ```
-                                                  equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
-      model                                                                                                                                                    
-      precompute3_model_cpp                                ✅                    0    270    33.1467   11.4058   18.2625   31.6903   46.9154   72.4616  113.6008
-      precompute3_model_pure_python                        ✅                    0    270    15.0927    3.5848    6.7906   15.1348   19.7249   22.3448   24.0070
-      precompute3_model_pure_python_get_mask_only          ✅                    0    270    15.1441    3.5872    7.1400   15.2565   19.8573   22.6248   23.4815
-      precompute3_model_pure_python_standalone             ✅                    0    270    14.7680    3.5232    6.5945   14.7813   19.2724   21.8646   22.7053
-      precompute3_model_pure_python_with_stats             ✅                    0    270    20.3886    4.3587   10.3925   20.3845   26.3209   29.7233   30.5479
-      ```
-
-      Why is the C++ model significantly slower than any of the Python ones? Fix it.
+  - user: Make it possible to disable profiling in the C++ code via a flag or env
+      var or something.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -18250,471 +18289,158 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The C++ engine is significantly slower primarily due to a major difference in memoization strategy within the `get_mask` traversal loop compared to the Python version, leading to a massive increase in redundant computations and GSS merge operations. Additionally, a secondary performance issue exists where a value used for pruning was recalculated in a hot loop instead of being precomputed.
+      Of course. Here are the step-by-step instructions to make C++ profiling optional, followed by the corresponding git diffs.
 
-      Here are the step-by-step instructions to fix the performance issues, followed by the corresponding git diffs.
+      ### Step-by-step Instructions
 
-      ### Step-by-Step Instructions
+      **1. Modify `python/aug25/models/stats.hpp` to make statistics collection conditional.**
 
-      1.  **File: `python/aug25/models/icl_rangeset.hpp`**
-          *   Add an include for `boost/functional/hash.hpp` at the top of the file.
-          *   Inside the `RangeSet` class, add a `public` `hash()` method. This will allow `RangeSet` objects to be used in hash maps by computing a hash from their constituent ranges.
+      We will wrap the implementation of the `Stats` class methods and its member variables with an `#ifdef ENABLE_STATS` preprocessor directive. This will cause the statistics-gathering code to be compiled out when the `ENABLE_STATS` macro is not defined, effectively creating no-op functions with zero runtime overhead.
 
-      2.  **File: `python/aug25/models/precompute3_engine.cpp`**
-          *   **Enable Value-Based Memoization for `Acc`**:
-              *   Inside the `Acc` struct, add a `hash()` method. This will compute a hash based on the `llm_mask` and `terminals_union`, allowing `Acc` objects to be used as keys in a hash map.
-              *   After the `Acc` struct definition, add `std::hash` and `std::equal_to` specializations for `std::shared_ptr<Acc>`. This enables using smart pointers to `Acc` as keys in an `std::unordered_map` for value-based (not pointer-based) memoization.
+      -   **Open the file**: `python/aug25/models/stats.hpp`.
+      -   **`inc` method**: Wrap the line `counters_[key] += value;` inside an `#ifdef ENABLE_STATS` ... `#endif` block.
+      -   **`start` method**: Wrap the line `timers_[key] = ...;` inside an `#ifdef ENABLE_STATS` ... `#endif` block.
+      -   **`stop` method**: Wrap the entire method body inside an `#ifdef ENABLE_STATS` ... `#endif` block.
+      -   **`reset` method**: Wrap the entire method body inside an `#ifdef ENABLE_STATS` ... `#endif` block.
+      -   **`report` method**: Wrap the current implementation inside an `#ifdef ENABLE_STATS` ... `#else` ... `#endif` block. In the `#else` branch, add a `std::cout` statement to indicate that stats are disabled.
+      -   **Member variables**: Wrap all private member variables (`counters_`, `durations_`, `timers_`) inside an `#ifdef ENABLE_STATS` ... `#endif` block.
 
-          *   **Precompute `llm_bv_union` for Pruning**:
-              *   In the `NodeInfo` struct definition, add a `RangeSet llm_bv_union;` member to store the precomputed union of all outgoing edge masks.
-              *   In the `parse_arena` method, initialize a local `RangeSet node_llm_bv_union`. As you process each edge for a node, union its `llm_bv_rs` into this local variable. Before storing the `NodeInfo` struct in the `arena_`, assign `node_llm_bv_union` to `info.llm_bv_union`.
+      **2. Update `python/run_benchmarks.sh` to control the `ENABLE_STATS` macro.**
 
-          *   **Optimize `get_mask` Traversal**:
-              *   In the "Zombie traversal avoidance" section of `get_mask`, replace the loop that calculates `node_llm_bv_union` with a single line that uses the newly precomputed `info.llm_bv_union`.
-              *   In the main edge traversal loop, just before calling `intersect_llm_mask`, declare the value-based memoization cache: `std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>, std::hash<std::shared_ptr<Acc>>, std::equal_to<std::shared_ptr<Acc>>> acc_memo;`.
-              *   Update the call to `intersect_llm_mask` to pass this `acc_memo`.
+      We will add logic to the build script to check for an environment variable, `ENABLE_CPP_STATS`, and add the `-DENABLE_STATS` compiler flag if it's set to `1`. This allows you to control whether the C++ statistics code is included at compile time.
 
-          *   **Implement Correct Memoization in `intersect_llm_mask`**:
-              *   Modify the signature of `intersect_llm_mask` to accept the new value-based `acc_memo` by reference.
-              *   Inside this function, define a `mutator` lambda. This lambda will now perform the value-based memoization: it first checks `acc_memo` for the current accumulator `a`. If a result exists, it's returned immediately. Otherwise, it computes the intersection, stores the result in `acc_memo`, and then returns it.
-              *   This `mutator` is then passed to `g.apply_and_prune`, which performs its own internal pointer-based memoization for traversing the GSS structure, perfectly replicating the performant Python implementation's logic.
+      -   **Open the file**: `python/run_benchmarks.sh`.
+      -   **Locate the build configuration**: Find the section where `CXXFLAGS` is defined, immediately after the `SANITIZE` check.
+      -   **Insert new logic**: Add a new block of code that:
+          1.  Sets a default value of `1` for the `ENABLE_CPP_STATS` environment variable if it's not already set.
+          2.  Checks if `ENABLE_CPP_STATS` is equal to `1`.
+          3.  If it is, it appends `-DENABLE_STATS` to the `CXXFLAGS` variable and prints a message confirming that stats are enabled.
+          4.  Otherwise, it prints a message that stats are disabled.
+
+      This change will allow you to run `./run_benchmarks.sh` with stats enabled by default, or `ENABLE_CPP_STATS=0 ./run_benchmarks.sh` to build the C++ extensions without stats collection for a pure performance measurement.
 
       ### Git Diffs
 
+      Here are the git diffs that apply the changes described above.
+
       ```diff
-      diff --git a/python/aug25/models/icl_rangeset.hpp b/python/aug25/models/icl_rangeset.hpp
-      --- a/python/aug25/models/icl_rangeset.hpp
-      +++ b/python/aug25/models/icl_rangeset.hpp
-      @@ -3,6 +3,7 @@
-       #include <string>
-       #include <sstream>
-       #include <algorithm>
-      +#include <boost/functional/hash.hpp>
-       #include <boost/icl/interval_set.hpp>
-       #include "stats.hpp"
-       
-      @@ -90,6 +91,16 @@
-               return set == other.set;
+      diff --git a/python/aug25/models/stats.hpp b/python/aug25/models/stats.hpp
+      index 9641147..130214a 100644
+      --- a/python/aug25/models/stats.hpp
+      +++ b/python/aug25/models/stats.hpp
+      @@ -12,40 +12,48 @@
            }
        
-      +    size_t hash() const {
-      +        size_t seed = 0;
-      +        // The hash needs to be order-independent of the intervals, but boost::icl::interval_set
-      +        // stores them in a sorted, non-overlapping way, so simple iteration is fine.
-      +        for (const auto& interval : set) {
-      +            boost::hash_combine(seed, interval.lower());
-      +            boost::hash_combine(seed, interval.upper());
-      +        }
-      +        return seed;
-      +    }
+           void inc(const std::string& key, long long value = 1) {
+      +#ifdef ENABLE_STATS
+               counters_[key] += value;
+      +#endif
+           }
+       
+           void start(const std::string& key) {
+      +#ifdef ENABLE_STATS
+               timers_[key] = std::chrono::high_resolution_clock::now();
+      +#endif
+           }
+       
+           void stop(const std::string& key) {
+      +#ifdef ENABLE_STATS
+               auto it = timers_.find(key);
+               if (it != timers_.end()) {
+                   auto end_time = std::chrono::high_resolution_clock::now();
+                   auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - it->second).count();
+                   durations_[key] += duration;
+                   timers_.erase(it);
+               }
+      +#endif
+           }
+       
+           void reset() {
+      +#ifdef ENABLE_STATS
+               counters_.clear();
+               durations_.clear();
+               timers_.clear();
+      +#endif
+           }
+       
+           void report() {
+      +#ifdef ENABLE_STATS
+               std::cout << "\n--- C++ Engine Stats Report ---\n";
+      -        
+      +
+               std::vector<std::string> counter_keys;
+               for (const auto& pair : counters_) {
+                   counter_keys.push_back(pair.first);
+               }
+               std::sort(counter_keys.begin(), counter_keys.end());
+       
+               std::cout << "\nCounters:\n";
+               for (const auto& key : counter_keys) {
+                   std::cout << "  " << std::left << std::setw(60) << key << ": " << counters_[key] << "\n";
+               }
+      @@ -61,6 +69,9 @@
+                   std::cout << "  " << std::left << std::setw(60) << key << ": " << std::fixed << std::setprecision(3) << ms << "\n";
+               }
+               std::cout << "---------------------------------\n" << std::endl;
+      +#else
+      +        std::cout << "\n--- C++ Engine Stats Report (DISABLED) ---\n" << std::endl;
+      +#endif
+           }
+       
        private:
-           boost::icl::interval_set<unsigned long long> set;
+      @@ -70,8 +81,10 @@
+           Stats(const Stats&) = delete;
+           Stats& operator=(const Stats&) = delete;
+       
+      +#ifdef ENABLE_STATS
+           std::unordered_map<std::string, long long> counters_;
+           std::unordered_map<std::string, long long> durations_; // in nanoseconds
+           std::unordered_map<std::string, std::chrono::high_resolution_clock::time_point> timers_;
+      +#endif
        };
+       
 
       ```
-      ```diff
-      diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
-      --- a/python/aug25/models/precompute3_engine.cpp
-      +++ b/python/aug25/models/precompute3_engine.cpp
-      @@ -48,6 +48,16 @@
-               }
-               return n;
-           }
-      +
-      +    size_t hash() const {
-      +        size_t h = llm_mask.hash();
-      +        // This hash combines the mask's hash with hashes from the terminals_union map.
-      +        // The combination logic is chosen to distribute well.
-      +        for (const auto& [key, val] : terminals_union) {
-      +            h ^= (std::hash<int>{}(key) << 1) ^ val.hash();
-      +        }
-      +        return h;
-      +    }
-       };
-       
-       
-      @@ -63,6 +73,23 @@
-           }
-       };
-       
-      +// Add std::hash and std::equal_to specializations for std::shared_ptr<Acc> to enable value-based hashing.
-      +namespace std {
-      +    template <>
-      +    struct hash<std::shared_ptr<Acc>> {
-      +        size_t operator()(const std::shared_ptr<Acc>& a) const {
-      +            return a ? a->hash() : 0;
-      +        }
-      +    };
-      +    template <>
-      +    struct equal_to<std::shared_ptr<Acc>> {
-      +        bool operator()(const std::shared_ptr<Acc>& lhs, const std::shared_ptr<Acc>& rhs) const {
-      +            if (!lhs && !rhs) return true;
-      +            if (!lhs || !rhs) return false;
-      +            return *lhs == *rhs;
-      +        }
-      +    };
-      +}
-       
-       class Engine {
-       public:
-      @@ -310,8 +337,8 @@
-                   stats.stop("get_mask.main_loop.end_node.reduce_acc");
-       
-                   // Zombie traversal avoidance
-                   stats.start("get_mask.zombie_check");
-      -            RangeSet node_llm_bv_union = RangeSet::empty();
-      -            for (const Edge& e : info.edges) {
-      -                node_llm_bv_union = node_llm_bv_union.union_with(e.llm_bv_rangeset);
-      -            }
-      -            RangeSet potential_new_tokens = node_llm_bv_union.difference_with(final_mask);
-      +            // Use the precomputed union of edge masks for this node.
-      +            RangeSet potential_new_tokens = info.llm_bv_union.difference_with(final_mask);
-                   if (potential_new_tokens.is_empty()) {
-                       stats.inc("get_mask.zombie_check.skipped_nodes_no_potential");
-                       stats.stop("get_mask.zombie_check");
-      @@ -343,9 +370,12 @@
-                       if (popped.is_empty()) { stats.inc("get_mask.traversal.edge.popped_empty"); continue; }
-       
-                       // Apply LLM limiter once per edge (not per destination) to avoid repeated
-      -                // expensive apply_and_prune work. This mirrors the sharing-friendly structure
-      -                // from the Python implementation.
-      -                std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> acc_memo;
-      -                Leveled popped_limited = intersect_llm_mask(popped, llm_bv, &acc_memo);
-      +                // expensive apply_and_prune work. The value-based acc_memo is critical
-      +                // for performance, replicating the Python version's key optimization.
-      +                std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>,
-      +                                   std::hash<std::shared_ptr<Acc>>,
-      +                                   std::equal_to<std::shared_ptr<Acc>>> acc_memo;
-      +                Leveled popped_limited = intersect_llm_mask(popped, llm_bv, acc_memo);
-                       if (popped_limited.is_empty()) {
-                           stats.inc("get_mask.traversal.edge.popped_pruned_empty");
-                           continue;
-      @@ -424,6 +454,7 @@
-       
-           struct NodeInfo {
-               std::vector<Edge> edges;
-      +        RangeSet llm_bv_union;
-               bool is_end{false};
-               int max_depth{0};
-           };
-      @@ -560,6 +591,8 @@
-                       children_obj = py::list();
-                   }
-       
-      +            RangeSet node_llm_bv_union = RangeSet::empty();
-      +
-                   for (auto ch : children_obj) {
-                       py::tuple entry = py::cast<py::tuple>(ch);
-                       py::tuple edge_key = py::cast<py::tuple>(entry[0]);
-      @@ -576,6 +609,7 @@
-                           llm_ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
-                       }
-                       RangeSet llm_bv_rs = RangeSet::from_ranges(llm_ranges_cpp);
-      +                node_llm_bv_union = node_llm_bv_union.union_with(llm_bv_rs);
-       
-                       std::vector<DestEdge> dests;
-                       py::object dest_map = entry[1];
-      @@ -602,7 +636,7 @@
-                       Edge e{pop, llm_bv_rs, std::move(dests)};
-                       info.edges.push_back(std::move(e));
-                   }
-      -
-      +            info.llm_bv_union = std::move(node_llm_bv_union);
-                   arena_[uid] = std::move(info);
-               }
-           }
-      @@ -751,26 +785,37 @@
-       
-           Leveled intersect_llm_mask(
-               const Leveled& g,
-               const RangeSet& limiter,
-      -        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo = nullptr) {
-      +        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>,
-      +                           std::hash<std::shared_ptr<Acc>>,
-      +                           std::equal_to<std::shared_ptr<Acc>>>& value_memo
-      +    ) {
-               auto& stats = Stats::get();
-               stats.start("get_mask.main_loop.edge.apply_and_prune");
-      +
-               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
-                   stats.inc("get_mask.intersect_and_prune.calls");
-      +
-      +            // Value-based memoization: check if we've already computed the result for an
-      +            // accumulator with this value.
-      +            auto it = value_memo.find(a);
-      +            if (it != value_memo.end()) {
-      +                stats.inc("get_mask.intersect_and_prune.memo_hits");
-      +                return it->second;
-      +            }
-      +
-                   stats.start("get_mask.intersect_and_prune.intersection");
-                   RangeSet new_mask = a->llm_mask.intersection_with(limiter);
-                   stats.stop("get_mask.intersect_and_prune.intersection");
-                   stats.inc("get_mask.data.llm_mask_after_intersect.len.sum", new_mask.size());
-      -            bool is_empty_mask = new_mask.is_empty();
-      -            if (is_empty_mask) {
-      +
-      +            std::shared_ptr<Acc> result = nullptr;
-      +            if (!new_mask.is_empty()) {
-      +                auto na = std::make_shared<Acc>();
-      +                na->llm_mask = new_mask;
-      +                result = na;
-      +            } else {
-                       stats.inc("get_mask.intersect_and_prune.pruned_accs");
-      -                return std::shared_ptr<Acc>(nullptr);
-                   }
-      -            auto na = std::make_shared<Acc>();
-      -            na->llm_mask = new_mask;
-      -            return na;
-      +            value_memo.emplace(a, result);
-      +            return result;
-               };
-      -        return g.apply_and_prune(mutator, acc_memo);
-      +        auto result = g.apply_and_prune(mutator);
-      +        stats.stop("get_mask.main_loop.edge.apply_and_prune");
-      +        return result;
-           }
-       
-       };
-
-      ```
-    metadata:
-  - user: |-
-      Failed Hunk:
 
       ```diff
-      @@ -310,8 +337,8 @@
-                   stats.stop("get_mask.main_loop.end_node.reduce_acc");
+      diff --git a/python/run_benchmarks.sh b/python/run_benchmarks.sh
+      index 2111111..1111111 100755
+      --- a/python/run_benchmarks.sh
+      +++ b/python/run_benchmarks.sh
+      @@ -118,6 +118,15 @@
+         LDFLAGS="${LDFLAGS} -fsanitize=address"
+       fi
        
-                   // Zombie traversal avoidance
-                   stats.start("get_mask.zombie_check");
-      -            RangeSet node_llm_bv_union = RangeSet::empty();
-      -            for (const Edge& e : info.edges) {
-      -                node_llm_bv_union = node_llm_bv_union.union_with(e.llm_bv_rangeset);
-      -            }
-      -            RangeSet potential_new_tokens = node_llm_bv_union.difference_with(final_mask);
-      +            // Use the precomputed union of edge masks for this node.
-      +            RangeSet potential_new_tokens = info.llm_bv_union.difference_with(final_mask);
-                   if (potential_new_tokens.is_empty()) {
-                       stats.inc("get_mask.zombie_check.skipped_nodes_no_potential");
-                       stats.stop("get_mask.zombie_check");
-      ```
-
-      Expected Context (from patch):
-
-      ```diff
-                  stats.stop("get_mask.main_loop.end_node.reduce_acc");
-
-                  // Zombie traversal avoidance
-                  stats.start("get_mask.zombie_check");
-                  RangeSet node_llm_bv_union = RangeSet::empty();
-                  for (const Edge& e : info.edges) {
-                      node_llm_bv_union = node_llm_bv_union.union_with(e.llm_bv_rangeset);
-                  }
-                  RangeSet potential_new_tokens = node_llm_bv_union.difference_with(final_mask);
-                  if (potential_new_tokens.is_empty()) {
-                      stats.inc("get_mask.zombie_check.skipped_nodes_no_potential");
-                      stats.stop("get_mask.zombie_check");
-      ```
-
-      Nearest Match in `python/aug25/models/precompute3_engine.cpp` (found at line 524 with 91.67% similarity, shown with padding):
-
-      ```cpp
-                      if (reduced) {
-                          stats.start("get_mask.main_loop.end_node.final_mask_union");
-                          final_mask = final_mask.union_with(reduced->llm_mask);
-                          stats.stop("get_mask.main_loop.end_node.final_mask_union");
-                      }
-                  }
-
-                  // Zombie traversal avoidance
-                  stats.start("get_mask.zombie_check");
-                  RangeSet node_llm_bv_union = RangeSet::empty();
-                  for (const Edge& e : info.edges) {
-                      node_llm_bv_union = node_llm_bv_union.union_with(e.llm_bv_rangeset);
-                  }
-                  RangeSet potential_new_tokens = node_llm_bv_union.difference_with(final_mask);
-                  if (potential_new_tokens.is_empty()) {
-                      stats.inc("get_mask.zombie_check.skipped_nodes_no_potential");
-                      stats.stop("get_mask.zombie_check");
-                      continue;
-                  }
-                  auto gss_mask_acc = gss_node.reduce_acc();
-                  if (gss_mask_acc && gss_mask_acc->llm_mask.intersection_with(potential_new_tokens).is_empty()) {
-                      stats.inc("get_mask.zombie_check.skipped_nodes_no_overlap");
-      ```
-
-      The git diff hunk above failed to apply to the file `python/aug25/models/precompute3_engine.cpp`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
-      Do not include any other text or explanation outside the code block.
-    metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
-      --- a/python/aug25/models/precompute3_engine.cpp
-      +++ b/python/aug25/models/precompute3_engine.cpp
-      @@ -48,6 +48,16 @@
-               }
-               return n;
-           }
+      +# Control C++ stats collection. Default to enabled.
+      +: "${ENABLE_CPP_STATS:=1}"
+      +if [[ "${ENABLE_CPP_STATS}" == "1" ]]; then
+      +  echo "Building C++ with stats enabled (ENABLE_CPP_STATS=1)"
+      +  CXXFLAGS="${CXXFLAGS} -DENABLE_STATS"
+      +else
+      +  echo "Building C++ with stats disabled (ENABLE_CPP_STATS=0)"
+      +fi
       +
-      +    size_t hash() const {
-      +        size_t h = llm_mask.hash();
-      +        // This hash combines the mask's hash with hashes from the terminals_union map.
-      +        // The combination logic is chosen to distribute well.
-      +        for (const auto& [key, val] : terminals_union) {
-      +            h ^= (std::hash<int>{}(key) << 1) ^ val.hash();
-      +        }
-      +        return h;
-      +    }
-       };
-       
-       
-      @@ -63,6 +73,23 @@
-           }
-       };
-       
-      +// Add std::hash and std::equal_to specializations for std::shared_ptr<Acc> to enable value-based hashing.
-      +namespace std {
-      +    template <>
-      +    struct hash<std::shared_ptr<Acc>> {
-      +        size_t operator()(const std::shared_ptr<Acc>& a) const {
-      +            return a ? a->hash() : 0;
-      +        }
-      +    };
-      +    template <>
-      +    struct equal_to<std::shared_ptr<Acc>> {
-      +        bool operator()(const std::shared_ptr<Acc>& lhs, const std::shared_ptr<Acc>& rhs) const {
-      +            if (!lhs && !rhs) return true;
-      +            if (!lhs || !rhs) return false;
-      +            return *lhs == *rhs;
-      +        }
-      +    };
-      +}
-       
-       class Engine {
-       public:
-      @@
-      -            RangeSet node_llm_bv_union = RangeSet::empty();
-      -            for (const Edge& e : info.edges) {
-      -                node_llm_bv_union = node_llm_bv_union.union_with(e.llm_bv_rangeset);
-      -            }
-      -            RangeSet potential_new_tokens = node_llm_bv_union.difference_with(final_mask);
-      +            // Use the precomputed union of edge masks for this node.
-      +            RangeSet potential_new_tokens = info.llm_bv_union.difference_with(final_mask);
-      @@ -343,9 +370,12 @@
-                       if (popped.is_empty()) { stats.inc("get_mask.traversal.edge.popped_empty"); continue; }
-       
-                       // Apply LLM limiter once per edge (not per destination) to avoid repeated
-      -                // expensive apply_and_prune work. This mirrors the sharing-friendly structure
-      -                // from the Python implementation.
-      -                std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> acc_memo;
-      -                Leveled popped_limited = intersect_llm_mask(popped, llm_bv, &acc_memo);
-      +                // expensive apply_and_prune work. The value-based acc_memo is critical
-      +                // for performance, replicating the Python version's key optimization.
-      +                std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>,
-      +                                   std::hash<std::shared_ptr<Acc>>,
-      +                                   std::equal_to<std::shared_ptr<Acc>>> acc_memo;
-      +                Leveled popped_limited = intersect_llm_mask(popped, llm_bv, acc_memo);
-                       if (popped_limited.is_empty()) {
-                           stats.inc("get_mask.traversal.edge.popped_pruned_empty");
-                           continue;
-      @@ -424,6 +454,7 @@
-       
-           struct NodeInfo {
-               std::vector<Edge> edges;
-      +        RangeSet llm_bv_union;
-               bool is_end{false};
-               int max_depth{0};
-           };
-      @@ -560,6 +591,8 @@
-                       children_obj = py::list();
-                   }
-       
-      +            RangeSet node_llm_bv_union = RangeSet::empty();
-      +
-                   for (auto ch : children_obj) {
-                       py::tuple entry = py::cast<py::tuple>(ch);
-                       py::tuple edge_key = py::cast<py::tuple>(entry[0]);
-      @@ -576,6 +609,7 @@
-                           llm_ranges_cpp.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
-                       }
-                       RangeSet llm_bv_rs = RangeSet::from_ranges(llm_ranges_cpp);
-      +                node_llm_bv_union = node_llm_bv_union.union_with(llm_bv_rs);
-       
-                       std::vector<DestEdge> dests;
-                       py::object dest_map = entry[1];
-      @@ -602,7 +636,7 @@
-                       Edge e{pop, llm_bv_rs, std::move(dests)};
-                       info.edges.push_back(std::move(e));
-                   }
-      -
-      +            info.llm_bv_union = std::move(node_llm_bv_union);
-                   arena_[uid] = std::move(info);
-               }
-           }
-      @@ -751,26 +785,37 @@
-       
-           Leveled intersect_llm_mask(
-               const Leveled& g,
-               const RangeSet& limiter,
-      -        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo = nullptr) {
-      +        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>,
-      +                           std::hash<std::shared_ptr<Acc>>,
-      +                           std::equal_to<std::shared_ptr<Acc>>>& value_memo
-      +    ) {
-               auto& stats = Stats::get();
-               stats.start("get_mask.main_loop.edge.apply_and_prune");
-      +
-               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
-                   stats.inc("get_mask.intersect_and_prune.calls");
-      +
-      +            // Value-based memoization: check if we've already computed the result for an
-      +            // accumulator with this value.
-      +            auto it = value_memo.find(a);
-      +            if (it != value_memo.end()) {
-      +                stats.inc("get_mask.intersect_and_prune.memo_hits");
-      +                return it->second;
-      +            }
-      +
-                   stats.start("get_mask.intersect_and_prune.intersection");
-                   RangeSet new_mask = a->llm_mask.intersection_with(limiter);
-                   stats.stop("get_mask.intersect_and_prune.intersection");
-                   stats.inc("get_mask.data.llm_mask_after_intersect.len.sum", new_mask.size());
-      -            bool is_empty_mask = new_mask.is_empty();
-      -            if (is_empty_mask) {
-      +
-      +            std::shared_ptr<Acc> result = nullptr;
-      +            if (!new_mask.is_empty()) {
-      +                auto na = std::make_shared<Acc>();
-      +                na->llm_mask = new_mask;
-      +                result = na;
-      +            } else {
-                       stats.inc("get_mask.intersect_and_prune.pruned_accs");
-      -                return std::shared_ptr<Acc>(nullptr);
-                   }
-      -            auto na = std::make_shared<Acc>();
-      -            na->llm_mask = new_mask;
-      -            return na;
-      +            value_memo.emplace(a, result);
-      +            return result;
-               };
-      -        return g.apply_and_prune(mutator, acc_memo);
-      +        auto result = g.apply_and_prune(mutator);
-      +        stats.stop("get_mask.main_loop.edge.apply_and_prune");
-      +        return result;
-           }
-       
-       };
+       # Change to python directory to run build commands with relative paths
+       ORIGINAL_CWD=$(pwd)
+       cd "$SCRIPT_DIR"
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_engine.cpp
-      Applying patch to 'python/aug25/models/precompute3_engine.cpp' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_engine.cpp.
+      Identified target file: python/aug25/models/stats.hpp
+      Applying patch to 'python/aug25/models/stats.hpp' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/stats.hpp.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/run_benchmarks.sh
+      Applying patch to 'python/run_benchmarks.sh' using custom patcher...
+      Successfully applied patch and wrote to python/run_benchmarks.sh.
+    metadata:
+  - user: 'Changes committed with message: "feat: Make C++ stats collection optional
+      via compile flag"'
     metadata:
 ...

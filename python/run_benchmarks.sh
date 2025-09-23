@@ -127,6 +127,15 @@ if [[ "${SANITIZE:-0}" == "1" ]]; then
   LDFLAGS="${LDFLAGS} -fsanitize=address"
 fi
 
+# Control C++ stats collection. Default to enabled.
+: "${ENABLE_CPP_STATS:=1}"
+if [[ "${ENABLE_CPP_STATS}" == "1" ]]; then
+  echo "Building C++ with stats enabled (ENABLE_CPP_STATS=1)"
+  CXXFLAGS="${CXXFLAGS} -DENABLE_STATS"
+else
+  echo "Building C++ with stats disabled (ENABLE_CPP_STATS=0)"
+fi
+
 # Change to python directory to run build commands with relative paths
 ORIGINAL_CWD=$(pwd)
 cd "$SCRIPT_DIR"

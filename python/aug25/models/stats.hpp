@@ -16,14 +16,19 @@ public:
     }
 
     void inc(const std::string& key, long long value = 1) {
+#ifdef ENABLE_STATS
         counters_[key] += value;
+#endif
     }
 
     void start(const std::string& key) {
+#ifdef ENABLE_STATS
         timers_[key] = std::chrono::high_resolution_clock::now();
+#endif
     }
 
     void stop(const std::string& key) {
+#ifdef ENABLE_STATS
         auto it = timers_.find(key);
         if (it != timers_.end()) {
             auto end_time = std::chrono::high_resolution_clock::now();
@@ -31,17 +36,21 @@ public:
             durations_[key] += duration;
             timers_.erase(it);
         }
+#endif
     }
 
     void reset() {
+#ifdef ENABLE_STATS
         counters_.clear();
         durations_.clear();
         timers_.clear();
+#endif
     }
 
     void report() {
+#ifdef ENABLE_STATS
         std::cout << "\n--- C++ Engine Stats Report ---\n";
-        
+
         std::vector<std::string> counter_keys;
         for (const auto& pair : counters_) {
             counter_keys.push_back(pair.first);
@@ -65,6 +74,9 @@ public:
             std::cout << "  " << std::left << std::setw(60) << key << ": " << std::fixed << std::setprecision(3) << ms << "\n";
         }
         std::cout << "---------------------------------\n" << std::endl;
+#else
+        std::cout << "\n--- C++ Engine Stats Report (DISABLED) ---\n" << std::endl;
+#endif
     }
 
 private:
@@ -73,7 +85,10 @@ private:
     Stats(const Stats&) = delete;
     Stats& operator=(const Stats&) = delete;
 
+#ifdef ENABLE_STATS
     std::unordered_map<std::string, long long> counters_;
     std::unordered_map<std::string, long long> durations_; // in nanoseconds
     std::unordered_map<std::string, std::chrono::high_resolution_clock::time_point> timers_;
+#endif
 };
+
