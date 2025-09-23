@@ -2049,7 +2049,7 @@ local_system:
 
           py::object get_mask() {
               py::dict state_map = state_;
-              py::object final_mask = range_empty_()();
+              py::object final_mask = range_empty_();
 
               // values: node_id -> GSS
               std::unordered_map<int, py::object> values;
@@ -2071,7 +2071,7 @@ local_system:
                   py::object terminals_union = acc.attr("terminals_union");
 
                   // Build disallowed mask as RangeSet
-                  py::object disallowed_llm_mask = range_empty_()();
+                  py::object disallowed_llm_mask = range_empty_();
 
                   for (auto item_handle : terminals_union.attr("items")()) {
                       py::tuple item = py::cast<py::tuple>(item_handle);
@@ -2389,7 +2389,7 @@ local_system:
               return py::cpp_function([&, terminals_map](py::handle acc_obj) -> bool {
                   py::object acc = py::reinterpret_borrow<py::object>(acc_obj);
                   py::object disallowed_map = acc.attr("terminals_union");
-                  py::object rs_empty = range_empty_()();
+                  py::object rs_empty = range_empty_();
 
                   for (auto item_handle : terminals_map.attr("items")()) {
                       py::tuple item = py::cast<py::tuple>(item_handle);
@@ -2414,7 +2414,7 @@ local_system:
                   py::object acc = py::reinterpret_borrow<py::object>(acc_obj);
                   py::object old_map = acc.attr("terminals_union");
                   py::dict new_bvs;
-                  py::object rs_empty = range_empty_()();
+                  py::object rs_empty = range_empty_();
 
                   for (auto item_handle : state_map.attr("items")()) {
                       py::tuple item = py::cast<py::tuple>(item_handle);
@@ -2442,7 +2442,7 @@ local_system:
               py::function fn = py::cpp_function([&, state_id, terminal_id](py::handle acc_obj) -> py::object {
                   py::object acc = py::reinterpret_borrow<py::object>(acc_obj);
                   py::dict current_map = py::cast<py::dict>(acc.attr("terminals_union"));
-                  py::object rs_empty = range_empty_()();
+                  py::object rs_empty = range_empty_();
                   py::object curr_bv = current_map.contains(py::int_(state_id)) ? current_map[py::int_(state_id)] : rs_empty;
 
                   std::vector<unsigned long long> idx{static_cast<unsigned long long>(terminal_id)};
@@ -4890,25 +4890,19 @@ local_system:
                       py::tuple entry = py::cast<py::tuple>(ch);
                       py::tuple edge_key = py::cast<py::tuple>(entry[0]);
                       int pop = py::cast<int>(edge_key[0]);
-                      py::object llm_bv_bitset = edge_key[1];
-                      // If this is RangeSet (fallback), convert to Bitset via to_ranges() -> from_json? We only need RangeSet here to intersect.
-                      // To be robust, detect by attribute presence
-                      py::object llm_bv_rs;
-                      if (py::hasattr(llm_bv_bitset, "to_ranges") && !py::hasattr(llm_bv_bitset, "to_indices")) {
-                          // It's likely a Bitset (ffi). Use as-is and convert to RS
-                          llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
-                      } else if (py::hasattr(llm_bv_bitset, "to_ranges")) {
-                          // Could be RangeSet; use as-is
-                          if (py::hasattr(llm_bv_bitset, "intersection")) {
-                              llm_bv_rs = llm_bv_bitset;
-                              // Synthesize a dummy bitset object by converting back when needed (not used)
-                              llm_bv_bitset = py::none();
-                          } else {
-                              llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
-                          }
-                      } else {
-                          // Best effort: attempt to call to_ranges
-                          llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
+                      py::object llm_bv_obj = edge_key[1];
+
+                      py::object llm_bv_bitset_for_edge;
+                      py::object llm_bv_rs_for_edge;
+
+                      std::string type_name = py::str(llm_bv_obj.get_type().attr("__name__"));
+
+                      if (type_name == "RangeSet") {
+                          llm_bv_rs_for_edge = llm_bv_obj;
+                          llm_bv_bitset_for_edge = py::none();
+                      } else { // Assume Bitset or something convertible
+                          llm_bv_bitset_for_edge = llm_bv_obj;
+                          llm_bv_rs_for_edge = range_from_ranges_(llm_bv_obj.attr("to_ranges")());
                       }
 
                       std::vector<DestEdge> dests;
@@ -4920,7 +4914,7 @@ local_system:
                           dests.push_back(DestEdge{dest_idx, state_bv});
                       }
 
-                      Edge e{pop, llm_bv_bitset, llm_bv_rs, std::move(dests)};
+                      Edge e{pop, llm_bv_bitset_for_edge, llm_bv_rs_for_edge, std::move(dests)};
                       info.edges.push_back(std::move(e));
                   }
 
@@ -7199,7 +7193,7 @@ messages:
 
           py::object get_mask() {
               py::dict state_map = state_;
-              py::object final_mask = range_empty_()();
+              py::object final_mask = range_empty_();
 
               // values: node_id -> GSS
               std::unordered_map<int, py::object> values;
@@ -7221,7 +7215,7 @@ messages:
                   py::object terminals_union = acc.attr("terminals_union");
 
                   // Build disallowed mask as RangeSet
-                  py::object disallowed_llm_mask = range_empty_()();
+                  py::object disallowed_llm_mask = range_empty_();
 
                   for (auto item_handle : terminals_union.attr("items")()) {
                       py::tuple item = py::cast<py::tuple>(item_handle);
@@ -7539,7 +7533,7 @@ messages:
               return py::cpp_function([&, terminals_map](py::handle acc_obj) -> bool {
                   py::object acc = py::reinterpret_borrow<py::object>(acc_obj);
                   py::object disallowed_map = acc.attr("terminals_union");
-                  py::object rs_empty = range_empty_()();
+                  py::object rs_empty = range_empty_();
 
                   for (auto item_handle : terminals_map.attr("items")()) {
                       py::tuple item = py::cast<py::tuple>(item_handle);
@@ -7564,7 +7558,7 @@ messages:
                   py::object acc = py::reinterpret_borrow<py::object>(acc_obj);
                   py::object old_map = acc.attr("terminals_union");
                   py::dict new_bvs;
-                  py::object rs_empty = range_empty_()();
+                  py::object rs_empty = range_empty_();
 
                   for (auto item_handle : state_map.attr("items")()) {
                       py::tuple item = py::cast<py::tuple>(item_handle);
@@ -7592,7 +7586,7 @@ messages:
               py::function fn = py::cpp_function([&, state_id, terminal_id](py::handle acc_obj) -> py::object {
                   py::object acc = py::reinterpret_borrow<py::object>(acc_obj);
                   py::dict current_map = py::cast<py::dict>(acc.attr("terminals_union"));
-                  py::object rs_empty = range_empty_()();
+                  py::object rs_empty = range_empty_();
                   py::object curr_bv = current_map.contains(py::int_(state_id)) ? current_map[py::int_(state_id)] : rs_empty;
 
                   std::vector<unsigned long long> idx{static_cast<unsigned long long>(terminal_id)};
@@ -7704,8 +7698,7 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_engine.cpp
-  - user: |-
-      Traceback (most recent call last):
+  - user: |2-
         File "<frozen runpy>", line 198, in _run_module_as_main
         File "<frozen runpy>", line 88, in _run_code
         File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 314, in <module>
@@ -7718,7 +7711,19 @@ messages:
         File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_cpp.py", line 1466, in get_mask
           return self._engine.get_mask()
                  ^^^^^^^^^^^^^^^^^^^^^^^
-      TypeError: 'python.aug25.models.icl_rangeset.RangeSet' object is not callable
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_cpp.py", line 811, in apply_and_prune
+          res_inner = transform(self.inner)
+                      ^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_cpp.py", line 763, in transform
+          new_acc_opt = mutate_acc(node.acc)
+                        ^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_cpp.py", line 750, in mutate_acc
+          r = mutator(a)
+              ^^^^^^^^^^
+      TypeError: intersection(): incompatible function arguments. The following argument types are supported:
+          1. (self: python.aug25.models.icl_rangeset.RangeSet, other: python.aug25.models.icl_rangeset.RangeSet) -> python.aug25.models.icl_rangeset.RangeSet
+
+      Invoked with: RangeSet([0, 18446744073709551615]), HybridBitset(HybridBitset { inner: 0..=21627 })
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -7737,123 +7742,176 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed the traceback you provided. The error `TypeError: 'python.aug25.models.icl_rangeset.RangeSet' object is not callable` indicates that an instance of the `RangeSet` class is being invoked as if it were a function. This is happening within the C++ engine code where the static method `RangeSet.empty()` is called. The code incorrectly adds an extra pair of parentheses, attempting to call the `RangeSet` object that `empty()` returns.
+      Hello! I see you're encountering a `TypeError` during your benchmark run. This error happens because the C++ engine is attempting to perform an intersection between a `RangeSet` and a `HybridBitset`, but the intersection operation is only defined between two `RangeSet` objects.
 
-      I'll provide step-by-step instructions to fix this, followed by a git diff patch.
+      The root cause is in the C++ engine's `parse_arena` method, where it uses duck-typing to distinguish between `RangeSet` and `Bitset` objects from the Python side. The logic incorrectly identifies a `Bitset` as a `RangeSet` because they share similar method names (like `intersection`).
 
-      ### Step-by-Step Instructions
+      I'll guide you through fixing this by replacing the faulty duck-typing logic with a more robust check based on the object's type name.
 
-      The issue is a repeated typo in `python/aug25/models/precompute3_engine.cpp` where `range_empty_()()` is used instead of `range_empty_()`. You need to correct this in five places.
+      ### Step-by-step Instructions
 
-      1.  **Open the file `python/aug25/models/precompute3_engine.cpp`**.
+      1.  **Open `python/aug25/models/precompute3_engine.cpp`**
 
-      2.  **In the `get_mask` method (around line 230):**
-          *   Find this line:
-              ```cpp
-              py::object final_mask = range_empty_()();
-              ```
-          *   Change it to:
-              ```cpp
-              py::object final_mask = range_empty_();
-              ```
+          Open this file in your editor.
 
-      3.  **In the `get_mask` method, inside the `initialize_acc` lambda (around line 251):**
-          *   Find this line:
-              ```cpp
-              py::object disallowed_llm_mask = range_empty_()();
-              ```
-          *   Change it to:
-              ```cpp
-              py::object disallowed_llm_mask = range_empty_();
-              ```
+      2.  **Navigate to the `parse_arena` method**
 
-      4.  **In the `commit` method, inside the `make_prune_predicate` lambda (around line 618):**
-          *   Find this line:
-              ```cpp
-              py::object rs_empty = range_empty_()();
-              ```
-          *   Change it to:
-              ```cpp
-              py::object rs_empty = range_empty_();
-              ```
+          Find the `parse_arena` method within the `Engine` class. Inside this method, locate the `for` loop that begins with `for (auto ch : children_obj)`.
 
-      5.  **In the `commit` method, inside the `make_apply_map` lambda (around line 634):**
-          *   Find this line:
-              ```cpp
-              py::object rs_empty = range_empty_()();
-              ```
-          *   Change it to:
-              ```cpp
-              py::object rs_empty = range_empty_();
-              ```
+      3.  **Replace the loop body**
 
-      6.  **In the `commit` method, inside the `disallow_in_state` lambda (around line 656):**
-          *   Find this line:
-              ```cpp
-              py::object rs_empty = range_empty_()();
-              ```
-          *   Change it to:
-              ```cpp
-              py::object rs_empty = range_empty_();
-              ```
+          The current logic inside this loop for processing `llm_bv_bitset` is flawed. You will replace the entire body of the `for (auto ch : children_obj)` loop.
 
-      7.  **Save the file.** After making these changes, you will need to recompile the C++ extension for them to take effect.
+          **Delete** the following block of code:
+          ```cpp
+                  for (auto ch : children_obj) {
+                      py::tuple entry = py::cast<py::tuple>(ch);
+                      py::tuple edge_key = py::cast<py::tuple>(entry[0]);
+                      int pop = py::cast<int>(edge_key[0]);
+                      py::object llm_bv_bitset = edge_key[1];
+                      // If this is RangeSet (fallback), convert to Bitset via to_ranges() -> from_json? We only need RangeSet here to intersect.
+                      // To be robust, detect by attribute presence
+                      py::object llm_bv_rs;
+                      if (py::hasattr(llm_bv_bitset, "to_ranges") && !py::hasattr(llm_bv_bitset, "to_indices")) {
+                          // It's likely a Bitset (ffi). Use as-is and convert to RS
+                          llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
+                      } else if (py::hasattr(llm_bv_bitset, "to_ranges")) {
+                          // Could be RangeSet; use as-is
+                          if (py::hasattr(llm_bv_bitset, "intersection")) {
+                              llm_bv_rs = llm_bv_bitset;
+                              // Synthesize a dummy bitset object by converting back when needed (not used)
+                              llm_bv_bitset = py::none();
+                          } else {
+                              llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
+                          }
+                      } else {
+                          // Best effort: attempt to call to_ranges
+                          llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
+                      }
+
+                      std::vector<DestEdge> dests;
+                      py::object dest_map = entry[1];
+                      for (auto d : dest_map) {
+                          py::tuple dd = py::cast<py::tuple>(d);
+                          int dest_idx = py::cast<int>(dd[0]);
+                          py::object state_bv = py::reinterpret_borrow<py::object>(dd[1]);
+                          dests.push_back(DestEdge{dest_idx, state_bv});
+                      }
+
+                      Edge e{pop, llm_bv_bitset, llm_bv_rs, std::move(dests)};
+                      info.edges.push_back(std::move(e));
+                  }
+          ```
+
+          **And replace it with this new implementation:**
+          ```cpp
+                  for (auto ch : children_obj) {
+                      py::tuple entry = py::cast<py::tuple>(ch);
+                      py::tuple edge_key = py::cast<py::tuple>(entry[0]);
+                      int pop = py::cast<int>(edge_key[0]);
+                      py::object llm_bv_obj = edge_key[1];
+
+                      py::object llm_bv_bitset_for_edge;
+                      py::object llm_bv_rs_for_edge;
+
+                      std::string type_name = py::str(llm_bv_obj.get_type().attr("__name__"));
+
+                      if (type_name == "RangeSet") {
+                          llm_bv_rs_for_edge = llm_bv_obj;
+                          llm_bv_bitset_for_edge = py::none();
+                      } else { // Assume Bitset or something convertible
+                          llm_bv_bitset_for_edge = llm_bv_obj;
+                          llm_bv_rs_for_edge = range_from_ranges_(llm_bv_obj.attr("to_ranges")());
+                      }
+
+                      std::vector<DestEdge> dests;
+                      py::object dest_map = entry[1];
+                      for (auto d : dest_map) {
+                          py::tuple dd = py::cast<py::tuple>(d);
+                          int dest_idx = py::cast<int>(dd[0]);
+                          py::object state_bv = py::reinterpret_borrow<py::object>(dd[1]);
+                          dests.push_back(DestEdge{dest_idx, state_bv});
+                      }
+
+                      Edge e{pop, llm_bv_bitset_for_edge, llm_bv_rs_for_edge, std::move(dests)};
+                      info.edges.push_back(std::move(e));
+                  }
+          ```
+
+      4.  **Recompile and Rerun**
+
+          After saving the changes, you will need to recompile the C++ extension before running the benchmark script again.
+
+      This change ensures that the bitset object from Python is always correctly converted to a `RangeSet` for use within the C++ engine, resolving the `TypeError`.
 
       ### Git Diffs
 
-      Here is the git patch to apply the changes automatically.
+      Here is the git diff for the change:
 
       ```diff
       diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
+      index 941111b..1111111 100644
       --- a/python/aug25/models/precompute3_engine.cpp
       +++ b/python/aug25/models/precompute3_engine.cpp
-      @@ -227,7 +227,7 @@
+      @@ -679,48 +679,39 @@
+                       children_obj = py::list();
+                   }
        
-           py::object get_mask() {
-               py::dict state_map = state_;
-      -        py::object final_mask = range_empty_()();
-      +        py::object final_mask = range_empty_();
+                   for (auto ch : children_obj) {
+                       py::tuple entry = py::cast<py::tuple>(ch);
+                       py::tuple edge_key = py::cast<py::tuple>(entry[0]);
+                       int pop = py::cast<int>(edge_key[0]);
+      -                py::object llm_bv_bitset = edge_key[1];
+      -                // If this is RangeSet (fallback), convert to Bitset via to_ranges() -> from_json? We only need RangeSet here to intersect.
+      -                // To be robust, detect by attribute presence
+      -                py::object llm_bv_rs;
+      -                if (py::hasattr(llm_bv_bitset, "to_ranges") && !py::hasattr(llm_bv_bitset, "to_indices")) {
+      -                    // It's likely a Bitset (ffi). Use as-is and convert to RS
+      -                    llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
+      -                } else if (py::hasattr(llm_bv_bitset, "to_ranges")) {
+      -                    // Could be RangeSet; use as-is
+      -                    if (py::hasattr(llm_bv_bitset, "intersection")) {
+      -                        llm_bv_rs = llm_bv_bitset;
+      -                        // Synthesize a dummy bitset object by converting back when needed (not used)
+      -                        llm_bv_bitset = py::none();
+      -                    } else {
+      -                        llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
+      -                    }
+      -                } else {
+      -                    // Best effort: attempt to call to_ranges
+      -                    llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
+      +                py::object llm_bv_obj = edge_key[1];
+      +
+      +                py::object llm_bv_bitset_for_edge;
+      +                py::object llm_bv_rs_for_edge;
+      +
+      +                std::string type_name = py::str(llm_bv_obj.get_type().attr("__name__"));
+      +
+      +                if (type_name == "RangeSet") {
+      +                    llm_bv_rs_for_edge = llm_bv_obj;
+      +                    llm_bv_bitset_for_edge = py::none();
+      +                } else { // Assume Bitset or something convertible
+      +                    llm_bv_bitset_for_edge = llm_bv_obj;
+      +                    llm_bv_rs_for_edge = range_from_ranges_(llm_bv_obj.attr("to_ranges")());
+                       }
        
-               // values: node_id -> GSS
-               std::unordered_map<int, py::object> values;
-      @@ -248,7 +248,7 @@
-                   py::object terminals_union = acc.attr("terminals_union");
+                       std::vector<DestEdge> dests;
+                       py::object dest_map = entry[1];
+                       for (auto d : dest_map) {
+                           py::tuple dd = py::cast<py::tuple>(d);
+                           int dest_idx = py::cast<int>(dd[0]);
+                           py::object state_bv = py::reinterpret_borrow<py::object>(dd[1]);
+                           dests.push_back(DestEdge{dest_idx, state_bv});
+                       }
        
-                   // Build disallowed mask as RangeSet
-      -            py::object disallowed_llm_mask = range_empty_()();
-      +            py::object disallowed_llm_mask = range_empty_();
+      -                Edge e{pop, llm_bv_bitset, llm_bv_rs, std::move(dests)};
+      +                Edge e{pop, llm_bv_bitset_for_edge, llm_bv_rs_for_edge, std::move(dests)};
+                       info.edges.push_back(std::move(e));
+                   }
        
-                   for (auto item_handle : terminals_union.attr("items")()) {
-                       py::tuple item = py::cast<py::tuple>(item_handle);
-      @@ -615,8 +615,8 @@
-           py::function make_prune_predicate(const py::dict& terminals_map) {
-               return py::cpp_function([&, terminals_map](py::handle acc_obj) -> bool {
-                   py::object acc = py::reinterpret_borrow<py::object>(acc_obj);
-      -            py::object disallowed_map = acc.attr("terminals_union");
-      -            py::object rs_empty = range_empty_()();
-      +            py::object disallowed_map = acc.attr("terminals_union");
-      +            py::object rs_empty = range_empty_();
-       
-                   for (auto item_handle : terminals_map.attr("items")()) {
-                       py::tuple item = py::cast<py::tuple>(item_handle);
-      @@ -639,7 +639,7 @@
-                   py::object acc = py::reinterpret_borrow<py::object>(acc_obj);
-                   py::object old_map = acc.attr("terminals_union");
-                   py::dict new_bvs;
-      -            py::object rs_empty = range_empty_()();
-      +            py::object rs_empty = range_empty_();
-       
-                   for (auto item_handle : state_map.attr("items")()) {
-                       py::tuple item = py::cast<py::tuple>(item_handle);
-      @@ -665,7 +665,7 @@
-               py::function fn = py::cpp_function([&, state_id, terminal_id](py::handle acc_obj) -> py::object {
-                   py::object acc = py::reinterpret_borrow<py::object>(acc_obj);
-                   py::dict current_map = py::cast<py::dict>(acc.attr("terminals_union"));
-      -            py::object rs_empty = range_empty_()();
-      +            py::object rs_empty = range_empty_();
-                   py::object curr_bv = current_map.contains(py::int_(state_id)) ? current_map[py::int_(state_id)] : rs_empty;
-       
-                   std::vector<unsigned long long> idx{static_cast<unsigned long long>(terminal_id)};
+                   arena_[uid] = std::move(info);
+               }
+           }
 
       ```
     metadata:
@@ -7866,7 +7924,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_engine.cpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_engine.cpp.
     metadata:
-  - user: 'Changes committed with message: "Fix: Remove extra parentheses from range_empty_()
-      calls in precompute3_engine"'
+  - user: 'Changes committed with message: "Fix: Correctly distinguish RangeSet and
+      Bitset types in C++ engine by checking type name"'
     metadata:
 ...

@@ -558,25 +558,19 @@ private:
                 py::tuple entry = py::cast<py::tuple>(ch);
                 py::tuple edge_key = py::cast<py::tuple>(entry[0]);
                 int pop = py::cast<int>(edge_key[0]);
-                py::object llm_bv_bitset = edge_key[1];
-                // If this is RangeSet (fallback), convert to Bitset via to_ranges() -> from_json? We only need RangeSet here to intersect.
-                // To be robust, detect by attribute presence
-                py::object llm_bv_rs;
-                if (py::hasattr(llm_bv_bitset, "to_ranges") && !py::hasattr(llm_bv_bitset, "to_indices")) {
-                    // It's likely a Bitset (ffi). Use as-is and convert to RS
-                    llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
-                } else if (py::hasattr(llm_bv_bitset, "to_ranges")) {
-                    // Could be RangeSet; use as-is
-                    if (py::hasattr(llm_bv_bitset, "intersection")) {
-                        llm_bv_rs = llm_bv_bitset;
-                        // Synthesize a dummy bitset object by converting back when needed (not used)
-                        llm_bv_bitset = py::none();
-                    } else {
-                        llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
-                    }
-                } else {
-                    // Best effort: attempt to call to_ranges
-                    llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
+                py::object llm_bv_obj = edge_key[1];
+
+                py::object llm_bv_bitset_for_edge;
+                py::object llm_bv_rs_for_edge;
+
+                std::string type_name = py::str(llm_bv_obj.get_type().attr("__name__"));
+
+                if (type_name == "RangeSet") {
+                    llm_bv_rs_for_edge = llm_bv_obj;
+                    llm_bv_bitset_for_edge = py::none();
+                } else { // Assume Bitset or something convertible
+                    llm_bv_bitset_for_edge = llm_bv_obj;
+                    llm_bv_rs_for_edge = range_from_ranges_(llm_bv_obj.attr("to_ranges")());
                 }
 
                 std::vector<DestEdge> dests;
@@ -588,7 +582,7 @@ private:
                     dests.push_back(DestEdge{dest_idx, state_bv});
                 }
 
-                Edge e{pop, llm_bv_bitset, llm_bv_rs, std::move(dests)};
+                Edge e{pop, llm_bv_bitset_for_edge, llm_bv_rs_for_edge, std::move(dests)};
                 info.edges.push_back(std::move(e));
             }
 
