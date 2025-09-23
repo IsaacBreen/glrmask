@@ -500,13 +500,12 @@ class Model(GraphProvider):
                     llm_mask=allowed_mask,
                 )
 
-            apply_memo: Dict[PyAcc, PyAcc] = {}
             for sid, gss in state_map.items():
                 stats.inc('get_mask.seeding.gss_loops')
                 r: int = roots_map[int(sid)]
 
                 stats.start('get_mask.seeding.gss.apply')
-                gss_initialized: GSS = gss.apply(initialize_acc, apply_memo)
+                gss_initialized: GSS = gss.apply(initialize_acc)
                 stats.stop('get_mask.seeding.gss.apply')
 
                 if r in values:

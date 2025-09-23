@@ -436,10 +436,9 @@ class Model(GraphProvider):
                 llm_mask=allowed_mask,
             )
 
-        apply_memo: Dict[PyAcc, PyAcc] = {}
         for sid, gss in state_map.items():
             r: int = roots_map[int(sid)]
-            gss_initialized: GSS = gss.apply(initialize_acc, apply_memo)
+            gss_initialized: GSS = gss.apply(initialize_acc)
             if r in values:
                 values[r] = values[r].merge(gss_initialized)
             else:
