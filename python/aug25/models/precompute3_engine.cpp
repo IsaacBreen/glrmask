@@ -295,15 +295,16 @@ public:
             if (visited_q_items.count(key)) continue;
             visited_q_items.insert(key);
 
-            ssize_t suffix_len = token_len - cur.offset;
-            py::memoryview suffix_view = py::memoryview::from_memory(token_data + cur.offset, suffix_len);
             ExecResult cached_res;
             auto cache_key = std::make_pair(cur.offset, cur.tokenizer_sid);
+            ExecResult cached_res;
             auto it = exec_cache.find(cache_key);
             if (it != exec_cache.end()) {
                 cached_res = it->second;
             } else {
-                cached_res = tokenizer_execute_from_state_(suffix_view, cur.tokenizer_sid);
+                ssize_t suffix_len = token_len - cur.offset;
+                py::bytes suffix_bytes(token_data + cur.offset, suffix_len);
+                cached_res = tokenizer_execute_from_state_(suffix_bytes, cur.tokenizer_sid);
                 exec_cache[cache_key] = cached_res;
             }
             py::tuple result = cached_res;
