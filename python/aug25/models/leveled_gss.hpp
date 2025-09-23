@@ -661,7 +661,11 @@ public:
                 }
             }
             if (!merged) merged = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-            return LeveledGSS(try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged)));
+            UpperPtr<T, Acc> result_node = merged;
+            if (!result_node->is_interface()) {
+                result_node = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(result_node));
+            }
+            return LeveledGSS(result_node);
         }
     }
 
@@ -755,7 +759,11 @@ public:
                     for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
                     UpperPtr<T, Acc> merged = popped[0];
                     for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-                    res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                    if (merged->is_interface()) {
+                        res = merged;
+                    } else {
+                        res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                    }
                 }
                 memo_upper[key] = res;
                 return res;

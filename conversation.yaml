@@ -8,7 +8,7 @@ local_system:
     - python/aug25/models/precompute3_engine.cpp
     - python/aug25/models/leveled_gss.hpp
     - run_rust_and_cpp_models.sh
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     python/run_benchmarks.sh: |
@@ -1746,547 +1746,9 @@ local_system:
       #include <algorithm>
       #include <functional>
       #include <memory>
+      #include "leveled_gss.hpp"
 
-      namespace leveled_gss {
-
-      template <typename T, typename Acc>
-      struct Upper;
-      template <typename T, typename Acc>
-      struct Lower;
-      template <typename T, typename Acc>
-      struct Interface;
-      template <typename T, typename Acc>
-      struct UpperBranch;
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Acc> _merge_optional_acc_impl(const std::shared_ptr<Acc>& a, const std::shared_ptr<Acc>& b) {
-          if (!a) return b;
-          if (!b) return a;
-          if (a == b) return a;
-          return a->merge(b);
-      }
-
-      template <typename T, typename Acc>
-      struct Upper : public std::enable_shared_from_this<Upper<T, Acc>> {
-          int max_depth;
-          virtual ~Upper() = default;
-
-          std::vector<std::shared_ptr<Upper<T, Acc>>> _all_children_upper() const {
-              if (auto ub = std::dynamic_pointer_cast<const UpperBranch<T, Acc>>(this->shared_from_this())) {
-                  std::vector<std::shared_ptr<Upper<T, Acc>>> children;
-                  for (const auto& pair1 : ub->children) {
-                      for (const auto& pair2 : pair1.second) {
-                          children.push_back(pair2.second);
-                      }
-                  }
-                  return children;
-              }
-              return {};
-          }
-
-          std::vector<std::shared_ptr<Lower<T, Acc>>> _all_children_lower() const {
-              if (auto it = std::dynamic_pointer_cast<const Interface<T, Acc>>(this->shared_from_this())) {
-                  std::vector<std::shared_ptr<Lower<T, Acc>>> children;
-                  for (const auto& pair1 : it->children) {
-                      for (const auto& pair2 : pair1.second) {
-                          children.push_back(pair2.second);
-                      }
-                  }
-                  return children;
-              }
-              return {};
-          }
-      };
-
-      template <typename T, typename Acc>
-      struct Lower : public std::enable_shared_from_this<Lower<T, Acc>> {
-          using ChildrenMap = std::unordered_map<T, std::unordered_map<int, std::shared_ptr<Lower<T, Acc>>>>;
-          ChildrenMap children;
-          bool empty;
-          int max_depth;
-
-          Lower(ChildrenMap ch, bool em) : children(std::move(ch)), empty(em) {
-              int d = 0;
-              for (const auto& pair1 : children) {
-                  for (const auto& pair2 : pair1.second) {
-                      d = std::max(d, pair2.second->max_depth);
-                  }
-              }
-              max_depth = d + (children.empty() ? 0 : 1);
-          }
-
-          std::vector<std::shared_ptr<Lower<T, Acc>>> _all_children() const {
-              std::vector<std::shared_ptr<Lower<T, Acc>>> res;
-              for (const auto& pair1 : children) {
-                  for (const auto& pair2 : pair1.second) {
-                      res.push_back(pair2.second);
-                  }
-              }
-              return res;
-          }
-      };
-
-      template <typename T, typename Acc>
-      struct Interface : public Upper<T, Acc> {
-          using LowerChildrenMap = std::unordered_map<T, std::unordered_map<int, std::shared_ptr<Lower<T, Acc>>>>;
-          LowerChildrenMap children;
-          std::shared_ptr<Acc> acc;
-          std::shared_ptr<Acc> empty;
-
-          Interface(LowerChildrenMap ch, std::shared_ptr<Acc> a, std::shared_ptr<Acc> em)
-              : children(std::move(ch)), acc(std::move(a)), empty(std::move(em)) {
-              int d = 0;
-              for (const auto& pair1 : children) {
-                  for (const auto& pair2 : pair1.second) {
-                      d = std::max(d, pair2.second->max_depth);
-                  }
-              }
-              this->max_depth = d + (children.empty() ? 0 : 1);
-          }
-      };
-
-      template <typename T, typename Acc>
-      struct UpperBranch : public Upper<T, Acc> {
-          using UpperChildrenMap = std::unordered_map<T, std::unordered_map<int, std::shared_ptr<Upper<T, Acc>>>>;
-          UpperChildrenMap children;
-          std::shared_ptr<Acc> empty;
-
-          UpperBranch(UpperChildrenMap ch, std::shared_ptr<Acc> em)
-              : children(std::move(ch)), empty(std::move(em)) {
-              int d = 0;
-              for (const auto& pair1 : children) {
-                  for (const auto& pair2 : pair1.second) {
-                      d = std::max(d, pair2.second->max_depth);
-                  }
-              }
-              this->max_depth = d + (children.empty() ? 0 : 1);
-          }
-      };
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Upper<T, Acc>> try_promote(std::shared_ptr<UpperBranch<T, Acc>> node);
-
-      template <typename T, typename Acc>
-      std::shared_ptr<UpperBranch<T, Acc>> interface_to_upperbranch(std::shared_ptr<Interface<T, Acc>> it) {
-          typename UpperBranch<T, Acc>::UpperChildrenMap children;
-          for (const auto& [v, kids] : it->children) {
-              std::unordered_map<int, std::shared_ptr<Upper<T, Acc>>> v_map;
-              for (const auto& lchild_pair : kids) {
-                  auto lchild = lchild_pair.second;
-                  auto ci = std::make_shared<Interface<T, Acc>>(
-                      lchild->children,
-                      it->acc,
-                      (lchild->empty ? it->acc : nullptr)
-                  );
-                  v_map[ci->max_depth] = ci;
-              }
-              if (!v_map.empty()) {
-                  children[v] = v_map;
-              }
-          }
-          
-          auto new_empty = it->empty;
-          if (it->children.empty() && !it->empty) {
-              new_empty = it->acc;
-          }
-
-          return std::make_shared<UpperBranch<T, Acc>>(children, new_empty);
-      }
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Upper<T, Acc>> merge_upper(std::shared_ptr<Upper<T, Acc>> u1, std::shared_ptr<Upper<T, Acc>> u2);
-
-      template <typename K, typename V, typename M>
-      std::unordered_map<K, std::unordered_map<int, V>> _merge_children_by_depth(
-          const std::unordered_map<K, std::unordered_map<int, V>>& c1,
-          const std::unordered_map<K, std::unordered_map<int, V>>& c2,
-          M merge_func) {
-          if (&c1 == &c2) return c1;
-          std::unordered_map<K, std::unordered_map<int, V>> merged_children;
-          std::set<K> all_vals;
-          for (const auto& kv : c1) all_vals.insert(kv.first);
-          for (const auto& kv : c2) all_vals.insert(kv.first);
-
-          for (const auto& v : all_vals) {
-              std::unordered_map<int, std::vector<V>> nodes_by_depth;
-              auto it1 = c1.find(v);
-              if (it1 != c1.end()) {
-                  for (const auto& [depth, child] : it1->second) {
-                      nodes_by_depth[depth].push_back(child);
-                  }
-              }
-              auto it2 = c2.find(v);
-              if (it2 != c2.end()) {
-                  for (const auto& [depth, child] : it2->second) {
-                      nodes_by_depth[depth].push_back(child);
-                  }
-              }
-              if (nodes_by_depth.empty()) continue;
-
-              std::unordered_map<int, V> v_out;
-              for (auto& [depth, nodes] : nodes_by_depth) {
-                  if (nodes.empty()) continue;
-                  V current = nodes[0];
-                  for (size_t i = 1; i < nodes.size(); ++i) {
-                      current = merge_func(current, nodes[i]);
-                  }
-                  v_out[current->max_depth] = current;
-              }
-              merged_children[v] = v_out;
-          }
-          return merged_children;
-      }
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Upper<T, Acc>> merge_upperbranches(std::shared_ptr<UpperBranch<T, Acc>> a, std::shared_ptr<UpperBranch<T, Acc>> b) {
-          if (a == b) return a;
-          auto new_empty = _merge_optional_acc_impl<T, Acc>(a->empty, b->empty);
-          auto merged_children = _merge_children_by_depth(a->children, b->children, &merge_upper<T, Acc>);
-          return try_promote(std::make_shared<UpperBranch<T, Acc>>(merged_children, new_empty));
-      }
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Lower<T, Acc>> merge_lower(std::shared_ptr<Lower<T, Acc>> l1, std::shared_ptr<Lower<T, Acc>> l2) {
-          if (l1 == l2) return l1;
-          bool new_empty = l1->empty || l2->empty;
-          auto merged_children = _merge_children_by_depth(l1->children, l2->children, &merge_lower<T, Acc>);
-          return std::make_shared<Lower<T, Acc>>(merged_children, new_empty);
-      }
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Upper<T, Acc>> merge_interfaces(std::shared_ptr<Interface<T, Acc>> a, std::shared_ptr<Interface<T, Acc>> b) {
-          bool acc_equal = (a->acc == b->acc) || (a->acc && b->acc && *a->acc == *b->acc);
-          if (acc_equal || a->children == b->children) {
-              auto merged_children = _merge_children_by_depth(a->children, b->children, &merge_lower<T, Acc>);
-              auto new_acc = _merge_optional_acc_impl<T, Acc>(a->acc, b->acc);
-              auto new_empty = _merge_optional_acc_impl<T, Acc>(a->empty, b->empty);
-              return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
-          }
-          return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b));
-      }
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Upper<T, Acc>> merge_upper(std::shared_ptr<Upper<T, Acc>> u1, std::shared_ptr<Upper<T, Acc>> u2) {
-          if (u1 == u2) return u1;
-          auto i1 = std::dynamic_pointer_cast<Interface<T, Acc>>(u1);
-          auto i2 = std::dynamic_pointer_cast<Interface<T, Acc>>(u2);
-          auto ub1 = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(u1);
-          auto ub2 = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(u2);
-
-          if (i1 && i2) return merge_interfaces(i1, i2);
-          if (ub1 && ub2) return merge_upperbranches(ub1, ub2);
-
-          auto to_ub1 = ub1 ? ub1 : interface_to_upperbranch(i1);
-          auto to_ub2 = ub2 ? ub2 : interface_to_upperbranch(i2);
-          return merge_upperbranches(to_ub1, to_ub2);
-      }
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Upper<T, Acc>> try_promote(std::shared_ptr<UpperBranch<T, Acc>> node) {
-          auto all_children = node->_all_children_upper();
-          if (all_children.empty()) {
-              if (node->empty) {
-                  return std::make_shared<Interface<T, Acc>>(
-                      typename Interface<T, Acc>::LowerChildrenMap{},
-                      node->empty,
-                      node->empty
-                  );
-              }
-              return node;
-          }
-
-          bool all_interfaces = true;
-          for (const auto& c : all_children) {
-              if (!std::dynamic_pointer_cast<Interface<T, Acc>>(c)) {
-                  all_interfaces = false;
-                  break;
-              }
-          }
-          if (!all_interfaces) return node;
-
-          std::vector<std::shared_ptr<Acc>> accs_vec;
-          if (node->empty) accs_vec.push_back(node->empty);
-          for (const auto& c : all_children) {
-              auto ic = std::static_pointer_cast<Interface<T, Acc>>(c);
-              accs_vec.push_back(ic->acc);
-              if (ic->empty) accs_vec.push_back(ic->empty);
-          }
-
-          if (!accs_vec.empty()) {
-              bool all_same = true;
-              for (size_t i = 1; i < accs_vec.size(); ++i) {
-                  bool equal = (accs_vec[i] == accs_vec[0]) || (*accs_vec[i] == *accs_vec[0]);
-                  if (!equal) {
-                      all_same = false;
-                      break;
-                  }
-              }
-              if (all_same) {
-                  auto the_acc = accs_vec[0];
-                  if (!the_acc) {
-                      return std::make_shared<UpperBranch<T, Acc>>(
-                          typename UpperBranch<T, Acc>::UpperChildrenMap{}, nullptr);
-                  }
-                  typename Interface<T, Acc>::LowerChildrenMap l_children;
-                  for (const auto& [v, kids] : node->children) {
-                      std::unordered_map<int, std::shared_ptr<Lower<T, Acc>>> v_map;
-                      for (const auto& child_pair : kids) {
-                          auto ci = std::static_pointer_cast<Interface<T, Acc>>(child_pair.second);
-                          auto lower = std::make_shared<Lower<T, Acc>>(ci->children, (ci->empty != nullptr));
-                          v_map[lower->max_depth] = lower;
-                      }
-                      if (!v_map.empty()) {
-                          l_children[v] = v_map;
-                      }
-                  }
-                  return std::make_shared<Interface<T, Acc>>(l_children, the_acc, node->empty);
-              }
-          }
-
-          return node;
-      }
-
-      template <typename T, typename Acc>
-      class LeveledGSS {
-      public:
-          std::shared_ptr<Upper<T, Acc>> inner;
-
-          LeveledGSS() : inner(create_empty().inner) {}
-
-          LeveledGSS(std::shared_ptr<Upper<T, Acc>> in) : inner(std::move(in)) {}
-
-          static LeveledGSS create_empty() {
-              return LeveledGSS(std::make_shared<UpperBranch<T, Acc>>(
-                  typename UpperBranch<T, Acc>::UpperChildrenMap{}, nullptr));
-          }
-
-          bool is_empty() const {
-              if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(inner)) {
-                  return ub->children.empty() && !ub->empty;
-              }
-              return false;
-          }
-
-          LeveledGSS push(const T& value) const {
-              if (is_empty()) return *this;
-              if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(inner)) {
-                  auto lower_node = std::make_shared<Lower<T, Acc>>(it->children, it->empty != nullptr);
-                  typename Interface<T, Acc>::LowerChildrenMap new_children;
-                  new_children[value][lower_node->max_depth] = lower_node;
-                  return LeveledGSS(std::make_shared<Interface<T, Acc>>(new_children, it->acc, nullptr));
-              } else {
-                  auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
-                  typename UpperBranch<T, Acc>::UpperChildrenMap new_children;
-                  new_children[value][ub->max_depth] = ub;
-                  return LeveledGSS(std::make_shared<UpperBranch<T, Acc>>(new_children, nullptr));
-              }
-          }
-
-          LeveledGSS popn(int n) const {
-              if (n <= 0 || is_empty()) return *this;
-              return LeveledGSS(_popn_upper(inner, n));
-          }
-
-          std::unordered_set<T> peek() const {
-              std::unordered_set<T> keys;
-              if (auto it = std::dynamic_pointer_cast<const Interface<T, Acc>>(inner)) {
-                  for (const auto& kv : it->children) keys.insert(kv.first);
-              } else if (auto ub = std::dynamic_pointer_cast<const UpperBranch<T, Acc>>(inner)) {
-                  for (const auto& kv : ub->children) keys.insert(kv.first);
-              }
-              return keys;
-          }
-
-          LeveledGSS isolate(const T& value) const {
-              if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(inner)) {
-                  auto it_ch = it->children.find(value);
-                  if (it_ch == it->children.end()) return create_empty();
-                  typename Interface<T, Acc>::LowerChildrenMap new_children;
-                  new_children[value] = it_ch->second;
-                  return LeveledGSS(std::make_shared<Interface<T, Acc>>(new_children, it->acc, nullptr));
-              } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(inner)) {
-                  auto it_ch = ub->children.find(value);
-                  if (it_ch == ub->children.end()) return create_empty();
-                  typename UpperBranch<T, Acc>::UpperChildrenMap new_children;
-                  new_children[value] = it_ch->second;
-                  return LeveledGSS(try_promote(std::make_shared<UpperBranch<T, Acc>>(new_children, nullptr)));
-              }
-              return create_empty();
-          }
-
-          LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
-              if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(inner)) {
-                  typename Interface<T, Acc>::LowerChildrenMap filtered_children;
-                  for(const T& v : values) {
-                      if (it->children.count(v)) filtered_children[v] = it->children.at(v);
-                  }
-                  if (filtered_children.empty()) return create_empty();
-                  return LeveledGSS(std::make_shared<Interface<T, Acc>>(filtered_children, it->acc, nullptr));
-              } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(inner)) {
-                  typename UpperBranch<T, Acc>::UpperChildrenMap filtered_children;
-                  for(const T& v : values) {
-                      if (ub->children.count(v)) filtered_children[v] = ub->children.at(v);
-                  }
-                  if (filtered_children.empty()) return create_empty();
-                  return LeveledGSS(try_promote(std::make_shared<UpperBranch<T, Acc>>(filtered_children, nullptr)));
-              }
-              return create_empty();
-          }
-
-          template <typename F>
-          LeveledGSS apply(F&& func) const {
-              return LeveledGSS(_apply(inner, func));
-          }
-
-          template <typename F>
-          LeveledGSS apply_and_prune(F&& func) const {
-              auto res = _apply_and_prune(inner, func);
-              return res ? LeveledGSS(res) : create_empty();
-          }
-
-          template <typename F>
-          LeveledGSS prune(F&& pred) const {
-              auto mutator = [&](const std::shared_ptr<Acc>& a) {
-                  return pred(a) ? a : nullptr;
-              };
-              return apply_and_prune(mutator);
-          }
-
-          LeveledGSS merge(const LeveledGSS& other) const {
-              return LeveledGSS(merge_upper(inner, other.inner));
-          }
-
-          static LeveledGSS merge_many(const std::vector<LeveledGSS>& gss_list) {
-              if (gss_list.empty()) return create_empty();
-              auto merged_inner = gss_list[0].inner;
-              for (size_t i = 1; i < gss_list.size(); ++i) {
-                  merged_inner = merge_upper(merged_inner, gss_list[i].inner);
-              }
-              return LeveledGSS(merged_inner);
-          }
-
-          std::shared_ptr<Acc> reduce_acc() const {
-              std::vector<std::shared_ptr<Acc>> accs;
-              std::unordered_set<const void*> visited_nodes;
-              std::unordered_set<const void*> visited_accs;
-              std::vector<std::shared_ptr<const Upper<T, Acc>>> q;
-              q.push_back(inner);
-
-              while(!q.empty()) {
-                  auto node = q.back();
-                  q.pop_back();
-                  if (visited_nodes.count(node.get())) continue;
-                  visited_nodes.insert(node.get());
-
-                  if (auto it = std::dynamic_pointer_cast<const Interface<T, Acc>>(node)) {
-                      if (it->acc && visited_accs.find(it->acc.get()) == visited_accs.end()) {
-                          accs.push_back(it->acc);
-                          visited_accs.insert(it->acc.get());
-                      }
-                      if (it->empty && visited_accs.find(it->empty.get()) == visited_accs.end()) {
-                          accs.push_back(it->empty);
-                          visited_accs.insert(it->empty.get());
-                      }
-                  } else if (auto ub = std::dynamic_pointer_cast<const UpperBranch<T, Acc>>(node)) {
-                      if (ub->empty && visited_accs.find(ub->empty.get()) == visited_accs.end()) {
-                          accs.push_back(ub->empty);
-                          visited_accs.insert(ub->empty.get());
-                      }
-                      for(const auto& child : ub->_all_children_upper()) q.push_back(child);
-                  }
-              }
-              if (accs.empty()) return nullptr;
-              auto res = accs[0];
-              for(size_t i = 1; i < accs.size(); ++i) res = res->merge(accs[i]);
-              return res;
-          }
-
-      private:
-          std::shared_ptr<Lower<T, Acc>> _popn_lower(std::shared_ptr<Lower<T, Acc>> node, int k) const {
-              if (k == 0) return node;
-              auto children = node->_all_children();
-              if (children.empty()) return std::make_shared<Lower<T, Acc>>(typename Lower<T, Acc>::ChildrenMap{}, false);
-              std::vector<std::shared_ptr<Lower<T, Acc>>> popped;
-              for (const auto& child : children) popped.push_back(_popn_lower(child, k - 1));
-              auto res = popped[0];
-              for (size_t i = 1; i < popped.size(); ++i) res = merge_lower(res, popped[i]);
-              return res;
-          }
-
-          std::shared_ptr<Upper<T, Acc>> _popn_upper(std::shared_ptr<Upper<T, Acc>> node, int k) const {
-              if (k == 0) return node;
-              if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(node)) {
-                  auto children = it->_all_children_lower();
-                  if (children.empty()) return create_empty().inner;
-                  std::vector<std::shared_ptr<Lower<T, Acc>>> popped;
-                  for (const auto& child : children) popped.push_back(_popn_lower(child, k - 1));
-                  auto merged = popped[0];
-                  for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower(merged, popped[i]);
-                  auto new_empty = merged->empty ? it->acc : nullptr;
-                  if (merged->children.empty() && !new_empty) return create_empty().inner;
-                  return std::make_shared<Interface<T, Acc>>(merged->children, it->acc, new_empty);
-              } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(node)) {
-                  auto children = ub->_all_children_upper();
-                  if (children.empty()) return create_empty().inner;
-                  std::vector<std::shared_ptr<Upper<T, Acc>>> popped;
-                  for (const auto& child : children) popped.push_back(_popn_upper(child, k - 1));
-                  auto merged = popped[0];
-                  for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper(merged, popped[i]);
-                  if (auto merged_ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(merged)) {
-                      return try_promote(merged_ub);
-                  }
-                  return merged;
-              }
-              return create_empty().inner;
-          }
-
-          template <typename F>
-          std::shared_ptr<Upper<T, Acc>> _apply(std::shared_ptr<Upper<T, Acc>> node, F& func) const {
-              if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(node)) {
-                  auto new_acc = func(it->acc);
-                  auto new_empty = it->empty ? func(it->empty) : nullptr;
-                  return std::make_shared<Interface<T, Acc>>(it->children, new_acc, new_empty);
-              } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(node)) {
-                  auto new_empty = ub->empty ? func(ub->empty) : nullptr;
-                  typename UpperBranch<T, Acc>::UpperChildrenMap new_children;
-                  for (const auto& [v, kids] : ub->children) {
-                      for (const auto& [d, child] : kids) {
-                          auto new_child = _apply(child, func);
-                          new_children[v][new_child->max_depth] = new_child;
-                      }
-                  }
-                  return try_promote(std::make_shared<UpperBranch<T, Acc>>(new_children, new_empty));
-              }
-              return nullptr;
-          }
-
-          template <typename F>
-          std::shared_ptr<Upper<T, Acc>> _apply_and_prune(std::shared_ptr<Upper<T, Acc>> node, F& func) const {
-              if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(node)) {
-                  auto new_acc = func(it->acc);
-                  auto new_empty = it->empty ? func(it->empty) : nullptr;
-                  if (!new_acc && !new_empty) return nullptr;
-                  if (!new_acc) {
-                      return try_promote(std::make_shared<UpperBranch<T, Acc>>(typename UpperBranch<T, Acc>::UpperChildrenMap{}, new_empty));
-                  }
-                  return std::make_shared<Interface<T, Acc>>(it->children, new_acc, new_empty);
-              } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(node)) {
-                  auto new_empty = ub->empty ? func(ub->empty) : nullptr;
-                  typename UpperBranch<T, Acc>::UpperChildrenMap new_children;
-                  for (const auto& [v, kids] : ub->children) {
-                      for (const auto& [d, child] : kids) {
-                          auto new_child = _apply_and_prune(child, func);
-                          if (new_child) new_children[v][new_child->max_depth] = new_child;
-                      }
-                  }
-                  if (new_children.empty() && !new_empty) return nullptr;
-                  return try_promote(std::make_shared<UpperBranch<T, Acc>>(new_children, new_empty));
-              }
-              return nullptr;
-          }
-      };
-
-      } // namespace leveled_gss
+      using namespace leveled_gss;
 
       namespace py = pybind11;
 
@@ -2385,7 +1847,10 @@ local_system:
               auto initial_acc = std::make_shared<Acc>();
               initial_acc->llm_mask = range_empty_();
               // terminals_union empty by default
-              Leveled init = Leveled::create_empty().push(start_state_id_);
+              std::vector<std::pair<std::vector<int>, std::shared_ptr<Acc>>> initial_stacks;
+              initial_stacks.emplace_back(std::vector<int>{}, initial_acc);
+              Leveled gss_with_empty_stack = Leveled::from_stacks(initial_stacks);
+              Leveled init = gss_with_empty_stack.push(start_state_id_);
               state_[tokenizer_initial_state_] = std::move(init);
           }
 
@@ -2514,7 +1979,7 @@ local_system:
                   int sid = kv.first;
                   const std::vector<Leveled> &lst = kv.second;
                   if (lst.empty()) continue;
-                  Leveled merged = merge_many(lst);
+                  Leveled merged = Leveled::merge_many(lst);
                   if (!merged.is_empty()) {
                       merged_states[sid] = std::move(merged);
                   }
@@ -2597,7 +2062,7 @@ local_system:
                               }
                               if (keep.empty()) continue;
 
-                              Leveled child = isolate_many(popped, keep);
+                              Leveled child = popped.isolate_many(keep);
                               if (child.is_empty()) continue;
 
                               // intersect_and_prune with edge's llm_bv (as RangeSet)
@@ -3029,15 +2494,6 @@ local_system:
               return g.apply_and_prune(mutator);
           }
 
-          // Merge many Leveled
-          static Leveled merge_many(const std::vector<Leveled>& lst) {
-              return Leveled::merge_many(lst);
-          }
-
-          // Convenience isolate_many wrapper for unordered_set<int>
-          static Leveled isolate_many(const Leveled& g, const std::unordered_set<int>& values) {
-              return g.isolate_many(values);
-          }
       };
 
       PYBIND11_MODULE(precompute3_engine, m) {
@@ -3261,13 +2717,7 @@ local_system:
                   for (size_t i = 1; i < vec.size(); ++i) {
                       merged = merge_func(merged, vec[i]);
                   }
-                  int md = 0;
-                  if constexpr (std::is_same<NodePtr, UpperPtr<TKey, Acc>>::value) {
-                      md = merged->_max_depth;
-                  } else {
-                      md = merged->_max_depth;
-                  }
-                  v_out[md] = merged;
+                  v_out[merged->_max_depth] = merged;
               }
               merged_children[v] = std::move(v_out);
           }
@@ -7413,7 +6863,11 @@ local_system:
                       }
                   }
                   if (!merged) merged = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
-                  return LeveledGSS(try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged)));
+                  UpperPtr<T, Acc> result_node = merged;
+                  if (!result_node->is_interface()) {
+                      result_node = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(result_node));
+                  }
+                  return LeveledGSS(result_node);
               }
           }
 
@@ -7507,7 +6961,11 @@ local_system:
                           for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
                           UpperPtr<T, Acc> merged = popped[0];
                           for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
-                          res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                          if (merged->is_interface()) {
+                              res = merged;
+                          } else {
+                              res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+                          }
                       }
                       memo_upper[key] = res;
                       return res;
@@ -9733,547 +9191,9 @@ messages:
       #include <algorithm>
       #include <functional>
       #include <memory>
+      #include "leveled_gss.hpp"
 
-      namespace leveled_gss {
-
-      template <typename T, typename Acc>
-      struct Upper;
-      template <typename T, typename Acc>
-      struct Lower;
-      template <typename T, typename Acc>
-      struct Interface;
-      template <typename T, typename Acc>
-      struct UpperBranch;
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Acc> _merge_optional_acc_impl(const std::shared_ptr<Acc>& a, const std::shared_ptr<Acc>& b) {
-          if (!a) return b;
-          if (!b) return a;
-          if (a == b) return a;
-          return a->merge(b);
-      }
-
-      template <typename T, typename Acc>
-      struct Upper : public std::enable_shared_from_this<Upper<T, Acc>> {
-          int max_depth;
-          virtual ~Upper() = default;
-
-          std::vector<std::shared_ptr<Upper<T, Acc>>> _all_children_upper() const {
-              if (auto ub = std::dynamic_pointer_cast<const UpperBranch<T, Acc>>(this->shared_from_this())) {
-                  std::vector<std::shared_ptr<Upper<T, Acc>>> children;
-                  for (const auto& pair1 : ub->children) {
-                      for (const auto& pair2 : pair1.second) {
-                          children.push_back(pair2.second);
-                      }
-                  }
-                  return children;
-              }
-              return {};
-          }
-
-          std::vector<std::shared_ptr<Lower<T, Acc>>> _all_children_lower() const {
-              if (auto it = std::dynamic_pointer_cast<const Interface<T, Acc>>(this->shared_from_this())) {
-                  std::vector<std::shared_ptr<Lower<T, Acc>>> children;
-                  for (const auto& pair1 : it->children) {
-                      for (const auto& pair2 : pair1.second) {
-                          children.push_back(pair2.second);
-                      }
-                  }
-                  return children;
-              }
-              return {};
-          }
-      };
-
-      template <typename T, typename Acc>
-      struct Lower : public std::enable_shared_from_this<Lower<T, Acc>> {
-          using ChildrenMap = std::unordered_map<T, std::unordered_map<int, std::shared_ptr<Lower<T, Acc>>>>;
-          ChildrenMap children;
-          bool empty;
-          int max_depth;
-
-          Lower(ChildrenMap ch, bool em) : children(std::move(ch)), empty(em) {
-              int d = 0;
-              for (const auto& pair1 : children) {
-                  for (const auto& pair2 : pair1.second) {
-                      d = std::max(d, pair2.second->max_depth);
-                  }
-              }
-              max_depth = d + (children.empty() ? 0 : 1);
-          }
-
-          std::vector<std::shared_ptr<Lower<T, Acc>>> _all_children() const {
-              std::vector<std::shared_ptr<Lower<T, Acc>>> res;
-              for (const auto& pair1 : children) {
-                  for (const auto& pair2 : pair1.second) {
-                      res.push_back(pair2.second);
-                  }
-              }
-              return res;
-          }
-      };
-
-      template <typename T, typename Acc>
-      struct Interface : public Upper<T, Acc> {
-          using LowerChildrenMap = std::unordered_map<T, std::unordered_map<int, std::shared_ptr<Lower<T, Acc>>>>;
-          LowerChildrenMap children;
-          std::shared_ptr<Acc> acc;
-          std::shared_ptr<Acc> empty;
-
-          Interface(LowerChildrenMap ch, std::shared_ptr<Acc> a, std::shared_ptr<Acc> em)
-              : children(std::move(ch)), acc(std::move(a)), empty(std::move(em)) {
-              int d = 0;
-              for (const auto& pair1 : children) {
-                  for (const auto& pair2 : pair1.second) {
-                      d = std::max(d, pair2.second->max_depth);
-                  }
-              }
-              this->max_depth = d + (children.empty() ? 0 : 1);
-          }
-      };
-
-      template <typename T, typename Acc>
-      struct UpperBranch : public Upper<T, Acc> {
-          using UpperChildrenMap = std::unordered_map<T, std::unordered_map<int, std::shared_ptr<Upper<T, Acc>>>>;
-          UpperChildrenMap children;
-          std::shared_ptr<Acc> empty;
-
-          UpperBranch(UpperChildrenMap ch, std::shared_ptr<Acc> em)
-              : children(std::move(ch)), empty(std::move(em)) {
-              int d = 0;
-              for (const auto& pair1 : children) {
-                  for (const auto& pair2 : pair1.second) {
-                      d = std::max(d, pair2.second->max_depth);
-                  }
-              }
-              this->max_depth = d + (children.empty() ? 0 : 1);
-          }
-      };
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Upper<T, Acc>> try_promote(std::shared_ptr<UpperBranch<T, Acc>> node);
-
-      template <typename T, typename Acc>
-      std::shared_ptr<UpperBranch<T, Acc>> interface_to_upperbranch(std::shared_ptr<Interface<T, Acc>> it) {
-          typename UpperBranch<T, Acc>::UpperChildrenMap children;
-          for (const auto& [v, kids] : it->children) {
-              std::unordered_map<int, std::shared_ptr<Upper<T, Acc>>> v_map;
-              for (const auto& lchild_pair : kids) {
-                  auto lchild = lchild_pair.second;
-                  auto ci = std::make_shared<Interface<T, Acc>>(
-                      lchild->children,
-                      it->acc,
-                      (lchild->empty ? it->acc : nullptr)
-                  );
-                  v_map[ci->max_depth] = ci;
-              }
-              if (!v_map.empty()) {
-                  children[v] = v_map;
-              }
-          }
-          
-          auto new_empty = it->empty;
-          if (it->children.empty() && !it->empty) {
-              new_empty = it->acc;
-          }
-
-          return std::make_shared<UpperBranch<T, Acc>>(children, new_empty);
-      }
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Upper<T, Acc>> merge_upper(std::shared_ptr<Upper<T, Acc>> u1, std::shared_ptr<Upper<T, Acc>> u2);
-
-      template <typename K, typename V, typename M>
-      std::unordered_map<K, std::unordered_map<int, V>> _merge_children_by_depth(
-          const std::unordered_map<K, std::unordered_map<int, V>>& c1,
-          const std::unordered_map<K, std::unordered_map<int, V>>& c2,
-          M merge_func) {
-          if (&c1 == &c2) return c1;
-          std::unordered_map<K, std::unordered_map<int, V>> merged_children;
-          std::set<K> all_vals;
-          for (const auto& kv : c1) all_vals.insert(kv.first);
-          for (const auto& kv : c2) all_vals.insert(kv.first);
-
-          for (const auto& v : all_vals) {
-              std::unordered_map<int, std::vector<V>> nodes_by_depth;
-              auto it1 = c1.find(v);
-              if (it1 != c1.end()) {
-                  for (const auto& [depth, child] : it1->second) {
-                      nodes_by_depth[depth].push_back(child);
-                  }
-              }
-              auto it2 = c2.find(v);
-              if (it2 != c2.end()) {
-                  for (const auto& [depth, child] : it2->second) {
-                      nodes_by_depth[depth].push_back(child);
-                  }
-              }
-              if (nodes_by_depth.empty()) continue;
-
-              std::unordered_map<int, V> v_out;
-              for (auto& [depth, nodes] : nodes_by_depth) {
-                  if (nodes.empty()) continue;
-                  V current = nodes[0];
-                  for (size_t i = 1; i < nodes.size(); ++i) {
-                      current = merge_func(current, nodes[i]);
-                  }
-                  v_out[current->max_depth] = current;
-              }
-              merged_children[v] = v_out;
-          }
-          return merged_children;
-      }
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Upper<T, Acc>> merge_upperbranches(std::shared_ptr<UpperBranch<T, Acc>> a, std::shared_ptr<UpperBranch<T, Acc>> b) {
-          if (a == b) return a;
-          auto new_empty = _merge_optional_acc_impl<T, Acc>(a->empty, b->empty);
-          auto merged_children = _merge_children_by_depth(a->children, b->children, &merge_upper<T, Acc>);
-          return try_promote(std::make_shared<UpperBranch<T, Acc>>(merged_children, new_empty));
-      }
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Lower<T, Acc>> merge_lower(std::shared_ptr<Lower<T, Acc>> l1, std::shared_ptr<Lower<T, Acc>> l2) {
-          if (l1 == l2) return l1;
-          bool new_empty = l1->empty || l2->empty;
-          auto merged_children = _merge_children_by_depth(l1->children, l2->children, &merge_lower<T, Acc>);
-          return std::make_shared<Lower<T, Acc>>(merged_children, new_empty);
-      }
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Upper<T, Acc>> merge_interfaces(std::shared_ptr<Interface<T, Acc>> a, std::shared_ptr<Interface<T, Acc>> b) {
-          bool acc_equal = (a->acc == b->acc) || (a->acc && b->acc && *a->acc == *b->acc);
-          if (acc_equal || a->children == b->children) {
-              auto merged_children = _merge_children_by_depth(a->children, b->children, &merge_lower<T, Acc>);
-              auto new_acc = _merge_optional_acc_impl<T, Acc>(a->acc, b->acc);
-              auto new_empty = _merge_optional_acc_impl<T, Acc>(a->empty, b->empty);
-              return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
-          }
-          return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b));
-      }
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Upper<T, Acc>> merge_upper(std::shared_ptr<Upper<T, Acc>> u1, std::shared_ptr<Upper<T, Acc>> u2) {
-          if (u1 == u2) return u1;
-          auto i1 = std::dynamic_pointer_cast<Interface<T, Acc>>(u1);
-          auto i2 = std::dynamic_pointer_cast<Interface<T, Acc>>(u2);
-          auto ub1 = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(u1);
-          auto ub2 = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(u2);
-
-          if (i1 && i2) return merge_interfaces(i1, i2);
-          if (ub1 && ub2) return merge_upperbranches(ub1, ub2);
-
-          auto to_ub1 = ub1 ? ub1 : interface_to_upperbranch(i1);
-          auto to_ub2 = ub2 ? ub2 : interface_to_upperbranch(i2);
-          return merge_upperbranches(to_ub1, to_ub2);
-      }
-
-      template <typename T, typename Acc>
-      std::shared_ptr<Upper<T, Acc>> try_promote(std::shared_ptr<UpperBranch<T, Acc>> node) {
-          auto all_children = node->_all_children_upper();
-          if (all_children.empty()) {
-              if (node->empty) {
-                  return std::make_shared<Interface<T, Acc>>(
-                      typename Interface<T, Acc>::LowerChildrenMap{},
-                      node->empty,
-                      node->empty
-                  );
-              }
-              return node;
-          }
-
-          bool all_interfaces = true;
-          for (const auto& c : all_children) {
-              if (!std::dynamic_pointer_cast<Interface<T, Acc>>(c)) {
-                  all_interfaces = false;
-                  break;
-              }
-          }
-          if (!all_interfaces) return node;
-
-          std::vector<std::shared_ptr<Acc>> accs_vec;
-          if (node->empty) accs_vec.push_back(node->empty);
-          for (const auto& c : all_children) {
-              auto ic = std::static_pointer_cast<Interface<T, Acc>>(c);
-              accs_vec.push_back(ic->acc);
-              if (ic->empty) accs_vec.push_back(ic->empty);
-          }
-
-          if (!accs_vec.empty()) {
-              bool all_same = true;
-              for (size_t i = 1; i < accs_vec.size(); ++i) {
-                  bool equal = (accs_vec[i] == accs_vec[0]) || (*accs_vec[i] == *accs_vec[0]);
-                  if (!equal) {
-                      all_same = false;
-                      break;
-                  }
-              }
-              if (all_same) {
-                  auto the_acc = accs_vec[0];
-                  if (!the_acc) {
-                      return std::make_shared<UpperBranch<T, Acc>>(
-                          typename UpperBranch<T, Acc>::UpperChildrenMap{}, nullptr);
-                  }
-                  typename Interface<T, Acc>::LowerChildrenMap l_children;
-                  for (const auto& [v, kids] : node->children) {
-                      std::unordered_map<int, std::shared_ptr<Lower<T, Acc>>> v_map;
-                      for (const auto& child_pair : kids) {
-                          auto ci = std::static_pointer_cast<Interface<T, Acc>>(child_pair.second);
-                          auto lower = std::make_shared<Lower<T, Acc>>(ci->children, (ci->empty != nullptr));
-                          v_map[lower->max_depth] = lower;
-                      }
-                      if (!v_map.empty()) {
-                          l_children[v] = v_map;
-                      }
-                  }
-                  return std::make_shared<Interface<T, Acc>>(l_children, the_acc, node->empty);
-              }
-          }
-
-          return node;
-      }
-
-      template <typename T, typename Acc>
-      class LeveledGSS {
-      public:
-          std::shared_ptr<Upper<T, Acc>> inner;
-
-          LeveledGSS() : inner(create_empty().inner) {}
-
-          LeveledGSS(std::shared_ptr<Upper<T, Acc>> in) : inner(std::move(in)) {}
-
-          static LeveledGSS create_empty() {
-              return LeveledGSS(std::make_shared<UpperBranch<T, Acc>>(
-                  typename UpperBranch<T, Acc>::UpperChildrenMap{}, nullptr));
-          }
-
-          bool is_empty() const {
-              if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(inner)) {
-                  return ub->children.empty() && !ub->empty;
-              }
-              return false;
-          }
-
-          LeveledGSS push(const T& value) const {
-              if (is_empty()) return *this;
-              if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(inner)) {
-                  auto lower_node = std::make_shared<Lower<T, Acc>>(it->children, it->empty != nullptr);
-                  typename Interface<T, Acc>::LowerChildrenMap new_children;
-                  new_children[value][lower_node->max_depth] = lower_node;
-                  return LeveledGSS(std::make_shared<Interface<T, Acc>>(new_children, it->acc, nullptr));
-              } else {
-                  auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
-                  typename UpperBranch<T, Acc>::UpperChildrenMap new_children;
-                  new_children[value][ub->max_depth] = ub;
-                  return LeveledGSS(std::make_shared<UpperBranch<T, Acc>>(new_children, nullptr));
-              }
-          }
-
-          LeveledGSS popn(int n) const {
-              if (n <= 0 || is_empty()) return *this;
-              return LeveledGSS(_popn_upper(inner, n));
-          }
-
-          std::unordered_set<T> peek() const {
-              std::unordered_set<T> keys;
-              if (auto it = std::dynamic_pointer_cast<const Interface<T, Acc>>(inner)) {
-                  for (const auto& kv : it->children) keys.insert(kv.first);
-              } else if (auto ub = std::dynamic_pointer_cast<const UpperBranch<T, Acc>>(inner)) {
-                  for (const auto& kv : ub->children) keys.insert(kv.first);
-              }
-              return keys;
-          }
-
-          LeveledGSS isolate(const T& value) const {
-              if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(inner)) {
-                  auto it_ch = it->children.find(value);
-                  if (it_ch == it->children.end()) return create_empty();
-                  typename Interface<T, Acc>::LowerChildrenMap new_children;
-                  new_children[value] = it_ch->second;
-                  return LeveledGSS(std::make_shared<Interface<T, Acc>>(new_children, it->acc, nullptr));
-              } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(inner)) {
-                  auto it_ch = ub->children.find(value);
-                  if (it_ch == ub->children.end()) return create_empty();
-                  typename UpperBranch<T, Acc>::UpperChildrenMap new_children;
-                  new_children[value] = it_ch->second;
-                  return LeveledGSS(try_promote(std::make_shared<UpperBranch<T, Acc>>(new_children, nullptr)));
-              }
-              return create_empty();
-          }
-
-          LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
-              if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(inner)) {
-                  typename Interface<T, Acc>::LowerChildrenMap filtered_children;
-                  for(const T& v : values) {
-                      if (it->children.count(v)) filtered_children[v] = it->children.at(v);
-                  }
-                  if (filtered_children.empty()) return create_empty();
-                  return LeveledGSS(std::make_shared<Interface<T, Acc>>(filtered_children, it->acc, nullptr));
-              } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(inner)) {
-                  typename UpperBranch<T, Acc>::UpperChildrenMap filtered_children;
-                  for(const T& v : values) {
-                      if (ub->children.count(v)) filtered_children[v] = ub->children.at(v);
-                  }
-                  if (filtered_children.empty()) return create_empty();
-                  return LeveledGSS(try_promote(std::make_shared<UpperBranch<T, Acc>>(filtered_children, nullptr)));
-              }
-              return create_empty();
-          }
-
-          template <typename F>
-          LeveledGSS apply(F&& func) const {
-              return LeveledGSS(_apply(inner, func));
-          }
-
-          template <typename F>
-          LeveledGSS apply_and_prune(F&& func) const {
-              auto res = _apply_and_prune(inner, func);
-              return res ? LeveledGSS(res) : create_empty();
-          }
-
-          template <typename F>
-          LeveledGSS prune(F&& pred) const {
-              auto mutator = [&](const std::shared_ptr<Acc>& a) {
-                  return pred(a) ? a : nullptr;
-              };
-              return apply_and_prune(mutator);
-          }
-
-          LeveledGSS merge(const LeveledGSS& other) const {
-              return LeveledGSS(merge_upper(inner, other.inner));
-          }
-
-          static LeveledGSS merge_many(const std::vector<LeveledGSS>& gss_list) {
-              if (gss_list.empty()) return create_empty();
-              auto merged_inner = gss_list[0].inner;
-              for (size_t i = 1; i < gss_list.size(); ++i) {
-                  merged_inner = merge_upper(merged_inner, gss_list[i].inner);
-              }
-              return LeveledGSS(merged_inner);
-          }
-
-          std::shared_ptr<Acc> reduce_acc() const {
-              std::vector<std::shared_ptr<Acc>> accs;
-              std::unordered_set<const void*> visited_nodes;
-              std::unordered_set<const void*> visited_accs;
-              std::vector<std::shared_ptr<const Upper<T, Acc>>> q;
-              q.push_back(inner);
-
-              while(!q.empty()) {
-                  auto node = q.back();
-                  q.pop_back();
-                  if (visited_nodes.count(node.get())) continue;
-                  visited_nodes.insert(node.get());
-
-                  if (auto it = std::dynamic_pointer_cast<const Interface<T, Acc>>(node)) {
-                      if (it->acc && visited_accs.find(it->acc.get()) == visited_accs.end()) {
-                          accs.push_back(it->acc);
-                          visited_accs.insert(it->acc.get());
-                      }
-                      if (it->empty && visited_accs.find(it->empty.get()) == visited_accs.end()) {
-                          accs.push_back(it->empty);
-                          visited_accs.insert(it->empty.get());
-                      }
-                  } else if (auto ub = std::dynamic_pointer_cast<const UpperBranch<T, Acc>>(node)) {
-                      if (ub->empty && visited_accs.find(ub->empty.get()) == visited_accs.end()) {
-                          accs.push_back(ub->empty);
-                          visited_accs.insert(ub->empty.get());
-                      }
-                      for(const auto& child : ub->_all_children_upper()) q.push_back(child);
-                  }
-              }
-              if (accs.empty()) return nullptr;
-              auto res = accs[0];
-              for(size_t i = 1; i < accs.size(); ++i) res = res->merge(accs[i]);
-              return res;
-          }
-
-      private:
-          std::shared_ptr<Lower<T, Acc>> _popn_lower(std::shared_ptr<Lower<T, Acc>> node, int k) const {
-              if (k == 0) return node;
-              auto children = node->_all_children();
-              if (children.empty()) return std::make_shared<Lower<T, Acc>>(typename Lower<T, Acc>::ChildrenMap{}, false);
-              std::vector<std::shared_ptr<Lower<T, Acc>>> popped;
-              for (const auto& child : children) popped.push_back(_popn_lower(child, k - 1));
-              auto res = popped[0];
-              for (size_t i = 1; i < popped.size(); ++i) res = merge_lower(res, popped[i]);
-              return res;
-          }
-
-          std::shared_ptr<Upper<T, Acc>> _popn_upper(std::shared_ptr<Upper<T, Acc>> node, int k) const {
-              if (k == 0) return node;
-              if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(node)) {
-                  auto children = it->_all_children_lower();
-                  if (children.empty()) return create_empty().inner;
-                  std::vector<std::shared_ptr<Lower<T, Acc>>> popped;
-                  for (const auto& child : children) popped.push_back(_popn_lower(child, k - 1));
-                  auto merged = popped[0];
-                  for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower(merged, popped[i]);
-                  auto new_empty = merged->empty ? it->acc : nullptr;
-                  if (merged->children.empty() && !new_empty) return create_empty().inner;
-                  return std::make_shared<Interface<T, Acc>>(merged->children, it->acc, new_empty);
-              } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(node)) {
-                  auto children = ub->_all_children_upper();
-                  if (children.empty()) return create_empty().inner;
-                  std::vector<std::shared_ptr<Upper<T, Acc>>> popped;
-                  for (const auto& child : children) popped.push_back(_popn_upper(child, k - 1));
-                  auto merged = popped[0];
-                  for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper(merged, popped[i]);
-                  if (auto merged_ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(merged)) {
-                      return try_promote(merged_ub);
-                  }
-                  return merged;
-              }
-              return create_empty().inner;
-          }
-
-          template <typename F>
-          std::shared_ptr<Upper<T, Acc>> _apply(std::shared_ptr<Upper<T, Acc>> node, F& func) const {
-              if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(node)) {
-                  auto new_acc = func(it->acc);
-                  auto new_empty = it->empty ? func(it->empty) : nullptr;
-                  return std::make_shared<Interface<T, Acc>>(it->children, new_acc, new_empty);
-              } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(node)) {
-                  auto new_empty = ub->empty ? func(ub->empty) : nullptr;
-                  typename UpperBranch<T, Acc>::UpperChildrenMap new_children;
-                  for (const auto& [v, kids] : ub->children) {
-                      for (const auto& [d, child] : kids) {
-                          auto new_child = _apply(child, func);
-                          new_children[v][new_child->max_depth] = new_child;
-                      }
-                  }
-                  return try_promote(std::make_shared<UpperBranch<T, Acc>>(new_children, new_empty));
-              }
-              return nullptr;
-          }
-
-          template <typename F>
-          std::shared_ptr<Upper<T, Acc>> _apply_and_prune(std::shared_ptr<Upper<T, Acc>> node, F& func) const {
-              if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(node)) {
-                  auto new_acc = func(it->acc);
-                  auto new_empty = it->empty ? func(it->empty) : nullptr;
-                  if (!new_acc && !new_empty) return nullptr;
-                  if (!new_acc) {
-                      return try_promote(std::make_shared<UpperBranch<T, Acc>>(typename UpperBranch<T, Acc>::UpperChildrenMap{}, new_empty));
-                  }
-                  return std::make_shared<Interface<T, Acc>>(it->children, new_acc, new_empty);
-              } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(node)) {
-                  auto new_empty = ub->empty ? func(ub->empty) : nullptr;
-                  typename UpperBranch<T, Acc>::UpperChildrenMap new_children;
-                  for (const auto& [v, kids] : ub->children) {
-                      for (const auto& [d, child] : kids) {
-                          auto new_child = _apply_and_prune(child, func);
-                          if (new_child) new_children[v][new_child->max_depth] = new_child;
-                      }
-                  }
-                  if (new_children.empty() && !new_empty) return nullptr;
-                  return try_promote(std::make_shared<UpperBranch<T, Acc>>(new_children, new_empty));
-              }
-              return nullptr;
-          }
-      };
-
-      } // namespace leveled_gss
+      using namespace leveled_gss;
 
       namespace py = pybind11;
 
@@ -10372,7 +9292,10 @@ messages:
               auto initial_acc = std::make_shared<Acc>();
               initial_acc->llm_mask = range_empty_();
               // terminals_union empty by default
-              Leveled init = Leveled::create_empty().push(start_state_id_);
+              std::vector<std::pair<std::vector<int>, std::shared_ptr<Acc>>> initial_stacks;
+              initial_stacks.emplace_back(std::vector<int>{}, initial_acc);
+              Leveled gss_with_empty_stack = Leveled::from_stacks(initial_stacks);
+              Leveled init = gss_with_empty_stack.push(start_state_id_);
               state_[tokenizer_initial_state_] = std::move(init);
           }
 
@@ -10501,7 +9424,7 @@ messages:
                   int sid = kv.first;
                   const std::vector<Leveled> &lst = kv.second;
                   if (lst.empty()) continue;
-                  Leveled merged = merge_many(lst);
+                  Leveled merged = Leveled::merge_many(lst);
                   if (!merged.is_empty()) {
                       merged_states[sid] = std::move(merged);
                   }
@@ -10584,7 +9507,7 @@ messages:
                               }
                               if (keep.empty()) continue;
 
-                              Leveled child = isolate_many(popped, keep);
+                              Leveled child = popped.isolate_many(keep);
                               if (child.is_empty()) continue;
 
                               // intersect_and_prune with edge's llm_bv (as RangeSet)
@@ -11016,15 +9939,6 @@ messages:
               return g.apply_and_prune(mutator);
           }
 
-          // Merge many Leveled
-          static Leveled merge_many(const std::vector<Leveled>& lst) {
-              return Leveled::merge_many(lst);
-          }
-
-          // Convenience isolate_many wrapper for unordered_set<int>
-          static Leveled isolate_many(const Leveled& g, const std::unordered_set<int>& values) {
-              return g.isolate_many(values);
-          }
       };
 
       PYBIND11_MODULE(precompute3_engine, m) {
@@ -11253,13 +10167,7 @@ messages:
                   for (size_t i = 1; i < vec.size(); ++i) {
                       merged = merge_func(merged, vec[i]);
                   }
-                  int md = 0;
-                  if constexpr (std::is_same<NodePtr, UpperPtr<TKey, Acc>>::value) {
-                      md = merged->_max_depth;
-                  } else {
-                      md = merged->_max_depth;
-                  }
-                  v_out[md] = merged;
+                  v_out[merged->_max_depth] = merged;
               }
               merged_children[v] = std::move(v_out);
           }
@@ -12257,7 +11165,7 @@ messages:
        - python/aug25/models/precompute3_engine.cpython-312-darwin.so
 
       Running benchmarks...
-      Benchmark results will be saved in: benchmark_results/2025-09-23_11-21-59
+      Benchmark results will be saved in: benchmark_results/2025-09-23_11-29-35
       ---
       Baseline Model: python/aug25/models/rust_model.py
       Other Models: python/aug25/models/precompute3_model_cpp.py
@@ -12267,145 +11175,169 @@ messages:
       Starting benchmark runs...
 
       >>> Running benchmark for: rust_model.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/rust_model.py --output benchmark_results/2025-09-23_11-21-59
+      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/rust_model.py --output benchmark_results/2025-09-23_11-29-35
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
       Loading model from: python/aug25/models/rust_model.py
-      Model loaded in 2.0297 seconds.
+      Model loaded in 2.1048 seconds.
       Loading and tokenizing code from: src/example_code.js
       Tokenized into 25 tokens.
 
       --- Running benchmark (25 steps) ---
-      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 25/25 [00:08<00:00,  3.09it/s, commit]
+      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 25/25 [00:07<00:00,  3.20it/s, commit]
       --- Benchmark finished ---
 
-      Benchmark results saved to: benchmark_results/2025-09-23_11-21-59/rust_model_results.json
+      Benchmark results saved to: benchmark_results/2025-09-23_11-29-35/rust_model_results.json
       >>> Finished benchmark for: rust_model.py
 
       >>> Running benchmark for: precompute3_model_cpp.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/precompute3_model_cpp.py --output benchmark_results/2025-09-23_11-21-59
+      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/precompute3_model_cpp.py --output benchmark_results/2025-09-23_11-29-35
       >>> Running with AddressSanitizer...
-      python(57581,0x1f1024800) malloc: nano zone abandoned due to inability to reserve vm space.
+      python(63354,0x1f1024800) malloc: nano zone abandoned due to inability to reserve vm space.
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
       Loading model from: python/aug25/models/precompute3_model_cpp.py
-      Model loaded in 41.3158 seconds.
+      Model loaded in 38.3439 seconds.
       Loading and tokenizing code from: src/example_code.js
       Tokenized into 25 tokens.
 
       --- Running benchmark (25 steps) ---
-      Benchmarking steps: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 25/25 [00:00<00:00, 4176.60it/s, commit]
-      --- Benchmark finished ---
+      Benchmarking steps:  12%|█████████████████▎                                                                                                                              | 3/25 [00:01<00:07,  2.79it/s, get_mask]=================================================================
+      ==63354==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60200002a880 at pc 0x0001711d10ec bp 0x00016b353d10 sp 0x00016b353d08
+      READ of size 8 at 0x60200002a880 thread T0
+          #0 0x0001711d10e8 in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> leveled_gss::try_promote<int, Acc>(std::__1::shared_ptr<leveled_gss::UpperBranch<int, Acc>> const&) leveled_gss.hpp:264
+          #1 0x000171262af4 in leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)::operator()(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int) const leveled_gss.hpp:758
+          #2 0x00017126133c in decltype(std::declval<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&>()(std::declval<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&>(), std::declval<int>())) std::__1::__invoke[abi:ne200100]<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int>(leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) invoke.h:179
+          #3 0x00017126128c in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> std::__1::__invoke_void_return_wrapper<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>>, false>::__call[abi:ne200100]<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int>(leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) invoke.h:243
+          #4 0x000171261250 in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> std::__1::__invoke_r[abi:ne200100]<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>>, leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int>(leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) invoke.h:273
+          #5 0x000171261214 in std::__1::__function::__alloc_func<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int), std::__1::allocator<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()[abi:ne200100](std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) function.h:167
+          #6 0x0001712608bc in std::__1::__function::__func<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int), std::__1::allocator<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) function.h:319
+          #7 0x0001712788c0 in std::__1::__function::__value_func<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()[abi:ne200100](std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) const function.h:436
+          #8 0x00017124a084 in std::__1::function<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int) const function.h:995
+          #9 0x0001712497c8 in leveled_gss::LeveledGSS<int, Acc>::popn(int) const leveled_gss.hpp:764
+          #10 0x00017114d700 in Engine::get_mask() precompute3_engine.cpp:322
+          #11 0x000171289668 in pybind11::cpp_function::cpp_function<pybind11::object, Engine, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object (Engine::*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(Engine*)::operator()(Engine*) const pybind11.h:136
+          #12 0x00017128957c in pybind11::object pybind11::detail::argument_loader<Engine*>::call_impl<pybind11::object, pybind11::cpp_function::cpp_function<pybind11::object, Engine, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object (Engine::*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(Engine*)&, 0ul, pybind11::detail::void_type>(Engine&&, std::__1::integer_sequence<unsigned long, 0ul>, pybind11::detail::void_type&&) && cast.h:1631
+          #13 0x000171289144 in std::__1::enable_if<!std::is_void<pybind11::object>::value, pybind11::object>::type pybind11::detail::argument_loader<Engine*>::call<pybind11::object, pybind11::detail::void_type, pybind11::cpp_function::cpp_function<pybind11::object, Engine, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object (Engine::*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(Engine*)&>(pybind11::cpp_function::cpp_function<pybind11::object, Engine, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object (Engine::*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(Engine*)&) && cast.h:1599
+          #14 0x000171288d34 in void pybind11::cpp_function::initialize<pybind11::cpp_function::cpp_function<pybind11::object, Engine, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object (Engine::*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(Engine*), pybind11::object, Engine*, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object&&, Engine (*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(pybind11::detail::function_call&)::operator()(pybind11::detail::function_call&) const pybind11.h:279
+          #15 0x0001712887fc in void pybind11::cpp_function::initialize<pybind11::cpp_function::cpp_function<pybind11::object, Engine, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object (Engine::*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(Engine*), pybind11::object, Engine*, pybind11::name, pybind11::is_method, pybind11::sibling>(pybind11::object&&, Engine (*)(), pybind11::name const&, pybind11::is_method const&, pybind11::sibling const&)::'lambda'(pybind11::detail::function_call&)::__invoke(pybind11::detail::function_call&) pybind11.h:249
+          #16 0x00017110751c in pybind11::cpp_function::dispatcher(_object*, _object*, _object*) pybind11.h:971
+          #17 0x000104b681f0 in cfunction_call+0x84 (python3.12:arm64+0x1000c41f0)
+          #18 0x000104b0bed4 in _PyObject_MakeTpCall+0x138 (python3.12:arm64+0x100067ed4)
+          #19 0x000104c27ca0 in _PyEval_EvalFrameDefault+0xd570 (python3.12:arm64+0x100183ca0)
+          #20 0x000104c19810 in PyEval_EvalCode+0x128 (python3.12:arm64+0x100175810)
+          #21 0x000104c16370 in builtin_exec+0x580 (python3.12:arm64+0x100172370)
+          #22 0x000104b68eb8 in cfunction_vectorcall_FASTCALL_KEYWORDS+0x8c (python3.12:arm64+0x1000c4eb8)
+          #23 0x000104b0ca50 in PyObject_Vectorcall+0x54 (python3.12:arm64+0x100068a50)
+          #24 0x000104c27ca0 in _PyEval_EvalFrameDefault+0xd570 (python3.12:arm64+0x100183ca0)
+          #25 0x000104cbea2c in pymain_run_module+0x120 (python3.12:arm64+0x10021aa2c)
+          #26 0x000104cbe3c0 in Py_RunMain+0x7dc (python3.12:arm64+0x10021a3c0)
+          #27 0x000104cbf2f0 in pymain_main+0x290 (python3.12:arm64+0x10021b2f0)
+          #28 0x000104aa64b8 in main+0x34 (python3.12:arm64+0x1000024b8)
+          #29 0x0001842b9d50 in start+0x1c0c (dyld:arm64e+0x3d50)
 
-      Benchmark results saved to: benchmark_results/2025-09-23_11-21-59/precompute3_model_cpp_results.json
-      >>> Finished benchmark for: precompute3_model_cpp.py
+      0x60200002a880 is located 0 bytes after 16-byte region [0x60200002a870,0x60200002a880)
+      allocated by thread T0 here:
+          #0 0x0001059a7404 in _Znwm+0x74 (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x4b404)
+          #1 0x0001711e0e50 in void* std::__1::__libcpp_operator_new[abi:ne200100]<std::__1::__hash_node_base<std::__1::__hash_node<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, void*>*>*>(unsigned long) allocate.h:55
+          #2 0x0001711e0dd8 in std::__1::__hash_node_base<std::__1::__hash_node<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, void*>*>** std::__1::__libcpp_allocate[abi:ne200100]<std::__1::__hash_node_base<std::__1::__hash_node<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, void*>*>*>(std::__1::__element_count, unsigned long) allocate.h:91
+          #3 0x0001711e0d4c in std::__1::allocator<std::__1::__hash_node_base<std::__1::__hash_node<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, void*>*>*>::allocate[abi:ne200100](unsigned long) allocator.h:105
+          #4 0x0001711e0c14 in std::__1::allocator_traits<std::__1::allocator<std::__1::__hash_node_base<std::__1::__hash_node<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, void*>*>*>>::allocate[abi:ne200100](std::__1::allocator<std::__1::__hash_node_base<std::__1::__hash_node<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, void*>*>*>&, unsigned long) allocator_traits.h:270
+          #5 0x0001711e05d8 in void std::__1::__hash_table<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::__unordered_map_hasher<int, std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, true>, std::__1::__unordered_map_equal<int, std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::equal_to<int>, std::__1::hash<int>, true>, std::__1::allocator<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>::__do_rehash<true>(unsigned long) __hash_table:1730
+          #6 0x0001711e0288 in void std::__1::__hash_table<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::__unordered_map_hasher<int, std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, true>, std::__1::__unordered_map_equal<int, std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::equal_to<int>, std::__1::hash<int>, true>, std::__1::allocator<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>::__rehash<true>(unsigned long) __hash_table:1715
+          #7 0x0001711df408 in std::__1::__hash_table<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::__unordered_map_hasher<int, std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, true>, std::__1::__unordered_map_equal<int, std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>, std::__1::equal_to<int>, std::__1::hash<int>, true>, std::__1::allocator<std::__1::__hash_value_type<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>::__rehash_unique[abi:ne200100](unsigned long) __hash_table:883
+          #8 0x0001711df34c in std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>::unordered_map(std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>> const&) unordered_map:1660
+          #9 0x0001711df2c4 in std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>::unordered_map(std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>> const&) unordered_map:1659
+          #10 0x0001711df0d8 in void std::__1::allocator<leveled_gss::Lower<int>>::construct[abi:ne200100]<leveled_gss::Lower<int>, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool>(leveled_gss::Lower<int>*, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool&&) allocator.h:153
+          #11 0x0001711dec98 in void std::__1::allocator_traits<std::__1::allocator<leveled_gss::Lower<int>>>::construct[abi:ne200100]<leveled_gss::Lower<int>, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool, 0>(std::__1::allocator<leveled_gss::Lower<int>>&, leveled_gss::Lower<int>*, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool&&) allocator_traits.h:309
+          #12 0x0001711deab0 in std::__1::__shared_ptr_emplace<leveled_gss::Lower<int>, std::__1::allocator<leveled_gss::Lower<int>>>::__shared_ptr_emplace[abi:ne200100]<std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool, std::__1::allocator<leveled_gss::Lower<int>>, 0>(std::__1::allocator<leveled_gss::Lower<int>>, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool&&) shared_ptr.h:161
+          #13 0x0001711de22c in std::__1::__shared_ptr_emplace<leveled_gss::Lower<int>, std::__1::allocator<leveled_gss::Lower<int>>>::__shared_ptr_emplace[abi:ne200100]<std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool, std::__1::allocator<leveled_gss::Lower<int>>, 0>(std::__1::allocator<leveled_gss::Lower<int>>, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool&&) shared_ptr.h:158
+          #14 0x0001711ddfb0 in std::__1::shared_ptr<leveled_gss::Lower<int>> std::__1::allocate_shared[abi:ne200100]<leveled_gss::Lower<int>, std::__1::allocator<leveled_gss::Lower<int>>, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool, 0>(std::__1::allocator<leveled_gss::Lower<int>> const&, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool&&) shared_ptr.h:733
+          #15 0x0001711db414 in std::__1::shared_ptr<leveled_gss::Lower<int>> std::__1::make_shared[abi:ne200100]<leveled_gss::Lower<int>, std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool, 0>(std::__1::unordered_map<int, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::unordered_map<int, std::__1::shared_ptr<leveled_gss::Lower<int>>, std::__1::hash<int>, std::__1::equal_to<int>, std::__1::allocator<std::__1::pair<int const, std::__1::shared_ptr<leveled_gss::Lower<int>>>>>>>>&, bool&&) shared_ptr.h:741
+          #16 0x0001711d18b0 in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> leveled_gss::try_promote<int, Acc>(std::__1::shared_ptr<leveled_gss::UpperBranch<int, Acc>> const&) leveled_gss.hpp:298
+          #17 0x000171268b7c in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> leveled_gss::merge_upperbranches<int, Acc>(std::__1::shared_ptr<leveled_gss::UpperBranch<int, Acc>> const&, std::__1::shared_ptr<leveled_gss::UpperBranch<int, Acc>> const&) leveled_gss.hpp:320
+          #18 0x000171268710 in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> leveled_gss::merge_interfaces<int, Acc>(std::__1::shared_ptr<leveled_gss::Interface<int, Acc>> const&, std::__1::shared_ptr<leveled_gss::Interface<int, Acc>> const&) leveled_gss.hpp:337
+          #19 0x00017126409c in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> leveled_gss::merge_upper<int, Acc>(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&) leveled_gss.hpp:345
+          #20 0x000171262a6c in leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)::operator()(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int) const leveled_gss.hpp:757
+          #21 0x00017126133c in decltype(std::declval<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&>()(std::declval<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&>(), std::declval<int>())) std::__1::__invoke[abi:ne200100]<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int>(leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) invoke.h:179
+          #22 0x00017126128c in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> std::__1::__invoke_void_return_wrapper<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>>, false>::__call[abi:ne200100]<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int>(leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) invoke.h:243
+          #23 0x000171261250 in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> std::__1::__invoke_r[abi:ne200100]<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>>, leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int>(leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)&, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) invoke.h:273
+          #24 0x000171261214 in std::__1::__function::__alloc_func<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int), std::__1::allocator<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()[abi:ne200100](std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) function.h:167
+          #25 0x0001712608bc in std::__1::__function::__func<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int), std::__1::allocator<leveled_gss::LeveledGSS<int, Acc>::popn(int) const::'lambda'(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>, std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) function.h:319
+          #26 0x0001712788c0 in std::__1::__function::__value_func<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()[abi:ne200100](std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int&&) const function.h:436
+          #27 0x00017124a084 in std::__1::function<std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> (std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int)>::operator()(std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> const&, int) const function.h:995
+          #28 0x0001712497c8 in leveled_gss::LeveledGSS<int, Acc>::popn(int) const leveled_gss.hpp:764
+          #29 0x00017114d700 in Engine::get_mask() precompute3_engine.cpp:322
+
+      SUMMARY: AddressSanitizer: heap-buffer-overflow leveled_gss.hpp:264 in std::__1::shared_ptr<leveled_gss::Upper<int, Acc>> leveled_gss::try_promote<int, Acc>(std::__1::shared_ptr<leveled_gss::UpperBranch<int, Acc>> const&)
+      Shadow bytes around the buggy address:
+        0x60200002a600: fa fa fa fa fa fa fd fa fa fa fa fa fa fa fa fa
+        0x60200002a680: fa fa fa fa fa fa fd fa fa fa fa fa fa fa fa fa
+        0x60200002a700: fa fa fa fa fa fa fd fd fa fa fd fa fa fa fa fa
+        0x60200002a780: fa fa fd fa fa fa fa fa fa fa fd fa fa fa fd fa
+        0x60200002a800: fa fa fd fa fa fa fd fa fa fa 00 00 fa fa 00 00
+      =>0x60200002a880:[fa]fa fd fa fa fa fd fd fa fa fd fd fa fa fd fa
+        0x60200002a900: fa fa fd fd fa fa fd fa fa fa fd fd fa fa fd fa
+        0x60200002a980: fa fa 00 00 fa fa fd fd fa fa fd fd fa fa fd fd
+        0x60200002aa00: fa fa fd fd fa fa fd fd fa fa fd fd fa fa fd fd
+        0x60200002aa80: fa fa fd fd fa fa 00 00 fa fa fd fd fa fa fd fd
+        0x60200002ab00: fa fa 00 00 fa fa fd fa fa fa 00 00 fa fa 00 00
+      Shadow byte legend (one shadow byte represents 8 application bytes):
+        Addressable:           00
+        Partially addressable: 01 02 03 04 05 06 07 
+        Heap left redzone:       fa
+        Freed heap region:       fd
+        Stack left redzone:      f1
+        Stack mid redzone:       f2
+        Stack right redzone:     f3
+        Stack after return:      f5
+        Stack use after scope:   f8
+        Global redzone:          f9
+        Global init order:       f6
+        Poisoned by user:        f7
+        Container overflow:      fc
+        Array cookie:            ac
+        Intra object redzone:    bb
+        ASan internal:           fe
+        Left alloca redzone:     ca
+        Right alloca redzone:    cb
+      ==63354==ABORTING
+      python/run_benchmarks.sh: line 84: 63354 Abort trap: 6           DYLD_INSERT_LIBRARIES="$ASAN_LIB" "${cmd[@]}"
+
+      /Users/isaacbreen/miniforge3/envs/py312/lib/python3.12/multiprocessing/resource_tracker.py:224: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+        warnings.warn('resource_tracker: There appear to be %d '
+      >>> Benchmark for precompute3_model_cpp.py failed with exit code 134. Skipping.
 
       All benchmark runs completed.
       ---
       Analyzing results and generating plots...
-      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-23_11-21-59/precompute3_model_cpp_results.json benchmark_results/2025-09-23_11-21-59/rust_model_results.json --baseline rust_model --output-dir benchmark_results/2025-09-23_11-21-59/analysis
+      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-23_11-29-35/rust_model_results.json --baseline rust_model --output-dir benchmark_results/2025-09-23_11-29-35/analysis
       Selected baseline: rust_model
-      Mask mismatch at token index 0 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 1 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 2 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 3 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 4 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 5 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 6 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 7 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 8 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 9 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 10 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 11 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 12 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 13 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 14 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 15 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 16 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 17 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 18 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 19 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 20 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 21 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 22 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 23 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
-      Mask mismatch at token index 24 for model precompute3_model_cpp
-      Baseline: ((0, 12088), (12090, 21628))
-      Current:  ()
       --- Benchmark Summary ---
-                            equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
-      model                                                                                                                              
-      precompute3_model_cpp          ❌                   25     25     0.1379    0.1383    0.0818    0.1056    0.1471    0.6468    0.7932
-      rust_model                     ✅                    0     25   322.8318  924.5272   31.1518   86.4359  303.5312 3800.3066 4611.1521
+                 equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
+      model                                                                                                                   
+      rust_model          ✅                    0     25   311.6554  890.1490   30.0756   77.2797  290.7305 3662.6174 4424.8380
 
       Baseline: rust_model
       ✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch
 
-      Saving plots to benchmark_results/2025-09-23_11-21-59/analysis...
-      Saved linear scale plot to benchmark_results/2025-09-23_11-21-59/analysis/timings_per_token_linear.png
-      Saved log scale plot to benchmark_results/2025-09-23_11-21-59/analysis/timings_per_token_log.png
-      Saved box plot to benchmark_results/2025-09-23_11-21-59/analysis/timings_distribution_boxplot.png
-      Saved commit linear scale plot to benchmark_results/2025-09-23_11-21-59/analysis/commit_timings_per_token_linear.png
-      Saved commit log scale plot to benchmark_results/2025-09-23_11-21-59/analysis/commit_timings_per_token_log.png
-      Saved combined linear scale plot to benchmark_results/2025-09-23_11-21-59/analysis/combined_timings_per_token_linear.png
-      Saved combined log scale plot to benchmark_results/2025-09-23_11-21-59/analysis/combined_timings_per_token_log.png
-      Saved stacked area plot to benchmark_results/2025-09-23_11-21-59/analysis/timings_stacked_area.png
-      Saved total time linear scale plot to benchmark_results/2025-09-23_11-21-59/analysis/total_timings_per_token_linear.png
-      Saved total time log scale plot to benchmark_results/2025-09-23_11-21-59/analysis/total_timings_per_token_log.png
+      Saving plots to benchmark_results/2025-09-23_11-29-35/analysis...
+      Saved linear scale plot to benchmark_results/2025-09-23_11-29-35/analysis/timings_per_token_linear.png
+      Saved log scale plot to benchmark_results/2025-09-23_11-29-35/analysis/timings_per_token_log.png
+      Saved box plot to benchmark_results/2025-09-23_11-29-35/analysis/timings_distribution_boxplot.png
+      Saved commit linear scale plot to benchmark_results/2025-09-23_11-29-35/analysis/commit_timings_per_token_linear.png
+      Saved commit log scale plot to benchmark_results/2025-09-23_11-29-35/analysis/commit_timings_per_token_log.png
+      Saved combined linear scale plot to benchmark_results/2025-09-23_11-29-35/analysis/combined_timings_per_token_linear.png
+      Saved combined log scale plot to benchmark_results/2025-09-23_11-29-35/analysis/combined_timings_per_token_log.png
+      Saved stacked area plot to benchmark_results/2025-09-23_11-29-35/analysis/timings_stacked_area.png
+      Saved total time linear scale plot to benchmark_results/2025-09-23_11-29-35/analysis/total_timings_per_token_linear.png
+      Saved total time log scale plot to benchmark_results/2025-09-23_11-29-35/analysis/total_timings_per_token_log.png
 
       ---
       Benchmark analysis complete.
       Baseline: rust_model
-      Summary printed above. Plots are saved in: benchmark_results/2025-09-23_11-21-59/analysis
-      Full JSON results are in: benchmark_results/2025-09-23_11-21-59
+      Summary printed above. Plots are saved in: benchmark_results/2025-09-23_11-29-35/analysis
+      Full JSON results are in: benchmark_results/2025-09-23_11-29-35
     metadata:
   - user: This is meant to be a super-fast C++ implementation of precompute3_model_pure_python_standalone.py.
       Careful attention was paid in the Python version to ensure that everything scaled
@@ -12413,7 +11345,7 @@ messages:
       is critical that the C++ code scales as well as the Python code. We want to
       translate the Python leveled GSS as faithfully as possible. (Don't modify precompute3_model_pure_python_standalone.py
       - it's here only for reference.) Currently, it fails. Here's the output. Fix
-      it. For one, we should be using the GSS in leveled_gss.hpp.
+      it.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -12432,805 +11364,89 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Based on the benchmark results, the C++ implementation is failing to produce correct masks, indicating a critical logic error. The root causes are a buggy, incomplete `LeveledGSS` implementation within `precompute3_engine.cpp` and incorrect initialization of the GSS state.
+      Hello! As an AI assistant, I can help you fix the C++ implementation. The benchmark failure is due to a memory safety issue, which AddressSanitizer correctly identified as a heap-buffer-overflow.
 
-      The fix involves replacing the faulty GSS code with the more faithful translation provided in `leveled_gss.hpp` and correcting the initial state setup to properly include the starting accumulator, which is essential for the mask computation logic to function.
+      The root cause is an unsafe `static_pointer_cast` in the C++ LeveledGSS implementation within `leveled_gss.hpp`. The `merge_upper` function can return a pointer to an `Interface` object, but the `pop` and `popn` methods incorrectly assume it's always an `UpperBranch` and cast it without checking. This leads to treating an `Interface` object's memory as if it were an `UpperBranch`, causing memory corruption when its members are accessed.
 
-      Here are the step-by-step instructions to fix the C++ model:
+      Here are the step-by-step instructions to fix this issue.
 
-      ### Step 1: Update `precompute3_engine.cpp`
+      ### Step-by-step Instructions
 
-      This file contains the core logic. We will replace its internal, incorrect `LeveledGSS` implementation with the correct one from `leveled_gss.hpp` and fix the initialization sequence.
+      I will apply corrections to two locations in `python/aug25/models/leveled_gss.hpp` to ensure type safety.
 
-      1.  **Remove the incorrect GSS implementation:** Delete the entire `namespace leveled_gss` block from the top of the file (spanning from approximately line 15 to line 501).
+      1.  **Fix the `pop()` method:**
+          In `python/aug25/models/leveled_gss.hpp`, locate the `LeveledGSS::pop()` method. Inside the `else` block that handles `UpperBranch` nodes, replace the final `return` statement.
 
-      2.  **Include the correct GSS header:** At the top of the file, after the other `#include` directives, add the following lines:
-
-          ```cpp
-          #include "leveled_gss.hpp"
-          
-          using namespace leveled_gss;
-          ```
-
-      3.  **Fix GSS Initialization:** In the `Engine` constructor, the initial GSS was created without an accumulator, causing all subsequent mask calculations to fail. Replace the faulty initialization logic.
-
-          *   Locate this block around line 550:
+          *   **File:** `python/aug25/models/leveled_gss.hpp`
+          *   **Around line 700:**
+          *   **Delete** the following line:
               ```cpp
-              // Initialize state: one GSS per tokenizer initial state with start parser state on stack
-              auto initial_acc = std::make_shared<Acc>();
-              initial_acc->llm_mask = range_empty_();
-              // terminals_union empty by default
-              Leveled init = Leveled::create_empty().push(start_state_id_);
-              state_[tokenizer_initial_state_] = std::move(init);
+              return LeveledGSS(try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged)));
               ```
-          *   Replace it with the correct version that mirrors the Python reference:
+          *   **Insert** these lines in its place:
               ```cpp
-              // Initialize state: one GSS per tokenizer initial state with start parser state on stack
-              auto initial_acc = std::make_shared<Acc>();
-              initial_acc->llm_mask = range_empty_();
-              // terminals_union empty by default
-              std::vector<std::pair<std::vector<int>, std::shared_ptr<Acc>>> initial_stacks;
-              initial_stacks.emplace_back(std::vector<int>{}, initial_acc);
-              Leveled gss_with_empty_stack = Leveled::from_stacks(initial_stacks);
-              Leveled init = gss_with_empty_stack.push(start_state_id_);
-              state_[tokenizer_initial_state_] = std::move(init);
+              UpperPtr<T, Acc> result_node = merged;
+              if (!result_node->is_interface()) {
+                  result_node = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(result_node));
+              }
+              return LeveledGSS(result_node);
               ```
 
-      4.  **Update GSS Method Calls:** The code was using static helper methods. Update the calls to use the methods from the new GSS class directly.
+      2.  **Fix the `popn()` method:**
+          In the same file, `python/aug25/models/leveled_gss.hpp`, find the `LeveledGSS::popn()` method and the `_popn_upper` lambda within it. In the `else` block for `UpperBranch` nodes, replace the line that assigns to `res`.
 
-          *   In the `Engine::commit` method, find this line:
+          *   **File:** `python/aug25/models/leveled_gss.hpp`
+          *   **Around line 784:**
+          *   **Delete** this line:
               ```cpp
-              Leveled merged = merge_many(lst);
+              res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
               ```
-              And change it to call the static `merge_many` method on the `Leveled` type:
+          *   **Insert** these lines instead:
               ```cpp
-              Leveled merged = Leveled::merge_many(lst);
-              ```
-          *   In the `Engine::get_mask` method, find this line:
-              ```cpp
-              Leveled child = isolate_many(popped, keep);
-              ```
-              And change it to call the `isolate_many` instance method:
-              ```cpp
-              Leveled child = popped.isolate_many(keep);
+              if (merged->is_interface()) {
+                  res = merged;
+              } else {
+                  res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+              }
               ```
 
-      5.  **Remove Redundant Helpers:** Delete the now-unused `merge_many` and `isolate_many` static helper methods from the end of the `Engine` class definition.
+      These changes introduce runtime type checks to prevent the invalid cast, resolving the memory corruption and allowing the benchmark to run correctly.
 
       ### Git Diffs
 
-      Here are the git diffs corresponding to the changes described above.
-
-      ```diff
-      diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
-      index 7384a30..22c4a93 100644
-      --- a/python/aug25/models/precompute3_engine.cpp
-      +++ b/python/aug25/models/precompute3_engine.cpp
-      @@ -12,490 +12,9 @@
-       #include <algorithm>
-       #include <functional>
-       #include <memory>
-      -
-      -namespace leveled_gss {
-      -
-      -template <typename T, typename Acc>
-      -struct Upper;
-      -template <typename T, typename Acc>
-      -struct Lower;
-      -template <typename T, typename Acc>
-      -struct Interface;
-      -template <typename T, typename Acc>
-      -struct UpperBranch;
-      -
-      -template <typename T, typename Acc>
-      -std::shared_ptr<Acc> _merge_optional_acc_impl(const std::shared_ptr<Acc>& a, const std::shared_ptr<Acc>& b) {
-      -    if (!a) return b;
-      -    if (!b) return a;
-      -    if (a == b) return a;
-      -    return a->merge(b);
-      -}
-      -
-      -template <typename T, typename Acc>
-      -struct Upper : public std::enable_shared_from_this<Upper<T, Acc>> {
-      -    int max_depth;
-      -    virtual ~Upper() = default;
-      -
-      -    std::vector<std::shared_ptr<Upper<T, Acc>>> _all_children_upper() const {
-      -        if (auto ub = std::dynamic_pointer_cast<const UpperBranch<T, Acc>>(this->shared_from_this())) {
-      -            std::vector<std::shared_ptr<Upper<T, Acc>>> children;
-      -            for (const auto& pair1 : ub->children) {
-      -                for (const auto& pair2 : pair1.second) {
-      -                    children.push_back(pair2.second);
-      -                }
-      -            }
-      -            return children;
-      -        }
-      -        return {};
-      -    }
-      -
-      -    std::vector<std::shared_ptr<Lower<T, Acc>>> _all_children_lower() const {
-      -        if (auto it = std::dynamic_pointer_cast<const Interface<T, Acc>>(this->shared_from_this())) {
-      -            std::vector<std::shared_ptr<Lower<T, Acc>>> children;
-      -            for (const auto& pair1 : it->children) {
-      -                for (const auto& pair2 : pair1.second) {
-      -                    children.push_back(pair2.second);
-      -                }
-      -            }
-      -            return children;
-      -        }
-      -        return {};
-      -    }
-      -};
-      -
-      -template <typename T, typename Acc>
-      -struct Lower : public std::enable_shared_from_this<Lower<T, Acc>> {
-      -    using ChildrenMap = std::unordered_map<T, std::unordered_map<int, std::shared_ptr<Lower<T, Acc>>>>;
-      -    ChildrenMap children;
-      -    bool empty;
-      -    int max_depth;
-      -
-      -    Lower(ChildrenMap ch, bool em) : children(std::move(ch)), empty(em) {
-      -        int d = 0;
-      -        for (const auto& pair1 : children) {
-      -            for (const auto& pair2 : pair1.second) {
-      -                d = std::max(d, pair2.second->max_depth);
-      -            }
-      -        }
-      -        max_depth = d + (children.empty() ? 0 : 1);
-      -    }
-      -
-      -    std::vector<std::shared_ptr<Lower<T, Acc>>> _all_children() const {
-      -        std::vector<std::shared_ptr<Lower<T, Acc>>> res;
-      -        for (const auto& pair1 : children) {
-      -            for (const auto& pair2 : pair1.second) {
-      -                res.push_back(pair2.second);
-      -            }
-      -        }
-      -        return res;
-      -    }
-      -};
-      -
-      -template <typename T, typename Acc>
-      -struct Interface : public Upper<T, Acc> {
-      -    using LowerChildrenMap = std::unordered_map<T, std::unordered_map<int, std::shared_ptr<Lower<T, Acc>>>>;
-      -    LowerChildrenMap children;
-      -    std::shared_ptr<Acc> acc;
-      -    std::shared_ptr<Acc> empty;
-      -
-      -    Interface(LowerChildrenMap ch, std::shared_ptr<Acc> a, std::shared_ptr<Acc> em)
-      -        : children(std::move(ch)), acc(std::move(a)), empty(std::move(em)) {
-      -        int d = 0;
-      -        for (const auto& pair1 : children) {
-      -            for (const auto& pair2 : pair1.second) {
-      -                d = std::max(d, pair2.second->max_depth);
-      -            }
-      -        }
-      -        this->max_depth = d + (children.empty() ? 0 : 1);
-      -    }
-      -};
-      -
-      -template <typename T, typename Acc>
-      -struct UpperBranch : public Upper<T, Acc> {
-      -    using UpperChildrenMap = std::unordered_map<T, std::unordered_map<int, std::shared_ptr<Upper<T, Acc>>>>;
-      -    UpperChildrenMap children;
-      -    std::shared_ptr<Acc> empty;
-      -
-      -    UpperBranch(UpperChildrenMap ch, std::shared_ptr<Acc> em)
-      -        : children(std::move(ch)), empty(std::move(em)) {
-      -        int d = 0;
-      -        for (const auto& pair1 : children) {
-      -            for (const auto& pair2 : pair1.second) {
-      -                d = std::max(d, pair2.second->max_depth);
-      -            }
-      -        }
-      -        this->max_depth = d + (children.empty() ? 0 : 1);
-      -    }
-      -};
-      -
-      -template <typename T, typename Acc>
-      -std::shared_ptr<Upper<T, Acc>> try_promote(std::shared_ptr<UpperBranch<T, Acc>> node);
-      -
-      -template <typename T, typename Acc>
-      -std::shared_ptr<UpperBranch<T, Acc>> interface_to_upperbranch(std::shared_ptr<Interface<T, Acc>> it) {
-      -    typename UpperBranch<T, Acc>::UpperChildrenMap children;
-      -    for (const auto& [v, kids] : it->children) {
-      -        std::unordered_map<int, std::shared_ptr<Upper<T, Acc>>> v_map;
-      -        for (const auto& lchild_pair : kids) {
-      -            auto lchild = lchild_pair.second;
-      -            auto ci = std::make_shared<Interface<T, Acc>>(
-      -                lchild->children,
-      -                it->acc,
-      -                (lchild->empty ? it->acc : nullptr)
-      -            );
-      -            v_map[ci->max_depth] = ci;
-      -        }
-      -        if (!v_map.empty()) {
-      -            children[v] = v_map;
-      -        }
-      -    }
-      -    
-      -    auto new_empty = it->empty;
-      -    if (it->children.empty() && !it->empty) {
-      -        new_empty = it->acc;
-      -    }
-      -
-      -    return std::make_shared<UpperBranch<T, Acc>>(children, new_empty);
-      -}
-      -
-      -template <typename T, typename Acc>
-      -std::shared_ptr<Upper<T, Acc>> merge_upper(std::shared_ptr<Upper<T, Acc>> u1, std::shared_ptr<Upper<T, Acc>> u2);
-      -
-      -template <typename K, typename V, typename M>
-      -std::unordered_map<K, std::unordered_map<int, V>> _merge_children_by_depth(
-      -    const std::unordered_map<K, std::unordered_map<int, V>>& c1,
-      -    const std::unordered_map<K, std::unordered_map<int, V>>& c2,
-      -    M merge_func) {
-      -    if (&c1 == &c2) return c1;
-      -    std::unordered_map<K, std::unordered_map<int, V>> merged_children;
-      -    std::set<K> all_vals;
-      -    for (const auto& kv : c1) all_vals.insert(kv.first);
-      -    for (const auto& kv : c2) all_vals.insert(kv.first);
-      -
-      -    for (const auto& v : all_vals) {
-      -        std::unordered_map<int, std::vector<V>> nodes_by_depth;
-      -        auto it1 = c1.find(v);
-      -        if (it1 != c1.end()) {
-      -            for (const auto& [depth, child] : it1->second) {
-      -                nodes_by_depth[depth].push_back(child);
-      -            }
-      -        }
-      -        auto it2 = c2.find(v);
-      -        if (it2 != c2.end()) {
-      -            for (const auto& [depth, child] : it2->second) {
-      -                nodes_by_depth[depth].push_back(child);
-      -            }
-      -        }
-      -        if (nodes_by_depth.empty()) continue;
-      -
-      -        std::unordered_map<int, V> v_out;
-      -        for (auto& [depth, nodes] : nodes_by_depth) {
-      -            if (nodes.empty()) continue;
-      -            V current = nodes[0];
-      -            for (size_t i = 1; i < nodes.size(); ++i) {
-      -                current = merge_func(current, nodes[i]);
-      -            }
-      -            v_out[current->max_depth] = current;
-      -        }
-      -        merged_children[v] = v_out;
-      -    }
-      -    return merged_children;
-      -}
-      -
-      -template <typename T, typename Acc>
-      -std::shared_ptr<Upper<T, Acc>> merge_upperbranches(std::shared_ptr<UpperBranch<T, Acc>> a, std::shared_ptr<UpperBranch<T, Acc>> b) {
-      -    if (a == b) return a;
-      -    auto new_empty = _merge_optional_acc_impl<T, Acc>(a->empty, b->empty);
-      -    auto merged_children = _merge_children_by_depth(a->children, b->children, &merge_upper<T, Acc>);
-      -    return try_promote(std::make_shared<UpperBranch<T, Acc>>(merged_children, new_empty));
-      -}
-      -
-      -template <typename T, typename Acc>
-      -std::shared_ptr<Lower<T, Acc>> merge_lower(std::shared_ptr<Lower<T, Acc>> l1, std::shared_ptr<Lower<T, Acc>> l2) {
-      -    if (l1 == l2) return l1;
-      -    bool new_empty = l1->empty || l2->empty;
-      -    auto merged_children = _merge_children_by_depth(l1->children, l2->children, &merge_lower<T, Acc>);
-      -    return std::make_shared<Lower<T, Acc>>(merged_children, new_empty);
-      -}
-      -
-      -template <typename T, typename Acc>
-      -std::shared_ptr<Upper<T, Acc>> merge_interfaces(std::shared_ptr<Interface<T, Acc>> a, std::shared_ptr<Interface<T, Acc>> b) {
-      -    bool acc_equal = (a->acc == b->acc) || (a->acc && b->acc && *a->acc == *b->acc);
-      -    if (acc_equal || a->children == b->children) {
-      -        auto merged_children = _merge_children_by_depth(a->children, b->children, &merge_lower<T, Acc>);
-      -        auto new_acc = _merge_optional_acc_impl<T, Acc>(a->acc, b->acc);
-      -        auto new_empty = _merge_optional_acc_impl<T, Acc>(a->empty, b->empty);
-      -        return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
-      -    }
-      -    return merge_upperbranches(interface_to_upperbranch(a), interface_to_upperbranch(b));
-      -}
-      -
-      -template <typename T, typename Acc>
-      -std::shared_ptr<Upper<T, Acc>> merge_upper(std::shared_ptr<Upper<T, Acc>> u1, std::shared_ptr<Upper<T, Acc>> u2) {
-      -    if (u1 == u2) return u1;
-      -    auto i1 = std::dynamic_pointer_cast<Interface<T, Acc>>(u1);
-      -    auto i2 = std::dynamic_pointer_cast<Interface<T, Acc>>(u2);
-      -    auto ub1 = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(u1);
-      -    auto ub2 = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(u2);
-      -
-      -    if (i1 && i2) return merge_interfaces(i1, i2);
-      -    if (ub1 && ub2) return merge_upperbranches(ub1, ub2);
-      -
-      -    auto to_ub1 = ub1 ? ub1 : interface_to_upperbranch(i1);
-      -    auto to_ub2 = ub2 ? ub2 : interface_to_upperbranch(i2);
-      -    return merge_upperbranches(to_ub1, to_ub2);
-      -}
-      -
-      -template <typename T, typename Acc>
-      -std::shared_ptr<Upper<T, Acc>> try_promote(std::shared_ptr<UpperBranch<T, Acc>> node) {
-      -    auto all_children = node->_all_children_upper();
-      -    if (all_children.empty()) {
-      -        if (node->empty) {
-      -            return std::make_shared<Interface<T, Acc>>(
-      -                typename Interface<T, Acc>::LowerChildrenMap{},
-      -                node->empty,
-      -                node->empty
-      -            );
-      -        }
-      -        return node;
-      -    }
-      -
-      -    bool all_interfaces = true;
-      -    for (const auto& c : all_children) {
-      -        if (!std::dynamic_pointer_cast<Interface<T, Acc>>(c)) {
-      -            all_interfaces = false;
-      -            break;
-      -        }
-      -    }
-      -    if (!all_interfaces) return node;
-      -
-      -    std::vector<std::shared_ptr<Acc>> accs_vec;
-      -    if (node->empty) accs_vec.push_back(node->empty);
-      -    for (const auto& c : all_children) {
-      -        auto ic = std::static_pointer_cast<Interface<T, Acc>>(c);
-      -        accs_vec.push_back(ic->acc);
-      -        if (ic->empty) accs_vec.push_back(ic->empty);
-      -    }
-      -
-      -    if (!accs_vec.empty()) {
-      -        bool all_same = true;
-      -        for (size_t i = 1; i < accs_vec.size(); ++i) {
-      -            bool equal = (accs_vec[i] == accs_vec[0]) || (*accs_vec[i] == *accs_vec[0]);
-      -            if (!equal) {
-      -                all_same = false;
-      -                break;
-      -            }
-      -        }
-      -        if (all_same) {
-      -            auto the_acc = accs_vec[0];
-      -            if (!the_acc) {
-      -                return std::make_shared<UpperBranch<T, Acc>>(
-      -                    typename UpperBranch<T, Acc>::UpperChildrenMap{}, nullptr);
-      -            }
-      -            typename Interface<T, Acc>::LowerChildrenMap l_children;
-      -            for (const auto& [v, kids] : node->children) {
-      -                std::unordered_map<int, std::shared_ptr<Lower<T, Acc>>> v_map;
-      -                for (const auto& child_pair : kids) {
-      -                    auto ci = std::static_pointer_cast<Interface<T, Acc>>(child_pair.second);
-      -                    auto lower = std::make_shared<Lower<T, Acc>>(ci->children, (ci->empty != nullptr));
-      -                    v_map[lower->max_depth] = lower;
-      -                }
-      -                if (!v_map.empty()) {
-      -                    l_children[v] = v_map;
-      -                }
-      -            }
-      -            return std::make_shared<Interface<T, Acc>>(l_children, the_acc, node->empty);
-      -        }
-      -    }
-      -
-      -    return node;
-      -}
-      -
-      -template <typename T, typename Acc>
-      -class LeveledGSS {
-      -public:
-      -    std::shared_ptr<Upper<T, Acc>> inner;
-      -
-      -    LeveledGSS() : inner(create_empty().inner) {}
-      -
-      -    LeveledGSS(std::shared_ptr<Upper<T, Acc>> in) : inner(std::move(in)) {}
-      -
-      -    static LeveledGSS create_empty() {
-      -        return LeveledGSS(std::make_shared<UpperBranch<T, Acc>>(
-      -            typename UpperBranch<T, Acc>::UpperChildrenMap{}, nullptr));
-      -    }
-      -
-      -    bool is_empty() const {
-      -        if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(inner)) {
-      -            return ub->children.empty() && !ub->empty;
-      -        }
-      -        return false;
-      -    }
-      -
-      -    LeveledGSS push(const T& value) const {
-      -        if (is_empty()) return *this;
-      -        if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(inner)) {
-      -            auto lower_node = std::make_shared<Lower<T, Acc>>(it->children, it->empty != nullptr);
-      -            typename Interface<T, Acc>::LowerChildrenMap new_children;
-      -            new_children[value][lower_node->max_depth] = lower_node;
-      -            return LeveledGSS(std::make_shared<Interface<T, Acc>>(new_children, it->acc, nullptr));
-      -        } else {
-      -            auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
-      -            typename UpperBranch<T, Acc>::UpperChildrenMap new_children;
-      -            new_children[value][ub->max_depth] = ub;
-      -            return LeveledGSS(std::make_shared<UpperBranch<T, Acc>>(new_children, nullptr));
-      -        }
-      -    }
-      -
-      -    LeveledGSS popn(int n) const {
-      -        if (n <= 0 || is_empty()) return *this;
-      -        return LeveledGSS(_popn_upper(inner, n));
-      -    }
-      -
-      -    std::unordered_set<T> peek() const {
-      -        std::unordered_set<T> keys;
-      -        if (auto it = std::dynamic_pointer_cast<const Interface<T, Acc>>(inner)) {
-      -            for (const auto& kv : it->children) keys.insert(kv.first);
-      -        } else if (auto ub = std::dynamic_pointer_cast<const UpperBranch<T, Acc>>(inner)) {
-      -            for (const auto& kv : ub->children) keys.insert(kv.first);
-      -        }
-      -        return keys;
-      -    }
-      -
-      -    LeveledGSS isolate(const T& value) const {
-      -        if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(inner)) {
-      -            auto it_ch = it->children.find(value);
-      -            if (it_ch == it->children.end()) return create_empty();
-      -            typename Interface<T, Acc>::LowerChildrenMap new_children;
-      -            new_children[value] = it_ch->second;
-      -            return LeveledGSS(std::make_shared<Interface<T, Acc>>(new_children, it->acc, nullptr));
-      -        } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(inner)) {
-      -            auto it_ch = ub->children.find(value);
-      -            if (it_ch == ub->children.end()) return create_empty();
-      -            typename UpperBranch<T, Acc>::UpperChildrenMap new_children;
-      -            new_children[value] = it_ch->second;
-      -            return LeveledGSS(try_promote(std::make_shared<UpperBranch<T, Acc>>(new_children, nullptr)));
-      -        }
-      -        return create_empty();
-      -    }
-      -
-      -    LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
-      -        if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(inner)) {
-      -            typename Interface<T, Acc>::LowerChildrenMap filtered_children;
-      -            for(const T& v : values) {
-      -                if (it->children.count(v)) filtered_children[v] = it->children.at(v);
-      -            }
-      -            if (filtered_children.empty()) return create_empty();
-      -            return LeveledGSS(std::make_shared<Interface<T, Acc>>(filtered_children, it->acc, nullptr));
-      -        } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(inner)) {
-      -            typename UpperBranch<T, Acc>::UpperChildrenMap filtered_children;
-      -            for(const T& v : values) {
-      -                if (ub->children.count(v)) filtered_children[v] = ub->children.at(v);
-      -            }
-      -            if (filtered_children.empty()) return create_empty();
-      -            return LeveledGSS(try_promote(std::make_shared<UpperBranch<T, Acc>>(filtered_children, nullptr)));
-      -        }
-      -        return create_empty();
-      -    }
-      -
-      -    template <typename F>
-      -    LeveledGSS apply(F&& func) const {
-      -        return LeveledGSS(_apply(inner, func));
-      -    }
-      -
-      -    template <typename F>
-      -    LeveledGSS apply_and_prune(F&& func) const {
-      -        auto res = _apply_and_prune(inner, func);
-      -        return res ? LeveledGSS(res) : create_empty();
-      -    }
-      -
-      -    template <typename F>
-      -    LeveledGSS prune(F&& pred) const {
-      -        auto mutator = [&](const std::shared_ptr<Acc>& a) {
-      -            return pred(a) ? a : nullptr;
-      -        };
-      -        return apply_and_prune(mutator);
-      -    }
-      -
-      -    LeveledGSS merge(const LeveledGSS& other) const {
-      -        return LeveledGSS(merge_upper(inner, other.inner));
-      -    }
-      -
-      -    static LeveledGSS merge_many(const std::vector<LeveledGSS>& gss_list) {
-      -        if (gss_list.empty()) return create_empty();
-      -        auto merged_inner = gss_list[0].inner;
-      -        for (size_t i = 1; i < gss_list.size(); ++i) {
-      -            merged_inner = merge_upper(merged_inner, gss_list[i].inner);
-      -        }
-      -        return LeveledGSS(merged_inner);
-      -    }
-      -
-      -    std::shared_ptr<Acc> reduce_acc() const {
-      -        std::vector<std::shared_ptr<Acc>> accs;
-      -        std::unordered_set<const void*> visited_nodes;
-      -        std::unordered_set<const void*> visited_accs;
-      -        std::vector<std::shared_ptr<const Upper<T, Acc>>> q;
-      -        q.push_back(inner);
-      -
-      -        while(!q.empty()) {
-      -            auto node = q.back();
-      -            q.pop_back();
-      -            if (visited_nodes.count(node.get())) continue;
-      -            visited_nodes.insert(node.get());
-      -
-      -            if (auto it = std::dynamic_pointer_cast<const Interface<T, Acc>>(node)) {
-      -                if (it->acc && visited_accs.find(it->acc.get()) == visited_accs.end()) {
-      -                    accs.push_back(it->acc);
-      -                    visited_accs.insert(it->acc.get());
-      -                }
-      -                if (it->empty && visited_accs.find(it->empty.get()) == visited_accs.end()) {
-      -                    accs.push_back(it->empty);
-      -                    visited_accs.insert(it->empty.get());
-      -                }
-      -            } else if (auto ub = std::dynamic_pointer_cast<const UpperBranch<T, Acc>>(node)) {
-      -                if (ub->empty && visited_accs.find(ub->empty.get()) == visited_accs.end()) {
-      -                    accs.push_back(ub->empty);
-      -                    visited_accs.insert(ub->empty.get());
-      -                }
-      -                for(const auto& child : ub->_all_children_upper()) q.push_back(child);
-      -            }
-      -        }
-      -        if (accs.empty()) return nullptr;
-      -        auto res = accs[0];
-      -        for(size_t i = 1; i < accs.size(); ++i) res = res->merge(accs[i]);
-      -        return res;
-      -    }
-      -
-      -private:
-      -    std::shared_ptr<Lower<T, Acc>> _popn_lower(std::shared_ptr<Lower<T, Acc>> node, int k) const {
-      -        if (k == 0) return node;
-      -        auto children = node->_all_children();
-      -        if (children.empty()) return std::make_shared<Lower<T, Acc>>(typename Lower<T, Acc>::ChildrenMap{}, false);
-      -        std::vector<std::shared_ptr<Lower<T, Acc>>> popped;
-      -        for (const auto& child : children) popped.push_back(_popn_lower(child, k - 1));
-      -        auto res = popped[0];
-      -        for (size_t i = 1; i < popped.size(); ++i) res = merge_lower(res, popped[i]);
-      -        return res;
-      -    }
-      -
-      -    std::shared_ptr<Upper<T, Acc>> _popn_upper(std::shared_ptr<Upper<T, Acc>> node, int k) const {
-      -        if (k == 0) return node;
-      -        if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(node)) {
-      -            auto children = it->_all_children_lower();
-      -            if (children.empty()) return create_empty().inner;
-      -            std::vector<std::shared_ptr<Lower<T, Acc>>> popped;
-      -            for (const auto& child : children) popped.push_back(_popn_lower(child, k - 1));
-      -            auto merged = popped[0];
-      -            for (size_t i = 1; i < popped.size(); ++i) merged = merge_lower(merged, popped[i]);
-      -            auto new_empty = merged->empty ? it->acc : nullptr;
-      -            if (merged->children.empty() && !new_empty) return create_empty().inner;
-      -            return std::make_shared<Interface<T, Acc>>(merged->children, it->acc, new_empty);
-      -        } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(node)) {
-      -            auto children = ub->_all_children_upper();
-      -            if (children.empty()) return create_empty().inner;
-      -            std::vector<std::shared_ptr<Upper<T, Acc>>> popped;
-      -            for (const auto& child : children) popped.push_back(_popn_upper(child, k - 1));
-      -            auto merged = popped[0];
-      -            for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper(merged, popped[i]);
-      -            if (auto merged_ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(merged)) {
-      -                return try_promote(merged_ub);
-      -            }
-      -            return merged;
-      -        }
-      -        return create_empty().inner;
-      -    }
-      -
-      -    template <typename F>
-      -    std::shared_ptr<Upper<T, Acc>> _apply(std::shared_ptr<Upper<T, Acc>> node, F& func) const {
-      -        if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(node)) {
-      -            auto new_acc = func(it->acc);
-      -            auto new_empty = it->empty ? func(it->empty) : nullptr;
-      -            return std::make_shared<Interface<T, Acc>>(it->children, new_acc, new_empty);
-      -        } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(node)) {
-      -            auto new_empty = ub->empty ? func(ub->empty) : nullptr;
-      -            typename UpperBranch<T, Acc>::UpperChildrenMap new_children;
-      -            for (const auto& [v, kids] : ub->children) {
-      -                for (const auto& [d, child] : kids) {
-      -                    auto new_child = _apply(child, func);
-      -                    new_children[v][new_child->max_depth] = new_child;
-      -                }
-      -            }
-      -            return try_promote(std::make_shared<UpperBranch<T, Acc>>(new_children, new_empty));
-      -        }
-      -        return nullptr;
-      -    }
-      -
-      -    template <typename F>
-      -    std::shared_ptr<Upper<T, Acc>> _apply_and_prune(std::shared_ptr<Upper<T, Acc>> node, F& func) const {
-      -        if (auto it = std::dynamic_pointer_cast<Interface<T, Acc>>(node)) {
-      -            auto new_acc = func(it->acc);
-      -            auto new_empty = it->empty ? func(it->empty) : nullptr;
-      -            if (!new_acc && !new_empty) return nullptr;
-      -            if (!new_acc) {
-      -                return try_promote(std::make_shared<UpperBranch<T, Acc>>(typename UpperBranch<T, Acc>::UpperChildrenMap{}, new_empty));
-      -            }
-      -            return std::make_shared<Interface<T, Acc>>(it->children, new_acc, new_empty);
-      -        } else if (auto ub = std::dynamic_pointer_cast<UpperBranch<T, Acc>>(node)) {
-      -            auto new_empty = ub->empty ? func(ub->empty) : nullptr;
-      -            typename UpperBranch<T, Acc>::UpperChildrenMap new_children;
-      -            for (const auto& [v, kids] : ub->children) {
-      -                for (const auto& [d, child] : kids) {
-      -                    auto new_child = _apply_and_prune(child, func);
-      -                    if (new_child) new_children[v][new_child->max_depth] = new_child;
-      -                }
-      -            }
-      -            if (new_children.empty() && !new_empty) return nullptr;
-      -            return try_promote(std::make_shared<UpperBranch<T, Acc>>(new_children, new_empty));
-      -        }
-      -        return nullptr;
-      -    }
-      -};
-      -
-      -} // namespace leveled_gss
-      +#include "leveled_gss.hpp"
-      +
-      +using namespace leveled_gss;
-       
-       namespace py = pybind11;
-       
-      @@ -550,10 +69,14 @@
-               // Initialize state: one GSS per tokenizer initial state with start parser state on stack
-               auto initial_acc = std::make_shared<Acc>();
-               initial_acc->llm_mask = range_empty_();
-               // terminals_union empty by default
-      -        Leveled init = Leveled::create_empty().push(start_state_id_);
-      +        std::vector<std::pair<std::vector<int>, std::shared_ptr<Acc>>> initial_stacks;
-      +        initial_stacks.emplace_back(std::vector<int>{}, initial_acc);
-      +        Leveled gss_with_empty_stack = Leveled::from_stacks(initial_stacks);
-      +        Leveled init = gss_with_empty_stack.push(start_state_id_);
-               state_[tokenizer_initial_state_] = std::move(init);
-           }
-       
-           void commit(py::bytes token_bytes) {
-      @@ -660,7 +583,7 @@
-                   int sid = kv.first;
-                   const std::vector<Leveled> &lst = kv.second;
-                   if (lst.empty()) continue;
-      -            Leveled merged = merge_many(lst);
-      +            Leveled merged = Leveled::merge_many(lst);
-                   if (!merged.is_empty()) {
-                       merged_states[sid] = std::move(merged);
-                   }
-      @@ -729,7 +652,7 @@
-                               }
-                               if (keep.empty()) continue;
-       
-      -                        Leveled child = isolate_many(popped, keep);
-      +                        Leveled child = popped.isolate_many(keep);
-                               if (child.is_empty()) continue;
-       
-                               // intersect_and_prune with edge's llm_bv (as RangeSet)
-      @@ -1080,16 +1003,6 @@
-               return g.apply_and_prune(mutator);
-           }
-       
-      -    // Merge many Leveled
-      -    static Leveled merge_many(const std::vector<Leveled>& lst) {
-      -        return Leveled::merge_many(lst);
-      -    }
-      -
-      -    // Convenience isolate_many wrapper for unordered_set<int>
-      -    static Leveled isolate_many(const Leveled& g, const std::unordered_set<int>& values) {
-      -        return g.isolate_many(values);
-      -    }
-       };
-       
-       PYBIND11_MODULE(precompute3_engine, m) {
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_engine.cpp
-      Applying patch to 'python/aug25/models/precompute3_engine.cpp' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_engine.cpp.
-    metadata:
-  - user: |-
-      Diff of python/run_benchmarks.sh since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_model_pure_python_standalone.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/model_abc.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_model_cpp.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/icl_rangeset.cpp since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_engine.cpp since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/leveled_gss.hpp since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of run_rust_and_cpp_models.sh since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      bash run_rust_and_cpp_models.sh
-      Installing pybind11 (local user)...
-
-      [notice] A new release of pip is available: 25.0.1 -> 25.2
-      [notice] To update, run: pip install --upgrade pip
-      Building C++ extensions ...
-      In file included from aug25/models/precompute3_engine.cpp:18:
-      aug25/models/leveled_gss.hpp:203:64: error: use of undeclared identifier 'Acc'
-        203 |             if constexpr (std::is_same<NodePtr, UpperPtr<TKey, Acc>>::value) {
-            |                                                                ^
-      1 error generated.
-    metadata:
-  - assistant: |-
-      You've encountered a C++ compilation error because a template helper function in `leveled_gss.hpp` was trying to use a type `Acc` that wasn't available in its context. This happened inside a redundant `if constexpr` block where both branches performed the exact same operation.
-
-      The fix is to remove this unnecessary conditional logic and simplify the code to directly access the `_max_depth` member, which is present on all relevant node types.
-
-      ### Step-by-Step Instructions
-
-      1.  **Open `python/aug25/models/leveled_gss.hpp`**.
-
-      2.  **Navigate to the `_merge_children_by_depth` function template**, which is around line 189.
-
-      3.  **Locate and replace the faulty code block.** Inside the `for` loop that iterates through `nodes_by_depth`, you will find the following lines:
-          ```cpp
-                  int md = 0;
-                  if constexpr (std::is_same<NodePtr, UpperPtr<TKey, Acc>>::value) {
-                      md = merged->_max_depth;
-                  } else {
-                      md = merged->_max_depth;
-                  }
-                  v_out[md] = merged;
-          ```
-
-      4.  **Replace that entire block** with this single, corrected line:
-          ```cpp
-                  v_out[merged->_max_depth] = merged;
-          ```
-
-      This change resolves the compile error by removing the reference to the undeclared `Acc` type and simplifying the logic.
-
-      ### Git Diff
-
-      Here is the corresponding git diff for the change.
+      Here are the changes in `git diff` format for you to apply.
 
       ```diff
       diff --git a/python/aug25/models/leveled_gss.hpp b/python/aug25/models/leveled_gss.hpp
-      index 1999e23..2b02860 100644
+      index 4552431..293375b 100644
       --- a/python/aug25/models/leveled_gss.hpp
       +++ b/python/aug25/models/leveled_gss.hpp
-      @@ -200,14 +200,7 @@
-                   for (size_t i = 1; i < vec.size(); ++i) {
-                       merged = merge_func(merged, vec[i]);
+      @@ -697,7 +697,11 @@
+                       }
                    }
-      -            int md = 0;
-      -            if constexpr (std::is_same<NodePtr, UpperPtr<TKey, Acc>>::value) {
-      -                md = merged->_max_depth;
-      -            } else {
-      -                md = merged->_max_depth;
-      -            }
-      -            v_out[md] = merged;
-      +            v_out[merged->_max_depth] = merged;
+                   if (!merged) merged = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+      -            return LeveledGSS(try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged)));
+      +            UpperPtr<T, Acc> result_node = merged;
+      +            if (!result_node->is_interface()) {
+      +                result_node = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(result_node));
+      +            }
+      +            return LeveledGSS(result_node);
                }
-               merged_children[v] = std::move(v_out);
            }
+       
+      @@ -781,7 +785,11 @@
+                           for (auto &u : all_children) popped.push_back(_popn_upper(u, k - 1));
+                           UpperPtr<T, Acc> merged = popped[0];
+                           for (size_t i = 1; i < popped.size(); ++i) merged = merge_upper<T, Acc>(merged, popped[i]);
+      -                    res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+      +                    if (merged->is_interface()) {
+      +                        res = merged;
+      +                    } else {
+      +                        res = try_promote<T, Acc>(std::static_pointer_cast<UpperBranch<T, Acc>>(merged));
+      +                    }
+                       }
+                       memo_upper[key] = res;
+                       return res;
 
       ```
     metadata:
@@ -13243,7 +11459,7 @@ messages:
       Applying patch to 'python/aug25/models/leveled_gss.hpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/leveled_gss.hpp.
     metadata:
-  - user: 'Changes committed with message: "Simplify _merge_children_by_depth by removing
-      redundant type check"'
+  - user: 'Changes committed with message: "Fix: Add type checks in LeveledGSS pop/popn
+      to prevent heap-buffer-overflow"'
     metadata:
 ...
