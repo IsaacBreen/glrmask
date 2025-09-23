@@ -1161,20 +1161,6 @@ public:
 };
 
 } // namespace leveled_gss
-            for (auto &dkv : kv.second) {
-                int cd = dkv.second->_max_depth;
-                if (cd + 1 > depth) depth = cd + 1;
-            }
-        }
-        this->_max_depth = depth;
-    }
-
-    bool is_interface() const override { return false; }
-    UpperChildren<T, Acc>& children_mut() override { return _children; }
-    const UpperChildren<T, Acc>& children() const override { return _children; }
-    std::shared_ptr<Acc> empty_acc() const override { return empty; }
-};
-
 template <typename T>
 struct Lower {
     LowerChildren<T> _children;
