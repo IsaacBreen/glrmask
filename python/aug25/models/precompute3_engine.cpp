@@ -545,10 +545,13 @@ private:
             info.max_depth = mdepth;
 
             // Children: prefer 'children_bits'
-            py::object children_obj = node.contains("children_bits") ? node["children_bits"] : py::none();
-            if (children_obj.is_none()) {
-                // fallback to 'children' (RangeSet-based) by converting back to Bitset when needed
-                children_obj = node.contains("children") ? node["children"] : py::list();
+            py::object children_obj;
+            if (node.contains("children_bits")) {
+                children_obj = node["children_bits"];
+            } else if (node.contains("children")) {
+                children_obj = node["children"];
+            } else {
+                children_obj = py::list();
             }
 
             for (auto ch : children_obj) {
