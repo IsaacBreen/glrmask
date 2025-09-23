@@ -260,7 +260,7 @@ public:
 
     py::object get_mask() {
         py::dict state_map = state_;
-        py::object final_mask = range_empty_();
+        py::object final_mask = range_empty_()();
 
         // values: node_id -> GSS
         std::unordered_map<int, py::object> values;
@@ -282,7 +282,7 @@ public:
             py::object terminals_union = acc.attr("terminals_union");
 
             // Build disallowed mask as RangeSet
-            py::object disallowed_llm_mask = range_empty_();
+            py::object disallowed_llm_mask = range_empty_()();
 
             for (auto item_handle : terminals_union.attr("items")()) {
                 py::tuple item = py::cast<py::tuple>(item_handle);
@@ -497,8 +497,8 @@ private:
                         int len = py::cast<int>(len_item[0]);
                         py::dict nts = py::cast<py::dict>(len_item[1]);
                         for (auto nt_item_handle : nts) {
-                            int nt_id = py::cast<int>(nt_item_handle.first);
-                            aot.reduces.emplace_back(nt_id, len);
+                            int nt = py::cast<int>(nt_item_handle.first);
+                            aot.reduces.emplace_back(nt, len);
                         }
                     }
                 }
@@ -650,7 +650,7 @@ private:
         py::function fn = py::cpp_function([&, state_id, terminal_id](py::handle acc_obj) -> py::object {
             py::object acc = py::reinterpret_borrow<py::object>(acc_obj);
             py::dict current_map = py::cast<py::dict>(acc.attr("terminals_union"));
-            py::object rs_empty = range_empty_();
+            py::object rs_empty = range_empty_()();
             py::object curr_bv = current_map.contains(py::int_(state_id)) ? current_map[py::int_(state_id)] : rs_empty;
 
             std::vector<unsigned long long> idx{static_cast<unsigned long long>(terminal_id)};
