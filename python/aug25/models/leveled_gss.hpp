@@ -323,7 +323,7 @@ static UpperPtr<T, Acc> merge_upperbranches(const UpperBranchPtr<T, Acc>& a, con
 // Merge interfaces; if same Acc pointer, merge Lower children only; otherwise convert and merge as branches
 template <typename T, typename Acc>
 static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const InterfacePtr<T, Acc>& b) {
-    if (a->acc.get() == b->acc.get()) {
+    if (a->acc.get() == b->acc.get() || (*(a->acc) == *(b->acc))) {
         auto merged_children = _merge_children_by_depth<LowerPtr<T>, std::function<LowerPtr<T>(LowerPtr<T>, LowerPtr<T>)>, T>(
             a->_children, b->_children,
             [](LowerPtr<T> l1, LowerPtr<T> l2) { return merge_lower<T>(l1, l2); }
