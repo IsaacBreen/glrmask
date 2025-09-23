@@ -246,6 +246,11 @@ def run_benchmark(args):
 
     print("--- Benchmark finished ---")
 
+    # Finalize model if it has a finalize method (e.g., for printing stats)
+    if hasattr(model, 'finalize'):
+        print("--- Finalizing model ---")
+        model.finalize()
+
     # 6. Compile and save results
     if get_mask_timings:
         pcts = np.percentile(get_mask_timings, [50, 90, 99])

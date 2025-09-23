@@ -683,5 +683,9 @@ class Model(GraphProvider):
             stats.stop('get_mask.final_conversion')
 
             stats.stop('get_mask.total')
-            # stats.report()
             return result
+
+    def finalize(self):
+        """Called at the end of a benchmark run to perform any final actions, like printing stats."""
+        print("\n--- Final Stats Report from Model ---")
+        Stats.get().report()
