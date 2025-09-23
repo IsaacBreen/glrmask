@@ -699,6 +699,7 @@ private:
             na->terminals_union = acc->terminals_union;
             std::vector<unsigned long long> idx{static_cast<unsigned long long>(terminal_id)};
             RangeSet to_add = RangeSet::from_indices(idx);
+            RangeSet rs_empty = RangeSet::empty();
             const RangeSet& curr = na->terminals_union.count(state_id) ? na->terminals_union[state_id] : rs_empty;
             na->terminals_union[state_id] = curr.union_with(to_add);
             return na;
