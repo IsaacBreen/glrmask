@@ -2575,12 +2575,6 @@ local_system:
               [](UpperPtr<T, Acc> n1, UpperPtr<T, Acc> n2) { return merge_upper<T, Acc>(n1, n2); }
           );
 
-          bool a_unchanged = (new_empty.get() == a->empty.get()) && (merged_children == *a->_children);
-          if (a_unchanged) return a;
-
-          bool b_unchanged = (new_empty.get() == b->empty.get()) && (merged_children == *b->_children);
-          if (b_unchanged) return b;
-
           auto ub = std::make_shared<UpperBranch<T, Acc>>(std::move(merged_children), new_empty);
           return try_promote<T, Acc>(ub);
       }
@@ -2600,17 +2594,6 @@ local_system:
               );
               auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
               auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
-
-              bool a_unchanged = (new_acc.get() == a->acc.get()) &&
-                                 (new_empty.get() == a->empty.get()) &&
-                                 (merged_children == *a->_children);
-              if (a_unchanged) return a;
-
-              bool b_unchanged = (new_acc.get() == b->acc.get()) &&
-                                 (new_empty.get() == b->empty.get()) &&
-                                 (merged_children == *b->_children);
-              if (b_unchanged) return b;
-
               return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
           }
           auto ub1 = interface_to_upperbranch<T, Acc>(a);
@@ -2646,9 +2629,6 @@ local_system:
               *l1->_children, *l2->_children,
               [](LowerPtr<T> a, LowerPtr<T> b) { return merge_lower<T>(a, b); }
           );
-
-          if (new_empty == l1->empty && merged_children == *l1->_children) return l1;
-          if (new_empty == l2->empty && merged_children == *l2->_children) return l2;
 
           return std::make_shared<Lower<T>>(std::move(merged_children), new_empty);
       }
@@ -6060,6 +6040,14 @@ local_system:
       static UpperPtr<T, Acc> merge_upperbranches(const UpperBranchPtr<T, Acc>& a, const UpperBranchPtr<T, Acc>& b) {
           if (a.get() == b.get()) return a;
           auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
+
+          if (a->_children.get() == b->_children.get()) {
+              if (new_empty.get() == a->empty.get()) return a;
+              if (new_empty.get() == b->empty.get()) return b;
+              auto ub = std::make_shared<UpperBranch<T, Acc>>(a->_children, new_empty);
+              return try_promote<T, Acc>(ub);
+          }
+
           auto merged_children = _merge_children_by_depth<UpperPtr<T, Acc>, std::function<UpperPtr<T, Acc>(UpperPtr<T, Acc>, UpperPtr<T, Acc>)>, T>(
               *a->_children, *b->_children,
               [](UpperPtr<T, Acc> n1, UpperPtr<T, Acc> n2) { return merge_upper<T, Acc>(n1, n2); }
@@ -6078,12 +6066,19 @@ local_system:
           if (a->acc.get() == b->acc.get() ||
               a->_children.get() == b->_children.get() ||
               (*(a->acc) == *(b->acc))) {
+              auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
+              auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
+
+              if (a->_children.get() == b->_children.get()) {
+                  if (new_acc.get() == a->acc.get() && new_empty.get() == a->empty.get()) return a;
+                  if (new_acc.get() == b->acc.get() && new_empty.get() == b->empty.get()) return b;
+                  return std::make_shared<Interface<T, Acc>>(a->_children, new_acc, new_empty);
+              }
+
               auto merged_children = _merge_children_by_depth<LowerPtr<T>, std::function<LowerPtr<T>(LowerPtr<T>, LowerPtr<T>)>, T>(
                   *a->_children, *b->_children,
                   [](LowerPtr<T> l1, LowerPtr<T> l2) { return merge_lower<T>(l1, l2); }
               );
-              auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
-              auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
               return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
           }
           auto ub1 = interface_to_upperbranch<T, Acc>(a);
@@ -9599,12 +9594,6 @@ messages:
               [](UpperPtr<T, Acc> n1, UpperPtr<T, Acc> n2) { return merge_upper<T, Acc>(n1, n2); }
           );
 
-          bool a_unchanged = (new_empty.get() == a->empty.get()) && (merged_children == *a->_children);
-          if (a_unchanged) return a;
-
-          bool b_unchanged = (new_empty.get() == b->empty.get()) && (merged_children == *b->_children);
-          if (b_unchanged) return b;
-
           auto ub = std::make_shared<UpperBranch<T, Acc>>(std::move(merged_children), new_empty);
           return try_promote<T, Acc>(ub);
       }
@@ -9624,17 +9613,6 @@ messages:
               );
               auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
               auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
-
-              bool a_unchanged = (new_acc.get() == a->acc.get()) &&
-                                 (new_empty.get() == a->empty.get()) &&
-                                 (merged_children == *a->_children);
-              if (a_unchanged) return a;
-
-              bool b_unchanged = (new_acc.get() == b->acc.get()) &&
-                                 (new_empty.get() == b->empty.get()) &&
-                                 (merged_children == *b->_children);
-              if (b_unchanged) return b;
-
               return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
           }
           auto ub1 = interface_to_upperbranch<T, Acc>(a);
@@ -9670,9 +9648,6 @@ messages:
               *l1->_children, *l2->_children,
               [](LowerPtr<T> a, LowerPtr<T> b) { return merge_lower<T>(a, b); }
           );
-
-          if (new_empty == l1->empty && merged_children == *l1->_children) return l1;
-          if (new_empty == l2->empty && merged_children == *l2->_children) return l2;
 
           return std::make_shared<Lower<T>>(std::move(merged_children), new_empty);
       }
@@ -10550,9 +10525,7 @@ messages:
       But no. It it's not this because I've *done* all this kind of thing already.
       I dunno. It might be something really obvious. Or something subtle. But there IS a difference.
 
-
-      Don't modify python/gss_tester/implementations/leveled_impl.py
-      I've included python/aug25/models/precompute3_engine.cpp here because it depends on python/aug25/models/leveled_gss.hpp, just in case it needs to be updated. But don't otherwise modify python/aug25/models/precompute3_engine.cpp - only if necessary becuse the interface of python/aug25/models/leveled_gss.hpp changed.
+      Perhaps it's something to do with 'hidden' implementations. Equality?? Hash?
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -10571,102 +10544,137 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Dealing with performance regressions in functionally equivalent code across different languages can be tricky. The issue you're facing is likely due to subtle differences in how object identity and equality are handled, especially with complex data structures. The C++ implementation's attempt to optimize by checking for unchanged states using deep map comparisons appears to be the primary performance bottleneck.
+      Of course. The performance discrepancy between the Python and C++ implementations of `LeveledGSS`, despite their apparent similarity, is a classic symptom of broken structural sharing. Your suspicion is correct: the C++ version was unnecessarily creating copies of data structures, which prevented pointer-equality fast paths from triggering, leading to poor scaling.
 
-      Here are the step-by-step instructions to fix the performance issues in your C++ `LeveledGSS` implementation, followed by the corresponding git diff.
+      The primary issue was in the `merge_upperbranches` and `merge_interfaces` functions. They were not correctly handling the case where two nodes being merged already shared the same children subtree. Instead of reusing the `shared_ptr` to the children map, they would proceed to the expensive `_merge_children_by_depth` function, which would return a new map object by value. This new map would then be used to construct a new node, breaking the chain of shared object identity.
+
+      Here are the step-by-step instructions to fix the performance issues by restoring proper structural sharing.
 
       ### Step-by-Step Instructions
 
-      The core of the fix is to remove the expensive, deep `std::unordered_map` comparisons from the merge functions (`merge_upperbranches`, `merge_interfaces`, and `merge_lower`) inside `leveled_gss.hpp`. This will make the C++ implementation's behavior more closely match the performant Python version, which relies on pointer-equality checks and cheap object creation rather than costly post-merge equality checks.
+      #### **File: `python/aug25/models/leveled_gss.hpp`**
 
-      1.  **Open the file `python/aug25/models/leveled_gss.hpp`**.
+      1.  **Optimize `merge_upperbranches` for Shared Children**
 
-      2.  Navigate to the `merge_upperbranches` function, which is around line 401.
+          Locate the `merge_upperbranches` function (around line 400). Replace its implementation with the version below. This adds a crucial fast path: if the two `UpperBranch` nodes already share the same children (`_children` pointers are identical), it avoids the expensive merge operation entirely and reuses the existing `shared_ptr`.
 
-      3.  Delete the block of code that checks if the merged result is unchanged from either of the inputs. Specifically, remove these four lines:
           ```cpp
-          bool a_unchanged = (new_empty.get() == a->empty.get()) && (merged_children == *a->_children);
-          if (a_unchanged) return a;
-
-          bool b_unchanged = (new_empty.get() == b->empty.get()) && (merged_children == *b->_children);
-          if (b_unchanged) return b;
+          template <typename T, typename Acc>
+          static UpperPtr<T, Acc> merge_upperbranches(const UpperBranchPtr<T, Acc>& a, const UpperBranchPtr<T, Acc>& b) {
+              if (a.get() == b.get()) return a;
+              auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
+          
+              if (a->_children.get() == b->_children.get()) {
+                  if (new_empty.get() == a->empty.get()) return a;
+                  if (new_empty.get() == b->empty.get()) return b;
+                  auto ub = std::make_shared<UpperBranch<T, Acc>>(a->_children, new_empty);
+                  return try_promote<T, Acc>(ub);
+              }
+          
+              auto merged_children = _merge_children_by_depth<UpperPtr<T, Acc>, std::function<UpperPtr<T, Acc>(UpperPtr<T, Acc>, UpperPtr<T, Acc>)>, T>(
+                  *a->_children, *b->_children,
+                  [](UpperPtr<T, Acc> n1, UpperPtr<T, Acc> n2) { return merge_upper<T, Acc>(n1, n2); }
+              );
+          
+              auto ub = std::make_shared<UpperBranch<T, Acc>>(std::move(merged_children), new_empty);
+              return try_promote<T, Acc>(ub);
+          }
           ```
 
-      4.  Next, navigate to the `merge_interfaces` function, around line 422.
+      2.  **Optimize `merge_interfaces` for Shared Children**
 
-      5.  Delete the similar block of code that performs an expensive check for an unchanged state. Specifically, remove these six lines:
+          Next, locate the `merge_interfaces` function (around line 416). Replace its implementation. The change is similar: within the block that merges two `Interface` nodes, we add a check for shared `_children` pointers. If they are shared, we bypass the call to `_merge_children_by_depth` and construct the new `Interface` node using the existing `shared_ptr` to the children map. This prevents unnecessary map copies and preserves the structural sharing.
+
           ```cpp
-          bool a_unchanged = (new_acc.get() == a->acc.get()) &&
-                             (new_empty.get() == a->empty.get()) &&
-                             (merged_children == *a->_children);
-          if (a_unchanged) return a;
-
-          bool b_unchanged = (new_acc.get() == b->acc.get()) &&
-                             (new_empty.get() == b->empty.get()) &&
-                             (merged_children == *b->_children);
-          if (b_unchanged) return b;
+          template <typename T, typename Acc>
+          static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const InterfacePtr<T, Acc>& b) {
+              if (a.get() == b.get()) return a;
+          
+              // Prefer cheap pointer checks; defer expensive content equality to last.
+              if (a->acc.get() == b->acc.get() ||
+                  a->_children.get() == b->_children.get() ||
+                  (*(a->acc) == *(b->acc))) {
+                  auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
+                  auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
+          
+                  if (a->_children.get() == b->_children.get()) {
+                      if (new_acc.get() == a->acc.get() && new_empty.get() == a->empty.get()) return a;
+                      if (new_acc.get() == b->acc.get() && new_empty.get() == b->empty.get()) return b;
+                      return std::make_shared<Interface<T, Acc>>(a->_children, new_acc, new_empty);
+                  }
+          
+                  auto merged_children = _merge_children_by_depth<LowerPtr<T>, std::function<LowerPtr<T>(LowerPtr<T>, LowerPtr<T>)>, T>(
+                      *a->_children, *b->_children,
+                      [](LowerPtr<T> l1, LowerPtr<T> l2) { return merge_lower<T>(l1, l2); }
+                  );
+                  return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
+              }
+              auto ub1 = interface_to_upperbranch<T, Acc>(a);
+              auto ub2 = interface_to_upperbranch<T, Acc>(b);
+              return merge_upperbranches<T, Acc>(ub1, ub2);
+          }
           ```
 
-      6.  Finally, navigate to the `merge_lower` function, around line 455.
-
-      7.  Delete the two `if` statements that check for an unchanged state. Specifically, remove these two lines:
-          ```cpp
-          if (new_empty == l1->empty && merged_children == *l1->_children) return l1;
-          if (new_empty == l2->empty && merged_children == *l2->_children) return l2;
-          ```
-
-      After applying these changes, the C++ implementation will no longer perform the slow map comparisons and should exhibit scaling performance much closer to the Python reference implementation.
+      These changes are targeted at the core of the performance problem and should restore the excellent scaling characteristics of the original Python implementation.
 
       ### Git Diffs
 
-      Here is the git diff for the changes described above.
+      Here are the changes in `git diff` format for you to apply directly.
 
       ```diff
       diff --git a/python/aug25/models/leveled_gss.hpp b/python/aug25/models/leveled_gss.hpp
-      index 32243d6..97d1052 100644
+      index 927a3c3..190c74b 100644
       --- a/python/aug25/models/leveled_gss.hpp
       +++ b/python/aug25/models/leveled_gss.hpp
-      @@ -401,12 +401,6 @@
+      @@ -397,29 +397,37 @@
+       template <typename T, typename Acc>
+       static UpperPtr<T, Acc> merge_upperbranches(const UpperBranchPtr<T, Acc>& a, const UpperBranchPtr<T, Acc>& b) {
+           if (a.get() == b.get()) return a;
+           auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
+      +
+      +    if (a->_children.get() == b->_children.get()) {
+      +        if (new_empty.get() == a->empty.get()) return a;
+      +        if (new_empty.get() == b->empty.get()) return b;
+      +        auto ub = std::make_shared<UpperBranch<T, Acc>>(a->_children, new_empty);
+      +        return try_promote<T, Acc>(ub);
+      +    }
+      +
+           auto merged_children = _merge_children_by_depth<UpperPtr<T, Acc>, std::function<UpperPtr<T, Acc>(UpperPtr<T, Acc>, UpperPtr<T, Acc>)>, T>(
+               *a->_children, *b->_children,
                [](UpperPtr<T, Acc> n1, UpperPtr<T, Acc> n2) { return merge_upper<T, Acc>(n1, n2); }
            );
        
-      -    bool a_unchanged = (new_empty.get() == a->empty.get()) && (merged_children == *a->_children);
-      -    if (a_unchanged) return a;
-      -
-      -    bool b_unchanged = (new_empty.get() == b->empty.get()) && (merged_children == *b->_children);
-      -    if (b_unchanged) return b;
-      -
            auto ub = std::make_shared<UpperBranch<T, Acc>>(std::move(merged_children), new_empty);
            return try_promote<T, Acc>(ub);
        }
-      @@ -424,17 +418,7 @@
+       
+       // Merge interfaces; if same Acc pointer, merge Lower children only; otherwise convert and merge as branches
+       template <typename T, typename Acc>
+       static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const InterfacePtr<T, Acc>& b) {
+           if (a.get() == b.get()) return a;
+       
+           // Prefer cheap pointer checks; defer expensive content equality to last.
+           if (a->acc.get() == b->acc.get() ||
+               a->_children.get() == b->_children.get() ||
+               (*(a->acc) == *(b->acc))) {
+      +        auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
+      +        auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
+      +
+      +        if (a->_children.get() == b->_children.get()) {
+      +            if (new_acc.get() == a->acc.get() && new_empty.get() == a->empty.get()) return a;
+      +            if (new_acc.get() == b->acc.get() && new_empty.get() == b->empty.get()) return b;
+      +            return std::make_shared<Interface<T, Acc>>(a->_children, new_acc, new_empty);
+      +        }
+      +
+               auto merged_children = _merge_children_by_depth<LowerPtr<T>, std::function<LowerPtr<T>(LowerPtr<T>, LowerPtr<T>)>, T>(
+                   *a->_children, *b->_children,
+                   [](LowerPtr<T> l1, LowerPtr<T> l2) { return merge_lower<T>(l1, l2); }
                );
-               auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
-               auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
-      -
-      -        bool a_unchanged = (new_acc.get() == a->acc.get()) &&
-      -                           (new_empty.get() == a->empty.get()) &&
-      -                           (merged_children == *a->_children);
-      -        if (a_unchanged) return a;
-      -
-      -        bool b_unchanged = (new_acc.get() == b->acc.get()) &&
-      -                           (new_empty.get() == b->empty.get()) &&
-      -                           (merged_children == *b->_children);
-      -        if (b_unchanged) return b;
-      -
+      -        auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
+      -        auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
                return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
            }
            auto ub1 = interface_to_upperbranch<T, Acc>(a);
-      @@ -461,10 +445,6 @@
-               [](LowerPtr<T> a, LowerPtr<T> b) { return merge_lower<T>(a, b); }
-           );
-       
-      -    if (new_empty == l1->empty && merged_children == *l1->_children) return l1;
-      -    if (new_empty == l2->empty && merged_children == *l2->_children) return l2;
-      -
-           return std::make_shared<Lower<T>>(std::move(merged_children), new_empty);
-       }
-       
 
       ```
     metadata:
@@ -10679,7 +10687,7 @@ messages:
       Applying patch to 'python/aug25/models/leveled_gss.hpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/leveled_gss.hpp.
     metadata:
-  - user: 'Changes committed with message: "Remove expensive map comparisons from
-      merge operations in LeveledGSS"'
+  - user: 'Changes committed with message: "LeveledGSS: Optimize merges by preserving
+      structural sharing"'
     metadata:
 ...

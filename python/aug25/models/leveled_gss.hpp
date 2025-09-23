@@ -340,6 +340,14 @@ template <typename T, typename Acc>
 static UpperPtr<T, Acc> merge_upperbranches(const UpperBranchPtr<T, Acc>& a, const UpperBranchPtr<T, Acc>& b) {
     if (a.get() == b.get()) return a;
     auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
+
+    if (a->_children.get() == b->_children.get()) {
+        if (new_empty.get() == a->empty.get()) return a;
+        if (new_empty.get() == b->empty.get()) return b;
+        auto ub = std::make_shared<UpperBranch<T, Acc>>(a->_children, new_empty);
+        return try_promote<T, Acc>(ub);
+    }
+
     auto merged_children = _merge_children_by_depth<UpperPtr<T, Acc>, std::function<UpperPtr<T, Acc>(UpperPtr<T, Acc>, UpperPtr<T, Acc>)>, T>(
         *a->_children, *b->_children,
         [](UpperPtr<T, Acc> n1, UpperPtr<T, Acc> n2) { return merge_upper<T, Acc>(n1, n2); }
@@ -358,12 +366,19 @@ static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const In
     if (a->acc.get() == b->acc.get() ||
         a->_children.get() == b->_children.get() ||
         (*(a->acc) == *(b->acc))) {
+        auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
+        auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
+
+        if (a->_children.get() == b->_children.get()) {
+            if (new_acc.get() == a->acc.get() && new_empty.get() == a->empty.get()) return a;
+            if (new_acc.get() == b->acc.get() && new_empty.get() == b->empty.get()) return b;
+            return std::make_shared<Interface<T, Acc>>(a->_children, new_acc, new_empty);
+        }
+
         auto merged_children = _merge_children_by_depth<LowerPtr<T>, std::function<LowerPtr<T>(LowerPtr<T>, LowerPtr<T>)>, T>(
             *a->_children, *b->_children,
             [](LowerPtr<T> l1, LowerPtr<T> l2) { return merge_lower<T>(l1, l2); }
         );
-        auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
-        auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
         return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
     }
     auto ub1 = interface_to_upperbranch<T, Acc>(a);
