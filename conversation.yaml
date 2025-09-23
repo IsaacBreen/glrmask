@@ -13,7 +13,6 @@ local_system:
     - python/aug25/models/leveled_gss.hpp
     - python/gss_tester/run_benches.sh
     - python/run_benchmarks.sh
-    - run_rust_and_cpp_models.sh
     - python/gss_tester/run_tests.sh
   conversation_file:
   compile_command:
@@ -1477,7 +1476,7 @@ local_system:
               apply_memo: Dict[PyAcc, PyAcc] = {}
               for sid, gss in state_map.items():
                   r: int = roots_map[int(sid)]
-                  gss_initialized: GSS = gss.apply(initialize_acc, apply_memo)
+                  gss_initialized: GSS = gss.apply(initialize_acc)
                   if r in values:
                       values[r] = values[r].merge(gss_initialized)
                   else:
@@ -5083,100 +5082,6 @@ local_system:
       echo "Baseline: $BASELINE_STEM"
       echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
       echo "Full JSON results are in: $RESULTS_DIR"
-    run_rust_and_cpp_models.sh: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-
-      # This script builds the Boost.ICL-backed C++ extension and runs the benchmarks
-      # comparing the Rust baseline and the C++-accelerated Python model.
-      #
-      # Usage:
-      #   bash run_rust_and_cpp_models.sh
-      #
-      # Requirements:
-      #   - curl, tar, a C++17 compiler (clang++ or g++)
-      #   - Python with pip
-      #
-      # It downloads Boost headers locally (no system install needed), builds the extensions in-place,
-      # and then runs the provided run_benchmarks.sh script.
-
-      PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-      cd "$PROJECT_ROOT"
-
-      # 1) Ensure we are in the repo root and Python folder exists
-      if [ ! -d "python" ]; then
-        echo "Error: expected 'python' directory at repo root. Run this script from the repo root."
-        exit 1
-      fi
-
-      # 2) Setup: download Boost headers locally and install pybind11
-      BOOST_VERSION="1.83.0"
-      BOOST_VER_UNDERSCORES="1_83_0"
-      BOOST_DIR="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}"
-      mkdir -p "${PROJECT_ROOT}/.build"
-
-      if [ ! -d "$BOOST_DIR" ]; then
-        BOOST_TGZ="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
-        echo "Downloading Boost ${BOOST_VERSION} headers..."
-        curl -L -o "$BOOST_TGZ" "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
-        echo "Extracting Boost..."
-        tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
-      fi
-
-      echo "Installing pybind11 (local user)..."
-      python3 -m pip install --user --quiet pybind11
-
-      # 3) Build the C++ extensions in place
-      echo "Building C++ extensions ..."
-      cd "${PROJECT_ROOT}/python"
-
-      # Compute extension suffix and includes via pybind11
-      EXT_SUFFIX="$(python3 - << 'PY'
-      import sysconfig
-      print(sysconfig.get_config_var("EXT_SUFFIX"))
-      PY
-      )"
-
-      PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
-      CXX="${CXX:-c++}"
-      CXXFLAGS="-O3 -DNDEBUG -std=c++17 -shared -fPIC"
-      LDFLAGS=""
-      if [[ "$(uname)" == "Darwin" ]]; then
-        LDFLAGS="-undefined dynamic_lookup"
-      fi
-
-      # Optional ASan (opt-in)
-      if [[ "${SANITIZE:-0}" == "1" ]]; then
-        echo "Building with AddressSanitizer (SANITIZE=1)"
-        CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c++17 -shared -fPIC"
-        LDFLAGS="${LDFLAGS} -fsanitize=address"
-      fi
-
-      # Compile icl_rangeset (Boost.ICL-backed RangeSet)
-      ${CXX} ${CXXFLAGS} \
-        ${PYBIND_INCLUDES} \
-        -I"${BOOST_DIR}" \
-        "aug25/models/icl_rangeset.cpp" \
-        -o "aug25/models/icl_rangeset${EXT_SUFFIX}" \
-        ${LDFLAGS}
-
-      # Compile precompute3_engine (C++ commit/get_mask engine)
-      ${CXX} ${CXXFLAGS} \
-        ${PYBIND_INCLUDES} \
-        -I"${BOOST_DIR}" \
-        "aug25/models/precompute3_engine.cpp" \
-        -o "aug25/models/precompute3_engine${EXT_SUFFIX}" \
-        ${LDFLAGS}
-
-      echo "Build complete:"
-      echo " - python/aug25/models/icl_rangeset${EXT_SUFFIX}"
-      echo " - python/aug25/models/precompute3_engine${EXT_SUFFIX}"
-
-      # 4) Run benchmarks comparing Rust baseline vs C++-accelerated model
-      echo
-      echo "Running benchmarks..."
-      cd "$PROJECT_ROOT"
-      bash python/run_benchmarks.sh "python/aug25/models/precompute3_model_pure_python_get_mask_only.py" "python/aug25/models/precompute3_model_cpp.py"
     python/gss_tester/run_tests.sh: |-
       #!/bin/bash
       set -euo pipefail
@@ -6815,7 +6720,7 @@ local_system:
               apply_memo: Dict[PyAcc, PyAcc] = {}
               for sid, gss in state_map.items():
                   r: int = roots_map[int(sid)]
-                  gss_initialized: GSS = gss.apply(initialize_acc, apply_memo)
+                  gss_initialized: GSS = gss.apply(initialize_acc)
                   if r in values:
                       values[r] = values[r].merge(gss_initialized)
                   else:
@@ -10298,7 +10203,7 @@ local_system:
       # (no in-process reference/baseline). The analyzer is later told which result
       # is the baseline to perform mask comparisons.
       #
-      # This script should be run from the `python` directory.
+      # This script should be run from the project root directory.
       #
       # Usage:
       #   ./run_benchmarks.sh <baseline_model.py> <model1.py> [model2.py ...]
@@ -10365,6 +10270,70 @@ local_system:
       echo "---"
 
 
+      # --- Automated C++ Build Process ---
+      echo "Ensuring C++ extensions are built..."
+
+      # Determine project root, assuming this script is in the 'python' directory.
+      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
+
+      # 1) Setup: download Boost headers locally and install pybind11
+      BOOST_VERSION="1.83.0"
+      BOOST_VER_UNDERSCORES="1_83_0"
+      BOOST_DIR="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}"
+      mkdir -p "${PROJECT_ROOT}/.build"
+
+      if [ ! -d "$BOOST_DIR" ]; then
+        BOOST_TGZ="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+        echo "Downloading Boost ${BOOST_VERSION} headers..."
+        curl -L -o "$BOOST_TGZ" "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+        echo "Extracting Boost..."
+        tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
+      fi
+
+      echo "Installing pybind11..."
+      python3 -m pip install --quiet pybind11
+
+      # 2) Build the C++ extensions in place
+      echo "Building C++ extensions..."
+
+      # Compute extension suffix and includes via pybind11
+      EXT_SUFFIX="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or ".so")')"
+      PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
+      CXX="${CXX:-c++}"
+      CXXFLAGS="-O3 -DNDEBUG -std=c++17 -shared -fPIC"
+      LDFLAGS=""
+      if [[ "$(uname)" == "Darwin" ]]; then
+        LDFLAGS="-undefined dynamic_lookup"
+      fi
+
+      # Optional ASan (opt-in via SANITIZE=1 env var)
+      if [[ "${SANITIZE:-0}" == "1" ]]; then
+        echo "Building with AddressSanitizer (SANITIZE=1)"
+        CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c++17 -shared -fPIC"
+        LDFLAGS="${LDFLAGS} -fsanitize=address"
+      fi
+
+      # Change to python directory to run build commands with relative paths
+      ORIGINAL_CWD=$(pwd)
+      cd "$SCRIPT_DIR"
+
+      # Compile extensions. Paths are relative to the 'python' directory.
+      ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+        "aug25/models/icl_rangeset.cpp" -o "aug25/models/icl_rangeset${EXT_SUFFIX}" ${LDFLAGS}
+
+      ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+        "aug25/models/leveled_gss_py.cpp" -o "leveled_gss_cpp${EXT_SUFFIX}" ${LDFLAGS}
+
+      ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+        "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
+
+      # Change back to original directory
+      cd "$ORIGINAL_CWD"
+
+      echo "Build complete."
+      echo "---"
+
       # --- Run Benchmarks ---
       echo "Starting benchmark runs..."
       # Define the ASAN library path at the top of the loop for clarity
@@ -10421,111 +10390,6 @@ local_system:
       echo "Baseline: $BASELINE_STEM"
       echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
       echo "Full JSON results are in: $RESULTS_DIR"
-    run_rust_and_cpp_models.sh: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-
-      # This script builds the Boost.ICL-backed C++ extension and runs the benchmarks
-      # comparing the Rust baseline and the C++-accelerated Python model.
-      #
-      # Usage:
-      #   bash run_rust_and_cpp_models.sh
-      #
-      # Requirements:
-      #   - curl, tar, a C++17 compiler (clang++ or g++)
-      #   - Python with pip
-      #
-      # It downloads Boost headers locally (no system install needed), builds the extensions in-place,
-      # and then runs the provided run_benchmarks.sh script.
-
-      PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-      cd "$PROJECT_ROOT"
-
-      # 1) Ensure we are in the repo root and Python folder exists
-      if [ ! -d "python" ]; then
-        echo "Error: expected 'python' directory at repo root. Run this script from the repo root."
-        exit 1
-      fi
-
-      export PYTHONPATH="${PROJECT_ROOT}/python:${PYTHONPATH:-}"
-
-      # 2) Setup: download Boost headers locally and install pybind11
-      BOOST_VERSION="1.83.0"
-      BOOST_VER_UNDERSCORES="1_83_0"
-      BOOST_DIR="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}"
-      mkdir -p "${PROJECT_ROOT}/.build"
-
-      if [ ! -d "$BOOST_DIR" ]; then
-        BOOST_TGZ="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
-        echo "Downloading Boost ${BOOST_VERSION} headers..."
-        curl -L -o "$BOOST_TGZ" "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
-        echo "Extracting Boost..."
-        tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
-      fi
-
-      echo "Installing pybind11 (local user)..."
-      python3 -m pip install --user --quiet pybind11
-
-      # 3) Build the C++ extensions in place
-      echo "Building C++ extensions ..."
-      cd "${PROJECT_ROOT}/python"
-
-      # Compute extension suffix and includes via pybind11
-      EXT_SUFFIX="$(python3 - << 'PY'
-      import sysconfig
-      print(sysconfig.get_config_var("EXT_SUFFIX"))
-      PY
-      )"
-
-      PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
-      CXX="${CXX:-c++}"
-      CXXFLAGS="-O3 -DNDEBUG -std=c++17 -shared -fPIC"
-      LDFLAGS=""
-      if [[ "$(uname)" == "Darwin" ]]; then
-        LDFLAGS="-undefined dynamic_lookup"
-      fi
-
-      # Optional ASan (opt-in)
-      if [[ "${SANITIZE:-0}" == "1" ]]; then
-        echo "Building with AddressSanitizer (SANITIZE=1)"
-        CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c++17 -shared -fPIC"
-        LDFLAGS="${LDFLAGS} -fsanitize=address"
-      fi
-
-      # Compile icl_rangeset (Boost.ICL-backed RangeSet)
-      ${CXX} ${CXXFLAGS} \
-        ${PYBIND_INCLUDES} \
-        -I"${BOOST_DIR}" \
-        "aug25/models/icl_rangeset.cpp" \
-        -o "aug25/models/icl_rangeset${EXT_SUFFIX}" \
-        ${LDFLAGS}
-
-      # Compile leveled_gss_cpp (C++ LeveledGSS implementation)
-      ${CXX} ${CXXFLAGS} \
-        ${PYBIND_INCLUDES} \
-        -I"${BOOST_DIR}" \
-        "aug25/models/leveled_gss_py.cpp" \
-        -o "leveled_gss_cpp${EXT_SUFFIX}" \
-        ${LDFLAGS}
-
-      # Compile precompute3_engine (C++ commit/get_mask engine)
-      ${CXX} ${CXXFLAGS} \
-        ${PYBIND_INCLUDES} \
-        -I"${BOOST_DIR}" \
-        "aug25/models/precompute3_engine.cpp" \
-        -o "aug25/models/precompute3_engine${EXT_SUFFIX}" \
-        ${LDFLAGS}
-
-      echo "Build complete:"
-      echo " - python/aug25/models/icl_rangeset${EXT_SUFFIX}"
-      echo " - python/leveled_gss_cpp${EXT_SUFFIX}"
-      echo " - python/aug25/models/precompute3_engine${EXT_SUFFIX}"
-
-      # 4) Run benchmarks comparing Rust baseline vs C++-accelerated model
-      echo
-      echo "Running benchmarks..."
-      cd "$PROJECT_ROOT"
-      bash python/run_benchmarks.sh "python/aug25/models/precompute3_model_pure_python_get_mask_only.py" "python/aug25/models/precompute3_model_cpp.py"
     python/gss_tester/run_tests.sh: |-
       #!/bin/bash
       set -euo pipefail
@@ -12218,7 +12082,7 @@ messages:
               apply_memo: Dict[PyAcc, PyAcc] = {}
               for sid, gss in state_map.items():
                   r: int = roots_map[int(sid)]
-                  gss_initialized: GSS = gss.apply(initialize_acc, apply_memo)
+                  gss_initialized: GSS = gss.apply(initialize_acc)
                   if r in values:
                       values[r] = values[r].merge(gss_initialized)
                   else:
@@ -15904,6 +15768,8 @@ messages:
         exit 1
       fi
 
+      export PYTHONPATH="${PROJECT_ROOT}/python:${PYTHONPATH:-}"
+
       # 2) Setup: download Boost headers locally and install pybind11
       BOOST_VERSION="1.83.0"
       BOOST_VER_UNDERSCORES="1_83_0"
@@ -15955,6 +15821,14 @@ messages:
         -o "aug25/models/icl_rangeset${EXT_SUFFIX}" \
         ${LDFLAGS}
 
+      # Compile leveled_gss_cpp (C++ LeveledGSS implementation)
+      ${CXX} ${CXXFLAGS} \
+        ${PYBIND_INCLUDES} \
+        -I"${BOOST_DIR}" \
+        "aug25/models/leveled_gss_py.cpp" \
+        -o "leveled_gss_cpp${EXT_SUFFIX}" \
+        ${LDFLAGS}
+
       # Compile precompute3_engine (C++ commit/get_mask engine)
       ${CXX} ${CXXFLAGS} \
         ${PYBIND_INCLUDES} \
@@ -15965,6 +15839,7 @@ messages:
 
       echo "Build complete:"
       echo " - python/aug25/models/icl_rangeset${EXT_SUFFIX}"
+      echo " - python/leveled_gss_cpp${EXT_SUFFIX}"
       echo " - python/aug25/models/precompute3_engine${EXT_SUFFIX}"
 
       # 4) Run benchmarks comparing Rust baseline vs C++-accelerated model
@@ -16158,67 +16033,8 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/run_tests.sh
-  - user: |
-      bash run_rust_and_cpp_models.sh
-      Installing pybind11 (local user)...
-
-      [notice] A new release of pip is available: 25.0.1 -> 25.2
-      [notice] To update, run: pip install --upgrade pip
-      Building C++ extensions ...
-      Build complete:
-       - python/aug25/models/icl_rangeset.cpython-312-darwin.so
-       - python/aug25/models/precompute3_engine.cpython-312-darwin.so
-
-      Running benchmarks...
-      Benchmark results will be saved in: benchmark_results/2025-09-23_13-39-48
-      ---
-      Baseline Model: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      Other Models: python/aug25/models/precompute3_model_cpp.py
-      Constraint File: ./.cache/test_vocabs/js_grammar_constraint.json.gz
-      Code: ./src/example_code.js
-      ---
-      Starting benchmark runs...
-
-      >>> Running benchmark for: precompute3_model_pure_python_get_mask_only.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/precompute3_model_pure_python_get_mask_only.py --output benchmark_results/2025-09-23_13-39-48
-      --- Setting up benchmark environment ---
-      Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
-      Loading model from: python/aug25/models/precompute3_model_pure_python_get_mask_only.py
-      Traceback (most recent call last):
-        File "<frozen runpy>", line 198, in _run_module_as_main
-        File "<frozen runpy>", line 88, in _run_code
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 314, in <module>
-          main()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 310, in main
-          run_benchmark(args)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 206, in run_benchmark
-          ModelClass = load_model_class(args.model)
-                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 87, in load_model_class
-          spec.loader.exec_module(module)
-        File "<frozen importlib._bootstrap_external>", line 994, in exec_module
-        File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python_get_mask_only.py", line 5, in <module>
-          from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
-        File "/Users/isaacbreen/Projects2/grammars2024/python/gss_tester/implementations/leveled_impl_cpp.py", line 6, in <module>
-          from leveled_gss_cpp import LeveledGssCpp
-      ModuleNotFoundError: No module named 'leveled_gss_cpp'
-
-      >>> Benchmark for precompute3_model_pure_python_get_mask_only.py failed with exit code 1. Skipping.
-
-      >>> Running benchmark for: precompute3_model_cpp.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/precompute3_model_cpp.py --output benchmark_results/2025-09-23_13-39-48
-      >>> Running with AddressSanitizer...
-      python(70862,0x1f1024800) malloc: nano zone abandoned due to inability to reserve vm space.
-      --- Setting up benchmark environment ---
-      Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
-      Loading model from: python/aug25/models/precompute3_model_cpp.py
-      ^C^Cobject address  : 0x16dea1300
-      object refcount : 3
-      object type     : 0x102f1c890
-      object type name: KeyboardInterrupt
-      object repr     : KeyboardInterrupt()
-      lost sys.stderr
+  - user: Make it so I can just run `bash python/run_benchmarks.sh python/aug25/models/precompute3_model_pure_python_get_mask_only.py
+      python/aug25/models/precompute3_model_cpp.py`, ie so we don't need `bash run_rust_and_cpp_models.sh`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -16237,99 +16053,251 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The error `ModuleNotFoundError: No module named 'leveled_gss_cpp'` occurs because the build script you're using, `run_rust_and_cpp_models.sh`, is missing the step to compile the `leveled_gss_cpp` Python module. Additionally, for Python to find this top-level module, the `PYTHONPATH` needs to be correctly configured.
-
-      Here are the step-by-step instructions to fix the script, followed by the git diff.
+      Here are the step-by-step instructions to consolidate the C++ build logic into the main benchmark script, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `run_rust_and_cpp_models.sh`**.
+      1.  **Update `python/run_benchmarks.sh`**
 
-      2.  **Set the `PYTHONPATH`**: Add a line to export the `PYTHONPATH` environment variable near the top of the script. This ensures that when the benchmark runner is invoked, Python can find the compiled modules.
-          *   **Location**: After the initial `cd "$PROJECT_ROOT"` and the check for the `python` directory.
-          *   **Add this line**:
-              ```shell
-              export PYTHONPATH="${PROJECT_ROOT}/python:${PYTHONPATH:-}"
-              ```
+          First, we'll modify the main benchmark script to handle the C++ extension building automatically. This makes it the single entry point for running these benchmarks.
 
-      3.  **Add the missing build step**: Insert the compilation command for `leveled_gss_py.cpp`. This will create the `leveled_gss_cpp.so` file that Python is looking for.
-          *   **Location**: After the compilation block for `icl_rangeset.cpp` and before the block for `precompute3_engine.cpp`.
-          *   **Add this code block**:
-              ```shell
-              # Compile leveled_gss_cpp (C++ LeveledGSS implementation)
-              ${CXX} ${CXXFLAGS} \
-                ${PYBIND_INCLUDES} \
-                -I"${BOOST_DIR}" \
-                "aug25/models/leveled_gss_py.cpp" \
-                -o "leveled_gss_cpp${EXT_SUFFIX}" \
-                ${LDFLAGS}
-              ```
+          *   Open the file `python/run_benchmarks.sh`.
+          *   In the header comment, change the line "This script should be run from the `python` directory" to "This script should be run from the project root directory" to reflect its correct usage.
+          *   After the `--- Setup ---` block (where it prints the configuration), insert a new `--- Automated C++ Build Process ---` block. This new section will:
+              *   Determine the project's root directory.
+              *   Download and extract the Boost library headers into a local `.build` directory if they don't already exist.
+              *   Install the `pybind11` dependency using `pip`.
+              *   Compile the three required C++ extensions (`icl_rangeset.cpp`, `leveled_gss_py.cpp`, and `precompute3_engine.cpp`). The script will handle compiler flags, pybind11 includes, and linking, placing the compiled shared libraries where Python can import them. It also includes support for AddressSanitizer via the `SANITIZE=1` environment variable.
 
-      4.  **Update the build summary**: Add an `echo` statement to confirm that the new module has been built.
-          *   **Location**: Inside the `echo "Build complete:"` block.
-          *   **Add this line**:
-              ```shell
-              echo " - python/leveled_gss_cpp${EXT_SUFFIX}"
-              ```
+      2.  **Delete `run_rust_and_cpp_models.sh`**
 
-      After applying these changes, the script will correctly build all necessary C++ modules and configure the environment for Python to find them, resolving the `ModuleNotFoundError`.
+          Since all the build logic from this script is now part of `python/run_benchmarks.sh`, this wrapper script is no longer needed.
 
-      ### Git Diff
+          *   Delete the file `run_rust_and_cpp_models.sh` from the project root.
 
-      Here is the git diff to apply the changes to `run_rust_and_cpp_models.sh`.
+      After applying these changes, you can run the benchmarks directly with the command you specified:
+      `bash python/run_benchmarks.sh python/aug25/models/precompute3_model_pure_python_get_mask_only.py python/aug25/models/precompute3_model_cpp.py`
+
+      ### Git Diffs
+
+      Here are the git diffs to apply these changes:
+
+      ```diff
+      diff --git a/python/run_benchmarks.sh b/python/run_benchmarks.sh
+      --- a/python/run_benchmarks.sh
+      +++ b/python/run_benchmarks.sh
+      @@ -5,9 +5,9 @@
+       # A script to automate running benchmarks for multiple grammar constraint models,
+       # generating JSON results and analysis plots. This script runs each model once
+       # (no in-process reference/baseline). The analyzer is later told which result
+       # is the baseline to perform mask comparisons.
+       #
+      -# This script should be run from the `python` directory.
+      +# This script should be run from the project root directory.
+       #
+       # Usage:
+       #   ./run_benchmarks.sh <baseline_model.py> <model1.py> [model2.py ...]
+      @@ -53,6 +53,68 @@
+       echo "---"
+       
+       
+      +# --- Automated C++ Build Process ---
+      +echo "Ensuring C++ extensions are built..."
+      +
+      +# Determine project root, assuming this script is in the 'python' directory.
+      +SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      +PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
+      +
+      +# 1) Setup: download Boost headers locally and install pybind11
+      +BOOST_VERSION="1.83.0"
+      +BOOST_VER_UNDERSCORES="1_83_0"
+      +BOOST_DIR="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}"
+      +mkdir -p "${PROJECT_ROOT}/.build"
+      +
+      +if [ ! -d "$BOOST_DIR" ]; then
+      +  BOOST_TGZ="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+      +  echo "Downloading Boost ${BOOST_VERSION} headers..."
+      +  curl -L -o "$BOOST_TGZ" "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+      +  echo "Extracting Boost..."
+      +  tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
+      +fi
+      +
+      +echo "Installing pybind11..."
+      +python3 -m pip install --quiet pybind11
+      +
+      +# 2) Build the C++ extensions in place
+      +echo "Building C++ extensions..."
+      +
+      +# Compute extension suffix and includes via pybind11
+      +EXT_SUFFIX="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or ".so")')"
+      +PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
+      +CXX="${CXX:-c++}"
+      +CXXFLAGS="-O3 -DNDEBUG -std=c++17 -shared -fPIC"
+      +LDFLAGS=""
+      +if [[ "$(uname)" == "Darwin" ]]; then
+      +  LDFLAGS="-undefined dynamic_lookup"
+      +fi
+      +
+      +# Optional ASan (opt-in via SANITIZE=1 env var)
+      +if [[ "${SANITIZE:-0}" == "1" ]]; then
+      +  echo "Building with AddressSanitizer (SANITIZE=1)"
+      +  CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c++17 -shared -fPIC"
+      +  LDFLAGS="${LDFLAGS} -fsanitize=address"
+      +fi
+      +
+      +# Change to python directory to run build commands with relative paths
+      +ORIGINAL_CWD=$(pwd)
+      +cd "$SCRIPT_DIR"
+      +
+      +# Compile extensions. Paths are relative to the 'python' directory.
+      +${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+      +  "aug25/models/icl_rangeset.cpp" -o "aug25/models/icl_rangeset${EXT_SUFFIX}" ${LDFLAGS}
+      +
+      +${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+      +  "aug25/models/leveled_gss_py.cpp" -o "leveled_gss_cpp${EXT_SUFFIX}" ${LDFLAGS}
+      +
+      +${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+      +  "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
+      +
+      +# Change back to original directory
+      +cd "$ORIGINAL_CWD"
+      +
+      +echo "Build complete."
+      +echo "---"
+      +
+       # --- Run Benchmarks ---
+       echo "Starting benchmark runs..."
+       # Define the ASAN library path at the top of the loop for clarity
+
+      ```
 
       ```diff
       diff --git a/run_rust_and_cpp_models.sh b/run_rust_and_cpp_models.sh
+      deleted file mode 100755
+      index 26011e1..0000000
       --- a/run_rust_and_cpp_models.sh
-      +++ b/run_rust_and_cpp_models.sh
-      @@ -19,6 +19,8 @@
-         exit 1
-       fi
-       
-      +export PYTHONPATH="${PROJECT_ROOT}/python:${PYTHONPATH:-}"
-      +
-       # 2) Setup: download Boost headers locally and install pybind11
-       BOOST_VERSION="1.83.0"
-       BOOST_VER_UNDERSCORES="1_83_0"
-      @@ -60,16 +62,25 @@
-         -o "aug25/models/icl_rangeset${EXT_SUFFIX}" \
-         ${LDFLAGS}
-       
-      +# Compile leveled_gss_cpp (C++ LeveledGSS implementation)
-      +${CXX} ${CXXFLAGS} \
-      +  ${PYBIND_INCLUDES} \
-      +  -I"${BOOST_DIR}" \
-      +  "aug25/models/leveled_gss_py.cpp" \
-      +  -o "leveled_gss_cpp${EXT_SUFFIX}" \
-      +  ${LDFLAGS}
-      +
-       # Compile precompute3_engine (C++ commit/get_mask engine)
-       ${CXX} ${CXXFLAGS} \
-         ${PYBIND_INCLUDES} \
-         -I"${BOOST_DIR}" \
-         "aug25/models/precompute3_engine.cpp" \
-         -o "aug25/models/precompute3_engine${EXT_SUFFIX}" \
-         ${LDFLAGS}
-       
-       echo "Build complete:"
-       echo " - python/aug25/models/icl_rangeset${EXT_SUFFIX}"
-      +echo " - python/leveled_gss_cpp${EXT_SUFFIX}"
-       echo " - python/aug25/models/precompute3_engine${EXT_SUFFIX}"
-       
-       # 4) Run benchmarks comparing Rust baseline vs C++-accelerated model
+      +++ /dev/null
+      @@ -1,81 +0,0 @@
+      -#!/usr/bin/env bash
+      -set -euo pipefail
+      -
+      -# This script builds the Boost.ICL-backed C++ extension and runs the benchmarks
+      -# comparing the Rust baseline and the C++-accelerated Python model.
+      -#
+      -# Usage:
+      -#   bash run_rust_and_cpp_models.sh
+      -#
+      -# Requirements:
+      -#   - curl, tar, a C++17 compiler (clang++ or g++)
+      -#   - Python with pip
+      -#
+      -# It downloads Boost headers locally (no system install needed), builds the extensions in-place,
+      -# and then runs the provided run_benchmarks.sh script.
+      -
+      -PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+      -cd "$PROJECT_ROOT"
+      -
+      -# 1) Ensure we are in the repo root and Python folder exists
+      -if [ ! -d "python" ]; then
+      -  echo "Error: expected 'python' directory at repo root. Run this script from the repo root."
+      -  exit 1
+      -fi
+      -
+      -export PYTHONPATH="${PROJECT_ROOT}/python:${PYTHONPATH:-}"
+      -
+      -# 2) Setup: download Boost headers locally and install pybind11
+      -BOOST_VERSION="1.83.0"
+      -BOOST_VER_UNDERSCORES="1_83_0"
+      -BOOST_DIR="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}"
+      -mkdir -p "${PROJECT_ROOT}/.build"
+      -
+      -if [ ! -d "$BOOST_DIR" ]; then
+      -  BOOST_TGZ="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+      -  echo "Downloading Boost ${BOOST_VERSION} headers..."
+      -  curl -L -o "$BOOST_TGZ" "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
+      -  echo "Extracting Boost..."
+      -  tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
+      -fi
+      -
+      -echo "Installing pybind11 (local user)..."
+      -python3 -m pip install --user --quiet pybind11
+      -
+      -# 3) Build the C++ extensions in place
+      -echo "Building C++ extensions ..."
+      -cd "${PROJECT_ROOT}/python"
+      -
+      -# Compute extension suffix and includes via pybind11
+      -EXT_SUFFIX="$(python3 - << 'PY'
+      -import sysconfig
+      -print(sysconfig.get_config_var("EXT_SUFFIX"))
+      -PY
+      -)"
+      -
+      -PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
+      -CXX="${CXX:-c++}"
+      -CXXFLAGS="-O3 -DNDEBUG -std=c++17 -shared -fPIC"
+      -LDFLAGS=""
+      -if [[ "$(uname)" == "Darwin" ]]; then
+      -  LDFLAGS="-undefined dynamic_lookup"
+      -fi
+      -
+      -# Optional ASan (opt-in)
+      -if [[ "${SANITIZE:-0}" == "1" ]]; then
+      -  echo "Building with AddressSanitizer (SANITIZE=1)"
+      -  CXXFLAGS="-g -O1 -fsanitize=address -fno-omit-frame-pointer -std=c++17 -shared -fPIC"
+      -  LDFLAGS="${LDFLAGS} -fsanitize=address"
+      -fi
+      -
+      -# Compile icl_rangeset (Boost.ICL-backed RangeSet)
+      -${CXX} ${CXXFLAGS} \
+      -  ${PYBIND_INCLUDES} \
+      -  -I"${BOOST_DIR}" \
+      -  "aug25/models/icl_rangeset.cpp" \
+      -  -o "aug25/models/icl_rangeset${EXT_SUFFIX}" \
+      -  ${LDFLAGS}
+      -
+      -# Compile leveled_gss_cpp (C++ LeveledGSS implementation)
+      -${CXX} ${CXXFLAGS} \
+      -  ${PYBIND_INCLUDES} \
+      -  -I"${BOOST_DIR}" \
+      -  "aug25/models/leveled_gss_py.cpp" \
+      -  -o "leveled_gss_cpp${EXT_SUFFIX}" \
+      -  ${LDFLAGS}
+      -
+      -# Compile precompute3_engine (C++ commit/get_mask engine)
+      -${CXX} ${CXXFLAGS} \
+      -  ${PYBIND_INCLUDES} \
+      -  -I"${BOOST_DIR}" \
+      -  "aug25/models/precompute3_engine.cpp" \
+      -  -o "aug25/models/precompute3_engine${EXT_SUFFIX}" \
+      -  ${LDFLAGS}
+      -
+      -echo "Build complete:"
+      -echo " - python/aug25/models/icl_rangeset${EXT_SUFFIX}"
+      -echo " - python/leveled_gss_cpp${EXT_SUFFIX}"
+      -echo " - python/aug25/models/precompute3_engine${EXT_SUFFIX}"
+      -
+      -# 4) Run benchmarks comparing Rust baseline vs C++-accelerated model
+      -echo
+      -echo "Running benchmarks..."
+      -cd "$PROJECT_ROOT"
+      -bash python/run_benchmarks.sh "python/aug25/models/precompute3_model_pure_python_get_mask_only.py" "python/aug25/models/precompute3_model_cpp.py"
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: python/run_benchmarks.sh
+      Applying patch to 'python/run_benchmarks.sh' using custom patcher...
+      Successfully applied patch and wrote to python/run_benchmarks.sh.
+
+      --- Processing Diff Block 2 ---
       Identified target file: run_rust_and_cpp_models.sh
-      Applying patch to 'run_rust_and_cpp_models.sh' using custom patcher...
-      Successfully applied patch and wrote to run_rust_and_cpp_models.sh.
-    metadata:
-  - user: 'Changes committed with message: "Fix: Build and configure leveled_gss_cpp
-      module for benchmarks"'
+      Detected deleted file (+++ /dev/null or missing +++ line).
+      Detected 'deleted file mode'.
+      Successfully deleted file: run_rust_and_cpp_models.sh
     metadata:
 ...
