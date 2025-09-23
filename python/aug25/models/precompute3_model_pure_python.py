@@ -2,7 +2,7 @@ import json
 import heapq
 import collections
 import time
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union, Any, TypedDict
 from dataclasses import dataclass, field
 
 from ..common_interface import GraphProvider, RangeSet
@@ -49,6 +49,17 @@ class ParserTable:
     table: Dict[int, Row]
 
 
+class ArenaValue(TypedDict, total=False):
+    clean_end: bool
+
+
+class ArenaNode(TypedDict, total=False):
+    max_depth: int
+    children: List[Tuple[Tuple[int, RangeSet], List[Tuple[int, RangeSet]]]]
+    llm_bv_union: RangeSet
+    value: ArenaValue
+
+
 @dataclass(frozen=True, eq=False)
 class PyAcc:
     terminals_union: Dict[int, RangeSet]
@@ -85,27 +96,31 @@ class PyAcc:
         return self.llm_mask.is_empty()
 
 
+@dataclass
 class Model(GraphProvider):
     """
     Precomputed trie model (third-generation), simplified and concise.
     """
+    roots_map_raw: List[Tuple[int, int]]
+    arena: Dict[int, Any]  # This is Dict[int, ArenaNode] after __post_init__
 
-    def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
-        self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
-        self.arena: Dict[int, dict] = arena
-        self.id_to_token: Dict[int, bytes] = {}
-        self.max_depth: Dict[int, int] = {}
-        self.possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = None
-        self.tokenizer: Optional[ffi.Regex] = None
-        self.glr_parser: Optional[ffi.GLRParser] = None
-        self.ignore_terminal_id: Optional[int] = None
-        self.parser_table: Optional[ParserTable] = None
-        self.state: Dict[int, GSS] = {}
-        self.internal_to_original_map: Dict[int, int] = {}
-        self.all_internal_llm_tokens_bitset: Optional[RangeSet] = None
-        self.tokenizer_initial_state: Optional[int] = None
-        self.tokenizer_max_state: Optional[int] = None
-        self.all_terminals_bitset: Optional[RangeSet] = None
+    roots_map: Dict[int, int] = field(init=False)
+    id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
+    max_depth: Dict[int, int] = field(init=False, default_factory=dict)
+    possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = field(init=False, default=None)
+    tokenizer: Optional[ffi.Regex] = field(init=False, default=None)
+    glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
+    ignore_terminal_id: Optional[int] = field(init=False, default=None)
+    parser_table: Optional[ParserTable] = field(init=False, default=None)
+    state: Dict[int, GSS] = field(init=False, default_factory=dict)
+    internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
+    all_internal_llm_tokens_bitset: Optional[RangeSet] = field(init=False, default=None)
+    tokenizer_initial_state: Optional[int] = field(init=False, default=None)
+    tokenizer_max_state: Optional[int] = field(init=False, default=None)
+    all_terminals_bitset: Optional[RangeSet] = field(init=False, default=None)
+
+    def __post_init__(self):
+        self.roots_map = {int(s): int(r) for s, r in self.roots_map_raw}
 
         dumps = json.dumps
         bs_from_json = ffi.Bitset.from_json_string
