@@ -291,33 +291,29 @@ static UpperPtr<T, Acc> try_promote(const UpperBranchPtr<T, Acc>& node) {
     }
     // If any child is UpperBranch, cannot promote
     for (auto &c : all_children) {
-        if (!c->is_interface()) return node;
-    }
+    if (!c->is_interface()) return node;
     // Acc set across children + node.empty
-    std::unordered_set<const Acc*> accs;
-    if (node->empty) accs.insert(node->empty.get());
+    // Acc set across children + node.empty, using value-based hashing for shared_ptr<Acc>
+    std::unordered_set<std::shared_ptr<Acc>> accs;
+    if (node->empty) accs.insert(node->empty);
     for (auto &c : all_children) {
         auto ci = std::static_pointer_cast<Interface<T, Acc>>(c);
-        accs.insert(ci->acc.get());
-        if (ci->empty) accs.insert(ci->empty.get());
+        accs.insert(ci->acc);
+        if (ci->empty) accs.insert(ci->empty);
     }
 
     if (accs.size() <= 1) {
         // Determine the unique acc (if any)
         std::shared_ptr<Acc> the_acc;
         if (!accs.empty()) {
-            // pick from children (some might be null, but if size <=1 and not empty, it's non-null)
-            if (node->empty) the_acc = node->empty;
-            else {
-                auto ci = std::static_pointer_cast<Interface<T, Acc>>(all_children[0]);
-                the_acc = ci->acc ? ci->acc : ci->empty;
-            }
-        } else {
-            // Truly empty GSS
+            the_acc = *accs.begin();
+        }
+
+        if (!the_acc) {
+            // All accumulators were null, or the set was empty.
             return std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
         }
 
-        // Build Lower children by converting each Interface child
         auto l_children = std::make_shared<LowerChildren<T>>();
         l_children->reserve(node->_children->size());
         for (auto &kv : *node->_children) {

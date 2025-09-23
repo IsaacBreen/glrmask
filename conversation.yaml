@@ -3795,7 +3795,7 @@ local_system:
 
               // This memoization cache is critical for performance. It's shared across all GSSs
               // being initialized, mirroring the Python implementation's optimization.
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> init_acc_memo;
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> init_acc_memo;
 
               values.reserve(state_.size());
               todo.reserve(state_.size());
@@ -4441,7 +4441,7 @@ local_system:
 
           Leveled initialize_gss_accs(
               const Leveled& g,
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>* acc_memo
           ) {
               auto& stats = Stats::get();
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
@@ -4559,9 +4559,26 @@ local_system:
           }
 
           static RangeSet from_indices(const std::vector<unsigned long long>& indices) {
+              if (indices.empty()) {
+                  return RangeSet::empty();
+              }
+              // Create a mutable copy to sort and unique
+              std::vector<unsigned long long> sorted_indices = indices;
+              std::sort(sorted_indices.begin(), sorted_indices.end());
+              sorted_indices.erase(std::unique(sorted_indices.begin(), sorted_indices.end()), sorted_indices.end());
+
               RangeSet rs;
-              for (unsigned long long i : indices) {
-                  rs.set.add(i);
+              auto it = sorted_indices.begin();
+              while (it != sorted_indices.end()) {
+                  unsigned long long start = *it;
+                  unsigned long long end = start;
+                  auto next_it = std::next(it);
+                  while (next_it != sorted_indices.end() && *next_it == end + 1) {
+                      end = *next_it;
+                      ++next_it;
+                  }
+                  rs.set.add(boost::icl::discrete_interval<unsigned long long>::closed(start, end));
+                  it = next_it;
               }
               return rs;
           }
@@ -5569,21 +5586,20 @@ local_system:
           // Apply: Acc -> NewAcc (but we keep Acc type same for simplicity here)
           LeveledGSS apply(
               const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& func,
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo_ptr = nullptr
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>* acc_memo_ptr = nullptr
           ) const {
               std::unordered_map<std::uintptr_t, UpperPtr<T, Acc>> memo;
 
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> local_acc_memo;
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>& acc_memo =
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> local_acc_memo;
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>& acc_memo =
                   acc_memo_ptr ? *acc_memo_ptr : local_acc_memo;
 
               auto apply_func = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   if (!a) return std::shared_ptr<Acc>(nullptr);
-                  auto k = reinterpret_cast<std::uintptr_t>(a.get());
-                  auto it = acc_memo.find(k);
+                  auto it = acc_memo.find(a);
                   if (it != acc_memo.end()) return it->second;
                   auto r = func(a);
-                  acc_memo.emplace(k, r);
+                  acc_memo.emplace(a, r);
                   return r;
               };
 
@@ -5754,22 +5770,21 @@ local_system:
 
           LeveledGSS apply_and_prune(
               const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& mutator,
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_cache_ptr = nullptr
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>* acc_cache_ptr = nullptr
           ) const {
               // mutator returns nullptr to prune stacks carrying acc; otherwise updated acc
               std::unordered_map<std::uintptr_t, UpperPtr<T, Acc>> memo;
 
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> local_acc_cache;
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>& acc_cache =
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> local_acc_cache;
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>& acc_cache =
                   acc_cache_ptr ? *acc_cache_ptr : local_acc_cache;
 
               auto mutate_acc = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   if (!a) return std::shared_ptr<Acc>(nullptr);
-                  auto k = reinterpret_cast<std::uintptr_t>(a.get());
-                  auto it = acc_cache.find(k);
+                  auto it = acc_cache.find(a);
                   if (it != acc_cache.end()) return it->second;
                   auto r = mutator(a);
-                  acc_cache.emplace(k, r);
+                  acc_cache.emplace(a, r);
                   return r;
               };
 
@@ -10616,26 +10631,11 @@ local_system:
           }
 
           static RangeSet from_indices(const std::vector<unsigned long long>& indices) {
-              if (indices.empty()) {
-                  return RangeSet::empty();
-              }
-              // Create a mutable copy to sort and unique
-              std::vector<unsigned long long> sorted_indices = indices;
-              std::sort(sorted_indices.begin(), sorted_indices.end());
-              sorted_indices.erase(std::unique(sorted_indices.begin(), sorted_indices.end()), sorted_indices.end());
-
               RangeSet rs;
-              auto it = sorted_indices.begin();
-              while (it != sorted_indices.end()) {
-                  unsigned long long start = *it;
-                  unsigned long long end = start;
-                  auto next_it = std::next(it);
-                  while (next_it != sorted_indices.end() && *next_it == end + 1) {
-                      end = *next_it;
-                      ++next_it;
-                  }
-                  rs.set.add(boost::icl::discrete_interval<unsigned long long>::closed(start, end));
-                  it = next_it;
+              // Directly add indices; boost::icl will merge intervals automatically.
+              // This avoids a potentially very expensive sort on a large vector.
+              for (unsigned long long index : indices) {
+                  rs.set.add(index);
               }
               return rs;
           }
@@ -11031,33 +11031,29 @@ local_system:
           }
           // If any child is UpperBranch, cannot promote
           for (auto &c : all_children) {
-              if (!c->is_interface()) return node;
-          }
+          if (!c->is_interface()) return node;
           // Acc set across children + node.empty
-          std::unordered_set<const Acc*> accs;
-          if (node->empty) accs.insert(node->empty.get());
+          // Acc set across children + node.empty, using value-based hashing for shared_ptr<Acc>
+          std::unordered_set<std::shared_ptr<Acc>> accs;
+          if (node->empty) accs.insert(node->empty);
           for (auto &c : all_children) {
               auto ci = std::static_pointer_cast<Interface<T, Acc>>(c);
-              accs.insert(ci->acc.get());
-              if (ci->empty) accs.insert(ci->empty.get());
+              accs.insert(ci->acc);
+              if (ci->empty) accs.insert(ci->empty);
           }
 
           if (accs.size() <= 1) {
               // Determine the unique acc (if any)
               std::shared_ptr<Acc> the_acc;
               if (!accs.empty()) {
-                  // pick from children (some might be null, but if size <=1 and not empty, it's non-null)
-                  if (node->empty) the_acc = node->empty;
-                  else {
-                      auto ci = std::static_pointer_cast<Interface<T, Acc>>(all_children[0]);
-                      the_acc = ci->acc ? ci->acc : ci->empty;
-                  }
-              } else {
-                  // Truly empty GSS
+                  the_acc = *accs.begin();
+              }
+
+              if (!the_acc) {
+                  // All accumulators were null, or the set was empty.
                   return std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
               }
 
-              // Build Lower children by converting each Interface child
               auto l_children = std::make_shared<LowerChildren<T>>();
               l_children->reserve(node->_children->size());
               for (auto &kv : *node->_children) {
@@ -16007,7 +16003,7 @@ messages:
 
               // This memoization cache is critical for performance. It's shared across all GSSs
               // being initialized, mirroring the Python implementation's optimization.
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> init_acc_memo;
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> init_acc_memo;
 
               values.reserve(state_.size());
               todo.reserve(state_.size());
@@ -16653,7 +16649,7 @@ messages:
 
           Leveled initialize_gss_accs(
               const Leveled& g,
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>* acc_memo
           ) {
               auto& stats = Stats::get();
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
@@ -16776,9 +16772,26 @@ messages:
           }
 
           static RangeSet from_indices(const std::vector<unsigned long long>& indices) {
+              if (indices.empty()) {
+                  return RangeSet::empty();
+              }
+              // Create a mutable copy to sort and unique
+              std::vector<unsigned long long> sorted_indices = indices;
+              std::sort(sorted_indices.begin(), sorted_indices.end());
+              sorted_indices.erase(std::unique(sorted_indices.begin(), sorted_indices.end()), sorted_indices.end());
+
               RangeSet rs;
-              for (unsigned long long i : indices) {
-                  rs.set.add(i);
+              auto it = sorted_indices.begin();
+              while (it != sorted_indices.end()) {
+                  unsigned long long start = *it;
+                  unsigned long long end = start;
+                  auto next_it = std::next(it);
+                  while (next_it != sorted_indices.end() && *next_it == end + 1) {
+                      end = *next_it;
+                      ++next_it;
+                  }
+                  rs.set.add(boost::icl::discrete_interval<unsigned long long>::closed(start, end));
+                  it = next_it;
               }
               return rs;
           }
@@ -17791,21 +17804,20 @@ messages:
           // Apply: Acc -> NewAcc (but we keep Acc type same for simplicity here)
           LeveledGSS apply(
               const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& func,
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo_ptr = nullptr
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>* acc_memo_ptr = nullptr
           ) const {
               std::unordered_map<std::uintptr_t, UpperPtr<T, Acc>> memo;
 
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> local_acc_memo;
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>& acc_memo =
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> local_acc_memo;
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>& acc_memo =
                   acc_memo_ptr ? *acc_memo_ptr : local_acc_memo;
 
               auto apply_func = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   if (!a) return std::shared_ptr<Acc>(nullptr);
-                  auto k = reinterpret_cast<std::uintptr_t>(a.get());
-                  auto it = acc_memo.find(k);
+                  auto it = acc_memo.find(a);
                   if (it != acc_memo.end()) return it->second;
                   auto r = func(a);
-                  acc_memo.emplace(k, r);
+                  acc_memo.emplace(a, r);
                   return r;
               };
 
@@ -17976,22 +17988,21 @@ messages:
 
           LeveledGSS apply_and_prune(
               const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& mutator,
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_cache_ptr = nullptr
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>* acc_cache_ptr = nullptr
           ) const {
               // mutator returns nullptr to prune stacks carrying acc; otherwise updated acc
               std::unordered_map<std::uintptr_t, UpperPtr<T, Acc>> memo;
 
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> local_acc_cache;
-              std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>& acc_cache =
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> local_acc_cache;
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>& acc_cache =
                   acc_cache_ptr ? *acc_cache_ptr : local_acc_cache;
 
               auto mutate_acc = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   if (!a) return std::shared_ptr<Acc>(nullptr);
-                  auto k = reinterpret_cast<std::uintptr_t>(a.get());
-                  auto it = acc_cache.find(k);
+                  auto it = acc_cache.find(a);
                   if (it != acc_cache.end()) return it->second;
                   auto r = mutator(a);
-                  acc_cache.emplace(k, r);
+                  acc_cache.emplace(a, r);
                   return r;
               };
 
@@ -18496,164 +18507,190 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Based on the performance analysis, the C++ model's slowness stems from two primary issues: an inefficient `RangeSet::from_indices` implementation and an incorrect memoization strategy in the C++ `LeveledGSS` that uses pointer addresses instead of object values for caching.
+      Based on my analysis of the performance statistics, the C++ model is slower than the Python versions due to two primary issues:
 
-      Here are the step-by-step instructions to fix these issues, followed by the corresponding git diffs.
+      1.  An extremely inefficient implementation of `RangeSet::from_indices` in C++, which becomes a major bottleneck at the end of `get_mask` when creating the final mask from millions of token IDs.
+      2.  A subtle bug in the `LeveledGSS::try_promote` canonicalization logic in C++. It was using pointer comparison instead of value comparison for accumulators, which prevented the GSS from being properly compacted. This led to an explosion in the number of unique accumulator objects, causing slowdowns in all GSS operations, especially `apply_and_prune`.
+
+      Here are the step-by-step instructions and corresponding diffs to fix these issues.
 
       ### Step-by-Step Instructions
 
-      1.  **Optimize `RangeSet::from_indices`**
-          -   **File:** `python/aug25/models/icl_rangeset.hpp`
-          -   **Action:** Replace the body of the `from_indices` static method. The current implementation adds indices one by one, which is slow for large, sparse sets. The new implementation will sort the indices, remove duplicates, and then merge consecutive numbers into intervals before adding them to the underlying `boost::icl::interval_set`.
+      #### 1. Optimize `RangeSet::from_indices`
 
-      2.  **Correct GSS Memoization Strategy**
-          -   **File:** `python/aug25/models/leveled_gss.hpp`
-          -   **Action:** In the `LeveledGSS` class, modify the `apply` and `apply_and_prune` methods.
-              -   Change the type of the optional `acc_memo_ptr` / `acc_cache_ptr` argument from `std::unordered_map<std::uintptr_t, ...>*` to `std::unordered_map<std::shared_ptr<Acc>, ...>*`.
-              -   Update the internal logic of these methods to use the `std::shared_ptr<Acc>` object itself as the key for the memoization map, enabling value-based caching instead of pointer-based caching.
+      In the file `python/aug25/models/icl_rangeset.hpp`, we will replace the `from_indices` implementation. The current version unnecessarily sorts a potentially huge vector of indices, which is very slow. The new version will simply add each index to the `boost::icl::interval_set`, which is highly optimized for this pattern.
 
-      3.  **Update Engine Code to Use Corrected GSS**
-          -   **File:** `python/aug25/models/precompute3_engine.cpp`
-          -   **Action:**
-              -   In the `get_mask` method, change the type of the `init_acc_memo` variable to `std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>` to match the updated GSS method signature.
-              -   In the `initialize_gss_accs` helper function, update its signature to accept a pointer to the new map type: `std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>*`.
+      -   **File:** `python/aug25/models/icl_rangeset.hpp`
+      -   **Locate:** The static method `RangeSet::from_indices`.
+      -   **Replace** the entire body of the method with the following code:
 
-      These changes will resolve the identified performance bottlenecks and should make the C++ implementation significantly faster.
+          ```cpp
+          RangeSet rs;
+          // Directly add indices; boost::icl will merge intervals automatically.
+          // This avoids a potentially very expensive sort on a large vector.
+          for (unsigned long long index : indices) {
+              rs.set.add(index);
+          }
+          return rs;
+          ```
+
+      #### 2. Fix GSS Canonicalization in `try_promote`
+
+      In the file `python/aug25/models/leveled_gss.hpp`, we will correct the `try_promote` function. This will allow it to correctly identify and merge GSS nodes that are semantically identical, drastically reducing the number of objects to process.
+
+      -   **File:** `python/aug25/models/leveled_gss.hpp`
+      -   **Locate:** The global static function `try_promote`.
+      -   **Action:** Replace the section of the function that collects and analyzes accumulators.
+          -   Change `std::unordered_set<const Acc*> accs;` to `std::unordered_set<std::shared_ptr<Acc>> accs;`.
+          -   Update the loops that populate `accs` to insert the `shared_ptr` objects, not their raw pointers.
+          -   Replace the buggy logic for selecting `the_acc` with a simple version that correctly handles all cases, including when all accumulators are null.
+
+          Specifically, replace this block:
+          ```cpp
+          // Acc set across children + node.empty
+          std::unordered_set<const Acc*> accs;
+          if (node->empty) accs.insert(node->empty.get());
+          for (auto &c : all_children) {
+              auto ci = std::static_pointer_cast<Interface<T, Acc>>(c);
+              accs.insert(ci->acc.get());
+              if (ci->empty) accs.insert(ci->empty.get());
+          }
+
+          if (accs.size() <= 1) {
+              // Determine the unique acc (if any)
+              std::shared_ptr<Acc> the_acc;
+              if (!accs.empty()) {
+                  // pick from children (some might be null, but if size <=1 and not empty, it's non-null)
+                  if (node->empty) the_acc = node->empty;
+                  else {
+                      auto ci = std::static_pointer_cast<Interface<T, Acc>>(all_children[0]);
+                      the_acc = ci->acc ? ci->acc : ci->empty;
+                  }
+              } else {
+                  // Truly empty GSS
+                  return std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+              }
+          ```
+          with this corrected version:
+          ```cpp
+          // Acc set across children + node.empty, using value-based hashing for shared_ptr<Acc>
+          std::unordered_set<std::shared_ptr<Acc>> accs;
+          if (node->empty) accs.insert(node->empty);
+          for (auto &c : all_children) {
+              auto ci = std::static_pointer_cast<Interface<T, Acc>>(c);
+              accs.insert(ci->acc);
+              if (ci->empty) accs.insert(ci->empty);
+          }
+
+          if (accs.size() <= 1) {
+              std::shared_ptr<Acc> the_acc;
+              if (!accs.empty()) {
+                  the_acc = *accs.begin();
+              }
+
+              if (!the_acc) {
+                  // All accumulators were null, or the set was empty.
+                  return std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+              }
+          ```
+
+      ---
 
       ### Git Diffs
 
+      Here are the `git diff` patches for the required changes.
+
       ```diff
       diff --git a/python/aug25/models/icl_rangeset.hpp b/python/aug25/models/icl_rangeset.hpp
-      index 2111181..1118181 100644
       --- a/python/aug25/models/icl_rangeset.hpp
       +++ b/python/aug25/models/icl_rangeset.hpp
-      @@ -14,12 +14,29 @@
+      @@ -14,29 +14,13 @@
            }
        
            static RangeSet from_indices(const std::vector<unsigned long long>& indices) {
-      -        RangeSet rs;
-      -        for (unsigned long long i : indices) {
-      -            rs.set.add(i);
-      +        if (indices.empty()) {
-      +            return RangeSet::empty();
-               }
-      -        return rs;
-      +        // Create a mutable copy to sort and unique
-      +        std::vector<unsigned long long> sorted_indices = indices;
-      +        std::sort(sorted_indices.begin(), sorted_indices.end());
-      +        sorted_indices.erase(std::unique(sorted_indices.begin(), sorted_indices.end()), sorted_indices.end());
-      +
+      -        if (indices.empty()) {
+      -            return RangeSet::empty();
       +        RangeSet rs;
-      +        auto it = sorted_indices.begin();
-      +        while (it != sorted_indices.end()) {
-      +            unsigned long long start = *it;
-      +            unsigned long long end = start;
-      +            auto next_it = std::next(it);
-      +            while (next_it != sorted_indices.end() && *next_it == end + 1) {
-      +                end = *next_it;
-      +                ++next_it;
-      +            }
-      +            rs.set.add(boost::icl::discrete_interval<unsigned long long>::closed(start, end));
-      +            it = next_it;
-      +        }
-      +        return rs;
+      +        // Directly add indices; boost::icl will merge intervals automatically.
+      +        // This avoids a potentially very expensive sort on a large vector.
+      +        for (unsigned long long index : indices) {
+      +            rs.set.add(index);
+               }
+      -        // Create a mutable copy to sort and unique
+      -        std::vector<unsigned long long> sorted_indices = indices;
+      -        std::sort(sorted_indices.begin(), sorted_indices.end());
+      -        sorted_indices.erase(std::unique(sorted_indices.begin(), sorted_indices.end()), sorted_indices.end());
+      -
+      -        RangeSet rs;
+      -        auto it = sorted_indices.begin();
+      -        while (it != sorted_indices.end()) {
+      -            unsigned long long start = *it;
+      -            unsigned long long end = start;
+      -            auto next_it = std::next(it);
+      -            while (next_it != sorted_indices.end() && *next_it == end + 1) {
+      -                end = *next_it;
+      -                ++next_it;
+      -            }
+      -            rs.set.add(boost::icl::discrete_interval<unsigned long long>::closed(start, end));
+      -            it = next_it;
+      -        }
+               return rs;
            }
        
            static RangeSet from_singleton(unsigned long long index) {
 
       ```
+
       ```diff
       diff --git a/python/aug25/models/leveled_gss.hpp b/python/aug25/models/leveled_gss.hpp
-      index 1118181..2111181 100644
       --- a/python/aug25/models/leveled_gss.hpp
       +++ b/python/aug25/models/leveled_gss.hpp
-      @@ -610,21 +610,21 @@
+      @@ -181,35 +181,28 @@
+           if (!c->is_interface()) return node;
+           // Acc set across children + node.empty
+      -    std::unordered_set<const Acc*> accs;
+      -    if (node->empty) accs.insert(node->empty.get());
+      +    // Acc set across children + node.empty, using value-based hashing for shared_ptr<Acc>
+      +    std::unordered_set<std::shared_ptr<Acc>> accs;
+      +    if (node->empty) accs.insert(node->empty);
+           for (auto &c : all_children) {
+               auto ci = std::static_pointer_cast<Interface<T, Acc>>(c);
+      -        accs.insert(ci->acc.get());
+      -        if (ci->empty) accs.insert(ci->empty.get());
+      +        accs.insert(ci->acc);
+      +        if (ci->empty) accs.insert(ci->empty);
+           }
        
-           // Apply: Acc -> NewAcc (but we keep Acc type same for simplicity here)
-           LeveledGSS apply(
-               const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& func,
-      -        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo_ptr = nullptr
-      +        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>* acc_memo_ptr = nullptr
-           ) const {
-               std::unordered_map<std::uintptr_t, UpperPtr<T, Acc>> memo;
+           if (accs.size() <= 1) {
+               // Determine the unique acc (if any)
+               std::shared_ptr<Acc> the_acc;
+               if (!accs.empty()) {
+      -            // pick from children (some might be null, but if size <=1 and not empty, it's non-null)
+      -            if (node->empty) the_acc = node->empty;
+      -            else {
+      -                auto ci = std::static_pointer_cast<Interface<T, Acc>>(all_children[0]);
+      -                the_acc = ci->acc ? ci->acc : ci->empty;
+      -            }
+      -        } else {
+      -            // Truly empty GSS
+      +            the_acc = *accs.begin();
+      +        }
+      +
+      +        if (!the_acc) {
+      +            // All accumulators were null, or the set was empty.
+                   return std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, std::shared_ptr<Acc>(nullptr));
+               }
        
-      -        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> local_acc_memo;
-      -        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>& acc_memo =
-      +        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> local_acc_memo;
-      +        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>& acc_memo =
-                   acc_memo_ptr ? *acc_memo_ptr : local_acc_memo;
-       
-               auto apply_func = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
-                   if (!a) return std::shared_ptr<Acc>(nullptr);
-      -            auto k = reinterpret_cast<std::uintptr_t>(a.get());
-      -            auto it = acc_memo.find(k);
-      +            auto it = acc_memo.find(a);
-                   if (it != acc_memo.end()) return it->second;
-                   auto r = func(a);
-      -            acc_memo.emplace(k, r);
-      +            acc_memo.emplace(a, r);
-                   return r;
-               };
-       
-      @@ -710,22 +710,22 @@
-       
-           LeveledGSS apply_and_prune(
-               const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& mutator,
-      -        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_cache_ptr = nullptr
-      +        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>* acc_cache_ptr = nullptr
-           ) const {
-               // mutator returns nullptr to prune stacks carrying acc; otherwise updated acc
-               std::unordered_map<std::uintptr_t, UpperPtr<T, Acc>> memo;
-       
-      -        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> local_acc_cache;
-      -        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>& acc_cache =
-      +        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> local_acc_cache;
-      +        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>& acc_cache =
-                   acc_cache_ptr ? *acc_cache_ptr : local_acc_cache;
-       
-               auto mutate_acc = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
-                   if (!a) return std::shared_ptr<Acc>(nullptr);
-      -            auto k = reinterpret_cast<std::uintptr_t>(a.get());
-      -            auto it = acc_cache.find(k);
-      +            auto it = acc_cache.find(a);
-                   if (it != acc_cache.end()) return it->second;
-                   auto r = mutator(a);
-      -            acc_cache.emplace(k, r);
-      +            acc_cache.emplace(a, r);
-                   return r;
-               };
-       
-
-      ```
-      ```diff
-      diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
-      index 2111181..1118181 100644
-      --- a/python/aug25/models/precompute3_engine.cpp
-      +++ b/python/aug25/models/precompute3_engine.cpp
-      @@ -218,7 +218,7 @@
-       
-               // This memoization cache is critical for performance. It's shared across all GSSs
-               // being initialized, mirroring the Python implementation's optimization.
-      -        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> init_acc_memo;
-      +        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> init_acc_memo;
-       
-               values.reserve(state_.size());
-               todo.reserve(state_.size());
-      @@ -1000,7 +1000,7 @@
-       
-           Leveled initialize_gss_accs(
-               const Leveled& g,
-      -        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo
-      +        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>* acc_memo
-           ) {
-               auto& stats = Stats::get();
-               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
+      -        // Build Lower children by converting each Interface child
+               auto l_children = std::make_shared<LowerChildren<T>>();
+               l_children->reserve(node->_children->size());
+               for (auto &kv : *node->_children) {
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/models/icl_rangeset.hpp
@@ -18664,13 +18701,8 @@ messages:
       Identified target file: python/aug25/models/leveled_gss.hpp
       Applying patch to 'python/aug25/models/leveled_gss.hpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/leveled_gss.hpp.
-
-      --- Processing Diff Block 3 ---
-      Identified target file: python/aug25/models/precompute3_engine.cpp
-      Applying patch to 'python/aug25/models/precompute3_engine.cpp' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_engine.cpp.
     metadata:
-  - user: 'Changes committed with message: "perf: Optimize RangeSet::from_indices
-      and use value-based GSS memoization"'
+  - user: 'Changes committed with message: "Fix: Optimize RangeSet::from_indices and
+      correct GSS canonicalization in try_promote"'
     metadata:
 ...
