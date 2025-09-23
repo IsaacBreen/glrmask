@@ -362,9 +362,8 @@ template <typename T, typename Acc>
 static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const InterfacePtr<T, Acc>& b) {
     if (a.get() == b.get()) return a;
 
-    // Prefer cheap pointer checks only. Avoid deep content equality on accumulators,
-    // which is expensive and leads to poor scaling compared to the Python version.
-    if (a->acc.get() == b->acc.get() ||
+    // Match Python implementation: use value equality on accumulators if pointers differ.
+    if ((a->acc.get() == b->acc.get() || (a->acc && b->acc && *a->acc == *b->acc)) ||
         a->_children.get() == b->_children.get()) {
         auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
         auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
@@ -454,6 +453,10 @@ public:
     LeveledGSS& operator=(const LeveledGSS& other) = default;
     LeveledGSS& operator=(LeveledGSS&& other) noexcept = default;
     ~LeveledGSS() = default;
+
+    LeveledGSS merge(const LeveledGSS& other) const {
+        return LeveledGSS(merge_upper<T, Acc>(inner, other.inner));
+    }
 
     static LeveledGSS from_stacks(const std::vector<std::pair<std::vector<T>, std::shared_ptr<Acc>>>& stacks) {
         // Canonicalize stacks: merge Acc for identical vectors
