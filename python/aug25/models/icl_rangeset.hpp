@@ -17,9 +17,26 @@ public:
     }
 
     static RangeSet from_indices(const std::vector<unsigned long long>& indices) {
+        if (indices.empty()) {
+            return RangeSet::empty();
+        }
+        // Create a mutable copy to sort and unique
+        std::vector<unsigned long long> sorted_indices = indices;
+        std::sort(sorted_indices.begin(), sorted_indices.end());
+        sorted_indices.erase(std::unique(sorted_indices.begin(), sorted_indices.end()), sorted_indices.end());
+
         RangeSet rs;
-        for (unsigned long long i : indices) {
-            rs.set.add(i);
+        auto it = sorted_indices.begin();
+        while (it != sorted_indices.end()) {
+            unsigned long long start = *it;
+            unsigned long long end = start;
+            auto next_it = std::next(it);
+            while (next_it != sorted_indices.end() && *next_it == end + 1) {
+                end = *next_it;
+                ++next_it;
+            }
+            rs.set.add(boost::icl::discrete_interval<unsigned long long>::closed(start, end));
+            it = next_it;
         }
         return rs;
     }

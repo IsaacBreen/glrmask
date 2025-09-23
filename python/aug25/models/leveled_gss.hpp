@@ -903,21 +903,20 @@ public:
     // Apply: Acc -> NewAcc (but we keep Acc type same for simplicity here)
     LeveledGSS apply(
         const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& func,
-        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo_ptr = nullptr
+        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>* acc_memo_ptr = nullptr
     ) const {
         std::unordered_map<std::uintptr_t, UpperPtr<T, Acc>> memo;
 
-        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> local_acc_memo;
-        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>& acc_memo =
+        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> local_acc_memo;
+        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>& acc_memo =
             acc_memo_ptr ? *acc_memo_ptr : local_acc_memo;
 
         auto apply_func = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
             if (!a) return std::shared_ptr<Acc>(nullptr);
-            auto k = reinterpret_cast<std::uintptr_t>(a.get());
-            auto it = acc_memo.find(k);
+            auto it = acc_memo.find(a);
             if (it != acc_memo.end()) return it->second;
             auto r = func(a);
-            acc_memo.emplace(k, r);
+            acc_memo.emplace(a, r);
             return r;
         };
 
@@ -1088,22 +1087,21 @@ public:
 
     LeveledGSS apply_and_prune(
         const std::function<std::shared_ptr<Acc>(const std::shared_ptr<Acc>&)>& mutator,
-        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_cache_ptr = nullptr
+        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>* acc_cache_ptr = nullptr
     ) const {
         // mutator returns nullptr to prune stacks carrying acc; otherwise updated acc
         std::unordered_map<std::uintptr_t, UpperPtr<T, Acc>> memo;
 
-        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> local_acc_cache;
-        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>& acc_cache =
+        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> local_acc_cache;
+        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>& acc_cache =
             acc_cache_ptr ? *acc_cache_ptr : local_acc_cache;
 
         auto mutate_acc = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
             if (!a) return std::shared_ptr<Acc>(nullptr);
-            auto k = reinterpret_cast<std::uintptr_t>(a.get());
-            auto it = acc_cache.find(k);
+            auto it = acc_cache.find(a);
             if (it != acc_cache.end()) return it->second;
             auto r = mutator(a);
-            acc_cache.emplace(k, r);
+            acc_cache.emplace(a, r);
             return r;
         };
 
