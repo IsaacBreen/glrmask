@@ -319,11 +319,8 @@ class LeveledGSS(Generic[T, Acc]):
 
             if isinstance(node, Interface):
                 # For an Interface, we pop k-1 levels from its Lower children
-                popped_lower_children = [_popn_lower(child, k - 1) for child in node._all_children()]
-                if popped_lower_children:
-                    merged = reduce(merge_lower, popped_lower_children[1:], popped_lower_children[0])
-                else:
-                    merged = Lower(children={}, empty=False)
+                popped_lower_children = [_popn_lower(child, k - 1) for child in all_children]
+                merged = reduce(merge_lower, popped_lower_children[1:], popped_lower_children[0])
 
                 # The result is a new Interface with the same accumulator
                 new_empty = node.acc if merged.empty else None
@@ -333,11 +330,8 @@ class LeveledGSS(Generic[T, Acc]):
                     res = Interface(children=merged.children, acc=node.acc, empty=new_empty)
             else:  # UpperBranch
                 # For an UpperBranch, we pop k-1 levels from its Upper children
-                popped_upper_children = [_popn_upper(child, k - 1) for child in node._all_children()]
-                if popped_upper_children:
-                    merged = reduce(merge_upper, popped_upper_children[1:], popped_upper_children[0])
-                else:
-                    merged = UpperBranch(children={}, empty=None)
+                popped_upper_children = [_popn_upper(child, k - 1) for child in all_children]
+                merged = reduce(merge_upper, popped_upper_children[1:], popped_upper_children[0])
                 res = try_promote(merged)
 
             memo_upper[key] = res
