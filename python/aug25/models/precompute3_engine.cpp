@@ -325,7 +325,6 @@ public:
         }
 
         RangeSet final_mask = RangeSet::empty();
-        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> intersect_acc_memo;
 
         while (!depth_heap.empty()) {
             int depth = depth_heap.top(); depth_heap.pop();
@@ -370,7 +369,7 @@ public:
                         if (child.is_empty()) continue;
 
                         // intersect_and_prune with edge's llm_bv (as RangeSet)
-                        Leveled child2 = intersect_llm_mask(child, e.llm_bv_rangeset, &intersect_acc_memo);
+                        Leveled child2 = intersect_llm_mask(child, e.llm_bv_rangeset);
                         if (child2.is_empty()) continue;
 
                         int dnode = de.dest_idx;
@@ -754,7 +753,11 @@ private:
             };
 
             auto handle_reduce = [&](int nt_id, int len, const Leveled& gss_to_reduce) {
-                Leveled popped_gss = gss_to_reduce.popn(len);
+                Leveled popped_gss = gss_to_reduce;
+                for (int i = 0; i < len; ++i) {
+                    popped_gss = popped_gss.pop();
+                }
+
                 std::unordered_set<int> from_states = popped_gss.peek();
                 for (int from_sid : from_states) {
                     auto goto_it = parser_.find(from_sid);
@@ -827,8 +830,7 @@ private:
     Leveled intersect_llm_mask(
         const Leveled& g,
         const RangeSet& limiter,
-        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo
-    ) {
+        std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo = nullptr) {
         auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
             RangeSet new_mask = a->llm_mask.intersection_with(limiter);
             bool is_empty_mask = new_mask.is_empty();
