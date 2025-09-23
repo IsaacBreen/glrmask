@@ -8,7 +8,7 @@ local_system:
     - python/aug25/models/precompute3_engine.cpp
     - python/aug25/models/icl_rangeset.hpp
     - python/aug25/models/leveled_gss.hpp
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     python/run_benchmarks.sh: |
@@ -118,13 +118,6 @@ local_system:
         tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
       fi
 
-      JSON_HPP_URL="https://github.com/nlohmann/json/releases/download/v3.11.2/json.hpp"
-      JSON_HPP_PATH="${PROJECT_ROOT}/.build/json.hpp"
-      if [ ! -f "$JSON_HPP_PATH" ]; then
-        echo "Downloading nlohmann/json.hpp..."
-        curl -L -o "$JSON_HPP_PATH" "$JSON_HPP_URL"
-      fi
-
       echo "Installing pybind11..."
       python3 -m pip install --quiet pybind11
 
@@ -160,7 +153,7 @@ local_system:
         "aug25/models/leveled_gss_py.cpp" -o "leveled_gss_cpp${EXT_SUFFIX}" ${LDFLAGS}
 
       ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
-        -I"${PROJECT_ROOT}/.build" "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
+        "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
 
       # Change back to original directory
       cd "$ORIGINAL_CWD"
@@ -300,19 +293,25 @@ local_system:
               model.glr_parser = constraint.glr_parser()
               model.tokenizer_initial_state = model.tokenizer.initial_state_id()
 
+              # Parse parser JSON directly from data (no Python-side dataclasses)
+              parser_data = data['parser']  # contains 'start_state_id' and 'stage_7_table'
+
               # Build id_to_token mapping (original LLM token map)
               model.id_to_token = {int(v): bytes(k) for k, v in data['llm_token_map']}
 
               # Keep internal->original token id map for final mask conversion (engine uses it too)
               model.internal_to_original_map = constraint.internal_to_original_map()
 
-              # Create the C++ Engine. Pass raw JSON string for fast C++-side parsing.
+              # Create the C++ Engine (self-contained algorithm in C++)
+              # Pass raw structures; the engine will parse/normalize as needed.
               model._engine = eng.Engine(
                   model.tokenizer,
                   model.tokenizer.initial_state_id(),
                   model.tokenizer.max_state(),
                   model.glr_parser.ignore_terminal_id if model.glr_parser.ignore_terminal_id is not None else None,
-                  s,
+                  parser_data,
+                  dict(model.roots_map),
+                  model.arena,
                   constraint.possible_matches(),                 # tsid -> term_id -> _sep1.Bitset
                   constraint.all_internal_llm_tokens_bitset(),  # _sep1.Bitset universe
                   model.internal_to_original_map                # int -> int
@@ -596,13 +595,11 @@ local_system:
       #include <memory>
       #include "leveled_gss.hpp"
 
+      #include <functional>
+      #include <memory>
+      #include "leveled_gss.hpp"
       #include "icl_rangeset.hpp"
 
-      // Fast JSON parsing
-      #include <nlohmann/json.hpp>
-
-
-      using json = nlohmann::json;
       using namespace leveled_gss;
 
       namespace py = pybind11;
@@ -666,22 +663,25 @@ local_system:
                  int tokenizer_initial_state,
                  int tokenizer_max_state,
                  py::object ignore_terminal_id_or_none,
-                 const std::string& json_string,
+                 py::dict parser_data,                  // JSON 'parser' object with start_state_id and stage_7_table
+                 py::dict roots_map_py,                 // state_id -> root node id
+                 py::dict arena_py,                     // uid -> node dict (children carry bitset JSON)
                  py::dict possible_matches,             // tsid -> term_id -> _sep1.Bitset
                  py::object all_internal_llm_tokens_bitset,
                  py::dict internal_to_original_map)
               : tokenizer_(std::move(tokenizer)),
                 tokenizer_initial_state_(tokenizer_initial_state),
                 tokenizer_max_state_(tokenizer_max_state),
+                parser_data_(std::move(parser_data)),
+                roots_map_py_(std::move(roots_map_py)),
                 pmc_(std::move(possible_matches)),
                 all_internal_llm_tokens_bitset_(std::move(all_internal_llm_tokens_bitset)) {
-
-              json data = json::parse(json_string);
 
               if (!ignore_terminal_id_or_none.is_none()) {
                   ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
               }
 
+              // Universe RangeSet for get_mask init
               {
                   py::list ranges_py = all_internal_llm_tokens_bitset_.attr("to_ranges")();
                   std::vector<std::pair<unsigned long long, unsigned long long>> ranges_cpp;
@@ -693,16 +693,21 @@ local_system:
                   universe_rangeset_ = RangeSet::from_ranges(ranges_cpp);
               }
 
-              const auto& roots_map_json = data.at("precomputed3");
-              for (const auto& item : roots_map_json) {
-                  roots_map_[item[0].get<int>()] = item[1].get<int>();
+              // Parse roots_map into C++ map
+              for (auto item : roots_map_py_) {
+                  int sid = py::cast<int>(item.first);
+                  int root = py::cast<int>(item.second);
+                  roots_map_[sid] = root;
               }
 
-              parse_parser_table_from_json(data.at("parser"));
+              // Parse parser table from JSON dict
+              parse_parser_table_from_json(parser_data_);
 
-              parse_arena(data.at("trie3_god"));
+              // Parse arena using JSON-encoded bitsets; convert to Bitset and RangeSet
+              parse_arena(arena_py);
 
               // Pre-convert possible_matches into C++ RangeSet map (tsid -> term_id -> RangeSet)
+              // This avoids repeated Python calls during get_mask initialization.
               {
                   py::module json = py::module::import("json");
                   py::object sep1 = py::module::import("_sep1");
@@ -1072,10 +1077,12 @@ local_system:
           std::optional<int> ignore_terminal_id_;
 
           // Parser
+          py::dict parser_data_;
           int start_state_id_{0};
           std::unordered_map<int, Row> parser_; // state_id -> Row
 
           // Arena/trie
+          py::dict roots_map_py_;
           std::unordered_map<int, NodeInfo> arena_;
           std::unordered_map<int, int> roots_map_;
 
@@ -1111,29 +1118,40 @@ local_system:
           // -----------------------------
           // Parsing helpers
           // -----------------------------
-          static int json_to_int(const json& j) {
-              if (j.is_string()) {
-                  return std::stoi(j.get<std::string>());
+          static int py_obj_to_int(py::handle obj) {
+              if (py::isinstance<py::int_>(obj)) {
+                  return obj.cast<int>();
               }
-              return j.get<int>();
+              if (py::isinstance<py::str>(obj)) {
+                  return std::stoi(obj.cast<std::string>());
+              }
+              throw py::type_error("Expected int or string representation of int");
           }
 
-          void parse_parser_table_from_json(const json& parser_data) {
-              start_state_id_ = parser_data.at("start_state_id").get<int>();
-              const json& table = parser_data.at("stage_7_table");
+          static bool is_py_dict(py::handle h) {
+              return py::isinstance<py::dict>(h);
+          }
 
-              for (const auto& row_item : table) {
-                  int state_id = std::stoi(row_item[0].get<std::string>());
-                  const json& row_data = row_item[1];
+          void parse_parser_table_from_json(const py::dict& parser_data) {
+              // parser_data: { 'start_state_id': int, 'stage_7_table': list[[state_id_str, row_data_dict], ...] }
+              start_state_id_ = py::cast<int>(parser_data["start_state_id"]);
+              py::list table = parser_data["stage_7_table"];
+
+              for (auto row_item : table) {
+                  py::tuple row_tuple = py::cast<py::tuple>(row_item);
+                  int state_id = py_obj_to_int(row_tuple[0]);
+                  py::dict row_data = py::cast<py::dict>(row_tuple[1]);
 
                   Row row;
 
                   // actions
-                  const json& actions_list = row_data.at("shifts_and_reduces_full");
-                  for (const auto& aitem : actions_list) {
-                      int term_id = json_to_int(aitem[0]);
-                      const json& action = aitem[1];
-                      std::string variant = action.at("variant").get<std::string>();
+                  py::list actions_list = row_data["shifts_and_reduces_full"];
+                  for (auto aitem : actions_list) {
+                      py::tuple a = py::cast<py::tuple>(aitem);
+                      int term_id = py_obj_to_int(a[0]);
+                      py::dict action = py::cast<py::dict>(a[1]);
+
+                      std::string variant = py::cast<std::string>(action["variant"]);
                       ActionsOnTerminal aot;
 
                       if (variant == "Shift") {
@@ -1141,19 +1159,22 @@ local_system:
                           aot.shift_state_id = py::cast<int>(action["state_id"]);
                       } else if (variant == "Reduce") {
                           int nt = py::cast<int>(action["nonterminal_id"]);
-                          int len = action.at("len").get<int>();
+                          int len = py::cast<int>(action["len"]);
                           aot.reduces.emplace_back(nt, len);
                       } else if (variant == "Split") {
-                          if (action.contains("shift") && !action.at("shift").is_null()) {
+                          py::object shift_obj = action["shift"];
+                          if (!shift_obj.is_none()) {
                               aot.has_shift = true;
-                              aot.shift_state_id = action.at("shift").get<int>();
+                              aot.shift_state_id = py::cast<int>(shift_obj);
                           }
-                          const json& reduces = action.at("reduces");
-                          for (const auto& len_item : reduces) {
-                              int len = json_to_int(len_item[0]);
-                              const json& nts = len_item[1];
-                              for (const auto& nt_item : nts) {
-                                  int nt = json_to_int(nt_item[0]);
+                          py::list reduces = action["reduces"];
+                          for (auto len_item : reduces) {
+                              py::tuple len_tuple = py::cast<py::tuple>(len_item);
+                              int len = py_obj_to_int(len_tuple[0]);
+                              py::list nts = py::cast<py::list>(len_tuple[1]);
+                              for (auto nt_item : nts) {
+                                  py::tuple nt_tuple = py::cast<py::tuple>(nt_item);
+                                  int nt = py_obj_to_int(nt_tuple[0]);
                                   aot.reduces.emplace_back(nt, len);
                               }
                           }
@@ -1162,11 +1183,13 @@ local_system:
                   }
 
                   // gotos
-                  const json& gotos_list = row_data.at("gotos");
-                  for (const auto& gitem : gotos_list) {
-                      int nt = json_to_int(gitem[0]);
-                      if (gitem[1].contains("state_id") && !gitem[1].at("state_id").is_null()) {
-                          row.gotos[nt] = gitem[1].at("state_id").get<int>();
+                  py::list gotos_list = row_data["gotos"];
+                  for (auto gitem : gotos_list) {
+                      py::tuple g = py::cast<py::tuple>(gitem);
+                      int nt = py_obj_to_int(g[0]);
+                      py::dict goto_data = py::cast<py::dict>(g[1]);
+                      if (goto_data.contains("state_id") && !goto_data["state_id"].is_none()) {
+                          row.gotos[nt] = py::cast<int>(goto_data["state_id"]);
                       }
                   }
 
@@ -1174,23 +1197,26 @@ local_system:
               }
           }
 
-          void parse_arena(const json& arena_json) {
+          void parse_arena(py::dict arena_py) {
+              py::module json = py::module::import("json");
+              py::object dumps = json.attr("dumps");
               py::object sep1 = py::module::import("_sep1");
               py::object BitsetClass = sep1.attr("Bitset");
 
-              const auto& arena_values = arena_json.at("values");
-              for (const auto& item : arena_values.items()) {
-                  int uid = std::stoi(item.key());
-                  const json& node = item.value();
+              for (auto item_handle : arena_py.attr("items")()) {
+                  py::tuple item = py::cast<py::tuple>(item_handle);
+                  int uid = py::cast<int>(item[0]);
+                  py::dict node = py::cast<py::dict>(item[1]);
                   NodeInfo info;
 
                   // Determine if end node
                   bool is_end = false;
                   if (node.contains("value")) {
-                      const auto& value_obj = node.at("value");
-                      if (!value_obj.is_null()) {
-                          if (value_obj.contains("clean_end")) {
-                              is_end = value_obj.at("clean_end").get<bool>();
+                      py::object value_obj = node["value"];
+                      if (!value_obj.is_none()) {
+                          py::dict value = py::cast<py::dict>(value_obj);
+                          if (value.contains("clean_end")) {
+                              is_end = py::cast<bool>(value["clean_end"]);
                           }
                       }
                   }
@@ -1199,26 +1225,28 @@ local_system:
                   // Max depth
                   int mdepth = 0;
                   if (node.contains("max_depth")) {
-                      mdepth = node.at("max_depth").get<int>();
+                      mdepth = py::cast<int>(node["max_depth"]);
                   }
                   info.max_depth = mdepth;
 
                   // Children: list of ((pop, llm_bv_json), [(dest_idx, state_bv_json), ...])
-                  const json* children_obj_ptr = nullptr;
+                  py::object children_obj;
                   if (node.contains("children_bits")) {
-                      children_obj_ptr = &node.at("children_bits");
+                      children_obj = node["children_bits"];
                   } else if (node.contains("children")) {
-                      children_obj_ptr = &node.at("children");
+                      children_obj = node["children"];
+                  } else {
+                      children_obj = py::list();
                   }
-                  if (!children_obj_ptr) continue;
 
-                  for (const auto& entry : *children_obj_ptr) {
-                      const auto& edge_key = entry[0];
-                      int pop = edge_key[0].get<int>();
-                      const auto& llm_bv_json = edge_key[1];
+                  for (auto ch : children_obj) {
+                      py::tuple entry = py::cast<py::tuple>(ch);
+                      py::tuple edge_key = py::cast<py::tuple>(entry[0]);
+                      int pop = py::cast<int>(edge_key[0]);
+                      py::object llm_bv_json = edge_key[1];
 
                       // Convert llm_bv_json -> _sep1.Bitset -> RangeSet
-                      py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(llm_bv_json.dump());
+                      py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(dumps(llm_bv_json));
                       py::list llm_ranges_py = llm_bv_bitset.attr("to_ranges")();
                       std::vector<std::pair<unsigned long long, unsigned long long>> llm_ranges_cpp;
                       llm_ranges_cpp.reserve(py::len(llm_ranges_py));
@@ -1229,12 +1257,13 @@ local_system:
                       RangeSet llm_bv_rs = RangeSet::from_ranges(llm_ranges_cpp);
 
                       std::vector<DestEdge> dests;
-                      const auto& dest_map = entry[1];
-                      for (const auto& d : dest_map) {
-                          int dest_idx = d[0].get<int>();
-                          const auto& state_bv_json = d[1];
+                      py::object dest_map = entry[1];
+                      for (auto d : dest_map) {
+                          py::tuple dd = py::cast<py::tuple>(d);
+                          int dest_idx = py::cast<int>(dd[0]);
+                          py::object state_bv_json = dd[1];
 
-                          py::object state_bv = BitsetClass.attr("from_json_string")(state_bv_json.dump());
+                          py::object state_bv = BitsetClass.attr("from_json_string")(dumps(state_bv_json));
                           bool is_empty_bv = state_bv.attr("is_empty")().cast<bool>();
                           std::vector<std::pair<int,int>> ranges;
                           if (!is_empty_bv) {
@@ -1440,12 +1469,14 @@ local_system:
           m.doc() = "C++ engine for precompute3_model_cpp: commit() and get_mask(), Leveled GSS implementation";
 
           py::class_<Engine>(m, "Engine")
-              .def(py::init<py::object,int,int,py::object,const std::string&,py::dict,py::object,py::dict>(),
+              .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::dict,py::object,py::dict>(),
                    py::arg("tokenizer"),
                    py::arg("tokenizer_initial_state"),
                    py::arg("tokenizer_max_state"),
                    py::arg("ignore_terminal_id_or_none"),
-                   py::arg("json_string"),
+                   py::arg("parser_data"),
+                   py::arg("roots_map_py"),
+                   py::arg("arena_py"),
                    py::arg("possible_matches"),
                    py::arg("all_internal_llm_tokens_bitset"),
                    py::arg("internal_to_original_map"))
@@ -3942,8 +3973,8 @@ local_system:
               const json& table = parser_data.at("stage_7_table");
 
               for (const auto& row_item : table) {
-                  int state_id = std::stoi(row_item[0].get<std::string>());
                   const json& row_data = row_item[1];
+                  int state_id = json_to_int(row_item[0]);
 
                   Row row;
 
@@ -3957,9 +3988,9 @@ local_system:
 
                       if (variant == "Shift") {
                           aot.has_shift = true;
-                          aot.shift_state_id = action.at("state_id").get<int>();
+                          aot.shift_state_id = py::cast<int>(action["state_id"]);
                       } else if (variant == "Reduce") {
-                          int nt = action.at("nonterminal_id").get<int>();
+                          int nt = py::cast<int>(action["nonterminal_id"]);
                           int len = action.at("len").get<int>();
                           aot.reduces.emplace_back(nt, len);
                       } else if (variant == "Split") {
@@ -5800,13 +5831,6 @@ messages:
         tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
       fi
 
-      JSON_HPP_URL="https://github.com/nlohmann/json/releases/download/v3.11.2/json.hpp"
-      JSON_HPP_PATH="${PROJECT_ROOT}/.build/json.hpp"
-      if [ ! -f "$JSON_HPP_PATH" ]; then
-        echo "Downloading nlohmann/json.hpp..."
-        curl -L -o "$JSON_HPP_PATH" "$JSON_HPP_URL"
-      fi
-
       echo "Installing pybind11..."
       python3 -m pip install --quiet pybind11
 
@@ -5842,7 +5866,7 @@ messages:
         "aug25/models/leveled_gss_py.cpp" -o "leveled_gss_cpp${EXT_SUFFIX}" ${LDFLAGS}
 
       ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
-        -I"${PROJECT_ROOT}/.build" "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
+        "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
 
       # Change back to original directory
       cd "$ORIGINAL_CWD"
@@ -5992,19 +6016,25 @@ messages:
               model.glr_parser = constraint.glr_parser()
               model.tokenizer_initial_state = model.tokenizer.initial_state_id()
 
+              # Parse parser JSON directly from data (no Python-side dataclasses)
+              parser_data = data['parser']  # contains 'start_state_id' and 'stage_7_table'
+
               # Build id_to_token mapping (original LLM token map)
               model.id_to_token = {int(v): bytes(k) for k, v in data['llm_token_map']}
 
               # Keep internal->original token id map for final mask conversion (engine uses it too)
               model.internal_to_original_map = constraint.internal_to_original_map()
 
-              # Create the C++ Engine. Pass raw JSON string for fast C++-side parsing.
+              # Create the C++ Engine (self-contained algorithm in C++)
+              # Pass raw structures; the engine will parse/normalize as needed.
               model._engine = eng.Engine(
                   model.tokenizer,
                   model.tokenizer.initial_state_id(),
                   model.tokenizer.max_state(),
                   model.glr_parser.ignore_terminal_id if model.glr_parser.ignore_terminal_id is not None else None,
-                  s,
+                  parser_data,
+                  dict(model.roots_map),
+                  model.arena,
                   constraint.possible_matches(),                 # tsid -> term_id -> _sep1.Bitset
                   constraint.all_internal_llm_tokens_bitset(),  # _sep1.Bitset universe
                   model.internal_to_original_map                # int -> int
@@ -6303,13 +6333,11 @@ messages:
       #include <memory>
       #include "leveled_gss.hpp"
 
+      #include <functional>
+      #include <memory>
+      #include "leveled_gss.hpp"
       #include "icl_rangeset.hpp"
 
-      // Fast JSON parsing
-      #include <nlohmann/json.hpp>
-
-
-      using json = nlohmann::json;
       using namespace leveled_gss;
 
       namespace py = pybind11;
@@ -6373,22 +6401,25 @@ messages:
                  int tokenizer_initial_state,
                  int tokenizer_max_state,
                  py::object ignore_terminal_id_or_none,
-                 const std::string& json_string,
+                 py::dict parser_data,                  // JSON 'parser' object with start_state_id and stage_7_table
+                 py::dict roots_map_py,                 // state_id -> root node id
+                 py::dict arena_py,                     // uid -> node dict (children carry bitset JSON)
                  py::dict possible_matches,             // tsid -> term_id -> _sep1.Bitset
                  py::object all_internal_llm_tokens_bitset,
                  py::dict internal_to_original_map)
               : tokenizer_(std::move(tokenizer)),
                 tokenizer_initial_state_(tokenizer_initial_state),
                 tokenizer_max_state_(tokenizer_max_state),
+                parser_data_(std::move(parser_data)),
+                roots_map_py_(std::move(roots_map_py)),
                 pmc_(std::move(possible_matches)),
                 all_internal_llm_tokens_bitset_(std::move(all_internal_llm_tokens_bitset)) {
-
-              json data = json::parse(json_string);
 
               if (!ignore_terminal_id_or_none.is_none()) {
                   ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
               }
 
+              // Universe RangeSet for get_mask init
               {
                   py::list ranges_py = all_internal_llm_tokens_bitset_.attr("to_ranges")();
                   std::vector<std::pair<unsigned long long, unsigned long long>> ranges_cpp;
@@ -6400,16 +6431,21 @@ messages:
                   universe_rangeset_ = RangeSet::from_ranges(ranges_cpp);
               }
 
-              const auto& roots_map_json = data.at("precomputed3");
-              for (const auto& item : roots_map_json) {
-                  roots_map_[item[0].get<int>()] = item[1].get<int>();
+              // Parse roots_map into C++ map
+              for (auto item : roots_map_py_) {
+                  int sid = py::cast<int>(item.first);
+                  int root = py::cast<int>(item.second);
+                  roots_map_[sid] = root;
               }
 
-              parse_parser_table_from_json(data.at("parser"));
+              // Parse parser table from JSON dict
+              parse_parser_table_from_json(parser_data_);
 
-              parse_arena(data.at("trie3_god"));
+              // Parse arena using JSON-encoded bitsets; convert to Bitset and RangeSet
+              parse_arena(arena_py);
 
               // Pre-convert possible_matches into C++ RangeSet map (tsid -> term_id -> RangeSet)
+              // This avoids repeated Python calls during get_mask initialization.
               {
                   py::module json = py::module::import("json");
                   py::object sep1 = py::module::import("_sep1");
@@ -6779,10 +6815,12 @@ messages:
           std::optional<int> ignore_terminal_id_;
 
           // Parser
+          py::dict parser_data_;
           int start_state_id_{0};
           std::unordered_map<int, Row> parser_; // state_id -> Row
 
           // Arena/trie
+          py::dict roots_map_py_;
           std::unordered_map<int, NodeInfo> arena_;
           std::unordered_map<int, int> roots_map_;
 
@@ -6818,29 +6856,40 @@ messages:
           // -----------------------------
           // Parsing helpers
           // -----------------------------
-          static int json_to_int(const json& j) {
-              if (j.is_string()) {
-                  return std::stoi(j.get<std::string>());
+          static int py_obj_to_int(py::handle obj) {
+              if (py::isinstance<py::int_>(obj)) {
+                  return obj.cast<int>();
               }
-              return j.get<int>();
+              if (py::isinstance<py::str>(obj)) {
+                  return std::stoi(obj.cast<std::string>());
+              }
+              throw py::type_error("Expected int or string representation of int");
           }
 
-          void parse_parser_table_from_json(const json& parser_data) {
-              start_state_id_ = parser_data.at("start_state_id").get<int>();
-              const json& table = parser_data.at("stage_7_table");
+          static bool is_py_dict(py::handle h) {
+              return py::isinstance<py::dict>(h);
+          }
 
-              for (const auto& row_item : table) {
-                  int state_id = std::stoi(row_item[0].get<std::string>());
-                  const json& row_data = row_item[1];
+          void parse_parser_table_from_json(const py::dict& parser_data) {
+              // parser_data: { 'start_state_id': int, 'stage_7_table': list[[state_id_str, row_data_dict], ...] }
+              start_state_id_ = py::cast<int>(parser_data["start_state_id"]);
+              py::list table = parser_data["stage_7_table"];
+
+              for (auto row_item : table) {
+                  py::tuple row_tuple = py::cast<py::tuple>(row_item);
+                  int state_id = py_obj_to_int(row_tuple[0]);
+                  py::dict row_data = py::cast<py::dict>(row_tuple[1]);
 
                   Row row;
 
                   // actions
-                  const json& actions_list = row_data.at("shifts_and_reduces_full");
-                  for (const auto& aitem : actions_list) {
-                      int term_id = json_to_int(aitem[0]);
-                      const json& action = aitem[1];
-                      std::string variant = action.at("variant").get<std::string>();
+                  py::list actions_list = row_data["shifts_and_reduces_full"];
+                  for (auto aitem : actions_list) {
+                      py::tuple a = py::cast<py::tuple>(aitem);
+                      int term_id = py_obj_to_int(a[0]);
+                      py::dict action = py::cast<py::dict>(a[1]);
+
+                      std::string variant = py::cast<std::string>(action["variant"]);
                       ActionsOnTerminal aot;
 
                       if (variant == "Shift") {
@@ -6848,19 +6897,22 @@ messages:
                           aot.shift_state_id = py::cast<int>(action["state_id"]);
                       } else if (variant == "Reduce") {
                           int nt = py::cast<int>(action["nonterminal_id"]);
-                          int len = action.at("len").get<int>();
+                          int len = py::cast<int>(action["len"]);
                           aot.reduces.emplace_back(nt, len);
                       } else if (variant == "Split") {
-                          if (action.contains("shift") && !action.at("shift").is_null()) {
+                          py::object shift_obj = action["shift"];
+                          if (!shift_obj.is_none()) {
                               aot.has_shift = true;
-                              aot.shift_state_id = action.at("shift").get<int>();
+                              aot.shift_state_id = py::cast<int>(shift_obj);
                           }
-                          const json& reduces = action.at("reduces");
-                          for (const auto& len_item : reduces) {
-                              int len = json_to_int(len_item[0]);
-                              const json& nts = len_item[1];
-                              for (const auto& nt_item : nts) {
-                                  int nt = json_to_int(nt_item[0]);
+                          py::list reduces = action["reduces"];
+                          for (auto len_item : reduces) {
+                              py::tuple len_tuple = py::cast<py::tuple>(len_item);
+                              int len = py_obj_to_int(len_tuple[0]);
+                              py::list nts = py::cast<py::list>(len_tuple[1]);
+                              for (auto nt_item : nts) {
+                                  py::tuple nt_tuple = py::cast<py::tuple>(nt_item);
+                                  int nt = py_obj_to_int(nt_tuple[0]);
                                   aot.reduces.emplace_back(nt, len);
                               }
                           }
@@ -6869,11 +6921,13 @@ messages:
                   }
 
                   // gotos
-                  const json& gotos_list = row_data.at("gotos");
-                  for (const auto& gitem : gotos_list) {
-                      int nt = json_to_int(gitem[0]);
-                      if (gitem[1].contains("state_id") && !gitem[1].at("state_id").is_null()) {
-                          row.gotos[nt] = gitem[1].at("state_id").get<int>();
+                  py::list gotos_list = row_data["gotos"];
+                  for (auto gitem : gotos_list) {
+                      py::tuple g = py::cast<py::tuple>(gitem);
+                      int nt = py_obj_to_int(g[0]);
+                      py::dict goto_data = py::cast<py::dict>(g[1]);
+                      if (goto_data.contains("state_id") && !goto_data["state_id"].is_none()) {
+                          row.gotos[nt] = py::cast<int>(goto_data["state_id"]);
                       }
                   }
 
@@ -6881,23 +6935,26 @@ messages:
               }
           }
 
-          void parse_arena(const json& arena_json) {
+          void parse_arena(py::dict arena_py) {
+              py::module json = py::module::import("json");
+              py::object dumps = json.attr("dumps");
               py::object sep1 = py::module::import("_sep1");
               py::object BitsetClass = sep1.attr("Bitset");
 
-              const auto& arena_values = arena_json.at("values");
-              for (const auto& item : arena_values.items()) {
-                  int uid = std::stoi(item.key());
-                  const json& node = item.value();
+              for (auto item_handle : arena_py.attr("items")()) {
+                  py::tuple item = py::cast<py::tuple>(item_handle);
+                  int uid = py::cast<int>(item[0]);
+                  py::dict node = py::cast<py::dict>(item[1]);
                   NodeInfo info;
 
                   // Determine if end node
                   bool is_end = false;
                   if (node.contains("value")) {
-                      const auto& value_obj = node.at("value");
-                      if (!value_obj.is_null()) {
-                          if (value_obj.contains("clean_end")) {
-                              is_end = value_obj.at("clean_end").get<bool>();
+                      py::object value_obj = node["value"];
+                      if (!value_obj.is_none()) {
+                          py::dict value = py::cast<py::dict>(value_obj);
+                          if (value.contains("clean_end")) {
+                              is_end = py::cast<bool>(value["clean_end"]);
                           }
                       }
                   }
@@ -6906,26 +6963,28 @@ messages:
                   // Max depth
                   int mdepth = 0;
                   if (node.contains("max_depth")) {
-                      mdepth = node.at("max_depth").get<int>();
+                      mdepth = py::cast<int>(node["max_depth"]);
                   }
                   info.max_depth = mdepth;
 
                   // Children: list of ((pop, llm_bv_json), [(dest_idx, state_bv_json), ...])
-                  const json* children_obj_ptr = nullptr;
+                  py::object children_obj;
                   if (node.contains("children_bits")) {
-                      children_obj_ptr = &node.at("children_bits");
+                      children_obj = node["children_bits"];
                   } else if (node.contains("children")) {
-                      children_obj_ptr = &node.at("children");
+                      children_obj = node["children"];
+                  } else {
+                      children_obj = py::list();
                   }
-                  if (!children_obj_ptr) continue;
 
-                  for (const auto& entry : *children_obj_ptr) {
-                      const auto& edge_key = entry[0];
-                      int pop = edge_key[0].get<int>();
-                      const auto& llm_bv_json = edge_key[1];
+                  for (auto ch : children_obj) {
+                      py::tuple entry = py::cast<py::tuple>(ch);
+                      py::tuple edge_key = py::cast<py::tuple>(entry[0]);
+                      int pop = py::cast<int>(edge_key[0]);
+                      py::object llm_bv_json = edge_key[1];
 
                       // Convert llm_bv_json -> _sep1.Bitset -> RangeSet
-                      py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(llm_bv_json.dump());
+                      py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(dumps(llm_bv_json));
                       py::list llm_ranges_py = llm_bv_bitset.attr("to_ranges")();
                       std::vector<std::pair<unsigned long long, unsigned long long>> llm_ranges_cpp;
                       llm_ranges_cpp.reserve(py::len(llm_ranges_py));
@@ -6936,12 +6995,13 @@ messages:
                       RangeSet llm_bv_rs = RangeSet::from_ranges(llm_ranges_cpp);
 
                       std::vector<DestEdge> dests;
-                      const auto& dest_map = entry[1];
-                      for (const auto& d : dest_map) {
-                          int dest_idx = d[0].get<int>();
-                          const auto& state_bv_json = d[1];
+                      py::object dest_map = entry[1];
+                      for (auto d : dest_map) {
+                          py::tuple dd = py::cast<py::tuple>(d);
+                          int dest_idx = py::cast<int>(dd[0]);
+                          py::object state_bv_json = dd[1];
 
-                          py::object state_bv = BitsetClass.attr("from_json_string")(state_bv_json.dump());
+                          py::object state_bv = BitsetClass.attr("from_json_string")(dumps(state_bv_json));
                           bool is_empty_bv = state_bv.attr("is_empty")().cast<bool>();
                           std::vector<std::pair<int,int>> ranges;
                           if (!is_empty_bv) {
@@ -7147,12 +7207,14 @@ messages:
           m.doc() = "C++ engine for precompute3_model_cpp: commit() and get_mask(), Leveled GSS implementation";
 
           py::class_<Engine>(m, "Engine")
-              .def(py::init<py::object,int,int,py::object,const std::string&,py::dict,py::object,py::dict>(),
+              .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::dict,py::object,py::dict>(),
                    py::arg("tokenizer"),
                    py::arg("tokenizer_initial_state"),
                    py::arg("tokenizer_max_state"),
                    py::arg("ignore_terminal_id_or_none"),
-                   py::arg("json_string"),
+                   py::arg("parser_data"),
+                   py::arg("roots_map_py"),
+                   py::arg("arena_py"),
                    py::arg("possible_matches"),
                    py::arg("all_internal_llm_tokens_bitset"),
                    py::arg("internal_to_original_map"))
@@ -8551,32 +8613,10 @@ messages:
     metadata:
       filename: python/aug25/models/leveled_gss.hpp
   - user: |-
-      bash python/run_benchmarks.sh python/aug25/models/precompute3_model_cpp.py
-      Benchmark results will be saved in: benchmark_results/2025-09-23_14-26-32
-      ---
-      Baseline Model: python/aug25/models/precompute3_model_cpp.py
-      Other Models: (none)
-      Constraint File: ./.cache/test_vocabs/js_grammar_constraint.json.gz
-      Code: ./src/example_code.js
-      ---
-      Ensuring C++ extensions are built...
-      Downloading nlohmann/json.hpp...
-        % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
-                                       Dload  Upload   Total   Spent    Left  Speed
-        0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
-      100  886k  100  886k    0     0  1171k      0 --:--:-- --:--:-- --:--:-- 1171k
-      Installing pybind11...
+      I need to make this C++ model much faster. Ensure it remains functionally identical.
+      Don't try do anything stupid like replace the GSS with raw stacks. The GSS has been finely-tuned for performance scaling to make this code O(log N).
 
-      [notice] A new release of pip is available: 25.0.1 -> 25.2
-      [notice] To update, run: pip install --upgrade pip
-      Building C++ extensions...
-      aug25/models/precompute3_engine.cpp:563:42: error: assigning to 'int' from incompatible type 'object'
-        563 |                     aot.shift_state_id = py::cast<int>(action["state_id"]);
-            |                                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-      aug25/models/precompute3_engine.cpp:565:25: error: no viable conversion from 'object' to 'int'
-        565 |                     int nt = py::cast<int>(action["nonterminal_id"]);
-            |                         ^    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-      2 errors generated.
+      Do the loading from JSON string in C++. Make it super fast.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8595,50 +8635,620 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! I see you've run into a compilation error with the C++ engine. The issue is that the code is trying to use a Python-specific casting function (`py::cast`) on a C++ JSON object from the `nlohmann::json` library.
+      To enhance the performance of your C++ model, I'll focus on optimizing the data loading process by parsing the JSON directly in C++ instead of Python. This will significantly reduce the overhead of creating and converting Python objects.
 
-      Here are the steps to fix the compilation errors:
+      Here are the step-by-step instructions to apply these changes:
 
-      ### Step-by-step Instructions
+      ### Step 1: Update the Benchmark Script to Fetch `nlohmann/json`
 
-      1.  **Open the file `python/aug25/models/precompute3_engine.cpp`**.
+      I will edit `python/run_benchmarks.sh` to automatically download the `nlohmann/json` header-only library and include it during compilation.
 
-      2.  Navigate to the `parse_parser_table_from_json` method, specifically inside the `for` loop that iterates over `actions_list`.
+      1.  **File:** `python/run_benchmarks.sh`
+      2.  **Action:** Add commands to download `json.hpp` after the Boost download section.
+      3.  **Action:** Update the g++ command for `precompute3_engine.cpp` to include the new header's location.
 
-      3.  In the `if (variant == "Shift")` block (around line 563), replace the incorrect cast:
+      Specifically, insert this block after the `tar` command for Boost (around line 93):
 
-          *   **Current line:**
-              ```cpp
-              aot.shift_state_id = py::cast<int>(action["state_id"]);
-              ```
-          *   **Change it to:**
-              ```cpp
-              aot.shift_state_id = action.at("state_id").get<int>();
-              ```
+      ```bash
+      JSON_HPP_URL="https://github.com/nlohmann/json/releases/download/v3.11.2/json.hpp"
+      JSON_HPP_PATH="${PROJECT_ROOT}/.build/json.hpp"
+      if [ ! -f "$JSON_HPP_PATH" ]; then
+        echo "Downloading nlohmann/json.hpp..."
+        curl -L -o "$JSON_HPP_PATH" "$JSON_HPP_URL"
+      fi
+      ```
 
-      4.  In the `else if (variant == "Reduce")` block (around line 565), replace the other incorrect cast:
+      And modify the compilation line for `precompute3_engine.cpp` (around line 125) to be:
 
-          *   **Current line:**
-              ```cpp
-              int nt = py::cast<int>(action["nonterminal_id"]);
-              ```
-          *   **Change it to:**
-              ```cpp
-              int nt = action.at("nonterminal_id").get<int>();
-              ```
+      ```bash
+      ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+        -I"${PROJECT_ROOT}/.build" "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
+      ```
 
-      These changes use the correct method (`.at(...).get<int>()`) to extract integer values from the `nlohmann::json` object. After applying these edits, the C++ extension should compile successfully.
+      ### Step 2: Modify the Python Wrapper to Pass the Raw JSON String
 
-      ### Git Diff
+      Next, I'll adjust `python/aug25/models/precompute3_model_cpp.py` to pass the entire JSON string to the C++ engine, avoiding costly pre-parsing in Python.
 
-      Here is the git diff for the required changes:
+      1.  **File:** `python/aug25/models/precompute3_model_cpp.py`
+      2.  **Action:** In the `from_json_string` static method, remove the Python-side parsing of `parser_data`.
+      3.  **Action:** Change the call to `eng.Engine()` to pass the raw JSON string `s` instead of the `parser_data`, `roots_map`, and `arena` Python objects.
+
+      ### Step 3: Refactor the C++ Engine for Native JSON Parsing
+
+      This is the core change. I will rewrite parts of `python/aug25/models/precompute3_engine.cpp` to handle JSON parsing internally.
+
+      1.  **File:** `python/aug25/models/precompute3_engine.cpp`
+      2.  **Action:** Add an include for `nlohmann/json.hpp`.
+      3.  **Action:** Update the `Engine` constructor's signature to accept a `const std::string& json_string` instead of several `py::dict` arguments.
+      4.  **Action:** In the constructor, use `nlohmann::json::parse()` and extract the necessary data structures (`roots_map`, `parser`, `arena`) from the parsed JSON object.
+      5.  **Action:** Remove the now-unused member variables `parser_data_` and `roots_map_py_`.
+      6.  **Action:** Rewrite the helper functions `parse_parser_table_from_json` and `parse_arena` to work with `nlohmann::json` objects instead of `py::dict`. This includes replacing pybind11 API calls with `nlohmann::json` equivalents.
+      7.  **Action:** Add a small helper function `json_to_int` to handle JSON values that could be either a string or an integer, replacing the old `py_obj_to_int`.
+      8.  **Action:** Update the `py::init` call within the `PYBIND11_MODULE` block to match the new constructor signature.
+
+      Below are the git diffs for each file.
 
       ```diff
-      diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
-      index 211118e..141111c 100644
+      --- a/python/run_benchmarks.sh
+      +++ b/python/run_benchmarks.sh
+      @@ -91,6 +91,13 @@
+         tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
+       fi
+       
+      +JSON_HPP_URL="https://github.com/nlohmann/json/releases/download/v3.11.2/json.hpp"
+      +JSON_HPP_PATH="${PROJECT_ROOT}/.build/json.hpp"
+      +if [ ! -f "$JSON_HPP_PATH" ]; then
+      +  echo "Downloading nlohmann/json.hpp..."
+      +  curl -L -o "$JSON_HPP_PATH" "$JSON_HPP_URL"
+      +fi
+      +
+       echo "Installing pybind11..."
+       python3 -m pip install --quiet pybind11
+       
+      @@ -122,7 +129,7 @@
+         "aug25/models/leveled_gss_py.cpp" -o "leveled_gss_cpp${EXT_SUFFIX}" ${LDFLAGS}
+       
+       ${CXX} ${CXXFLAGS} ${PYBIND_INCLUDES} -I"${BOOST_DIR}" \
+      -  "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
+      +  -I"${PROJECT_ROOT}/.build" "aug25/models/precompute3_engine.cpp" -o "aug25/models/precompute3_engine${EXT_SUFFIX}" ${LDFLAGS}
+       
+       # Change back to original directory
+       cd "$ORIGINAL_CWD"
+
+      ``````diff
+      --- a/python/aug25/models/precompute3_model_cpp.py
+      +++ b/python/aug25/models/precompute3_model_cpp.py
+      @@ -50,22 +50,16 @@
+               model.glr_parser = constraint.glr_parser()
+               model.tokenizer_initial_state = model.tokenizer.initial_state_id()
+       
+      -        # Parse parser JSON directly from data (no Python-side dataclasses)
+      -        parser_data = data['parser']  # contains 'start_state_id' and 'stage_7_table'
+      -
+               # Build id_to_token mapping (original LLM token map)
+               model.id_to_token = {int(v): bytes(k) for k, v in data['llm_token_map']}
+       
+               # Keep internal->original token id map for final mask conversion (engine uses it too)
+               model.internal_to_original_map = constraint.internal_to_original_map()
+       
+      -        # Create the C++ Engine (self-contained algorithm in C++)
+      -        # Pass raw structures; the engine will parse/normalize as needed.
+      +        # Create the C++ Engine. Pass raw JSON string for fast C++-side parsing.
+               model._engine = eng.Engine(
+                   model.tokenizer,
+                   model.tokenizer.initial_state_id(),
+                   model.tokenizer.max_state(),
+                   model.glr_parser.ignore_terminal_id if model.glr_parser.ignore_terminal_id is not None else None,
+      -            parser_data,
+      -            dict(model.roots_map),
+      -            model.arena,
+      +            s,
+                   constraint.possible_matches(),                 # tsid -> term_id -> _sep1.Bitset
+                   constraint.all_internal_llm_tokens_bitset(),  # _sep1.Bitset universe
+                   model.internal_to_original_map                # int -> int
+
+      ``````diff
       --- a/python/aug25/models/precompute3_engine.cpp
       +++ b/python/aug25/models/precompute3_engine.cpp
-      @@ -560,10 +560,10 @@
+      @@ -16,11 +16,14 @@
+       #include <memory>
+       #include "leveled_gss.hpp"
+       
+      -#include <functional>
+      -#include <memory>
+      -#include "leveled_gss.hpp"
+       #include "icl_rangeset.hpp"
+       
+      +// Fast JSON parsing
+      +#include <nlohmann/json.hpp>
+      +
+      +
+      +using json = nlohmann::json;
+       using namespace leveled_gss;
+       
+       namespace py = pybind11;
+      @@ -82,26 +85,22 @@
+                  int tokenizer_initial_state,
+                  int tokenizer_max_state,
+                  py::object ignore_terminal_id_or_none,
+      -           py::dict parser_data,                  // JSON 'parser' object with start_state_id and stage_7_table
+      -           py::dict roots_map_py,                 // state_id -> root node id
+      -           py::dict arena_py,                     // uid -> node dict (children carry bitset JSON)
+      +           const std::string& json_string,
+                  py::dict possible_matches,             // tsid -> term_id -> _sep1.Bitset
+                  py::object all_internal_llm_tokens_bitset,
+                  py::dict internal_to_original_map)
+               : tokenizer_(std::move(tokenizer)),
+                 tokenizer_initial_state_(tokenizer_initial_state),
+                 tokenizer_max_state_(tokenizer_max_state),
+      -          parser_data_(std::move(parser_data)),
+      -          roots_map_py_(std::move(roots_map_py)),
+                 pmc_(std::move(possible_matches)),
+                 all_internal_llm_tokens_bitset_(std::move(all_internal_llm_tokens_bitset)) {
+       
+      +        json data = json::parse(json_string);
+      +
+               if (!ignore_terminal_id_or_none.is_none()) {
+                   ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
+               }
+       
+      -        // Universe RangeSet for get_mask init
+               {
+                   py::list ranges_py = all_internal_llm_tokens_bitset_.attr("to_ranges")();
+                   std::vector<std::pair<unsigned long long, unsigned long long>> ranges_cpp;
+      @@ -113,18 +112,16 @@
+                   universe_rangeset_ = RangeSet::from_ranges(ranges_cpp);
+               }
+       
+      -        // Parse roots_map into C++ map
+      -        for (auto item : roots_map_py_) {
+      -            int sid = py::cast<int>(item.first);
+      -            int root = py::cast<int>(item.second);
+      -            roots_map_[sid] = root;
+      -        }
+      -
+      -        // Parse parser table from JSON dict
+      -        parse_parser_table_from_json(parser_data_);
+      -
+      -        // Parse arena using JSON-encoded bitsets; convert to Bitset and RangeSet
+      -        parse_arena(arena_py);
+      +        const auto& roots_map_json = data.at("precomputed3");
+      +        for (const auto& item : roots_map_json) {
+      +            roots_map_[item[0].get<int>()] = item[1].get<int>();
+      +        }
+      +
+      +        parse_parser_table_from_json(data.at("parser"));
+      +
+      +        parse_arena(data.at("trie3_god"));
+       
+               // Pre-convert possible_matches into C++ RangeSet map (tsid -> term_id -> RangeSet)
+      -        // This avoids repeated Python calls during get_mask initialization.
+               {
+                   py::module json = py::module::import("json");
+                   py::object sep1 = py::module::import("_sep1");
+      @@ -428,14 +425,11 @@
+           std::optional<int> ignore_terminal_id_;
+       
+           // Parser
+      -    py::dict parser_data_;
+           int start_state_id_{0};
+           std::unordered_map<int, Row> parser_; // state_id -> Row
+       
+           // Arena/trie
+      -    py::dict roots_map_py_;
+           std::unordered_map<int, NodeInfo> arena_;
+           std::unordered_map<int, int> roots_map_;
+       
+      @@ -469,37 +463,28 @@
+           // -----------------------------
+           // Parsing helpers
+           // -----------------------------
+      -    static int py_obj_to_int(py::handle obj) {
+      -        if (py::isinstance<py::int_>(obj)) {
+      -            return obj.cast<int>();
+      -        }
+      -        if (py::isinstance<py::str>(obj)) {
+      -            return std::stoi(obj.cast<std::string>());
+      -        }
+      -        throw py::type_error("Expected int or string representation of int");
+      -    }
+      -
+      -    static bool is_py_dict(py::handle h) {
+      -        return py::isinstance<py::dict>(h);
+      -    }
+      -
+      -    void parse_parser_table_from_json(const py::dict& parser_data) {
+      -        // parser_data: { 'start_state_id': int, 'stage_7_table': list[[state_id_str, row_data_dict], ...] }
+      -        start_state_id_ = py::cast<int>(parser_data["start_state_id"]);
+      -        py::list table = parser_data["stage_7_table"];
+      -
+      -        for (auto row_item : table) {
+      -            py::tuple row_tuple = py::cast<py::tuple>(row_item);
+      -            int state_id = py_obj_to_int(row_tuple[0]);
+      -            py::dict row_data = py::cast<py::dict>(row_tuple[1]);
+      +    static int json_to_int(const json& j) {
+      +        if (j.is_string()) {
+      +            return std::stoi(j.get<std::string>());
+      +        }
+      +        return j.get<int>();
+      +    }
+      +
+      +    void parse_parser_table_from_json(const json& parser_data) {
+      +        start_state_id_ = parser_data.at("start_state_id").get<int>();
+      +        const json& table = parser_data.at("stage_7_table");
+      +
+      +        for (const auto& row_item : table) {
+      +            int state_id = std::stoi(row_item[0].get<std::string>());
+      +            const json& row_data = row_item[1];
+       
+                   Row row;
+       
+                   // actions
+      -            py::list actions_list = row_data["shifts_and_reduces_full"];
+      -            for (auto aitem : actions_list) {
+      -                py::tuple a = py::cast<py::tuple>(aitem);
+      -                int term_id = py_obj_to_int(a[0]);
+      -                py::dict action = py::cast<py::dict>(a[1]);
+      -
+      -                std::string variant = py::cast<std::string>(action["variant"]);
+      +            const json& actions_list = row_data.at("shifts_and_reduces_full");
+      +            for (const auto& aitem : actions_list) {
+      +                int term_id = json_to_int(aitem[0]);
+      +                const json& action = aitem[1];
+      +                std::string variant = action.at("variant").get<std::string>();
+                       ActionsOnTerminal aot;
+       
+                       if (variant == "Shift") {
+      @@ -507,24 +492,21 @@
+                           aot.shift_state_id = py::cast<int>(action["state_id"]);
+                       } else if (variant == "Reduce") {
+                           int nt = py::cast<int>(action["nonterminal_id"]);
+      -                    int len = py::cast<int>(action["len"]);
+      +                    int len = action.at("len").get<int>();
+                           aot.reduces.emplace_back(nt, len);
+                       } else if (variant == "Split") {
+      -                    py::object shift_obj = action["shift"];
+      -                    if (!shift_obj.is_none()) {
+      +                    if (action.contains("shift") && !action.at("shift").is_null()) {
+                               aot.has_shift = true;
+      -                        aot.shift_state_id = py::cast<int>(shift_obj);
+      -                    }
+      -                    py::list reduces = action["reduces"];
+      -                    for (auto len_item : reduces) {
+      -                        py::tuple len_tuple = py::cast<py::tuple>(len_item);
+      -                        int len = py_obj_to_int(len_tuple[0]);
+      -                        py::list nts = py::cast<py::list>(len_tuple[1]);
+      -                        for (auto nt_item : nts) {
+      -                            py::tuple nt_tuple = py::cast<py::tuple>(nt_item);
+      -                            int nt = py_obj_to_int(nt_tuple[0]);
+      +                        aot.shift_state_id = action.at("shift").get<int>();
+      +                    }
+      +                    const json& reduces = action.at("reduces");
+      +                    for (const auto& len_item : reduces) {
+      +                        int len = json_to_int(len_item[0]);
+      +                        const json& nts = len_item[1];
+      +                        for (const auto& nt_item : nts) {
+      +                            int nt = json_to_int(nt_item[0]);
+                                   aot.reduces.emplace_back(nt, len);
+                               }
+                           }
+      @@ -533,13 +515,11 @@
+                   }
+       
+                   // gotos
+      -            py::list gotos_list = row_data["gotos"];
+      -            for (auto gitem : gotos_list) {
+      -                py::tuple g = py::cast<py::tuple>(gitem);
+      -                int nt = py_obj_to_int(g[0]);
+      -                py::dict goto_data = py::cast<py::dict>(g[1]);
+      -                if (goto_data.contains("state_id") && !goto_data["state_id"].is_none()) {
+      -                    row.gotos[nt] = py::cast<int>(goto_data["state_id"]);
+      +            const json& gotos_list = row_data.at("gotos");
+      +            for (const auto& gitem : gotos_list) {
+      +                int nt = json_to_int(gitem[0]);
+      +                if (gitem[1].contains("state_id") && !gitem[1].at("state_id").is_null()) {
+      +                    row.gotos[nt] = gitem[1].at("state_id").get<int>();
+                       }
+                   }
+       
+      @@ -547,26 +527,22 @@
+               }
+           }
+       
+      -    void parse_arena(py::dict arena_py) {
+      -        py::module json = py::module::import("json");
+      -        py::object dumps = json.attr("dumps");
+      +    void parse_arena(const json& arena_json) {
+               py::object sep1 = py::module::import("_sep1");
+               py::object BitsetClass = sep1.attr("Bitset");
+       
+      -        for (auto item_handle : arena_py.attr("items")()) {
+      -            py::tuple item = py::cast<py::tuple>(item_handle);
+      -            int uid = py::cast<int>(item[0]);
+      -            py::dict node = py::cast<py::dict>(item[1]);
+      +        const auto& arena_values = arena_json.at("values");
+      +        for (const auto& item : arena_values.items()) {
+      +            int uid = std::stoi(item.key());
+      +            const json& node = item.value();
+                   NodeInfo info;
+       
+                   // Determine if end node
+                   bool is_end = false;
+                   if (node.contains("value")) {
+      -                py::object value_obj = node["value"];
+      -                if (!value_obj.is_none()) {
+      -                    py::dict value = py::cast<py::dict>(value_obj);
+      -                    if (value.contains("clean_end")) {
+      -                        is_end = py::cast<bool>(value["clean_end"]);
+      +                const auto& value_obj = node.at("value");
+      +                if (!value_obj.is_null()) {
+      +                    if (value_obj.contains("clean_end")) {
+      +                        is_end = value_obj.at("clean_end").get<bool>();
+                           }
+                       }
+                   }
+      @@ -575,26 +551,24 @@
+                   // Max depth
+                   int mdepth = 0;
+                   if (node.contains("max_depth")) {
+      -                mdepth = py::cast<int>(node["max_depth"]);
+      +                mdepth = node.at("max_depth").get<int>();
+                   }
+                   info.max_depth = mdepth;
+       
+                   // Children: list of ((pop, llm_bv_json), [(dest_idx, state_bv_json), ...])
+      -            py::object children_obj;
+      +            const json* children_obj_ptr = nullptr;
+                   if (node.contains("children_bits")) {
+      -                children_obj = node["children_bits"];
+      +                children_obj_ptr = &node.at("children_bits");
+                   } else if (node.contains("children")) {
+      -                children_obj = node["children"];
+      -            } else {
+      -                children_obj = py::list();
+      -            }
+      -
+      -            for (auto ch : children_obj) {
+      -                py::tuple entry = py::cast<py::tuple>(ch);
+      -                py::tuple edge_key = py::cast<py::tuple>(entry[0]);
+      -                int pop = py::cast<int>(edge_key[0]);
+      -                py::object llm_bv_json = edge_key[1];
+      +                children_obj_ptr = &node.at("children");
+      +            }
+      +            if (!children_obj_ptr) continue;
+      +
+      +            for (const auto& entry : *children_obj_ptr) {
+      +                const auto& edge_key = entry[0];
+      +                int pop = edge_key[0].get<int>();
+      +                const auto& llm_bv_json = edge_key[1];
+       
+                       // Convert llm_bv_json -> _sep1.Bitset -> RangeSet
+      -                py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(dumps(llm_bv_json));
+      +                py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(llm_bv_json.dump());
+                       py::list llm_ranges_py = llm_bv_bitset.attr("to_ranges")();
+                       std::vector<std::pair<unsigned long long, unsigned long long>> llm_ranges_cpp;
+                       llm_ranges_cpp.reserve(py::len(llm_ranges_py));
+      @@ -605,19 +579,17 @@
+                       RangeSet llm_bv_rs = RangeSet::from_ranges(llm_ranges_cpp);
+       
+                       std::vector<DestEdge> dests;
+      -                py::object dest_map = entry[1];
+      -                for (auto d : dest_map) {
+      -                    py::tuple dd = py::cast<py::tuple>(d);
+      -                    int dest_idx = py::cast<int>(dd[0]);
+      -                    py::object state_bv_json = dd[1];
+      -
+      -                    py::object state_bv = BitsetClass.attr("from_json_string")(dumps(state_bv_json));
+      +                const auto& dest_map = entry[1];
+      +                for (const auto& d : dest_map) {
+      +                    int dest_idx = d[0].get<int>();
+      +                    const auto& state_bv_json = d[1];
+      +
+      +                    py::object state_bv = BitsetClass.attr("from_json_string")(state_bv_json.dump());
+                           bool is_empty_bv = state_bv.attr("is_empty")().cast<bool>();
+                           std::vector<std::pair<int,int>> ranges;
+                           if (!is_empty_bv) {
+                               py::object py_ranges = state_bv.attr("to_ranges")();
+                               ranges.reserve(py::len(py_ranges));
+                               for (auto it : py_ranges) {
+                                   py::tuple t = py::cast<py::tuple>(it);
+                                   int l = py::cast<int>(t[0]);
+      @@ -829,14 +801,12 @@
+           m.doc() = "C++ engine for precompute3_model_cpp: commit() and get_mask(), Leveled GSS implementation";
+       
+           py::class_<Engine>(m, "Engine")
+      -        .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::dict,py::object,py::dict>(),
+      +        .def(py::init<py::object,int,int,py::object,const std::string&,py::dict,py::object,py::dict>(),
+                    py::arg("tokenizer"),
+                    py::arg("tokenizer_initial_state"),
+                    py::arg("tokenizer_max_state"),
+                    py::arg("ignore_terminal_id_or_none"),
+      -             py::arg("parser_data"),
+      -             py::arg("roots_map_py"),
+      -             py::arg("arena_py"),
+      +             py::arg("json_string"),
+                    py::arg("possible_matches"),
+                    py::arg("all_internal_llm_tokens_bitset"),
+                    py::arg("internal_to_original_map"))
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 3 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/run_benchmarks.sh
+      Applying patch to 'python/run_benchmarks.sh' using custom patcher...
+      Successfully applied patch and wrote to python/run_benchmarks.sh.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/aug25/models/precompute3_model_cpp.py
+      Applying patch to 'python/aug25/models/precompute3_model_cpp.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_cpp.py.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: python/aug25/models/precompute3_engine.cpp
+      Applying patch to 'python/aug25/models/precompute3_engine.cpp' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_engine.cpp.
+    metadata:
+  - user: 'Changes committed with message: "feat: Enable native JSON parsing in C++
+      engine for performance"'
+    metadata:
+  - user: |-
+      Diff of python/run_benchmarks.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/model_abc.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_cpp.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/icl_rangeset.cpp since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/leveled_gss_py.cpp since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_engine.cpp since previous turn:
+      ```diff
+      --- original version of python/aug25/models/precompute3_engine.cpp+++ current version of python/aug25/models/precompute3_engine.cpp@@ -560,9 +560,9 @@ 
+                       if (variant == "Shift") {
+                           aot.has_shift = true;
+      -                    aot.shift_state_id = py::cast<int>(action["state_id"]);
+      +                    aot.shift_state_id = action.at("state_id").get<int>();
+                       } else if (variant == "Reduce") {
+      -                    int nt = py::cast<int>(action["nonterminal_id"]);
+      +                    int nt = action.at("nonterminal_id").get<int>();
+                           int len = action.at("len").get<int>();
+                           aot.reduces.emplace_back(nt, len);
+                       } else if (variant == "Split") {
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/icl_rangeset.hpp since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/leveled_gss.hpp since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      bash python/run_benchmarks.sh python/aug25/models/precompute3_model_cpp.py
+      Benchmark results will be saved in: benchmark_results/2025-09-23_14-28-14
+      ---
+      Baseline Model: python/aug25/models/precompute3_model_cpp.py
+      Other Models: (none)
+      Constraint File: ./.cache/test_vocabs/js_grammar_constraint.json.gz
+      Code: ./src/example_code.js
+      ---
+      Ensuring C++ extensions are built...
+      Installing pybind11...
+
+      [notice] A new release of pip is available: 25.0.1 -> 25.2
+      [notice] To update, run: pip install --upgrade pip
+      Building C++ extensions...
+      Build complete.
+      ---
+      Starting benchmark runs...
+
+      >>> Running benchmark for: precompute3_model_cpp.py
+      python -m python.aug25.benchmark_runner --code ./src/example_code.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz --model python/aug25/models/precompute3_model_cpp.py --output benchmark_results/2025-09-23_14-28-14
+      >>> Running with AddressSanitizer...
+      python(11485,0x1f1024800) malloc: nano zone abandoned due to inability to reserve vm space.
+      --- Setting up benchmark environment ---
+      Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint.json.gz
+      Loading model from: python/aug25/models/precompute3_model_cpp.py
+      Traceback (most recent call last):
+        File "<frozen runpy>", line 198, in _run_module_as_main
+        File "<frozen runpy>", line 88, in _run_code
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 314, in <module>
+          main()
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 310, in main
+          run_benchmark(args)
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 209, in run_benchmark
+          model = ModelClass.from_json_string(constraint_json_str)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_cpp.py", line 66, in from_json_string
+          model._engine = eng.Engine(
+                          ^^^^^^^^^^^
+      RuntimeError: [json.exception.type_error.302] type must be string, but is number
+
+      >>> Benchmark for precompute3_model_cpp.py failed with exit code 1. Skipping.
+
+      All benchmark runs completed.
+      ---
+      Analyzing results and generating plots...
+      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-23_14-28-14/*.json --baseline precompute3_model_cpp --output-dir benchmark_results/2025-09-23_14-28-14/analysis
+      Error: No .json files found in the specified paths.
+
+      ---
+      Benchmark analysis complete.
+      Baseline: precompute3_model_cpp
+      Summary printed above. Plots are saved in: benchmark_results/2025-09-23_14-28-14/analysis
+      Full JSON results are in: benchmark_results/2025-09-23_14-28-14
+    metadata:
+  - assistant: |-
+      It looks like the transition to native C++ JSON parsing introduced a couple of issues. The runtime error you're seeing is because the parser table's `state_id` can be either a string or a number, but the new code was strictly expecting a string. Additionally, I've spotted a few other places where the old `py::cast` was mistakenly left in, which I'll also correct.
+
+      Here are the steps to fix the C++ engine:
+
+      ### Step 1: Correct JSON Value Handling in `precompute3_engine.cpp`
+
+      I will update the `parse_parser_table_from_json` function to correctly handle mixed types for IDs and to consistently use the `nlohmann::json` API.
+
+      1.  **File:** `python/aug25/models/precompute3_engine.cpp`
+      2.  **Function:** `parse_parser_table_from_json`
+      3.  **Action:** Locate the line that parses the `state_id` from the table row.
+          -   **Change:** `int state_id = std::stoi(row_item[0].get<std::string>());`
+          -   **To:** `int state_id = json_to_int(row_item[0]);`
+      4.  **Action:** Inside the `actions` loop, correct the parsing for `Shift` and `Reduce` variants.
+          -   In the `if (variant == "Shift")` block:
+              -   **Change:** `aot.shift_state_id = py::cast<int>(action["state_id"]);`
+              -   **To:** `aot.shift_state_id = action.at("state_id").get<int>();`
+          -   In the `else if (variant == "Reduce")` block:
+              -   **Change:** `int nt = py::cast<int>(action["nonterminal_id"]);`
+              -   **To:** `int nt = action.at("nonterminal_id").get<int>();`
+
+      These changes will resolve the runtime crash and make the JSON parsing logic more robust.
+
+      Here is the git diff to apply the fix:
+
+      ```diff
+      --- a/python/aug25/models/precompute3_engine.cpp
+      +++ b/python/aug25/models/precompute3_engine.cpp
+      @@ -533,8 +533,8 @@
+               const json& table = parser_data.at("stage_7_table");
+       
+               for (const auto& row_item : table) {
+      -            int state_id = std::stoi(row_item[0].get<std::string>());
+                   const json& row_data = row_item[1];
+      +            int state_id = json_to_int(row_item[0]);
+       
+                   Row row;
+       
+      @@ -548,10 +548,10 @@
        
                        if (variant == "Shift") {
                            aot.has_shift = true;
@@ -8647,6 +9257,94 @@ messages:
                        } else if (variant == "Reduce") {
       -                    int nt = py::cast<int>(action["nonterminal_id"]);
       +                    int nt = action.at("nonterminal_id").get<int>();
+                           int len = action.at("len").get<int>();
+                           aot.reduces.emplace_back(nt, len);
+                       } else if (variant == "Split") {
+
+      ```
+    metadata:
+  - user: |-
+      Failed Hunk:
+
+      ```diff
+      @@ -548,10 +548,10 @@
+       
+                       if (variant == "Shift") {
+                           aot.has_shift = true;
+      -                    aot.shift_state_id = py::cast<int>(action["state_id"]);
+      +                    aot.shift_state_id = action.at("state_id").get<int>();
+                       } else if (variant == "Reduce") {
+      -                    int nt = py::cast<int>(action["nonterminal_id"]);
+      +                    int nt = action.at("nonterminal_id").get<int>();
+                           int len = action.at("len").get<int>();
+                           aot.reduces.emplace_back(nt, len);
+                       } else if (variant == "Split") {
+      ```
+
+      Expected Context (from patch):
+
+      ```diff
+
+                      if (variant == "Shift") {
+                          aot.has_shift = true;
+                          aot.shift_state_id = py::cast<int>(action["state_id"]);
+                      } else if (variant == "Reduce") {
+                          int nt = py::cast<int>(action["nonterminal_id"]);
+                          int len = action.at("len").get<int>();
+                          aot.reduces.emplace_back(nt, len);
+                      } else if (variant == "Split") {
+      ```
+
+      Nearest Match in `python/aug25/models/precompute3_engine.cpp` (found at line 560 with 77.78% similarity, shown with padding):
+
+      ```cpp
+                  for (const auto& aitem : actions_list) {
+                      int term_id = json_to_int(aitem[0]);
+                      const json& action = aitem[1];
+                      std::string variant = action.at("variant").get<std::string>();
+                      ActionsOnTerminal aot;
+
+                      if (variant == "Shift") {
+                          aot.has_shift = true;
+                          aot.shift_state_id = action.at("state_id").get<int>();
+                      } else if (variant == "Reduce") {
+                          int nt = action.at("nonterminal_id").get<int>();
+                          int len = action.at("len").get<int>();
+                          aot.reduces.emplace_back(nt, len);
+                      } else if (variant == "Split") {
+                          if (action.contains("shift") && !action.at("shift").is_null()) {
+                              aot.has_shift = true;
+                              aot.shift_state_id = action.at("shift").get<int>();
+                          }
+                          const json& reduces = action.at("reduces");
+      ```
+
+      The git diff hunk above failed to apply to the file `python/aug25/models/precompute3_engine.cpp`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
+      Do not include any other text or explanation outside the code block.
+    metadata:
+  - assistant: |-
+      ```diff
+      --- a/python/aug25/models/precompute3_engine.cpp
+      +++ b/python/aug25/models/precompute3_engine.cpp
+      @@ -533,8 +533,8 @@
+               const json& table = parser_data.at("stage_7_table");
+       
+               for (const auto& row_item : table) {
+      -            int state_id = std::stoi(row_item[0].get<std::string>());
+                   const json& row_data = row_item[1];
+      +            int state_id = json_to_int(row_item[0]);
+       
+                   Row row;
+       
+      @@ -548,10 +548,10 @@
+       
+                       if (variant == "Shift") {
+                           aot.has_shift = true;
+      -                    aot.shift_state_id = action.at("state_id").get<int>();
+      +                    aot.shift_state_id = py::cast<int>(action["state_id"]);
+                       } else if (variant == "Reduce") {
+      -                    int nt = action.at("nonterminal_id").get<int>();
+      +                    int nt = py::cast<int>(action["nonterminal_id"]);
                            int len = action.at("len").get<int>();
                            aot.reduces.emplace_back(nt, len);
                        } else if (variant == "Split") {
@@ -8662,7 +9360,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_engine.cpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_engine.cpp.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correct JSON integer extraction in
-      precompute3_engine"'
+  - user: 'Changes committed with message: "feat: Implement C++-side JSON parsing
+      for precompute3 engine"'
     metadata:
 ...

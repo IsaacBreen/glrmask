@@ -545,8 +545,8 @@ private:
         const json& table = parser_data.at("stage_7_table");
 
         for (const auto& row_item : table) {
-            int state_id = std::stoi(row_item[0].get<std::string>());
             const json& row_data = row_item[1];
+            int state_id = json_to_int(row_item[0]);
 
             Row row;
 
@@ -560,9 +560,9 @@ private:
 
                 if (variant == "Shift") {
                     aot.has_shift = true;
-                    aot.shift_state_id = action.at("state_id").get<int>();
+                    aot.shift_state_id = py::cast<int>(action["state_id"]);
                 } else if (variant == "Reduce") {
-                    int nt = action.at("nonterminal_id").get<int>();
+                    int nt = py::cast<int>(action["nonterminal_id"]);
                     int len = action.at("len").get<int>();
                     aot.reduces.emplace_back(nt, len);
                 } else if (variant == "Split") {
