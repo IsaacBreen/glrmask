@@ -410,6 +410,16 @@ private:
     // -----------------------------
     // Parsing helpers
     // -----------------------------
+    static int py_obj_to_int(py::handle obj) {
+        if (py::isinstance<py::int_>(obj)) {
+            return obj.cast<int>();
+        }
+        if (py::isinstance<py::str>(obj)) {
+            return std::stoi(obj.cast<std::string>());
+        }
+        throw py::type_error("Expected int or string representation of int");
+    }
+
     static bool is_py_dict(py::handle h) {
         return py::isinstance<py::dict>(h);
     }
@@ -421,7 +431,7 @@ private:
 
         for (auto row_item : table) {
             py::tuple row_tuple = py::cast<py::tuple>(row_item);
-            int state_id = std::stoi(py::cast<std::string>(row_tuple[0]));
+            int state_id = py_obj_to_int(row_tuple[0]);
             py::dict row_data = py::cast<py::dict>(row_tuple[1]);
 
             Row row;
@@ -430,7 +440,7 @@ private:
             py::list actions_list = row_data["shifts_and_reduces_full"];
             for (auto aitem : actions_list) {
                 py::tuple a = py::cast<py::tuple>(aitem);
-                int term_id = std::stoi(py::cast<std::string>(a[0]));
+                int term_id = py_obj_to_int(a[0]);
                 py::dict action = py::cast<py::dict>(a[1]);
 
                 std::string variant = py::cast<std::string>(action["variant"]);
@@ -452,11 +462,11 @@ private:
                     py::list reduces = action["reduces"];
                     for (auto len_item : reduces) {
                         py::tuple len_tuple = py::cast<py::tuple>(len_item);
-                        int len = std::stoi(py::cast<std::string>(len_tuple[0]));
+                        int len = py_obj_to_int(len_tuple[0]);
                         py::list nts = py::cast<py::list>(len_tuple[1]);
                         for (auto nt_item : nts) {
                             py::tuple nt_tuple = py::cast<py::tuple>(nt_item);
-                            int nt = std::stoi(py::cast<std::string>(nt_tuple[0]));
+                            int nt = py_obj_to_int(nt_tuple[0]);
                             aot.reduces.emplace_back(nt, len);
                         }
                     }
@@ -468,7 +478,7 @@ private:
             py::list gotos_list = row_data["gotos"];
             for (auto gitem : gotos_list) {
                 py::tuple g = py::cast<py::tuple>(gitem);
-                int nt = std::stoi(py::cast<std::string>(g[0]));
+                int nt = py_obj_to_int(g[0]);
                 py::dict goto_data = py::cast<py::dict>(g[1]);
                 if (goto_data.contains("state_id") && !goto_data["state_id"].is_none()) {
                     row.gotos[nt] = py::cast<int>(goto_data["state_id"]);
