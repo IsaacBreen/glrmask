@@ -96,6 +96,7 @@ for model_to_benchmark in "${ALL_MODELS[@]}"; do
         if DYLD_INSERT_LIBRARIES="$ASAN_LIB" "${cmd[@]}"; then
             echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
         else
+            exit_code=$?
             echo
             echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
         fi
@@ -103,6 +104,7 @@ for model_to_benchmark in "${ALL_MODELS[@]}"; do
         if "${cmd[@]}"; then
             echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
         else
+            exit_code=$?
             echo
             echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
         fi
