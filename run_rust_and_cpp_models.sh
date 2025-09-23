@@ -69,9 +69,7 @@ ${CXX} -O3 -std=c++17 -shared -fPIC \
 # Compile precompute3_engine (C++ commit/get_mask engine)
 ${CXX} -O3 -std=c++17 -shared -fPIC \
   ${PYBIND_INCLUDES} \
-  -I"${BOOST_DIR}" \
   "aug25/models/precompute3_engine.cpp" \
-  "aug25/models/icl_rangeset.cpp" \
   -o "aug25/models/precompute3_engine${EXT_SUFFIX}" \
   ${LDFLAGS}
 
