@@ -378,7 +378,7 @@ public:
         // todo buckets: depth -> set of nodes
         std::unordered_map<int, std::set<int>> todo;
         // min-heap for depths
-        std::priority_queue<int, std::vector<int>, std::greater<int>> depth_heap;
+        std::priority_queue<int> depth_heap;
 
         auto enqueue = [&](int d, int n) {
             auto &bucket = todo[d];
@@ -439,14 +439,22 @@ public:
 
                 // Traverse edges
                 for (const Edge &e : info.edges) {
+                    RangeSet llm_bv = e.llm_bv_rangeset.difference_with(final_mask);
+                    if (llm_bv.is_empty()) continue;
+
                     Leveled popped = gss_node.popn(e.pop);
                     if (popped.is_empty()) continue;
 
                     // Apply LLM limiter once per edge (not per destination) to avoid repeated
                     // expensive apply_and_prune work. This mirrors the sharing-friendly structure
                     // from the Python implementation.
-                    Leveled popped_limited = intersect_llm_mask(popped, e.llm_bv_rangeset);
+                    Leveled popped_limited = intersect_llm_mask(popped, llm_bv);
                     if (popped_limited.is_empty()) continue;
+
+                    auto reduced_popped = popped_limited.reduce_acc();
+                    if (!reduced_popped || reduced_popped->llm_mask.is_empty()) {
+                        continue;
+                    }
 
                     // Compute top states after pruning/limiting.
                     std::unordered_set<int> top_after = popped_limited.peek();
@@ -463,6 +471,11 @@ public:
 
                         Leveled child2 = popped_limited.isolate_many(keep);
                         if (child2.is_empty()) continue;
+
+                        auto reduced_child = child2.reduce_acc();
+                        if (!reduced_child || reduced_child->llm_mask.is_empty()) {
+                            continue;
+                        }
 
                         int dnode = de.dest_idx;
                         auto it_child = values.find(dnode);
