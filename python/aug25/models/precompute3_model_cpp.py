@@ -79,12 +79,18 @@ class Model(GraphProvider):
             constraint.all_internal_llm_tokens_bitset(),  # _sep1.Bitset universe
             model.internal_to_original_map                # int -> int
         )
+        model._engine.reset_stats()
 
         return model
 
     def commit(self, token_id: int):
         token_bytes = self.id_to_token[token_id]
         self._engine.commit(token_bytes)
+
+    def finalize(self):
+        """Called at the end of a benchmark run to perform any final actions, like printing stats."""
+        print("\n--- Final Stats Report from Model ---")
+        self._engine.report_stats()
 
     def get_mask(self) -> RangeSet:
         return self._engine.get_mask()

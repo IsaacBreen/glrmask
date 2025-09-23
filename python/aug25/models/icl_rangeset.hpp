@@ -5,6 +5,7 @@
 #include <sstream>
 #include <algorithm>
 #include <boost/icl/interval_set.hpp>
+#include "stats.hpp"
 
 class RangeSet {
 public:
@@ -38,12 +39,14 @@ public:
 
     RangeSet union_with(const RangeSet& other) const {
         RangeSet result = *this;
+        Stats::get().inc("bitset.union.calls");
         result.set |= other.set;
         return result;
     }
 
     RangeSet intersection_with(const RangeSet& other) const {
         RangeSet result = *this;
+        Stats::get().inc("bitset.intersection.calls");
         result.set &= other.set;
         return result;
     }
@@ -56,6 +59,10 @@ public:
 
     bool contains(unsigned long long index) const {
         return boost::icl::contains(set, index);
+    }
+
+    size_t size() const {
+        return boost::icl::cardinality(set);
     }
 
     std::vector<std::pair<unsigned long long, unsigned long long>> to_ranges() const {

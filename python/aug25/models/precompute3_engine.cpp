@@ -23,6 +23,7 @@
 #include <memory>
 #include "leveled_gss.hpp"
 #include "icl_rangeset.hpp"
+#include "stats.hpp"
 
 using namespace leveled_gss;
 
@@ -194,9 +195,20 @@ public:
         Leveled gss_with_empty_stack = Leveled::from_stacks(initial_stacks);
         Leveled init = gss_with_empty_stack.push(start_state_id_);
         state_[tokenizer_initial_state_] = std::move(init);
+        reset_stats();
+    }
+
+    void reset_stats() {
+        Stats::get().reset();
+    }
+
+    void report_stats() {
+        Stats::get().report();
     }
 
     void commit(py::bytes token_bytes) {
+        auto& stats = Stats::get();
+        stats.start("commit.total");
         // Caches for this commit() call.
         using ExecResult = py::tuple;
         // Key: (offset, tokenizer_sid)
@@ -204,11 +216,14 @@ public:
         accessible_cache_.clear();
 
         // Build terminals_map and state_map
+        stats.start("commit.build_tokenizer_maps");
         py::buffer_info token_buf = py::buffer(token_bytes).request();
         const char* token_data = static_cast<const char*>(token_buf.ptr);
         ssize_t token_len = token_buf.size;
         std::unordered_map<int, RangeSet> terminals_map; // sid -> RangeSet of matched terminals
         std::unordered_map<int, int> state_map;            // old_sid -> end_sid
+
+        stats.inc("commit.tokenizer_states_in", state_.size());
 
         for (const auto &kv : state_) {
             int tokenizer_sid = kv.first;
@@ -230,8 +245,10 @@ public:
             }
             terminals_map[tokenizer_sid] = RangeSet::from_indices(matched_terminals);
         }
+        stats.stop("commit.build_tokenizer_maps");
 
         // 2) Prune and map per-state GSS (rename terminals_union keys according to state_map)
+        stats.start("commit.prune_and_map_gss");
         std::unordered_map<int, Leveled> temp_states;
         temp_states.reserve(state_.size());
         {
@@ -248,8 +265,10 @@ public:
                     }
                 }
             }
-        } // GIL re-acquired here
+        }
+        stats.stop("commit.prune_and_map_gss");
 
+        stats.start("commit.main_loop");
         // 3) Main BFS over token bytes
         struct Item {
             int offset;
@@ -355,8 +374,10 @@ public:
                 new_states_vec[end_state].push_back(cur.gss);
             }
         }
+        stats.stop("commit.main_loop");
 
         // 4) Merge and filter empties
+        stats.start("commit.merge_states");
         std::unordered_map<int, Leveled> merged_states;
         for (auto &kv : new_states_vec) {
             int sid = kv.first;
@@ -367,16 +388,24 @@ public:
                 merged_states[sid] = std::move(merged);
             }
         }
+        stats.stop("commit.merge_states");
 
         // Update internal state
         state_ = std::move(merged_states);
+        stats.inc("commit.tokenizer_states_out", state_.size());
+        stats.stop("commit.total");
     }
 
     py::object get_mask() {
+        auto& stats = Stats::get();
+        stats.start("get_mask.total");
         py::gil_scoped_release release; // Release GIL for the whole C++ part
 
         // values: node_id -> GSS
         std::unordered_map<int, Leveled> values;
+        stats.inc("get_mask.initial_tokenizer_states", state_.size());
+
+
         std::priority_queue<std::pair<int, int>> depth_heap; // {depth, node_id}
         std::unordered_set<int> enqueued_nodes;
 
@@ -384,6 +413,7 @@ public:
             if (enqueued_nodes.count(n)) {
                 return;
             }
+            stats.inc("get_mask.traversal.enqueues");
             enqueued_nodes.insert(n);
             depth_heap.push({d, n});
         };
@@ -392,7 +422,22 @@ public:
         // being initialized, mirroring the Python implementation's optimization.
         std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> init_acc_memo;
 
+        // --- Initial GSS Stats ---
+        stats.start("get_mask.initial_stats");
+        std::unordered_set<std::shared_ptr<Acc>> all_initial_accs;
+        for (auto& kv : state_) {
+            const auto& gss = kv.second;
+            auto accs = gss.get_all_accs();
+            all_initial_accs.insert(accs.begin(), accs.end());
+            stats.inc("get_mask.initial.gss_heads.sum", gss.peek().size());
+        }
+        stats.inc("get_mask.initial.unique_accs", all_initial_accs.size());
+        for (const auto& acc : all_initial_accs) {
+            stats.inc("get_mask.initial.terminals_union_size.sum", acc->terminals_union.size());
+        }
+        stats.stop("get_mask.initial_stats");
 
+        stats.start("get_mask.seeding");
         // Seed with initialized accs (compute allowed llm mask from terminals_union)
         for (auto &kv : state_) {
             int sid = kv.first;
@@ -401,62 +446,119 @@ public:
             if (it == roots_map_.end()) continue;
             root = it->second;
             const Leveled &gss = kv.second;
+            stats.start("get_mask.seeding.gss.apply");
             Leveled gss_initialized = initialize_gss_accs(gss, &init_acc_memo);
+            stats.stop("get_mask.seeding.gss.apply");
 
             auto itv = values.find(root);
             if (itv != values.end()) {
+                stats.start("get_mask.seeding.gss.merge");
                 values[root] = values[root].merge(gss_initialized);
+                stats.stop("get_mask.seeding.gss.merge");
             } else {
                 values[root] = std::move(gss_initialized);
             }
             int d = arena_.at(root).max_depth;
             enqueue(d, root);
         }
+        stats.stop("get_mask.seeding");
 
         RangeSet final_mask = RangeSet::empty();
 
+        stats.start("get_mask.main_loop");
+        int max_depth_reached = 0;
+        std::unordered_set<int> visited_nodes;
         while (!depth_heap.empty()) {
             auto [depth, node] = depth_heap.top();
             depth_heap.pop();
+            max_depth_reached = std::max(max_depth_reached, depth);
+            stats.inc("get_mask.traversal.depth_heap.pops");
+            stats.inc("get_mask.traversal.nodes_processed");
+            visited_nodes.insert(node);
 
             auto itv = values.find(node);
             if (itv == values.end()) continue;
             Leveled gss_node = std::move(itv->second);
             values.erase(itv);
+            stats.inc("get_mask.gss.at_node.accs.sum", gss_node.get_all_accs().size());
 
             // End-node handling
             const NodeInfo &info = arena_.at(node);
             if (info.is_end) {
+                stats.inc("get_mask.traversal.end_nodes");
+                stats.start("get_mask.main_loop.end_node.reduce_acc");
                 auto reduced = gss_node.reduce_acc();
+                stats.stop("get_mask.main_loop.end_node.reduce_acc");
                 if (reduced) {
+                    stats.start("get_mask.main_loop.end_node.final_mask_union");
                     final_mask = final_mask.union_with(reduced->llm_mask);
+                    stats.stop("get_mask.main_loop.end_node.final_mask_union");
                 }
             }
 
+            // Zombie traversal avoidance
+            stats.start("get_mask.zombie_check");
+            RangeSet node_llm_bv_union = RangeSet::empty();
+            for (const Edge& e : info.edges) {
+                node_llm_bv_union = node_llm_bv_union.union_with(e.llm_bv_rangeset);
+            }
+            RangeSet potential_new_tokens = node_llm_bv_union.difference_with(final_mask);
+            if (potential_new_tokens.is_empty()) {
+                stats.inc("get_mask.zombie_check.skipped_nodes_no_potential");
+                stats.stop("get_mask.zombie_check");
+                continue;
+            }
+            auto gss_mask_acc = gss_node.reduce_acc();
+            if (gss_mask_acc && gss_mask_acc->llm_mask.intersection_with(potential_new_tokens).is_empty()) {
+                stats.inc("get_mask.zombie_check.skipped_nodes_no_overlap");
+                stats.stop("get_mask.zombie_check");
+                continue;
+            }
+            stats.stop("get_mask.zombie_check");
+
             // Traverse edges
+            stats.inc("get_mask.traversal.edge_blocks.sum", info.edges.size());
+            size_t dests_blocks_sum = 0;
+            for (const Edge &e : info.edges) dests_blocks_sum += e.dests.size();
+            stats.inc("get_mask.traversal.dests_blocks.sum", dests_blocks_sum);
             for (const Edge &e : info.edges) {
                 RangeSet llm_bv = e.llm_bv_rangeset.difference_with(final_mask);
-                if (llm_bv.is_empty()) continue;
+                if (llm_bv.is_empty()) {
+                    stats.inc("get_mask.traversal.edge.llm_bv_empty");
+                    continue;
+                }
+                stats.inc("get_mask.traversal.edges_traversed");
+                stats.inc("get_mask.traversal.edge_pop_val." + std::to_string(e.pop));
+                stats.inc("get_mask.data.llm_bv_on_edge.len.sum", llm_bv.size());
 
+                stats.start("get_mask.main_loop.edge.popn");
                 Leveled popped = gss_node.popn(e.pop);
-                if (popped.is_empty()) continue;
+                stats.stop("get_mask.main_loop.edge.popn");
+                if (popped.is_empty()) { stats.inc("get_mask.traversal.edge.popped_empty"); continue; }
 
                 // Apply LLM limiter once per edge (not per destination) to avoid repeated
                 // expensive apply_and_prune work. This mirrors the sharing-friendly structure
                 // from the Python implementation.
                 std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> acc_memo;
                 Leveled popped_limited = intersect_llm_mask(popped, llm_bv, &acc_memo);
-                if (popped_limited.is_empty()) continue;
+                if (popped_limited.is_empty()) {
+                    stats.inc("get_mask.traversal.edge.popped_pruned_empty");
+                    continue;
+                }
 
                 auto reduced_popped = popped_limited.reduce_acc();
                 if (!reduced_popped || reduced_popped->llm_mask.is_empty()) {
+                    stats.inc("get_mask.traversal.edge.popped_reduced_empty");
                     continue;
                 }
 
                 // Compute top states after pruning/limiting.
+                stats.start("get_mask.main_loop.edge.peek_and_filter");
                 std::unordered_set<int> top_after = popped_limited.peek();
+                stats.stop("get_mask.main_loop.edge.peek_and_filter");
 
                 for (const DestEdge &de : e.dests) {
+                    stats.inc("get_mask.traversal.dests_traversed");
                     // Determine which top states to keep for this destination
                     std::unordered_set<int> keep;
                     for (int top_sid : top_after) {
@@ -466,8 +568,15 @@ public:
                     }
                     if (keep.empty()) continue;
 
+                    stats.start("get_mask.main_loop.edge.isolate_many");
                     Leveled child2 = popped_limited.isolate_many(keep);
-                    if (child2.is_empty()) continue;
+                    stats.stop("get_mask.main_loop.edge.isolate_many");
+                    stats.inc("get_mask.intersect_and_prune.memo_size.sum", acc_memo.size());
+
+                    if (child2.is_empty()) {
+                        stats.inc("get_mask.traversal.edge.child_gss_pruned_empty");
+                        continue;
+                    }
 
                     auto reduced_child = child2.reduce_acc();
                     if (!reduced_child || reduced_child->llm_mask.is_empty()) {
@@ -477,7 +586,10 @@ public:
                     int dnode = de.dest_idx;
                     auto it_child = values.find(dnode);
                     if (it_child != values.end()) {
+                        stats.inc("get_mask.traversal.edge.gss_merges");
+                        stats.start("get_mask.main_loop.edge.gss_merge");
                         values[dnode] = values[dnode].merge(child2);
+                        stats.stop("get_mask.main_loop.edge.gss_merge");
                     } else {
                         values[dnode] = std::move(child2);
                     }
@@ -485,11 +597,18 @@ public:
                 }
             }
         }
+        stats.stop("get_mask.main_loop");
+        stats.inc("get_mask.traversal.max_depth_reached", max_depth_reached);
+        stats.inc("get_mask.traversal.nodes_visited.unique", visited_nodes.size());
 
+        stats.start("get_mask.final_conversion");
         // Convert internal mask indices to original
         std::vector<unsigned long long> original_indices;
         // Iterate over the final mask (much smaller than vocab) and look up original IDs.
+        stats.start("get_mask.final_conversion.to_indices");
         std::vector<unsigned long long> final_indices = final_mask.to_indices();
+        stats.stop("get_mask.final_conversion.to_indices");
+        stats.inc("get_mask.final_mask.internal_indices", final_indices.size());
         original_indices.reserve(final_indices.size());
         for (unsigned long long internal_id : final_indices) {
             auto it = internal_to_original_map_cpp_.find(internal_id);
@@ -497,9 +616,15 @@ public:
                 original_indices.push_back(it->second);
             }
         }
+        stats.inc("get_mask.final_mask.original_indices", original_indices.size());
 
+        stats.start("get_mask.final_conversion.from_indices");
+        RangeSet result = RangeSet::from_indices(original_indices);
+        stats.stop("get_mask.final_conversion.from_indices");
+        stats.stop("get_mask.final_conversion");
+        stats.stop("get_mask.total");
         py::gil_scoped_acquire acquire; // Re-acquire GIL before returning to Python
-        return py::cast(RangeSet::from_indices(original_indices));
+        return py::cast(result);
     }
 
 private:
@@ -847,9 +972,13 @@ private:
     }
 
     Leveled process_token(const Leveled& g, int terminal_id) {
+        auto& stats = Stats::get();
+        stats.start("_process_token.total");
+        stats.inc("_process_token.calls");
         // heads_by_state: state_id -> vector<Leveled>
         std::unordered_map<int, std::vector<Leveled>> heads_by_state;
         std::unordered_set<int> tops = g.peek();
+        stats.inc("_process_token.initial_heads", tops.size());
         for (int state_id : tops) {
             Leveled isol = g.isolate(state_id);
             heads_by_state[state_id].push_back(std::move(isol));
@@ -862,6 +991,7 @@ private:
         };
 
         while (!heads_by_state.empty()) {
+            stats.inc("_process_token.loop_iterations");
             // pop one element
             auto it = heads_by_state.begin();
             int state_id = it->first;
@@ -881,11 +1011,13 @@ private:
             ActionsOnTerminal &action = act_it->second;
 
             auto handle_shift = [&](int shift_to_state_id, const Leveled& gss_to_shift) {
+                stats.inc("_process_token.shifts");
                 Leveled shifted = gss_to_shift.push(shift_to_state_id);
                 shifted_gsses.push_back(std::move(shifted));
             };
 
             auto handle_reduce = [&](int nt_id, int len, const Leveled& gss_to_reduce) {
+                stats.inc("_process_token.reduces");
                 Leveled popped_gss = gss_to_reduce.popn(len);
                 std::unordered_set<int> from_states = popped_gss.peek();
                 for (int from_sid : from_states) {
@@ -896,27 +1028,41 @@ private:
                     if (gt == from_row.gotos.end()) continue;
                     int goto_state_id = gt->second;
                     Leveled goto_gss = popped_gss.isolate(from_sid).push(goto_state_id);
+                    stats.inc("_process_token.reduce.new_heads");
                     heads_by_state[goto_state_id].push_back(std::move(goto_gss));
                 }
             };
 
             if (action.has_shift) {
                 handle_shift(action.shift_state_id, state_gss);
+                if (!action.reduces.empty()) {
+                    stats.inc("_process_token.splits");
+                }
             }
             for (auto &rd : action.reduces) {
                 handle_reduce(rd.first, rd.second, state_gss);
             }
         }
 
-        Leveled merged = Leveled::merge_many(shifted_gsses);
-        return merged;
+        if (shifted_gsses.empty()) {
+            stats.inc("_process_token.final_heads", 0);
+            stats.stop("_process_token.total");
+            return Leveled::from_stacks({});
+        }
+        Leveled result = Leveled::merge_many(shifted_gsses);
+        stats.inc("_process_token.final_heads", result.peek().size());
+        stats.stop("_process_token.total");
+        return result;
     }
 
     Leveled initialize_gss_accs(
         const Leveled& g,
         std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo
     ) {
+        auto& stats = Stats::get();
         auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
+            stats.inc("get_mask.initialize_acc.calls");
+            stats.start("get_mask.initialize_acc.total");
             // Build disallowed mask as RangeSet
             RangeSet disallowed_llm_mask = RangeSet::empty();
 
@@ -929,21 +1075,30 @@ private:
                 const auto &term_to_llm = it_ts->second;
                 // Correctly iterate over the (small) set of disallowed terminals and look up
                 // the corresponding LLM tokens, matching the Python implementation's logic.
+                stats.start("get_mask.initialize_acc.to_indices");
                 std::vector<unsigned long long> disallowed_indices = kv.second.to_indices();
+                stats.stop("get_mask.initialize_acc.to_indices");
+                stats.inc("get_mask.initialize_acc.disallowed_terminals_count.sum", disallowed_indices.size());
                 for (unsigned long long term_id_ull : disallowed_indices) {
+                    stats.inc("get_mask.initialize_acc.disallowed_terminals_inner_loops");
                     int term_id = static_cast<int>(term_id_ull);
                     auto it_term = term_to_llm.find(term_id);
                     if (it_term != term_to_llm.end()) {
+                        stats.start("get_mask.initialize_acc.union");
                         disallowed_llm_mask = disallowed_llm_mask.union_with(it_term->second);
+                        stats.stop("get_mask.initialize_acc.union");
                     }
                 }
             }
 
+            stats.start("get_mask.initialize_acc.difference");
             RangeSet allowed_mask = universe_rangeset_.difference_with(disallowed_llm_mask);
+            stats.stop("get_mask.initialize_acc.difference");
 
             auto na = std::make_shared<Acc>();
             na->llm_mask = allowed_mask;
             // terminals_union -> empty
+            stats.stop("get_mask.initialize_acc.total");
             return na;
         };
         return g.apply(mutator, acc_memo);
@@ -953,10 +1108,19 @@ private:
         const Leveled& g,
         const RangeSet& limiter,
         std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>>* acc_memo = nullptr) {
+        auto& stats = Stats::get();
+        stats.start("get_mask.main_loop.edge.apply_and_prune");
         auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
+            stats.inc("get_mask.intersect_and_prune.calls");
+            stats.start("get_mask.intersect_and_prune.intersection");
             RangeSet new_mask = a->llm_mask.intersection_with(limiter);
+            stats.stop("get_mask.intersect_and_prune.intersection");
+            stats.inc("get_mask.data.llm_mask_after_intersect.len.sum", new_mask.size());
             bool is_empty_mask = new_mask.is_empty();
-            if (is_empty_mask) return std::shared_ptr<Acc>(nullptr);
+            if (is_empty_mask) {
+                stats.inc("get_mask.intersect_and_prune.pruned_accs");
+                return std::shared_ptr<Acc>(nullptr);
+            }
             auto na = std::make_shared<Acc>();
             na->llm_mask = new_mask;
             return na;
@@ -982,5 +1146,8 @@ PYBIND11_MODULE(precompute3_engine, m) {
              py::arg("all_internal_llm_tokens_bitset"),
              py::arg("internal_to_original_map"))
         .def("commit", &Engine::commit, py::arg("token_bytes"))
-        .def("get_mask", &Engine::get_mask);
+        .def("get_mask", &Engine::get_mask)
+        .def("reset_stats", &Engine::reset_stats)
+        .def("report_stats", &Engine::report_stats);
 }
+

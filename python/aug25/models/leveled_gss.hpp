@@ -1238,6 +1238,38 @@ public:
         return s;
     }
 
+    std::unordered_set<std::shared_ptr<Acc>> get_all_accs() const {
+        std::unordered_map<std::uintptr_t, bool> visited;
+        std::unordered_set<std::shared_ptr<Acc>> unique_accs;
+
+        std::deque<UpperPtr<T, Acc>> q;
+        q.push_back(inner);
+
+        while (!q.empty()) {
+            auto node = q.front(); q.pop_front();
+            auto nid = reinterpret_cast<std::uintptr_t>(node.get());
+            if (visited[nid]) continue;
+            visited[nid] = true;
+
+            if (node->is_interface()) {
+                auto it = std::static_pointer_cast<Interface<T, Acc>>(node);
+                if (it->acc) unique_accs.insert(it->acc);
+                if (it->empty) unique_accs.insert(it->empty);
+            } else {
+                auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(node);
+                if (ub->empty) unique_accs.insert(ub->empty);
+                for (auto &kv : *ub->_children) {
+                    for (auto &dkv : kv.second) {
+                        q.push_back(dkv.second);
+                    }
+                }
+            }
+        }
+        return unique_accs;
+    }
+
+
+
     // Reduce unique accumulators by merging; returns nullptr if none
     std::shared_ptr<Acc> reduce_acc() const {
         std::unordered_map<std::uintptr_t, bool> visited;
