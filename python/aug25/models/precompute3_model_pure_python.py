@@ -81,6 +81,9 @@ class PyAcc:
             llm_mask=self.llm_mask.union(other.llm_mask),
         )
 
+    def is_empty(self):
+        return self.llm_mask.is_empty()
+
 
 class Model(GraphProvider):
     """
@@ -115,14 +118,17 @@ class Model(GraphProvider):
             children = node.get("children") or []
             if not children:
                 node["children"] = []
+                node["llm_bv_union"] = RangeSet.empty()
                 continue
 
             new_children = []
+            llm_bv_union = RangeSet.empty()
             for edge_key, dest_map in children:
                 pop, llm_bv_json = edge_key
                 llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
                 # Convert to RangeSet for ffi-free operations in commit/get_mask
                 llm_bv = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
+                llm_bv_union = llm_bv_union.union(llm_bv)
                 new_dest_map = []
                 for dest_idx, state_bv_json in dest_map:
                     state_bv_bitset = bs_from_json(dumps(state_bv_json))
@@ -130,6 +136,7 @@ class Model(GraphProvider):
                     new_dest_map.append((int(dest_idx), state_bv))
                 new_children.append(((int(pop), llm_bv), new_dest_map))
             node["children"] = new_children
+            node["llm_bv_union"] = llm_bv_union
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -396,8 +403,8 @@ class Model(GraphProvider):
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
         values: Dict[int, GSS] = {}
-        todo: Dict[int, Set[int]] = {}
-        depth_heap: List[int] = []
+        depth_heap: List[Tuple[int, int]] = []  # Stores (-depth, node_id)
+        enqueued_nodes: Set = set()
 
         hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, int] = self.roots_map
@@ -439,81 +446,93 @@ class Model(GraphProvider):
                 values[r] = gss_initialized
 
             d: int = max_depth[r]
-            bucket: Optional[Set[int]] = todo.get(d)
-            if bucket is None:
-                todo[d] = {r}
-                hp(depth_heap, d)
-            else:
-                bucket.add(r)
+            if r not in enqueued_nodes:
+                enqueued_nodes.add(r)
+                hp(depth_heap, (-d, r))
 
         def enqueue(d: int, n: int) -> None:
-            bucket: Optional[Set[int]] = todo.get(d)
-            if bucket is None:
-                todo[d] = {n}
-                hp(depth_heap, d)
-            else:
-                bucket.add(n)
+            if n not in enqueued_nodes:
+                enqueued_nodes.add(n)
+                hp(depth_heap, (-d, n))
 
         # Main loop
         while depth_heap:
-            depth: int = hpop(depth_heap)
-            while todo[depth]:
-                node: int = todo[depth].pop()
-                gss_node: GSS = values.pop(node)
+            neg_depth, node = hpop(depth_heap)
+            gss_node: GSS = values.pop(node)
 
-                # End-node handling: just union the allowed LLM tokens
-                if is_end(node):
-                    reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                    if reduced_acc:
-                        final_mask = final_mask.union(reduced_acc.llm_mask)
+            # End-node handling: just union the allowed LLM tokens
+            if is_end(node):
+                reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+                if reduced_acc:
+                    final_mask = final_mask.union(reduced_acc.llm_mask)
 
-                # Traverse edges and propagate masks
-                edges = arena.get(node, {}).get("children") or []
-                for (pop, llm_bv), dests in edges:
-                    popped: GSS = gss_node.popn(pop)
-                    if popped.is_empty():
+            # Zombie traversal avoidance
+            node_llm_bv_union = arena.get(node, {}).get("llm_bv_union", RangeSet.empty())
+            potential_new_tokens = node_llm_bv_union.difference(final_mask)
+            if potential_new_tokens.is_empty():
+                continue
+
+            gss_mask_acc = gss_node.reduce_acc()
+            if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
+                continue
+
+            # Traverse edges and propagate masks
+            edges = arena.get(node, {}).get("children") or []
+            for (pop, llm_bv), dests in edges:
+                llm_bv = llm_bv.difference(final_mask)
+                if llm_bv.is_empty():
+                    continue
+
+                popped: GSS = gss_node.popn(pop)
+                if popped.is_empty():
+                    continue
+
+                # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
+
+                def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                    if acc in acc_memo:
+                        return acc_memo[acc]
+                    new_mask = acc.llm_mask.intersection(llm_bv)
+                    if new_mask.is_empty():
+                        result = None
+                    else:
+                        result = PyAcc(
+                            terminals_union=acc.terminals_union,
+                            llm_mask=new_mask
+                        )
+                    acc_memo[acc] = result
+                    return result
+
+                popped = popped.apply_and_prune(intersect_and_prune)
+                if popped.is_empty():
+                    continue
+
+                reduced = popped.reduce_acc()
+                if not reduced or reduced.is_empty():
+                    continue
+
+                for dest_idx, state_bv in dests:
+                    peeked = popped.peek()
+                    values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+
+                    if not values_to_keep:
                         continue
 
-                    for dest_idx, state_bv in dests:
-                        peeked = popped.peek()
-                        values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                    child_gss: GSS = popped.isolate_many(values_to_keep)
+                    if child_gss.is_empty():
+                        continue
 
-                        if not values_to_keep:
-                            continue
+                    reduced_child = child_gss.reduce_acc()
+                    if not reduced_child or reduced_child.is_empty():
+                        continue
 
-                        child_gss: GSS = popped.isolate_many(values_to_keep)
-                        if child_gss.is_empty():
-                            continue
-
-                        # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                        acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
-
-                        def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                            if acc in acc_memo:
-                                return acc_memo[acc]
-                            new_mask = acc.llm_mask.intersection(llm_bv)
-                            if new_mask.is_empty():
-                                result = None
-                            else:
-                                result = PyAcc(
-                                    terminals_union=acc.terminals_union,
-                                    llm_mask=new_mask
-                                )
-                            acc_memo[acc] = result
-                            return result
-
-                        child_gss = child_gss.apply_and_prune(intersect_and_prune)
-                        if child_gss.is_empty():
-                            continue
-
-                        d: int = int(dest_idx)
-                        if d in values:
-                            values[d] = values[d].merge(child_gss)
-                        else:
-                            values[d] = child_gss
-                        enqueue(max_depth[d], d)
-
-            todo.pop(depth)
+                    d: int = int(dest_idx)
+                    if d in values:
+                        values[d] = values[d].merge(child_gss)
+                    else:
+                        values[d] = child_gss
+                    enqueue(max_depth[d], d)
 
 
         # Convert internal mask back to original IDs
