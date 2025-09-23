@@ -345,12 +345,6 @@ static UpperPtr<T, Acc> merge_upperbranches(const UpperBranchPtr<T, Acc>& a, con
         [](UpperPtr<T, Acc> n1, UpperPtr<T, Acc> n2) { return merge_upper<T, Acc>(n1, n2); }
     );
 
-    bool a_unchanged = (new_empty.get() == a->empty.get()) && (merged_children == *a->_children);
-    if (a_unchanged) return a;
-
-    bool b_unchanged = (new_empty.get() == b->empty.get()) && (merged_children == *b->_children);
-    if (b_unchanged) return b;
-
     auto ub = std::make_shared<UpperBranch<T, Acc>>(std::move(merged_children), new_empty);
     return try_promote<T, Acc>(ub);
 }
@@ -370,17 +364,6 @@ static UpperPtr<T, Acc> merge_interfaces(const InterfacePtr<T, Acc>& a, const In
         );
         auto new_acc = _merge_acc<Acc>(a->acc, b->acc);
         auto new_empty = _merge_optional_acc<Acc>(a->empty, b->empty);
-
-        bool a_unchanged = (new_acc.get() == a->acc.get()) &&
-                           (new_empty.get() == a->empty.get()) &&
-                           (merged_children == *a->_children);
-        if (a_unchanged) return a;
-
-        bool b_unchanged = (new_acc.get() == b->acc.get()) &&
-                           (new_empty.get() == b->empty.get()) &&
-                           (merged_children == *b->_children);
-        if (b_unchanged) return b;
-
         return std::make_shared<Interface<T, Acc>>(merged_children, new_acc, new_empty);
     }
     auto ub1 = interface_to_upperbranch<T, Acc>(a);
@@ -416,9 +399,6 @@ static LowerPtr<T> merge_lower(const LowerPtr<T>& l1, const LowerPtr<T>& l2) {
         *l1->_children, *l2->_children,
         [](LowerPtr<T> a, LowerPtr<T> b) { return merge_lower<T>(a, b); }
     );
-
-    if (new_empty == l1->empty && merged_children == *l1->_children) return l1;
-    if (new_empty == l2->empty && merged_children == *l2->_children) return l2;
 
     return std::make_shared<Lower<T>>(std::move(merged_children), new_empty);
 }
