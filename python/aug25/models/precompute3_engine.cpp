@@ -561,7 +561,7 @@ private:
                 for (auto d : dest_map) {
                     py::tuple dd = py::cast<py::tuple>(d);
                     int dest_idx = py::cast<int>(dd[0]);
-                    py::object state_bv_json = py::reinterpret_borrow<py::object>(dd[1]);
+                    py::object state_bv_json = dd[1];
 
                     py::object state_bv = BitsetClass.attr("from_json_string")(dumps(state_bv_json));
                     dests.push_back(DestEdge{dest_idx, state_bv});
