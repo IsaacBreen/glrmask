@@ -53,13 +53,18 @@ PY
 
 PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
 CXX="${CXX:-c++}"
+LDFLAGS=""
+if [[ "$(uname)" == "Darwin" ]]; then
+  LDFLAGS="-undefined dynamic_lookup"
+fi
 
 # Compile
 ${CXX} -O3 -std=c++17 -shared -fPIC \
   ${PYBIND_INCLUDES} \
   -I"${BOOST_DIR}" \
   "aug25/models/icl_rangeset.cpp" \
-  -o "aug25/models/icl_rangeset${EXT_SUFFIX}"
+  -o "aug25/models/icl_rangeset${EXT_SUFFIX}" \
+  ${LDFLAGS}
 
 echo "Build complete: python/aug25/models/icl_rangeset${EXT_SUFFIX}"
 
