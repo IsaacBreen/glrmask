@@ -90,4 +90,4 @@ echo " - python/aug25/models/precompute3_engine${EXT_SUFFIX}"
 echo
 echo "Running benchmarks..."
 cd "$PROJECT_ROOT"
-bash python/run_benchmarks.sh "python/aug25/models/rust_model.py" "python/aug25/models/precompute3_model_cpp.py"
+bash python/run_benchmarks.sh "python/aug25/models/precompute3_model_pure_python_get_mask_only.py" "python/aug25/models/precompute3_model_cpp.py"

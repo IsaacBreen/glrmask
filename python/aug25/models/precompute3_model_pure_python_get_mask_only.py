@@ -1,7 +1,8 @@
 import heapq
 from typing import Dict, List, Set, Optional
 
-from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+# from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
 from .precompute3_model_pure_python import Model as InnerModel, PyAcc
 from ..common_interface import GraphProvider, RangeSet
 
