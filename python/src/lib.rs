@@ -1,13 +1,13 @@
-use sep1_core::tokenizer::LLMTokenID;
-use sep1_core::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq, ExprGroups, eat_u8_seq, eat_u8_set_negation};
-use sep1_core::finite_automata::Regex;
+use sep1::tokenizer::LLMTokenID;
+use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq, ExprGroups, eat_u8_seq, eat_u8_set_negation};
+use sep1::finite_automata::Regex;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
-use sep1_core::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use sep1_core::glr::parser::{GLRParser, GLRParserState};
-use sep1_core::glr::table::{generate_glr_parser, StateID, TerminalID};
-use sep1_core::interface::{CompiledGrammar, GrammarExpr, choice as grammar_choice, literal as grammar_literal, optional as grammar_optional, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence, eat_any_fast, GrammarDefinition};
-use sep1_core::constraint::{GrammarConstraint, GrammarConstraintState};
+use sep1::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+use sep1::glr::parser::{GLRParser, GLRParserState};
+use sep1::glr::table::{generate_glr_parser, StateID, TerminalID};
+use sep1::interface::{CompiledGrammar, GrammarExpr, choice as grammar_choice, literal as grammar_literal, optional as grammar_optional, repeat as grammar_repeat, r#ref as grammar_ref, sequence as grammar_sequence, eat_any_fast, GrammarDefinition};
+use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
 use std::collections::{BTreeMap, BTreeSet};
 use bimap::BiBTreeMap;
 use pyo3::basic::CompareOp;
@@ -16,12 +16,12 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use ouroboros::self_referencing;
 use numpy::{IntoPyArray, PyArray1};
-use sep1_core::datastructures::u8set::U8Set;
-use sep1_core::interface::IncrementalParser;
-use sep1_core::json_serialization::{JSONConvertible, JSONNode};
-use sep1_core::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
-use sep1_core::datastructures::hybrid_l2_bitset::HybridL2Bitset as RustHybridL2Bitset;
-use sep1_core::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, GSSNode, gather_gss_stats, popn_collect_fast};
+use sep1::datastructures::u8set::U8Set;
+use sep1::interface::IncrementalParser;
+use sep1::json_serialization::{JSONConvertible, JSONNode};
+use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
+use sep1::datastructures::hybrid_l2_bitset::HybridL2Bitset as RustHybridL2Bitset;
+use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, GSSNode, gather_gss_stats, popn_collect_fast};
 
 #[pyclass(name = "GrammarExpr")]
 #[derive(Clone)]
@@ -157,7 +157,7 @@ impl PyRegexExpr {
 #[pyclass(name = "RegexGroup")]
 #[derive(Clone)]
 struct PyRegexGroup {
-    inner: sep1_core::finite_automata::ExprGroup,
+    inner: sep1::finite_automata::ExprGroup,
 }
 
 #[pymethods]
@@ -202,7 +202,7 @@ pub struct PyRegex {
 #[pymethods]
 impl PyRegex {
     fn execute_from_state(&self, bytes: &[u8], state_id: usize) -> PyResult<(Option<usize>, Vec<(usize, usize)>)> {
-        let exec_result = self.inner.execute_from_state(bytes, sep1_core::tokenizer::TokenizerStateID(state_id));
+        let exec_result = self.inner.execute_from_state(bytes, sep1::tokenizer::TokenizerStateID(state_id));
         let end_state = exec_result.end_state;
         let matches: Vec<(usize, usize)> = exec_result.matches.into_iter().map(|m| (m.id, m.width)).collect();
         Ok((end_state, matches))
@@ -211,7 +211,7 @@ impl PyRegex {
     fn tokens_accessible_from_state(&self, state_id: usize) -> PyResult<Vec<usize>> {
         let accessible = self
             .inner
-            .tokens_accessible_from_state(sep1_core::tokenizer::TokenizerStateID(state_id));
+            .tokens_accessible_from_state(sep1::tokenizer::TokenizerStateID(state_id));
         let out: Vec<usize> = accessible.into_iter().map(|tid| tid.0).collect();
         Ok(out)
     }
@@ -331,8 +331,8 @@ impl PyGLRParser {
             let actions_dict = PyDict::new_bound(py);
             for (&terminal_id, action) in &row.shifts_and_reduces_full {
                 let py_action = match action {
-                    sep1_core::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => ("shift", to_state.0).to_object(py),
-                    sep1_core::glr::table::Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => ("shift", to_state.0).to_object(py),
+                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
                         let pids: Vec<usize> = production_ids.iter().map(|p| p.0).collect();
                         PyTuple::new_bound(py, &[
                             "reduce".to_object(py),
@@ -341,7 +341,7 @@ impl PyGLRParser {
                             pids.to_object(py)
                         ]).to_object(py)
                     }
-                    sep1_core::glr::table::Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                    sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                         let py_reduces = PyDict::new_bound(py);
                         for (len, nts) in reduces {
                             let py_nts = PyDict::new_bound(py);
@@ -445,28 +445,28 @@ impl PyGrammarConstraint {
 
     fn precompute2_json_string(&self) -> PyResult<String> {
         // Build [roots_map, arena] JSON array
-        let roots_arr = sep1_core::json_serialization::JSONNode::Array(
+        let roots_arr = sep1::json_serialization::JSONNode::Array(
             self.inner.precomputed2.iter()
-                .map(|(sid, idx)| sep1_core::json_serialization::JSONNode::Array(vec![
+                .map(|(sid, idx)| sep1::json_serialization::JSONNode::Array(vec![
                     sid.0.to_json(), idx.to_json()
                 ]))
                 .collect()
         );
         let arena_json = self.inner.trie2_god.to_json();
-        let top = sep1_core::json_serialization::JSONNode::Array(vec![roots_arr, arena_json]);
+        let top = sep1::json_serialization::JSONNode::Array(vec![roots_arr, arena_json]);
         Ok(top.to_json_string())
     }
 
     fn precompute3_json_string(&self) -> PyResult<String> {
-        let roots_arr = sep1_core::json_serialization::JSONNode::Array(
+        let roots_arr = sep1::json_serialization::JSONNode::Array(
             self.inner.precomputed3.iter()
-                .map(|(sid, idx)| sep1_core::json_serialization::JSONNode::Array(vec![
+                .map(|(sid, idx)| sep1::json_serialization::JSONNode::Array(vec![
                     sid.0.to_json(), idx.to_json()
                 ]))
                 .collect()
         );
         let arena_json = self.inner.trie3_god.to_json();
-        let top = sep1_core::json_serialization::JSONNode::Array(vec![roots_arr, arena_json]);
+        let top = sep1::json_serialization::JSONNode::Array(vec![roots_arr, arena_json]);
         Ok(top.to_json_string())
     }
 
@@ -558,8 +558,8 @@ impl PyHybridBitset {
     #[staticmethod]
     fn from_ranges(ranges: Vec<(usize, usize)>) -> Self {
         let json_ranges: Vec<Vec<usize>> = ranges.into_iter().map(|(s,e)| vec![s,e]).collect();
-        let inner = RustHybridBitset::from_json(sep1_core::json_serialization::JSONNode::Array(
-            json_ranges.into_iter().map(|p| sep1_core::json_serialization::JSONNode::Array(vec![p[0].to_json(), p[1].to_json()])).collect()
+        let inner = RustHybridBitset::from_json(sep1::json_serialization::JSONNode::Array(
+            json_ranges.into_iter().map(|p| sep1::json_serialization::JSONNode::Array(vec![p[0].to_json(), p[1].to_json()])).collect()
         )).expect("Bitset::from_ranges JSON");
         Self { inner }
     }
@@ -572,12 +572,12 @@ impl PyHybridBitset {
         // reuse JSON conversion for simplicity
         let json = self.inner.to_json();
         let arr = match json {
-            sep1_core::json_serialization::JSONNode::Array(arr) => arr,
+            sep1::json_serialization::JSONNode::Array(arr) => arr,
             _ => vec![],
         };
         let mut out = Vec::new();
         for pair in arr {
-            if let sep1_core::json_serialization::JSONNode::Array(v) = pair {
+            if let sep1::json_serialization::JSONNode::Array(v) = pair {
                 if v.len() == 2 {
                     let s = usize::from_json(v[0].clone()).unwrap();
                     let e = usize::from_json(v[1].clone()).unwrap();
@@ -646,7 +646,7 @@ impl PyHybridBitset {
 
     #[staticmethod]
     fn from_json_string(s: &str) -> PyResult<Self> {
-        let node = sep1_core::json_serialization::JSONNode::from_json_string(s)
+        let node = sep1::json_serialization::JSONNode::from_json_string(s)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("parse json: {}", e)))?;
         let inner = RustHybridBitset::from_json(node)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError,_>(format!("bitset from json: {}", e)))?;
@@ -865,7 +865,7 @@ fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset
 #[pyfunction]
 fn gss_reset_llm_tokens(node: &mut PyGSSNode) {
     let mut arc = node.inner.clone();
-    sep1_core::datastructures::gss::reset_llm_tokens(&mut arc, &mut std::collections::HashMap::new());
+    sep1::datastructures::gss::reset_llm_tokens(&mut arc, &mut std::collections::HashMap::new());
     node.inner = arc;
 }
 
@@ -873,13 +873,13 @@ fn gss_reset_llm_tokens(node: &mut PyGSSNode) {
 fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_, PyDict>) -> PyResult<()> {
     let mut rust_terminals_map = BTreeMap::new();
     for (k, v) in terminals_map.iter() {
-        let tokenizer_state_id = sep1_core::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+        let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
         let terminal_bv = v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
         rust_terminals_map.insert(tokenizer_state_id, terminal_bv);
     }
 
     let mut arc = node.inner.clone();
-    sep1_core::datastructures::gss::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
+    sep1::datastructures::gss::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
     node.inner = arc;
     Ok(())
 }
@@ -888,13 +888,13 @@ fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_
 fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &Bound<'_, PyDict>) -> PyResult<()> {
     let mut rust_state_map = BTreeMap::new();
     for (k, v) in state_map.iter() {
-        let from_state = sep1_core::tokenizer::TokenizerStateID(k.extract::<usize>()?);
-        let to_state = sep1_core::tokenizer::TokenizerStateID(v.extract::<usize>()?);
+        let from_state = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+        let to_state = sep1::tokenizer::TokenizerStateID(v.extract::<usize>()?);
         rust_state_map.insert(from_state, to_state);
     }
 
     let mut arc = node.inner.clone();
-    sep1_core::datastructures::gss::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
+    sep1::datastructures::gss::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
     node.inner = arc;
     Ok(())
 }
@@ -902,7 +902,7 @@ fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &
 #[pyfunction]
 fn gss_fuse_predecessors(node: &mut PyGSSNode, levels: usize) {
     let mut arc = node.inner.clone();
-    arc = sep1_core::datastructures::gss::fuse_predecessors_recursive(&arc, levels, &mut std::collections::HashMap::new());
+    arc = sep1::datastructures::gss::fuse_predecessors_recursive(&arc, levels, &mut std::collections::HashMap::new());
     node.inner = arc;
 }
 
@@ -1004,7 +1004,7 @@ impl PyGrammarConstraintState {
             let mut new_b_tree_map = BTreeMap::new();
             for (tokenizer_state_id, gss_node) in new_state {
                 let glr_state = state.parent.parser.init_glr_parser_from_stack(gss_node.inner.clone());
-                new_b_tree_map.insert(sep1_core::tokenizer::TokenizerStateID(tokenizer_state_id), glr_state);
+                new_b_tree_map.insert(sep1::tokenizer::TokenizerStateID(tokenizer_state_id), glr_state);
             }
             state.state = new_b_tree_map;
         });
