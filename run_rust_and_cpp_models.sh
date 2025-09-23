@@ -1,69 +1,111 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env python3
+import os
+import sys
+import subprocess
+import urllib.request
+import tarfile
+import sysconfig
+from pathlib import Path
 
 # This script builds the Boost.ICL-backed C++ extension and runs the benchmarks
 # comparing the Rust baseline and the C++-accelerated Python model.
 #
 # Usage:
-#   bash run_rust_and_cpp_models.sh
+#   python3 run_rust_and_cpp_models.sh
 #
 # Requirements:
-#   - curl, tar, a C++17 compiler (clang++ or g++)
+#   - A C++17 compiler (clang++ or g++)
 #   - Python with pip
-#
-# It downloads Boost headers locally (no system install needed), builds the extension in-place,
-# and then runs the provided run_benchmarks.sh script.
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$PROJECT_ROOT"
+def main():
+    """Main function to setup, build, and run benchmarks."""
+    project_root = Path(__file__).parent.resolve()
+    os.chdir(project_root)
 
-# 1) Ensure we are in the repo root and Python folder exists
-if [ ! -d "python" ]; then
-  echo "Error: expected 'python' directory at repo root. Run this script from the repo root."
-  exit 1
-fi
+    # 1) Ensure we are in the repo root and Python folder exists
+    if not (project_root / "python").is_dir():
+        print(
+            "Error: expected 'python' directory at repo root. "
+            "Run this script from the repo root.",
+            file=sys.stderr
+        )
+        sys.exit(1)
 
-# 2) Setup: download Boost headers locally and install pybind11
-BOOST_VERSION="1.83.0"
-BOOST_VER_UNDERSCORES="1_83_0"
-BOOST_DIR="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}"
-mkdir -p "${PROJECT_ROOT}/.build"
+    # 2) Setup: download Boost headers locally and install pybind11
+    boost_version = "1.83.0"
+    boost_ver_underscores = "1_83_0"
+    build_dir = project_root / ".build"
+    boost_dir = build_dir / f"boost_{boost_ver_underscores}"
+    build_dir.mkdir(exist_ok=True)
 
-if [ ! -d "$BOOST_DIR" ]; then
-  BOOST_TGZ="${PROJECT_ROOT}/.build/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
-  echo "Downloading Boost ${BOOST_VERSION} headers..."
-  curl -L -o "$BOOST_TGZ" "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VER_UNDERSCORES}.tar.gz"
-  echo "Extracting Boost..."
-  tar -C "${PROJECT_ROOT}/.build" -xzf "$BOOST_TGZ"
-fi
+    if not boost_dir.is_dir():
+        boost_tgz = build_dir / f"boost_{boost_ver_underscores}.tar.gz"
+        print(f"Downloading Boost {boost_version} headers...")
+        boost_url = (
+            f"https://archives.boost.io/release/{boost_version}/source/"
+            f"boost_{boost_ver_underscores}.tar.gz"
+        )
+        urllib.request.urlretrieve(boost_url, boost_tgz)
 
-echo "Installing pybind11 (local user)..."
-python3 -m pip install --user --quiet pybind11
+        print("Extracting Boost...")
+        with tarfile.open(boost_tgz, "r:gz") as tar:
+            tar.extractall(path=build_dir)
+        boost_tgz.unlink()  # remove tarball after extraction
 
-# 3) Build the C++ extension in place
-echo "Building C++ extension (Boost.ICL RangeSet) ..."
-cd "${PROJECT_ROOT}/python"
+    print("Installing pybind11 (local user)...")
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--user", "--quiet", "pybind11"],
+        check=True
+    )
 
-# Compute extension suffix and includes via pybind11
-EXT_SUFFIX="$(python3 - << 'PY'
-import sysconfig
-print(sysconfig.get_config_var("EXT_SUFFIX"))
-PY
-)"
+    # 3) Build the C++ extension in place
+    print("Building C++ extension (Boost.ICL RangeSet) ...")
+    python_dir = project_root / "python"
+    os.chdir(python_dir)
 
-PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
-CXX="${CXX:-c++}"
+    # Compute extension suffix and includes via pybind11
+    ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    pybind_includes_str = subprocess.check_output(
+        [sys.executable, "-m", "pybind11", "--includes"],
+        encoding='utf-8'
+    ).strip()
+    pybind_includes = pybind_includes_str.split()
 
-# Compile
-${CXX} -O3 -std=c++17 -shared -fPIC \
-  ${PYBIND_INCLUDES} \
-  -I"${BOOST_DIR}" \
-  "aug25/models/icl_rangeset.cpp" \
-  -o "aug25/models/icl_rangeset${EXT_SUFFIX}"
+    cxx = os.environ.get("CXX", "c++")
 
-echo "Build complete: python/aug25/models/icl_rangeset${EXT_SUFFIX}"
+    source_file = "aug25/models/icl_rangeset.cpp"
+    output_file = f"aug25/models/icl_rangeset{ext_suffix}"
 
-# 4) Run benchmarks comparing Rust baseline vs C++-accelerated model
-echo
-echo "Running benchmarks..."
-bash run_benchmarks.sh "python/aug25/models/rust_model.py" "python/aug25/models/precompute3_model_cpp.py"
+    compile_command = [
+        cxx,
+        "-O3",
+        "-std=c++17",
+        "-shared",
+        "-fPIC",
+        *pybind_includes,
+        f"-I{boost_dir}",
+        source_file,
+        "-o",
+        output_file,
+    ]
+
+    subprocess.run(compile_command, check=True, text=True)
+
+    print(f"Build complete: {python_dir / output_file}")
+
+    # 4) Run benchmarks comparing Rust baseline vs C++-accelerated model
+    print("\nRunning benchmarks...")
+    # Assumes run_benchmarks.sh is in the 'python' directory and model paths
+    # should be relative to it.
+    subprocess.run(
+        [
+            "bash",
+            "run_benchmarks.sh",
+            "aug25/models/rust_model.py",
+            "aug25/models/precompute3_model_cpp.py"
+        ],
+        check=True
+    )
+
+if __name__ == "__main__":
+    main()
