@@ -297,7 +297,6 @@ public:
 
             ExecResult cached_res;
             auto cache_key = std::make_pair(cur.offset, cur.tokenizer_sid);
-            ExecResult cached_res;
             auto it = exec_cache.find(cache_key);
             if (it != exec_cache.end()) {
                 cached_res = it->second;
