@@ -377,24 +377,21 @@ public:
 
         // values: node_id -> GSS
         std::unordered_map<int, Leveled> values;
-        // todo buckets: depth -> set of nodes
-        std::unordered_map<int, std::set<int>> todo;
-        // min-heap for depths
-        std::priority_queue<int> depth_heap;
+        std::priority_queue<std::pair<int, int>> depth_heap; // {depth, node_id}
+        std::unordered_set<int> enqueued_nodes;
 
         auto enqueue = [&](int d, int n) {
-            auto &bucket = todo[d];
-            bool first = bucket.empty();
-            bucket.insert(n);
-            if (first) depth_heap.push(d);
+            if (enqueued_nodes.count(n)) {
+                return;
+            }
+            enqueued_nodes.insert(n);
+            depth_heap.push({d, n});
         };
 
         // This memoization cache is critical for performance. It's shared across all GSSs
         // being initialized, mirroring the Python implementation's optimization.
         std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> init_acc_memo;
 
-        values.reserve(state_.size());
-        todo.reserve(state_.size());
 
         // Seed with initialized accs (compute allowed llm mask from terminals_union)
         for (auto &kv : state_) {
@@ -419,79 +416,74 @@ public:
         RangeSet final_mask = RangeSet::empty();
 
         while (!depth_heap.empty()) {
-            int depth = depth_heap.top(); depth_heap.pop();
-            auto &bucket = todo[depth];
+            auto [depth, node] = depth_heap.top();
+            depth_heap.pop();
 
-            while (!bucket.empty()) {
-                int node = *bucket.begin();
-                bucket.erase(bucket.begin());
-                auto itv = values.find(node);
-                if (itv == values.end()) continue;
-                Leveled gss_node = std::move(itv->second);
-                values.erase(itv);
+            auto itv = values.find(node);
+            if (itv == values.end()) continue;
+            Leveled gss_node = std::move(itv->second);
+            values.erase(itv);
 
-                // End-node handling
-                const NodeInfo &info = arena_.at(node);
-                if (info.is_end) {
-                    auto reduced = gss_node.reduce_acc();
-                    if (reduced) {
-                        final_mask = final_mask.union_with(reduced->llm_mask);
-                    }
+            // End-node handling
+            const NodeInfo &info = arena_.at(node);
+            if (info.is_end) {
+                auto reduced = gss_node.reduce_acc();
+                if (reduced) {
+                    final_mask = final_mask.union_with(reduced->llm_mask);
+                }
+            }
+
+            // Traverse edges
+            for (const Edge &e : info.edges) {
+                RangeSet llm_bv = e.llm_bv_rangeset.difference_with(final_mask);
+                if (llm_bv.is_empty()) continue;
+
+                Leveled popped = gss_node.popn(e.pop);
+                if (popped.is_empty()) continue;
+
+                // Apply LLM limiter once per edge (not per destination) to avoid repeated
+                // expensive apply_and_prune work. This mirrors the sharing-friendly structure
+                // from the Python implementation.
+                std::unordered_map<std::uintptr_t, std::shared_ptr<Acc>> acc_memo;
+                Leveled popped_limited = intersect_llm_mask(popped, llm_bv, &acc_memo);
+                if (popped_limited.is_empty()) continue;
+
+                auto reduced_popped = popped_limited.reduce_acc();
+                if (!reduced_popped || reduced_popped->llm_mask.is_empty()) {
+                    continue;
                 }
 
-                // Traverse edges
-                for (const Edge &e : info.edges) {
-                    RangeSet llm_bv = e.llm_bv_rangeset.difference_with(final_mask);
-                    if (llm_bv.is_empty()) continue;
+                // Compute top states after pruning/limiting.
+                std::unordered_set<int> top_after = popped_limited.peek();
 
-                    Leveled popped = gss_node.popn(e.pop);
-                    if (popped.is_empty()) continue;
+                for (const DestEdge &de : e.dests) {
+                    // Determine which top states to keep for this destination
+                    std::unordered_set<int> keep;
+                    for (int top_sid : top_after) {
+                        if (contains_in_ranges(de.state_ranges, top_sid)) {
+                            keep.insert(top_sid);
+                        }
+                    }
+                    if (keep.empty()) continue;
 
-                    // Apply LLM limiter once per edge (not per destination) to avoid repeated
-                    // expensive apply_and_prune work. This mirrors the sharing-friendly structure
-                    // from the Python implementation.
-                    Leveled popped_limited = intersect_llm_mask(popped, llm_bv);
-                    if (popped_limited.is_empty()) continue;
+                    Leveled child2 = popped_limited.isolate_many(keep);
+                    if (child2.is_empty()) continue;
 
-                    auto reduced_popped = popped_limited.reduce_acc();
-                    if (!reduced_popped || reduced_popped->llm_mask.is_empty()) {
+                    auto reduced_child = child2.reduce_acc();
+                    if (!reduced_child || reduced_child->llm_mask.is_empty()) {
                         continue;
                     }
 
-                    // Compute top states after pruning/limiting.
-                    std::unordered_set<int> top_after = popped_limited.peek();
-
-                    for (const DestEdge &de : e.dests) {
-                        // Determine which top states to keep for this destination
-                        std::unordered_set<int> keep;
-                        for (int top_sid : top_after) {
-                            if (contains_in_ranges(de.state_ranges, top_sid)) {
-                                keep.insert(top_sid);
-                            }
-                        }
-                        if (keep.empty()) continue;
-
-                        Leveled child2 = popped_limited.isolate_many(keep);
-                        if (child2.is_empty()) continue;
-
-                        auto reduced_child = child2.reduce_acc();
-                        if (!reduced_child || reduced_child->llm_mask.is_empty()) {
-                            continue;
-                        }
-
-                        int dnode = de.dest_idx;
-                        auto it_child = values.find(dnode);
-                        if (it_child != values.end()) {
-                            values[dnode] = values[dnode].merge(child2);
-                        } else {
-                            values[dnode] = std::move(child2);
-                        }
-                        enqueue(arena_.at(dnode).max_depth, dnode);
+                    int dnode = de.dest_idx;
+                    auto it_child = values.find(dnode);
+                    if (it_child != values.end()) {
+                        values[dnode] = values[dnode].merge(child2);
+                    } else {
+                        values[dnode] = std::move(child2);
                     }
+                    enqueue(arena_.at(dnode).max_depth, dnode);
                 }
             }
-            // Clean up bucket
-            todo.erase(depth);
         }
 
         // Convert internal mask indices to original
