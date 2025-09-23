@@ -114,10 +114,10 @@ echo "Building C++ extensions..."
 EXT_SUFFIX="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or ".so")')"
 PYBIND_INCLUDES="$(python3 -m pybind11 --includes)"
 CXX="${CXX:-c++}"
-CXXFLAGS="-O3 -DNDEBUG -std=c++17 -shared -fPIC"
-LDFLAGS=""
+CXXFLAGS="-O3 -DNDEBUG -march=native -flto -std=c++17 -shared -fPIC"
+LDFLAGS="-flto"
 if [[ "$(uname)" == "Darwin" ]]; then
-  LDFLAGS="-undefined dynamic_lookup"
+  LDFLAGS="${LDFLAGS} -undefined dynamic_lookup"
 fi
 
 # Optional ASan (opt-in via SANITIZE=1 env var)
