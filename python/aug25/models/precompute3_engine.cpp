@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <functional>
 
+#include "icl_rangeset.h"
+
 namespace py = pybind11;
 
 class Engine {
@@ -28,26 +30,20 @@ public:
            py::dict arena_py,                     // uid -> node dict (children carry bitset JSON)
            py::dict possible_matches,             // tsid -> term_id -> _sep1.Bitset
            py::object all_internal_llm_tokens_bitset,
-           py::dict internal_to_original_map,
-           py::object RangeSetClass)
+           py::dict internal_to_original_map)
         : tokenizer_(std::move(tokenizer)),
           tokenizer_initial_state_(tokenizer_initial_state),
           tokenizer_max_state_(tokenizer_max_state),
           parser_data_(std::move(parser_data)),
           roots_map_py_(std::move(roots_map_py)),
           pmc_(std::move(possible_matches)),
-          all_internal_llm_tokens_bitset_(std::move(all_internal_llm_tokens_bitset)),
-          internal_to_original_map_(std::move(internal_to_original_map)),
-          RangeSetClass_(std::move(RangeSetClass)) {
+          internal_to_original_map_(std::move(internal_to_original_map)) {
 
         if (!ignore_terminal_id_or_none.is_none()) {
             ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
         }
 
-        // Cache RangeSet helpers
-        range_empty_ = RangeSetClass_.attr("empty");
-        range_from_indices_ = RangeSetClass_.attr("from_indices");
-        range_from_ranges_ = RangeSetClass_.attr("from_ranges");
+        py::object range_from_ranges_ = py::module::import("python.aug25.models.icl_rangeset").attr("RangeSet").attr("from_ranges");
 
         // Universe RangeSet for get_mask init
         universe_rangeset_ = range_from_ranges_(all_internal_llm_tokens_bitset_.attr("to_ranges")());
@@ -66,20 +62,18 @@ public:
         parse_arena(arena_py);
 
         // Initialize state: one GSS per tokenizer initial state with start parser state on stack
-        GSS initial_gss;
-        Stack st;
-        st.states.push_back(start_state_id_);
-        st.acc = std::make_shared<Acc>();
-        st.acc->llm_mask = range_empty_(); // empty initial; get_mask will initialize
-        // terminals_union is empty map by default
-        initial_gss.stacks.push_back(std::move(st));
-        state_[tokenizer_initial_state_] = std::move(initial_gss);
+        auto initial_acc = std::make_shared<Acc>();
+        initial_acc->llm_mask = RangeSet::empty();
+        GSSNodePtr leaf = std::make_shared<const GSSNode>(
+            std::unordered_map<int, GSSNodePtr>{}, initial_acc
+        );
+        state_[tokenizer_initial_state_] = gss_push(leaf, start_state_id_);
     }
 
     void commit(py::bytes token_bytes) {
         // Build terminals_map and state_map
         std::string token = token_bytes; // implicit cast via pybind11
-        std::unordered_map<int, py::object> terminals_map; // sid -> RangeSet of matched terminals
+        std::unordered_map<int, RangeSet> terminals_map; // sid -> RangeSet of matched terminals
         std::unordered_map<int, int> state_map;            // old_sid -> end_sid
 
         // 1) Probe tokenizer from each active state
@@ -101,20 +95,20 @@ public:
                 int terminal_id = py::cast<int>(tmt[0]);
                 matched_terminals.push_back(static_cast<unsigned long long>(terminal_id));
             }
-            py::object matched_rs = range_from_indices_(matched_terminals);
+            RangeSet matched_rs = RangeSet::from_indices(matched_terminals);
             terminals_map[tokenizer_sid] = matched_rs;
         }
 
         // 2) Prune and map per-state GSS (rename terminals_union keys according to state_map)
-        std::unordered_map<int, GSS> temp_states;
+        std::unordered_map<int, GSSNodePtr> temp_states;
         for (auto &kv : state_) {
             int tokenizer_sid = kv.first;
-            const GSS &gss = kv.second;
+            const GSSNodePtr &gss = kv.second;
 
-            GSS pruned = prune_by_terminals_map(gss, terminals_map);
-            if (!pruned.stacks.empty()) {
-                GSS mapped = apply_state_map_to_gss(pruned, state_map);
-                if (!mapped.stacks.empty()) {
+            GSSNodePtr pruned = prune_by_terminals_map(gss, terminals_map);
+            if (!pruned->is_empty()) {
+                GSSNodePtr mapped = apply_state_map_to_gss(pruned, state_map);
+                if (!mapped->is_empty()) {
                     temp_states[tokenizer_sid] = std::move(mapped);
                 }
             }
@@ -124,7 +118,7 @@ public:
         struct Item {
             int offset;
             int tokenizer_sid;
-            GSS gss;
+            GSSNodePtr gss;
         };
 
         std::deque<Item> q;
@@ -133,7 +127,7 @@ public:
         }
 
         // new states being built
-        std::unordered_map<int, std::vector<GSS>> new_states_vec;
+        std::unordered_map<int, std::vector<GSSNodePtr>> new_states_vec;
 
         while (!q.empty()) {
             Item cur = std::move(q.front());
@@ -161,7 +155,7 @@ public:
                 int terminal_id = mt.first;
                 int width = mt.second;
 
-                GSS processed = cur.gss;
+                GSSNodePtr processed = cur.gss;
                 if (!(ignore_terminal_id_.has_value() && terminal_id == *ignore_terminal_id_)) {
                     processed = process_token(processed, terminal_id);
                 }
@@ -180,7 +174,7 @@ public:
                     }
                 }
 
-                if (!processed.stacks.empty()) {
+                if (!processed->is_empty()) {
                     int new_offset = cur.offset + width;
                     int next_tokenizer_sid = tokenizer_initial_state_;
                     if (static_cast<size_t>(new_offset) == token.size()) {
@@ -197,13 +191,13 @@ public:
         }
 
         // 4) Merge and filter empties
-        std::unordered_map<int, GSS> merged_states;
+        std::unordered_map<int, GSSNodePtr> merged_states;
         for (auto &kv : new_states_vec) {
             int sid = kv.first;
-            const std::vector<GSS> &lst = kv.second;
+            const std::vector<GSSNodePtr> &lst = kv.second;
             if (lst.empty()) continue;
-            GSS merged = merge_many(lst);
-            if (!merged.stacks.empty()) {
+            GSSNodePtr merged = gss_merge_many(lst);
+            if (!merged->is_empty()) {
                 merged_states[sid] = std::move(merged);
             }
         }
@@ -214,7 +208,7 @@ public:
 
     py::object get_mask() {
         // values: node_id -> GSS
-        std::unordered_map<int, GSS> values;
+        std::unordered_map<int, GSSNodePtr> values;
         // todo buckets: depth -> set of nodes
         std::unordered_map<int, std::set<int>> todo;
         // min-heap for depths
@@ -234,13 +228,13 @@ public:
             auto it = roots_map_.find(sid);
             if (it == roots_map_.end()) continue;
             root = it->second;
-            const GSS &gss = kv.second;
+            const GSSNodePtr &gss = kv.second;
 
-            GSS gss_initialized = initialize_gss_accs(gss);
+            GSSNodePtr gss_initialized = initialize_gss_accs(gss);
 
             auto itv = values.find(root);
             if (itv != values.end()) {
-                values[root] = merge(values[root], gss_initialized);
+                values[root] = gss_merge(values[root], gss_initialized);
             } else {
                 values[root] = std::move(gss_initialized);
             }
@@ -248,7 +242,7 @@ public:
             enqueue(d, root);
         }
 
-        py::object final_mask = range_empty_();
+        RangeSet final_mask = RangeSet::empty();
 
         while (!depth_heap.empty()) {
             int depth = depth_heap.top(); depth_heap.pop();
@@ -259,44 +253,40 @@ public:
                 bucket.erase(bucket.begin());
                 auto itv = values.find(node);
                 if (itv == values.end()) continue;
-                GSS gss_node = std::move(itv->second);
+                GSSNodePtr gss_node = std::move(itv->second);
                 values.erase(itv);
 
                 // End-node handling
                 const NodeInfo &info = arena_.at(node);
                 if (info.is_end) {
-                    py::object reduced = union_llm_masks(gss_node);
-                    final_mask = final_mask.attr("union")(reduced);
+                    RangeSet reduced = union_llm_masks(gss_node);
+                    final_mask = final_mask.union_with(reduced);
                 }
 
                 // Traverse edges
                 for (const Edge &e : info.edges) {
-                    GSS popped = popn(gss_node, e.pop);
-                    if (popped.stacks.empty()) continue;
+                    GSSNodePtr popped = gss_popn(gss_node, e.pop);
+                    if (popped->is_empty()) continue;
 
                     for (const DestEdge &de : e.dests) {
                         // Determine which top states to keep
-                        std::unordered_set<int> keep;
-                        for (auto &st : popped.stacks) {
-                            if (st.states.empty()) continue;
-                            int top = st.states.back();
-                            if (state_matches_bitset(de.state_bv, top)) {
-                                keep.insert(top);
-                            }
-                        }
+                        std::vector<int> keep;
+                        for (auto const& [state_id, _] : popped->children)
+                            if (state_matches_bitset(de.state_bv, state_id))
+                                keep.push_back(state_id);
                         if (keep.empty()) continue;
 
-                        GSS child = isolate_many(popped, keep);
-                        if (child.stacks.empty()) continue;
+                        GSSNodePtr child = gss_isolate_many(popped, keep);
+                        if (child->is_empty()) continue;
 
                         // intersect_and_prune with edge's llm_bv (as RangeSet)
-                        GSS child2 = intersect_llm_mask(child, e.llm_bv_rangeset);
-                        if (child2.stacks.empty()) continue;
+                        GSSNodePtr child2 = intersect_llm_mask(child, e.llm_bv_rangeset);
+                        if (child2->is_empty()) continue;
 
                         int dnode = de.dest_idx;
                         auto it_child = values.find(dnode);
                         if (it_child != values.end()) {
-                            values[dnode] = merge(it_child->second, child2);
+                            values[dnode] = gss_merge(it_child->second, child2);
                         } else {
                             values[dnode] = std::move(child2);
                         }
@@ -309,16 +299,16 @@ public:
         }
 
         // Convert internal mask indices to original
-        std::vector<unsigned long long> original_indices;
-        py::object idxs = final_mask.attr("to_indices")();
-        for (auto iobj : idxs) {
-            int i = py::cast<int>(iobj);
+        std::vector<unsigned long long> original_indices_ull;
+        std::vector<unsigned long long> final_indices = final_mask.to_indices();
+        for (unsigned long long i_ull : final_indices) {
+            int i = static_cast<int>(i_ull);
             if (internal_to_original_map_.contains(py::int_(i))) {
                 int mapped = py::cast<int>(internal_to_original_map_[py::int_(i)]);
-                original_indices.push_back(static_cast<unsigned long long>(mapped));
+                original_indices_ull.push_back(static_cast<unsigned long long>(mapped));
             }
         }
-        py::object res = range_from_indices_(original_indices);
+        py::object res = py::cast(RangeSet::from_indices(original_indices_ull));
         return res;
     }
 
@@ -344,7 +334,7 @@ private:
 
     struct Edge {
         int pop;
-        py::object llm_bv_rangeset; // icl_rangeset.RangeSet (for intersection)
+        RangeSet llm_bv_rangeset;
         std::vector<DestEdge> dests;
     };
 
@@ -356,18 +346,26 @@ private:
 
     struct Acc {
         // terminals_union: tokenizer_state_id -> RangeSet of disallowed terminals
-        std::unordered_map<int, py::object> terminals_union;
+        std::unordered_map<int, RangeSet> terminals_union;
         // current allowed LLM mask (RangeSet)
-        py::object llm_mask;
+        RangeSet llm_mask;
     };
 
-    struct Stack {
-        std::vector<int> states;
-        std::shared_ptr<Acc> acc;
-    };
+    struct GSSNode;
+    using GSSNodePtr = std::shared_ptr<const GSSNode>;
 
-    struct GSS {
-        std::vector<Stack> stacks;
+    struct GSSNode {
+        const std::unordered_map<int, GSSNodePtr> children;
+        const std::shared_ptr<Acc> acc;
+
+        mutable std::unordered_map<int, GSSNodePtr> popn_cache;
+
+        GSSNode(std::unordered_map<int, GSSNodePtr> c, std::shared_ptr<Acc> a)
+            : children(std::move(c)), acc(std::move(a)) {}
+
+        bool is_empty() const {
+            return children.empty() && !acc;
+        }
     };
 
     // -----------------------------
@@ -390,22 +388,13 @@ private:
     std::unordered_map<int, int> roots_map_;
 
     // Possible matches and universe bitset
-    py::dict pmc_;
-    py::object all_internal_llm_tokens_bitset_;
-
-    // Universe RangeSet
-    py::object universe_rangeset_;
+    std::unordered_map<int, std::unordered_map<int, RangeSet>> pmc_native_;
+    RangeSet universe_rangeset_;
 
     py::dict internal_to_original_map_;
 
     // Current GLR state: tokenizer_state_id -> GSS
-    std::unordered_map<int, GSS> state_;
-
-    // RangeSet helpers
-    py::object RangeSetClass_;
-    py::object range_empty_;
-    py::object range_from_indices_;
-    py::object range_from_ranges_;
+    std::unordered_map<int, GSSNodePtr> state_;
 
     // -----------------------------
     // Parsing helpers
@@ -422,6 +411,20 @@ private:
 
     static bool is_py_dict(py::handle h) {
         return py::isinstance<py::dict>(h);
+    }
+
+    static RangeSet bitset_to_rangeset(py::handle bitset_py) {
+        if (bitset_py.is_none()) return RangeSet::empty();
+        py::list ranges_py = bitset_py.attr("to_ranges")();
+        if (ranges_py.empty()) return RangeSet::empty();
+
+        std::vector<std::pair<unsigned long long, unsigned long long>> ranges;
+        ranges.reserve(py::len(ranges_py));
+        for (auto r_handle : ranges_py) {
+            py::tuple t = py::cast<py::tuple>(r_handle);
+            ranges.emplace_back(py::cast<unsigned long long>(t[0]), py::cast<unsigned long long>(t[1]));
+        }
+        return RangeSet::from_ranges(ranges);
     }
 
     void parse_parser_table_from_json(const py::dict& parser_data) {
@@ -489,6 +492,20 @@ private:
         }
     }
 
+    void parse_pmc(py::dict pmc_py) {
+        for (auto item : pmc_py) {
+            int tsid = py::cast<int>(item.first);
+            py::dict inner_map = py::cast<py::dict>(item.second);
+            std::unordered_map<int, RangeSet> native_inner_map;
+            for (auto inner_item : inner_map) {
+                int term_id = py::cast<int>(inner_item.first);
+                py::object bitset = py::reinterpret_borrow<py::object>(inner_item.second);
+                native_inner_map[term_id] = bitset_to_rangeset(bitset);
+            }
+            pmc_native_[tsid] = std::move(native_inner_map);
+        }
+    }
+
     void parse_arena(py::dict arena_py) {
         py::module json = py::module::import("json");
         py::object dumps = json.attr("dumps");
@@ -538,16 +555,14 @@ private:
                 py::object llm_bv_json = edge_key[1];
 
                 // Convert llm_bv_json -> _sep1.Bitset -> RangeSet
-                py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(dumps(llm_bv_json));
-                py::object llm_bv_rs = range_from_ranges_(llm_bv_bitset.attr("to_ranges")());
+                RangeSet llm_bv_rs = bitset_to_rangeset(BitsetClass.attr("from_json_string")(dumps(llm_bv_json)));
 
                 std::vector<DestEdge> dests;
                 py::object dest_map = entry[1];
                 for (auto d : dest_map) {
                     py::tuple dd = py::cast<py::tuple>(d);
                     int dest_idx = py::cast<int>(dd[0]);
-                    py::object state_bv_json = py::reinterpret_borrow<py::object>(dd[1]);
-
+                    py::handle state_bv_json = dd[1];
                     py::object state_bv = BitsetClass.attr("from_json_string")(dumps(state_bv_json));
                     dests.push_back(DestEdge{dest_idx, state_bv});
                 }
@@ -558,182 +573,204 @@ private:
 
             arena_[uid] = std::move(info);
         }
+        parse_pmc(py::cast<py::dict>(py::module::import("_sep1").attr("GrammarConstraint").attr("from_json_string")(parser_data_.attr("__str__")()).attr("possible_matches")()));
     }
 
     // -----------------------------
-    // GSS primitives (naive vector-of-stacks)
+    // GSS primitives (immutable trie)
     // -----------------------------
-    static bool states_equal(const std::vector<int>& a, const std::vector<int>& b) {
-        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
-    }
+    static GSSNodePtr GSS_EMPTY;
 
-    static std::string stack_key(const Stack& s) {
-        std::string out;
-        out.reserve(32 + s.states.size() * 6);
-        out.append(std::to_string(reinterpret_cast<std::uintptr_t>(s.acc.get())));
-        out.push_back('|');
-        for (size_t i = 0; i < s.states.size(); ++i) {
-            if (i) out.push_back(',');
-            out.append(std::to_string(s.states[i]));
-        }
-        return out;
-    }
+    static GSSNodePtr gss_merge(GSSNodePtr a, GSSNodePtr b) {
+        if (a == b || b->is_empty()) return a;
+        if (a->is_empty()) return b;
 
-    static void dedup_stacks(std::vector<Stack>& stacks) {
-        std::unordered_map<std::string, size_t> seen;
-        std::vector<Stack> out;
-        out.reserve(stacks.size());
-        for (auto &s : stacks) {
-            std::string k = stack_key(s);
-            if (seen.find(k) == seen.end()) {
-                seen.emplace(std::move(k), out.size());
-                out.push_back(std::move(s));
+        std::unordered_map<int, GSSNodePtr> new_children;
+        std::set<int> all_keys;
+        for (const auto& kv : a->children) all_keys.insert(kv.first);
+        for (const auto& kv : b->children) all_keys.insert(kv.first);
+
+        for (int key : all_keys) {
+            auto a_it = a->children.find(key);
+            auto b_it = b->children.find(key);
+            GSSNodePtr child_a = (a_it != a->children.end()) ? a_it->second : GSS_EMPTY;
+            GSSNodePtr child_b = (b_it != b->children.end()) ? b_it->second : GSS_EMPTY;
+            GSSNodePtr merged_child = gss_merge(child_a, child_b);
+            if (!merged_child->is_empty()) {
+                new_children[key] = merged_child;
             }
         }
-        stacks.swap(out);
-    }
 
-    static GSS merge(const GSS& a, const GSS& b) {
-        GSS r;
-        r.stacks.reserve(a.stacks.size() + b.stacks.size());
-        r.stacks.insert(r.stacks.end(), a.stacks.begin(), a.stacks.end());
-        r.stacks.insert(r.stacks.end(), b.stacks.begin(), b.stacks.end());
-        dedup_stacks(r.stacks);
-        return r;
-    }
-
-    static GSS merge_many(const std::vector<GSS>& lst) {
-        if (lst.empty()) return GSS{};
-        GSS r;
-        size_t total = 0;
-        for (auto &g : lst) total += g.stacks.size();
-        r.stacks.reserve(total);
-        for (auto &g : lst) {
-            r.stacks.insert(r.stacks.end(), g.stacks.begin(), g.stacks.end());
-        }
-        dedup_stacks(r.stacks);
-        return r;
-    }
-
-    static std::unordered_set<int> peek(const GSS& g) {
-        std::unordered_set<int> s;
-        for (auto &st : g.stacks) {
-            if (!st.states.empty()) {
-                s.insert(st.states.back());
+        std::shared_ptr<Acc> new_acc = nullptr;
+        if (a->acc && b->acc) {
+            new_acc = std::make_shared<Acc>();
+            new_acc->llm_mask = a->acc->llm_mask.union_with(b->acc->llm_mask);
+            new_acc->terminals_union = a->acc->terminals_union;
+            for (const auto& kv : b->acc->terminals_union) {
+                auto it = new_acc->terminals_union.find(kv.first);
+                if (it != new_acc->terminals_union.end()) {
+                    it->second = it->second.union_with(kv.second);
+                } else {
+                    new_acc->terminals_union[kv.first] = kv.second;
+                }
             }
+        } else if (a->acc) {
+            new_acc = a->acc;
+        } else if (b->acc) {
+            new_acc = b->acc;
         }
-        return s;
+
+        if (new_children.empty() && !new_acc) return GSS_EMPTY;
+        return std::make_shared<const GSSNode>(std::move(new_children), new_acc);
     }
 
-    static GSS isolate(const GSS& g, int value) {
-        GSS r;
-        for (auto &st : g.stacks) {
-            if (!st.states.empty() && st.states.back() == value) {
-                r.stacks.push_back(st);
-            }
+    static GSSNodePtr gss_merge_many(const std::vector<GSSNodePtr>& lst) {
+        if (lst.empty()) return GSS_EMPTY;
+        GSSNodePtr result = lst[0];
+        for (size_t i = 1; i < lst.size(); ++i) {
+            result = gss_merge(result, lst[i]);
         }
-        return r;
+        return result;
     }
 
-    static GSS isolate_many(const GSS& g, const std::unordered_set<int>& values) {
-        GSS r;
-        for (auto &st : g.stacks) {
-            if (!st.states.empty() && values.find(st.states.back()) != values.end()) {
-                r.stacks.push_back(st);
-            }
-        }
-        return r;
+    static GSSNodePtr gss_push(GSSNodePtr g, int value) {
+        if (g->is_empty()) return GSS_EMPTY;
+        return std::make_shared<const GSSNode>(
+            std::unordered_map<int, GSSNodePtr>{{value, g}}, nullptr
+        );
     }
 
-    static GSS push(const GSS& g, int value) {
-        GSS r;
-        r.stacks.reserve(g.stacks.size());
-        for (auto &st : g.stacks) {
-            Stack ns = st;
-            ns.states.push_back(value);
-            r.stacks.push_back(std::move(ns));
+    static GSSNodePtr gss_pop(GSSNodePtr g) {
+        if (g->is_empty()) return GSS_EMPTY;
+        GSSNodePtr result = GSS_EMPTY;
+        for (const auto& kv : g->children) {
+            result = gss_merge(result, kv.second);
         }
-        return r;
+        return result;
     }
 
-    static GSS popn(const GSS& g, int n) {
+    static GSSNodePtr gss_popn(GSSNodePtr g, int n) {
         if (n <= 0) return g;
-        GSS r;
-        for (auto &st : g.stacks) {
-            if (static_cast<int>(st.states.size()) >= n) {
-                Stack ns;
-                ns.acc = st.acc;
-                ns.states.assign(st.states.begin(), st.states.end() - n);
-                r.stacks.push_back(std::move(ns));
+        if (g->is_empty()) return GSS_EMPTY;
+
+        auto it = g->popn_cache.find(n);
+        if (it != g->popn_cache.end()) return it->second;
+
+        GSSNodePtr result = GSS_EMPTY;
+        for (const auto& kv : g->children) {
+            result = gss_merge(result, gss_popn(kv.second, n - 1));
+        }
+        g->popn_cache[n] = result;
+        return result;
+    }
+
+    static GSSNodePtr gss_isolate_many(GSSNodePtr g, const std::vector<int>& values) {
+        std::unordered_map<int, GSSNodePtr> new_children;
+        for (int v : values) {
+            auto it = g->children.find(v);
+            if (it != g->children.end()) {
+                new_children[v] = it->second;
             }
         }
-        return r;
+        if (new_children.empty()) return GSS_EMPTY;
+        return std::make_shared<const GSSNode>(std::move(new_children), nullptr);
     }
 
     // -----------------------------
     // Acc/GSS transforms needed by algorithm
     // -----------------------------
-    GSS prune_by_terminals_map(const GSS& g, const std::unordered_map<int, py::object>& terminals_map) {
-        GSS r;
-        py::object rs_empty = range_empty_();
-        for (auto &st : g.stacks) {
+    GSSNodePtr prune_by_terminals_map(GSSNodePtr g, const std::unordered_map<int, RangeSet>& terminals_map) {
+        if (g->is_empty()) return GSS_EMPTY;
+
+        std::shared_ptr<Acc> new_acc = g->acc;
+        if (g->acc) {
             bool keep = true;
-            for (auto &kv : terminals_map) {
-                int sid = kv.first;
-                const py::object &matched = kv.second;
-                auto it = st.acc->terminals_union.find(sid);
-                py::object disallowed = (it != st.acc->terminals_union.end()) ? it->second : rs_empty;
-                py::object inter = matched.attr("intersection")(disallowed);
-                bool ok = inter.attr("is_empty")().cast<bool>();
-                if (!ok) {
-                    keep = false; break;
+            for (const auto& [sid, matched] : terminals_map) {
+                auto it = g->acc->terminals_union.find(sid);
+                if (it != g->acc->terminals_union.end()) {
+                    if (!matched.intersection_with(it->second).is_empty()) {
+                        keep = false;
+                        break;
+                    }
                 }
             }
-            if (keep) r.stacks.push_back(st);
+            if (!keep) new_acc = nullptr;
         }
-        return r;
+
+        std::unordered_map<int, GSSNodePtr> new_children;
+        bool changed = false;
+        for (const auto& [val, child] : g->children) {
+            GSSNodePtr new_child = prune_by_terminals_map(child, terminals_map);
+            if (new_child != child) changed = true;
+            if (!new_child->is_empty()) new_children[val] = new_child;
+        }
+        if (new_children.size() != g->children.size()) changed = true;
+
+        if (!changed && new_acc == g->acc) return g;
+        if (new_children.empty() && !new_acc) return GSS_EMPTY;
+        return std::make_shared<const GSSNode>(std::move(new_children), new_acc);
     }
 
-    GSS apply_state_map_to_gss(const GSS& g, const std::unordered_map<int, int>& state_map) {
-        GSS r;
-        py::object rs_empty = range_empty_();
-        for (auto &st : g.stacks) {
-            std::shared_ptr<Acc> na = std::make_shared<Acc>();
-            na->llm_mask = st.acc->llm_mask;
-            // merge mapped bitsets
-            for (auto &kv : st.acc->terminals_union) {
-                int old_sid = kv.first;
+    GSSNodePtr apply_state_map_to_gss(GSSNodePtr g, const std::unordered_map<int, int>& state_map) {
+        if (g->is_empty()) return GSS_EMPTY;
+
+        std::shared_ptr<Acc> new_acc = g->acc;
+        if (g->acc) {
+            auto na = std::make_shared<Acc>();
+            na->llm_mask = g->acc->llm_mask;
+            for (const auto& [old_sid, bv] : g->acc->terminals_union) {
                 auto it = state_map.find(old_sid);
-                if (it == state_map.end()) continue;
-                int new_sid = it->second;
-                py::object src = kv.second;
-                py::object curr = na->terminals_union.count(new_sid) ? na->terminals_union[new_sid] : rs_empty;
-                na->terminals_union[new_sid] = curr.attr("union")(src);
+                if (it != state_map.end()) {
+                    int new_sid = it->second;
+                    auto it2 = na->terminals_union.find(new_sid);
+                    if (it2 != na->terminals_union.end()) {
+                        it2->second = it2->second.union_with(bv);
+                    } else {
+                        na->terminals_union[new_sid] = bv;
+                    }
+                }
             }
-            Stack ns = st;
-            ns.acc = std::move(na);
-            r.stacks.push_back(std::move(ns));
+            new_acc = na;
         }
-        return r;
+
+        std::unordered_map<int, GSSNodePtr> new_children;
+        bool changed = false;
+        for (const auto& [val, child] : g->children) {
+            GSSNodePtr new_child = apply_state_map_to_gss(child, state_map);
+            if (new_child != child) changed = true;
+            new_children[val] = new_child;
+        }
+
+        if (!changed && new_acc == g->acc) return g;
+        return std::make_shared<const GSSNode>(std::move(new_children), new_acc);
     }
 
-    GSS disallow_in_state(const GSS& g, int state_id, int terminal_id) {
-        GSS r;
-        std::vector<unsigned long long> idx{static_cast<unsigned long long>(terminal_id)};
-        py::object to_add = range_from_indices_(idx);
-        py::object rs_empty = range_empty_();
+    GSSNodePtr disallow_in_state(GSSNodePtr g, int state_id, int terminal_id) {
+        if (g->is_empty()) return GSS_EMPTY;
+        RangeSet to_add = RangeSet::from_indices({(unsigned long long)terminal_id});
 
-        for (auto &st : g.stacks) {
-            std::shared_ptr<Acc> na = std::make_shared<Acc>(*st.acc);
-            py::object curr = na->terminals_union.count(state_id) ? na->terminals_union[state_id] : rs_empty;
-            py::object new_bv = curr.attr("union")(to_add);
-            na->terminals_union[state_id] = new_bv;
-
-            Stack ns = st;
-            ns.acc = std::move(na);
-            r.stacks.push_back(std::move(ns));
+        std::shared_ptr<Acc> new_acc = g->acc;
+        if (g->acc) {
+            auto na = std::make_shared<Acc>(*g->acc);
+            auto it = na->terminals_union.find(state_id);
+            if (it != na->terminals_union.end()) {
+                it->second = it->second.union_with(to_add);
+            } else {
+                na->terminals_union[state_id] = to_add;
+            }
+            new_acc = na;
         }
-        return r;
+
+        std::unordered_map<int, GSSNodePtr> new_children;
+        bool changed = false;
+        for (const auto& [val, child] : g->children) {
+            GSSNodePtr new_child = disallow_in_state(child, state_id, terminal_id);
+            if (new_child != child) changed = true;
+            new_children[val] = new_child;
+        }
+
+        if (!changed && new_acc == g->acc) return g;
+        return std::make_shared<const GSSNode>(std::move(new_children), new_acc);
     }
 
     bool state_matches_bitset(const py::object& bitset, int sid) const {
@@ -743,26 +780,26 @@ private:
         return bitset.attr("contains")(py::int_(sid)).cast<bool>();
         }
 
-    GSS process_token(const GSS& g, int terminal_id) {
+    GSSNodePtr process_token(GSSNodePtr g, int terminal_id) {
         // heads_by_state: state_id -> vector<GSS>
-        std::unordered_map<int, std::vector<GSS>> heads_by_state;
-        std::unordered_set<int> tops = peek(g);
-        for (int state_id : tops) {
-            GSS isol = isolate(g, state_id);
-            heads_by_state[state_id].push_back(std::move(isol));
+        std::unordered_map<int, std::vector<GSSNodePtr>> heads_by_state;
+        for (const auto& [state_id, child_gss] : g->children) {
+            heads_by_state[state_id].push_back(
+                std::make_shared<const GSSNode>(std::unordered_map<int, GSSNodePtr>{{state_id, child_gss}}, nullptr)
+            );
         }
 
-        std::vector<GSS> shifted_gsses;
+        std::vector<GSSNodePtr> shifted_gsses;
 
         while (!heads_by_state.empty()) {
             // pop one element
-            auto it = heads_by_state.begin();
+            auto it = heads_by_state.begin(); // Inefficient, but matches Python logic
             int state_id = it->first;
-            std::vector<GSS> gsss = std::move(it->second);
+            std::vector<GSSNodePtr> gsss = std::move(it->second);
             heads_by_state.erase(it);
 
             // merge_many
-            GSS state_gss = merge_many(gsss);
+            GSSNodePtr state_gss = gss_merge_many(gsss);
 
             // lookup row
             auto row_it = parser_.find(state_id);
@@ -773,22 +810,24 @@ private:
             if (act_it == row.actions.end()) continue;
             ActionsOnTerminal &action = act_it->second;
 
-            auto handle_shift = [&](int shift_to_state_id, const GSS& gss_to_shift) {
-                GSS shifted = push(gss_to_shift, shift_to_state_id);
+            auto handle_shift = [&](int shift_to_state_id, GSSNodePtr gss_to_shift) {
+                GSSNodePtr shifted = gss_push(gss_to_shift, shift_to_state_id);
                 shifted_gsses.push_back(std::move(shifted));
             };
 
-            auto handle_reduce = [&](int nt_id, int len, const GSS& gss_to_reduce) {
-                GSS popped_gss = popn(gss_to_reduce, len);
-                std::unordered_set<int> from_states = peek(popped_gss);
-                for (int from_sid : from_states) {
+            auto handle_reduce = [&](int nt_id, int len, GSSNodePtr gss_to_reduce) {
+                GSSNodePtr popped_gss = gss_popn(gss_to_reduce, len);
+                for (const auto& [from_sid, _] : popped_gss->children) {
                     auto goto_it = parser_.find(from_sid);
                     if (goto_it == parser_.end()) continue;
                     Row &from_row = goto_it->second;
                     auto gt = from_row.gotos.find(nt_id);
                     if (gt == from_row.gotos.end()) continue;
                     int goto_state_id = gt->second;
-                    GSS goto_gss = push(isolate(popped_gss, from_sid), goto_state_id);
+
+                    GSSNodePtr isolated = gss_isolate_many(popped_gss, {from_sid});
+                    GSSNodePtr goto_gss = gss_push(isolated, goto_state_id);
+
                     heads_by_state[goto_state_id].push_back(std::move(goto_gss));
                 }
             };
@@ -801,76 +840,91 @@ private:
             }
         }
 
-        GSS merged = merge_many(shifted_gsses);
+        GSSNodePtr merged = gss_merge_many(shifted_gsses);
         return merged;
     }
 
-    GSS initialize_gss_accs(const GSS& g) {
-        GSS r;
-        for (auto &st : g.stacks) {
-            // Build disallowed mask as RangeSet
-            py::object disallowed_llm_mask = range_empty_();
+    GSSNodePtr initialize_gss_accs(GSSNodePtr g) {
+        if (g->is_empty()) return GSS_EMPTY;
 
-            for (auto &kv : st.acc->terminals_union) {
-                int tsid = kv.first;
+        std::shared_ptr<Acc> new_acc = g->acc;
+        if (g->acc) {
+            RangeSet disallowed_llm_mask = RangeSet::empty();
+            for (const auto& [tsid, disallowed_terminals] : g->acc->terminals_union) {
                 if (tsid > tokenizer_max_state_) continue;
-                if (!pmc_.contains(py::int_(tsid))) continue;
+                auto it = pmc_native_.find(tsid);
+                if (it == pmc_native_.end()) continue;
+                const auto& terms_to_llm = it->second;
 
-                py::dict terms_to_llm = py::cast<py::dict>(pmc_[py::int_(tsid)]);
-                py::object indices = kv.second.attr("to_indices")();
-                for (auto idx : indices) {
-                    int terminal_id = py::cast<int>(idx);
-                    if (terms_to_llm.contains(py::int_(terminal_id))) {
-                        py::object bit = py::reinterpret_borrow<py::object>(terms_to_llm[py::int_(terminal_id)]);
-                        py::object rs = range_from_ranges_(bit.attr("to_ranges")());
-                        disallowed_llm_mask = disallowed_llm_mask.attr("union")(rs);
+                for (unsigned long long terminal_id_ull : disallowed_terminals.to_indices()) {
+                    int terminal_id = static_cast<int>(terminal_id_ull);
+                    auto it2 = terms_to_llm.find(terminal_id);
+                    if (it2 != terms_to_llm.end()) {
+                        disallowed_llm_mask = disallowed_llm_mask.union_with(it2->second);
                     }
                 }
             }
-
-            py::object allowed_mask = universe_rangeset_.attr("difference")(disallowed_llm_mask);
-
-            std::shared_ptr<Acc> na = std::make_shared<Acc>();
+            RangeSet allowed_mask = universe_rangeset_.difference_with(disallowed_llm_mask);
+            auto na = std::make_shared<Acc>();
             na->llm_mask = allowed_mask;
-            // terminals_union -> empty
-            Stack ns = st;
-            ns.acc = std::move(na);
-            r.stacks.push_back(std::move(ns));
+            new_acc = na;
         }
-        return r;
+
+        std::unordered_map<int, GSSNodePtr> new_children;
+        bool changed = false;
+        for (const auto& [val, child] : g->children) {
+            GSSNodePtr new_child = initialize_gss_accs(child);
+            if (new_child != child) changed = true;
+            new_children[val] = new_child;
+        }
+
+        if (!changed && new_acc == g->acc) return g;
+        return std::make_shared<const GSSNode>(std::move(new_children), new_acc);
     }
 
-    GSS intersect_llm_mask(const GSS& g, const py::object& limiter) {
-        GSS r;
-        for (auto &st : g.stacks) {
-            py::object new_mask = st.acc->llm_mask.attr("intersection")(limiter);
-            bool is_empty_mask = new_mask.attr("is_empty")().cast<bool>();
-            if (is_empty_mask) continue;
+    GSSNodePtr intersect_llm_mask(GSSNodePtr g, const RangeSet& limiter) {
+        if (g->is_empty() || limiter.is_empty()) return GSS_EMPTY;
 
-            std::shared_ptr<Acc> na = std::make_shared<Acc>(*st.acc);
-            na->llm_mask = new_mask;
-
-            Stack ns = st;
-            ns.acc = std::move(na);
-            r.stacks.push_back(std::move(ns));
+        std::shared_ptr<Acc> new_acc = g->acc;
+        if (g->acc) {
+            RangeSet new_mask = g->acc->llm_mask.intersection_with(limiter);
+            if (new_mask.is_empty()) new_acc = nullptr;
+            else if (!new_mask.operator==(g->acc->llm_mask)) {
+                auto na = std::make_shared<Acc>(*g->acc);
+                na->llm_mask = new_mask;
+                new_acc = na;
+            }
         }
-        return r;
+
+        std::unordered_map<int, GSSNodePtr> new_children;
+        for (const auto& [val, child] : g->children) {
+            GSSNodePtr new_child = intersect_llm_mask(child, limiter);
+            if (!new_child->is_empty()) new_children[val] = new_child;
+        }
+
+        if (new_children.empty() && !new_acc) return GSS_EMPTY;
+        return std::make_shared<const GSSNode>(std::move(new_children), new_acc);
     }
 
-    py::object union_llm_masks(const GSS& g) {
-        py::object acc = range_empty_();
-        for (auto &st : g.stacks) {
-            acc = acc.attr("union")(st.acc->llm_mask);
+    RangeSet union_llm_masks(GSSNodePtr g) {
+        if (g->is_empty()) return RangeSet::empty();
+        RangeSet r = g->acc ? g->acc->llm_mask : RangeSet::empty();
+        for (const auto& [_, child] : g->children) {
+            r = r.union_with(union_llm_masks(child));
         }
-        return acc;
+        return r;
     }
 };
+
+Engine::GSSNodePtr Engine::GSS_EMPTY = std::make_shared<const Engine::GSSNode>(
+    std::unordered_map<int, Engine::GSSNodePtr>{}, nullptr
+);
 
 PYBIND11_MODULE(precompute3_engine, m) {
     m.doc() = "C++ engine for precompute3_model_cpp: commit() and get_mask(), fully self-contained GSS implementation";
 
     py::class_<Engine>(m, "Engine")
-        .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::dict,py::object,py::dict,py::object>(),
+        .def(py::init<py::object,int,int,py::object,py::dict,py::dict,py::dict,py::dict,py::object,py::dict>(),
              py::arg("tokenizer"),
              py::arg("tokenizer_initial_state"),
              py::arg("tokenizer_max_state"),
@@ -880,8 +934,7 @@ PYBIND11_MODULE(precompute3_engine, m) {
              py::arg("arena_py"),
              py::arg("possible_matches"),
              py::arg("all_internal_llm_tokens_bitset"),
-             py::arg("internal_to_original_map"),
-             py::arg("RangeSetClass"))
+             py::arg("internal_to_original_map"))
         .def("commit", &Engine::commit, py::arg("token_bytes"))
         .def("get_mask", &Engine::get_mask);
 }

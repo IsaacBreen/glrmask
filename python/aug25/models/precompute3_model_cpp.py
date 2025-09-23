@@ -78,8 +78,7 @@ class Model(GraphProvider):
             model.arena,
             constraint.possible_matches(),                 # tsid -> term_id -> _sep1.Bitset
             constraint.all_internal_llm_tokens_bitset(),  # _sep1.Bitset universe
-            model.internal_to_original_map,               # int -> int
-            RangeSet                                       # icl_rangeset.RangeSet class
+            model.internal_to_original_map                # int -> int
         )
 
         return model
