@@ -3515,8 +3515,7 @@ local_system:
                       py::object llm_bv_json = edge_key[1];
 
                       // Convert llm_bv_json -> _sep1.Bitset -> RangeSet
-                      py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(dumps(llm_bv_json));
-                      py::list llm_ranges_py = llm_bv_bitset.attr("to_ranges")();
+                      py::list llm_ranges_py = py::cast<py::list>(llm_bv_json);
                       std::vector<std::pair<unsigned long long, unsigned long long>> llm_ranges_cpp;
                       llm_ranges_cpp.reserve(py::len(llm_ranges_py));
                       for (auto r : llm_ranges_py) {
@@ -3533,11 +3532,9 @@ local_system:
                           int dest_idx = py::cast<int>(dd[0]);
                           py::object state_bv_json = dd[1];
 
-                          py::object state_bv = BitsetClass.attr("from_json_string")(dumps(state_bv_json));
-                          bool is_empty_bv = state_bv.attr("is_empty")().cast<bool>();
+                          py::list py_ranges = py::cast<py::list>(state_bv_json);
                           std::vector<std::pair<int,int>> ranges;
-                          if (!is_empty_bv) {
-                              py::object py_ranges = state_bv.attr("to_ranges")();
+                          if (py::len(py_ranges) > 0) {
                               ranges.reserve(py::len(py_ranges));
                               for (auto it : py_ranges) {
                                   py::tuple t = py::cast<py::tuple>(it);
@@ -3546,6 +3543,7 @@ local_system:
                                   ranges.emplace_back(l, r);
                               }
                           }
+
                           dests.push_back(DestEdge{dest_idx, std::move(ranges)});
                       }
 
@@ -3756,6 +3754,8 @@ local_system:
               auto& stats = Stats::get();
               stats.start("get_mask.main_loop.edge.apply_and_prune");
 
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> acc_memo;
+
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   stats.inc("get_mask.intersect_and_prune.calls");
 
@@ -3772,7 +3772,8 @@ local_system:
                   na->llm_mask = new_mask;
                   return na;
               };
-              auto result = g.apply_and_prune(mutator);
+              auto result = g.apply_and_prune(mutator, &acc_memo);
+              stats.inc("get_mask.intersect_and_prune.memo_size.sum", acc_memo.size());
               stats.stop("get_mask.main_loop.edge.apply_and_prune");
               return result;
           }
@@ -8224,19 +8225,44 @@ local_system:
               stats.start("commit.prune_and_map_gss");
               std::unordered_map<int, Leveled> temp_states;
               temp_states.reserve(state_.size());
-              {
-                  py::gil_scoped_release release; // Release GIL for C++ heavy part
-                  for (const auto &kv : state_) {
-                      int tokenizer_sid = kv.first;
-                      const Leveled &gss = kv.second;
+              for (const auto &kv : state_) {
+                  int tokenizer_sid = kv.first;
+                  const Leveled &gss = kv.second;
 
-                      Leveled pruned = prune_by_terminals_map(gss, terminals_map);
-                      if (!pruned.is_empty()) {
-                          Leveled mapped = apply_state_map_to_gss(pruned, state_map);
-                          if (!mapped.is_empty()) {
-                              temp_states[tokenizer_sid] = std::move(mapped);
+                  auto mutator = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
+                      // 1. Prune check from prune_by_terminals_map
+                      RangeSet rs_empty = RangeSet::empty();
+                      for (auto &kv_term : terminals_map) {
+                          int sid = kv_term.first;
+                          const RangeSet &matched = kv_term.second;
+                          auto it = acc->terminals_union.find(sid);
+                          const RangeSet &disallowed = (it != acc->terminals_union.end()) ? it->second : rs_empty;
+                          if (!matched.intersection_with(disallowed).is_empty()) {
+                              return nullptr; // Prune
                           }
                       }
+
+                      // 2. Mapping logic from apply_state_map_to_gss
+                      auto na = std::make_shared<Acc>();
+                      na->llm_mask = acc->llm_mask;
+                      for (auto const& [old_sid, new_sid] : state_map) {
+                          auto it = acc->terminals_union.find(old_sid);
+                          if (it != acc->terminals_union.end()) {
+                              const RangeSet& bv_source = it->second;
+                              auto it_new = na->terminals_union.find(new_sid);
+                              if (it_new != na->terminals_union.end()) {
+                                  it_new->second = it_new->second.union_with(bv_source);
+                              } else {
+                                  na->terminals_union.emplace(new_sid, bv_source);
+                              }
+                          }
+                      }
+                      return na;
+                  };
+
+                  Leveled fused_gss = gss.apply_and_prune(mutator);
+                  if (!fused_gss.is_empty()) {
+                      temp_states[tokenizer_sid] = std::move(fused_gss);
                   }
               }
               stats.stop("commit.prune_and_map_gss");
@@ -8377,16 +8403,15 @@ local_system:
 
               // values: node_id -> GSS
               std::unordered_map<int, Leveled> values;
-              // todo buckets: depth -> set of nodes
-              std::unordered_map<int, std::set<int>> todo;
-              // min-heap for depths
-              std::priority_queue<int> depth_heap;
+              // Max-heap for {depth, node_id} pairs.
+              std::priority_queue<std::pair<int, int>> pq;
+              std::unordered_set<int> enqueued_nodes;
 
               auto enqueue = [&](int d, int n) {
-                  auto &bucket = todo[d];
-                  bool first = bucket.empty();
-                  bucket.insert(n);
-                  if (first) depth_heap.push(d);
+                  if (enqueued_nodes.find(n) == enqueued_nodes.end()) {
+                      enqueued_nodes.insert(n);
+                      pq.push({d, n});
+                  }
               };
 
               // This memoization cache is critical for performance. It's shared across all GSSs
@@ -8411,7 +8436,6 @@ local_system:
               stats.stop("get_mask.initial_stats");
 
               stats.start("get_mask.seeding");
-              // Seed with initialized accs (compute allowed llm mask from terminals_union)
               for (auto &kv : state_) {
                   int sid = kv.first;
                   int root = 0;
@@ -8441,15 +8465,11 @@ local_system:
               stats.start("get_mask.main_loop");
               int max_depth_reached = 0;
               std::unordered_set<int> visited_nodes;
-              while (!depth_heap.empty()) {
-                  int depth = depth_heap.top(); depth_heap.pop();
-                  auto &bucket = todo[depth];
-
-                  while (!bucket.empty()) {
-                      int node = *bucket.begin();
-                      bucket.erase(bucket.begin());
-
+              while (!pq.empty()) {
+                  auto [depth, node] = pq.top();
+                  pq.pop();
                   max_depth_reached = std::max(max_depth_reached, depth);
+
                   stats.inc("get_mask.traversal.depth_heap.pops");
 
                   stats.inc("get_mask.traversal.nodes_processed");
@@ -8570,8 +8590,6 @@ local_system:
                           enqueue(arena_.at(dnode).max_depth, dnode);
                       }
                   }
-                  }
-                  todo.erase(depth);
               }
               stats.stop("get_mask.main_loop");
               stats.inc("get_mask.traversal.max_depth_reached", max_depth_reached);
@@ -8893,48 +8911,6 @@ local_system:
           // -----------------------------
           // Leveled GSS transforms needed by algorithm
           // -----------------------------
-          Leveled prune_by_terminals_map(const Leveled& g, const std::unordered_map<int, RangeSet>& terminals_map) {
-              auto pred = [&](const std::shared_ptr<Acc>& acc) -> bool {
-                  RangeSet rs_empty = RangeSet::empty();
-                  for (auto &kv : terminals_map) {
-                      int sid = kv.first;
-                      const RangeSet &matched = kv.second;
-                      auto it = acc->terminals_union.find(sid);
-                      const RangeSet &disallowed = (it != acc->terminals_union.end()) ? it->second : rs_empty;
-                      RangeSet inter = matched.intersection_with(disallowed);
-                      bool ok = inter.is_empty();
-                      if (!ok) return false;
-                  }
-                  return true;
-              };
-              return g.prune(pred);
-          }
-
-          Leveled apply_state_map_to_gss(const Leveled& g, const std::unordered_map<int, int>& state_map) {
-              auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
-                  auto na = std::make_shared<Acc>();
-                  na->llm_mask = acc->llm_mask;
-                  RangeSet rs_empty = RangeSet::empty();
-                  // This logic must mirror the Python version to ensure terminals_union is pruned
-                  // and does not grow indefinitely. We iterate over the small state_map, not the
-                  // potentially large terminals_union.
-                  for (auto const& [old_sid, new_sid] : state_map) {
-                      auto it = acc->terminals_union.find(old_sid);
-                      if (it != acc->terminals_union.end()) {
-                          const RangeSet& bv_source = it->second;
-                          auto it_new = na->terminals_union.find(new_sid);
-                          if (it_new != na->terminals_union.end()) {
-                              it_new->second = it_new->second.union_with(bv_source);
-                          } else {
-                              na->terminals_union.emplace(new_sid, bv_source);
-                          }
-                      }
-                  }
-                  return na;
-              };
-              return g.apply(mapper);
-          }
-
           Leveled disallow_in_state(const Leveled& g, int state_id, int terminal_id) {
               auto transformer = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
                   auto na = std::make_shared<Acc>();
@@ -9011,11 +8987,12 @@ local_system:
                       }
                   };
 
+                  if ((action.has_shift && !action.reduces.empty()) || action.reduces.size() > 1) {
+                      stats.inc("_process_token.splits");
+                  }
+
                   if (action.has_shift) {
                       handle_shift(action.shift_state_id, state_gss);
-                      if (!action.reduces.empty()) {
-                          stats.inc("_process_token.splits");
-                      }
                   }
                   for (auto &rd : action.reduces) {
                       handle_reduce(rd.first, rd.second, state_gss);
@@ -14260,8 +14237,7 @@ messages:
                       py::object llm_bv_json = edge_key[1];
 
                       // Convert llm_bv_json -> _sep1.Bitset -> RangeSet
-                      py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(dumps(llm_bv_json));
-                      py::list llm_ranges_py = llm_bv_bitset.attr("to_ranges")();
+                      py::list llm_ranges_py = py::cast<py::list>(llm_bv_json);
                       std::vector<std::pair<unsigned long long, unsigned long long>> llm_ranges_cpp;
                       llm_ranges_cpp.reserve(py::len(llm_ranges_py));
                       for (auto r : llm_ranges_py) {
@@ -14278,11 +14254,9 @@ messages:
                           int dest_idx = py::cast<int>(dd[0]);
                           py::object state_bv_json = dd[1];
 
-                          py::object state_bv = BitsetClass.attr("from_json_string")(dumps(state_bv_json));
-                          bool is_empty_bv = state_bv.attr("is_empty")().cast<bool>();
+                          py::list py_ranges = py::cast<py::list>(state_bv_json);
                           std::vector<std::pair<int,int>> ranges;
-                          if (!is_empty_bv) {
-                              py::object py_ranges = state_bv.attr("to_ranges")();
+                          if (py::len(py_ranges) > 0) {
                               ranges.reserve(py::len(py_ranges));
                               for (auto it : py_ranges) {
                                   py::tuple t = py::cast<py::tuple>(it);
@@ -14291,6 +14265,7 @@ messages:
                                   ranges.emplace_back(l, r);
                               }
                           }
+
                           dests.push_back(DestEdge{dest_idx, std::move(ranges)});
                       }
 
@@ -14501,6 +14476,8 @@ messages:
               auto& stats = Stats::get();
               stats.start("get_mask.main_loop.edge.apply_and_prune");
 
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> acc_memo;
+
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   stats.inc("get_mask.intersect_and_prune.calls");
 
@@ -14517,7 +14494,8 @@ messages:
                   na->llm_mask = new_mask;
                   return na;
               };
-              auto result = g.apply_and_prune(mutator);
+              auto result = g.apply_and_prune(mutator, &acc_memo);
+              stats.inc("get_mask.intersect_and_prune.memo_size.sum", acc_memo.size());
               stats.stop("get_mask.main_loop.edge.apply_and_prune");
               return result;
           }
@@ -16355,6 +16333,46 @@ messages:
       Summary printed above. Plots are saved in: benchmark_results/2025-09-23_17-06-32/analysis
       Full JSON results are in: benchmark_results/2025-09-23_17-06-32
     metadata:
+  - user: |-
+      Of course. Here is an analysis focusing on the most significant differences and points of special interest from the benchmark results.
+
+      ### High-Level Summary
+
+      The C++ implementation is faster overall, with a **mean processing time of 15.0ms per token** compared to Python's **19.9ms**. However, the performance difference is not uniform. C++ shows a massive speedup in the `commit` and `_process_token` phases, but the `get_mask` phase is much more competitive, with some sub-tasks even running slower in C++.
+
+      The most critical difference lies in an apparent algorithmic divergence in how acceptable tokens are initialized (`initialize_acc`), where the Python version performs over **220x more calls**, creating a major bottleneck.
+
+      ---
+
+      ### Key Performance Differences (The "Why")
+
+      Here are the most significant performance metrics, filtered to highlight the core differences.
+
+      | Area | Metric | C++ Time (ms) | Python Time (ms) | C++ Count | Python Count | Analysis |
+      | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+      | **`get_mask` Initialization** | `initialize_acc.total` | **4.4** | 760.9 | 647 | **143,883** | **(Most Significant Finding)** Python is **170x slower** because it calls this function over **220x more often**. This points to a fundamental difference in how initial masks are constructed, likely involving many more small, iterative operations in Python. |
+      | **`get_mask` Seeding** | `seeding.total` | 181.0 | **1,631.3** | - | - | Python is **9x slower** when seeding the traversal. The `gss.apply` sub-task is the main culprit, suggesting that applying the initial GSS states to the traversal queue is a major bottleneck in Python. |
+      | **`commit` Phase** | `prune_and_map_gss` | 505.1 | **3,161.9** | - | - | C++ is **6.3x faster** at pruning the Graph-Structured Stack (GSS). This task involves heavy data structure manipulation, which is a classic strength of C++ over Python. |
+      | **`_process_token` Phase** | `_process_token.total` | 303.8 | **1,237.9** | 1,346 | 1,346 | C++ is **4.1x faster** in the core token processing loop, as expected for tight, repetitive logic. |
+      | **`get_mask` Traversal** | `main_loop.edge.peek_and_filter` | **53.4** | 1,032.5 | - | - | C++ is **19x faster** at filtering grammar edges during traversal, likely due to more efficient bitset operations and data access. |
+      | **`get_mask` Traversal** | `zombie_check` | **372.9** | 153.0 | - | - | **(Unexpected Result)** Python is **2.4x faster** at checking for "zombie" nodes (nodes with no potential to reach an end state). This could indicate a more efficient data structure or access pattern for this specific check in the Python code. |
+
+      ---
+
+      ### Points of Special Interest
+
+      1.  **Algorithmic Divergence in `get_mask`:**
+          The enormous discrepancy in `get_mask.initialize_acc.calls` (647 vs 143,883) and `bitset.union.calls` (34k vs 529k) is the single most important takeaway. The Python version is not just a direct translation; it appears to be using a much more granular, iterative approach to building the initial set of allowed tokens for each grammar state, which is computationally very expensive.
+
+      2.  **Python is Faster in `zombie_check`:**
+          It is highly unusual for the Python implementation to outperform C++ in any component. The fact that `zombie_check` is over twice as fast in Python suggests that the C++ implementation might have an inefficiency in this specific area, or that the Python version's data layout is coincidentally better suited for this particular task.
+
+      3.  **Slightly Different Parsing Paths:**
+          The Python version records more `_process_token.reduces` (8,967 vs 7,943) and `_process_token.splits` (213 vs 106), even though the final output masks are identical. This implies that the internal state management of the GSS may differ slightly, leading Python to explore more (or different) transient parsing paths before arriving at the same result.
+
+      4.  **Performance Consistency:**
+          The C++ version has a higher standard deviation in its timings (7.9ms vs 5.3ms). This suggests that while faster on average, the C++ performance may be more "spiky" and sensitive to the complexity of specific tokens, whereas the Python version is slower but more consistent.
+    metadata:
   - user: The C++ version should be MUCH faster than the Python version, but is only
       slightly faster. Look at the number of bitset unions, the `_process_token` time.
       Commit is much slower in C++. Fix this. get_mask is also slower. Fix that too.
@@ -16376,70 +16394,31 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Based on my analysis of the benchmark results, the C++ implementation's performance is being held back by two main issues: very inefficient parsing during model loading and a missing memoization cache in a critical path of the `get_mask` algorithm. The following changes will address these bottlenecks.
+      Of course. Based on the benchmark analysis, the C++ implementation is not performing as well as it should, particularly in the `get_mask` and `commit` phases. Here are the step-by-step instructions and corresponding git diffs to apply the necessary optimizations.
 
       ### Step-by-Step Instructions
 
-      1.  **Optimize Arena Parsing in `precompute3_engine.cpp`**
-
-          The current implementation for parsing the model's arena structure involves a slow process of converting Python list objects to JSON strings, only to have Python parse them back into bitset objects. We can optimize this by directly parsing the Python list of ranges in C++.
-
-          -   **File:** `python/aug25/models/precompute3_engine.cpp`
-          -   **Method:** `parse_arena`
-
-          a.  In the main loop over `children_obj`, replace the `llm_bv_json` processing block.
-              -   **Delete** these two lines:
-                  ```cpp
-                  py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(dumps(llm_bv_json));
-                  py::list llm_ranges_py = llm_bv_bitset.attr("to_ranges")();
-                  ```
-              -   **Insert** this line in their place:
-                  ```cpp
-                  py::list llm_ranges_py = py::cast<py::list>(llm_bv_json);
-                  ```
-
-          b.  In the inner loop over `dest_map`, replace the `state_bv_json` processing block.
-              -   **Delete** the entire block that starts with `py::object state_bv = ...` and ends with the closing brace of the `if (!is_empty_bv)` block.
-              -   **Insert** the following code in its place:
-                  ```cpp
-                  py::list py_ranges = py::cast<py::list>(state_bv_json);
-                  std::vector<std::pair<int,int>> ranges;
-                  if (py::len(py_ranges) > 0) {
-                      ranges.reserve(py::len(py_ranges));
-                      for (auto it : py_ranges) {
-                          py::tuple t = py::cast<py::tuple>(it);
-                          int l = py::cast<int>(t[0]);
-                          int r = py::cast<int>(t[1]);
-                          ranges.emplace_back(l, r);
-                      }
-                  }
-                  ```
-
-      2.  **Fix `get_mask` Performance in `precompute3_engine.cpp`**
-
-          The C++ version of `get_mask` is slower than expected because a key transformation, `apply_and_prune`, is not using a memoization cache that is present in the Python version. This leads to a large amount of redundant work.
-
-          -   **File:** `python/aug25/models/precompute3_engine.cpp`
-          -   **Method:** `intersect_llm_mask`
-
-          a.  **Insert** the cache declaration at the beginning of the function, after `stats.start(...)`:
-              ```cpp
-              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> acc_memo;
-              ```
-
-          b.  **Modify** the call to `g.apply_and_prune` to pass a pointer to this new cache. Change this line:
-              ```cpp
-              auto result = g.apply_and_prune(mutator);
-              ```
-              to this:
-              ```cpp
-              auto result = g.apply_and_prune(mutator, &acc_memo);
-              ```
-
-          c.  **Insert** a new line after the `apply_and_prune` call to add a statistic for the cache size, which helps in verifying the fix:
-              ```cpp
-              stats.inc("get_mask.intersect_and_prune.memo_size.sum", acc_memo.size());
-              ```
+      1.  **File `python/aug25/models/precompute3_engine.cpp`:**
+          
+          We will apply three optimizations to this file:
+          
+          a.  **Optimize `commit` GSS Processing:** In the `Engine::commit` method, we will fuse the separate `prune` and `map` operations on the GSS into a single, more efficient `apply_and_prune` pass. This halves the number of GSS traversals in this critical section.
+              *   Navigate to the `Engine::commit` method.
+              *   Find the block starting with `stats.start("commit.prune_and_map_gss");`.
+              *   Replace the `for` loop within this block with a new version that defines a `mutator` lambda. This lambda will first perform the pruning check and then, if successful, apply the state mapping to the accumulator, returning `nullptr` to prune.
+              *   Remove the now-unused helper methods `prune_by_terminals_map` and `apply_state_map_to_gss` from the class definition.
+          
+          b.  **Optimize `get_mask` Traversal Queue:** The current node traversal queue in `Engine::get_mask` is inefficient. We will replace it with a simpler and faster priority queue.
+              *   Navigate to the `Engine::get_mask` method.
+              *   Delete the `todo` map and `depth_heap` priority queue.
+              *   In their place, declare a `std::priority_queue<std::pair<int, int>>` named `pq` to store `(depth, node_id)` pairs, and an `std::unordered_set<int>` named `enqueued_nodes` to prevent duplicate processing.
+              *   Update the `enqueue` lambda to use `pq` and `enqueued_nodes`.
+              *   Replace the complex, nested `while` loops for traversal with a single, simple `while (!pq.empty())` loop.
+          
+          c.  **Fix `_process_token` Statistics:** The counter for "split" actions is in the wrong place, causing a mismatch with the Python stats.
+              *   Navigate to the `Engine::process_token` method.
+              *   Find the line `stats.inc("_process_token.splits");`.
+              *   Move this line and change its condition to correctly fire when a shift-reduce or reduce-reduce conflict occurs (`(action.has_shift && !action.reduces.empty()) || action.reduces.size() > 1`).
 
       ### Git Diffs
 
@@ -16449,58 +16428,196 @@ messages:
       diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
       --- a/python/aug25/models/precompute3_engine.cpp
       +++ b/python/aug25/models/precompute3_engine.cpp
-      @@ -1010,8 +1010,7 @@
-                       py::object llm_bv_json = edge_key[1];
-       
-                       // Convert llm_bv_json -> _sep1.Bitset -> RangeSet
-      -                py::object llm_bv_bitset = BitsetClass.attr("from_json_string")(dumps(llm_bv_json));
-      -                py::list llm_ranges_py = llm_bv_bitset.attr("to_ranges")();
-      +                py::list llm_ranges_py = py::cast<py::list>(llm_bv_json);
-                       std::vector<std::pair<unsigned long long, unsigned long long>> llm_ranges_cpp;
-                       llm_ranges_cpp.reserve(py::len(llm_ranges_py));
-                       for (auto r : llm_ranges_py) {
-      @@ -1027,19 +1026,19 @@
-                           int dest_idx = py::cast<int>(dd[0]);
-                           py::object state_bv_json = dd[1];
-       
-      -                    py::object state_bv = BitsetClass.attr("from_json_string")(dumps(state_bv_json));
-      -                    bool is_empty_bv = state_bv.attr("is_empty")().cast<bool>();
-      +                    py::list py_ranges = py::cast<py::list>(state_bv_json);
-                           std::vector<std::pair<int,int>> ranges;
-      -                    if (!is_empty_bv) {
-      -                        py::object py_ranges = state_bv.attr("to_ranges")();
-      +                    if (py::len(py_ranges) > 0) {
-                               ranges.reserve(py::len(py_ranges));
-                               for (auto it : py_ranges) {
-                                   py::tuple t = py::cast<py::tuple>(it);
-                                   int l = py::cast<int>(t[0]);
-                                   int r = py::cast<int>(t[1]);
-                                   ranges.emplace_back(l, r);
-                               }
+      @@ -211,21 +211,45 @@
+               stats.start("commit.prune_and_map_gss");
+               std::unordered_map<int, Leveled> temp_states;
+               temp_states.reserve(state_.size());
+      -        {
+      -            py::gil_scoped_release release; // Release GIL for C++ heavy part
+      -            for (const auto &kv : state_) {
+      -                int tokenizer_sid = kv.first;
+      -                const Leveled &gss = kv.second;
+      -
+      -                Leveled pruned = prune_by_terminals_map(gss, terminals_map);
+      -                if (!pruned.is_empty()) {
+      -                    Leveled mapped = apply_state_map_to_gss(pruned, state_map);
+      -                    if (!mapped.is_empty()) {
+      -                        temp_states[tokenizer_sid] = std::move(mapped);
+      +        for (const auto &kv : state_) {
+      +            int tokenizer_sid = kv.first;
+      +            const Leveled &gss = kv.second;
+      +
+      +            auto mutator = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
+      +                // 1. Prune check from prune_by_terminals_map
+      +                RangeSet rs_empty = RangeSet::empty();
+      +                for (auto &kv_term : terminals_map) {
+      +                    int sid = kv_term.first;
+      +                    const RangeSet &matched = kv_term.second;
+      +                    auto it = acc->terminals_union.find(sid);
+      +                    const RangeSet &disallowed = (it != acc->terminals_union.end()) ? it->second : rs_empty;
+      +                    if (!matched.intersection_with(disallowed).is_empty()) {
+      +                        return nullptr; // Prune
                            }
-      +
-                           dests.push_back(DestEdge{dest_idx, std::move(ranges)});
                        }
-       
-      @@ -1221,6 +1220,8 @@
-           ) {
-               auto& stats = Stats::get();
-               stats.start("get_mask.main_loop.edge.apply_and_prune");
+      -            }
+      -        }
       +
-      +        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> acc_memo;
+      +                // 2. Mapping logic from apply_state_map_to_gss
+      +                auto na = std::make_shared<Acc>();
+      +                na->llm_mask = acc->llm_mask;
+      +                for (auto const& [old_sid, new_sid] : state_map) {
+      +                    auto it = acc->terminals_union.find(old_sid);
+      +                    if (it != acc->terminals_union.end()) {
+      +                        const RangeSet& bv_source = it->second;
+      +                        auto it_new = na->terminals_union.find(new_sid);
+      +                        if (it_new != na->terminals_union.end()) {
+      +                            it_new->second = it_new->second.union_with(bv_source);
+      +                        } else {
+      +                            na->terminals_union.emplace(new_sid, bv_source);
+      +                        }
+      +                    }
+      +                }
+      +                return na;
+      +            };
+      +
+      +            Leveled fused_gss = gss.apply_and_prune(mutator);
+      +            if (!fused_gss.is_empty()) {
+      +                temp_states[tokenizer_sid] = std::move(fused_gss);
+      +            }
+      +        }
+               stats.stop("commit.prune_and_map_gss");
        
-               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
-                   stats.inc("get_mask.intersect_and_prune.calls");
-      @@ -1238,7 +1239,8 @@
-                   na->llm_mask = new_mask;
-                   return na;
+               stats.start("commit.main_loop");
+      @@ -331,18 +355,18 @@
+       
+       
+               // values: node_id -> GSS
+               std::unordered_map<int, Leveled> values;
+      -        // todo buckets: depth -> set of nodes
+      -        std::unordered_map<int, std::set<int>> todo;
+      -        // min-heap for depths
+      -        std::priority_queue<int> depth_heap;
+      +        // Max-heap for {depth, node_id} pairs.
+      +        std::priority_queue<std::pair<int, int>> pq;
+      +        std::unordered_set<int> enqueued_nodes;
+       
+               auto enqueue = [&](int d, int n) {
+      -            auto &bucket = todo[d];
+      -            bool first = bucket.empty();
+      -            bucket.insert(n);
+      -            if (first) depth_heap.push(d);
+      +            if (enqueued_nodes.find(n) == enqueued_nodes.end()) {
+      +                enqueued_nodes.insert(n);
+      +                pq.push({d, n});
+      +            }
                };
-      -        auto result = g.apply_and_prune(mutator);
-      +        auto result = g.apply_and_prune(mutator, &acc_memo);
-      +        stats.inc("get_mask.intersect_and_prune.memo_size.sum", acc_memo.size());
-               stats.stop("get_mask.main_loop.edge.apply_and_prune");
-               return result;
-           }
+       
+               // This memoization cache is critical for performance. It's shared across all GSSs
+               // being initialized, mirroring the Python implementation's optimization.
+      @@ -359,7 +383,6 @@
+               stats.stop("get_mask.initial_stats");
+       
+               stats.start("get_mask.seeding");
+      -        // Seed with initialized accs (compute allowed llm mask from terminals_union)
+               for (auto &kv : state_) {
+                   int sid = kv.first;
+                   int root = 0;
+      @@ -386,15 +409,11 @@
+               stats.start("get_mask.main_loop");
+               int max_depth_reached = 0;
+               std::unordered_set<int> visited_nodes;
+      -        while (!depth_heap.empty()) {
+      -            int depth = depth_heap.top(); depth_heap.pop();
+      -            auto &bucket = todo[depth];
+      -
+      -            while (!bucket.empty()) {
+      -                int node = *bucket.begin();
+      -                bucket.erase(bucket.begin());
+      -
+      +        while (!pq.empty()) {
+      +            auto [depth, node] = pq.top();
+      +            pq.pop();
+                   max_depth_reached = std::max(max_depth_reached, depth);
+      +
+                   stats.inc("get_mask.traversal.depth_heap.pops");
+       
+                   stats.inc("get_mask.traversal.nodes_processed");
+      @@ -510,9 +529,7 @@
+                           enqueue(arena_.at(dnode).max_depth, dnode);
+                       }
+                   }
+      -            }
+      -            todo.erase(depth);
+      -        }
+      +        }
+               stats.stop("get_mask.main_loop");
+               stats.inc("get_mask.traversal.max_depth_reached", max_depth_reached);
+               stats.inc("get_mask.traversal.nodes_visited.unique", visited_nodes.size());
+      @@ -718,49 +735,6 @@
+           // -----------------------------
+           // Leveled GSS transforms needed by algorithm
+           // -----------------------------
+      -    Leveled prune_by_terminals_map(const Leveled& g, const std::unordered_map<int, RangeSet>& terminals_map) {
+      -        auto pred = [&](const std::shared_ptr<Acc>& acc) -> bool {
+      -            RangeSet rs_empty = RangeSet::empty();
+      -            for (auto &kv : terminals_map) {
+      -                int sid = kv.first;
+      -                const RangeSet &matched = kv.second;
+      -                auto it = acc->terminals_union.find(sid);
+      -                const RangeSet &disallowed = (it != acc->terminals_union.end()) ? it->second : rs_empty;
+      -                RangeSet inter = matched.intersection_with(disallowed);
+      -                bool ok = inter.is_empty();
+      -                if (!ok) return false;
+      -            }
+      -            return true;
+      -        };
+      -        return g.prune(pred);
+      -    }
+      -
+      -    Leveled apply_state_map_to_gss(const Leveled& g, const std::unordered_map<int, int>& state_map) {
+      -        auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
+      -            auto na = std::make_shared<Acc>();
+      -            na->llm_mask = acc->llm_mask;
+      -            RangeSet rs_empty = RangeSet::empty();
+      -            // This logic must mirror the Python version to ensure terminals_union is pruned
+      -            // and does not grow indefinitely. We iterate over the small state_map, not the
+      -            // potentially large terminals_union.
+      -            for (auto const& [old_sid, new_sid] : state_map) {
+      -                auto it = acc->terminals_union.find(old_sid);
+      -                if (it != acc->terminals_union.end()) {
+      -                    const RangeSet& bv_source = it->second;
+      -                    auto it_new = na->terminals_union.find(new_sid);
+      -                    if (it_new != na->terminals_union.end()) {
+      -                        it_new->second = it_new->second.union_with(bv_source);
+      -                    } else {
+      -                        na->terminals_union.emplace(new_sid, bv_source);
+      -                    }
+      -                }
+      -            }
+      -            return na;
+      -        };
+      -        return g.apply(mapper);
+      -    }
+      -
+           Leveled disallow_in_state(const Leveled& g, int state_id, int terminal_id) {
+               auto transformer = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
+                   auto na = std::make_shared<Acc>();
+      @@ -824,12 +798,12 @@
+                       }
+                   };
+       
+      +            if ((action.has_shift && !action.reduces.empty()) || action.reduces.size() > 1) {
+      +                stats.inc("_process_token.splits");
+      +            }
+      +
+                   if (action.has_shift) {
+                       handle_shift(action.shift_state_id, state_gss);
+      -                if (!action.reduces.empty()) {
+      -                    stats.inc("_process_token.splits");
+      -                }
+                   }
+                   for (auto &rd : action.reduces) {
+                       handle_reduce(rd.first, rd.second, state_gss);
 
       ```
     metadata:
@@ -16513,7 +16630,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_engine.cpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_engine.cpp.
     metadata:
-  - user: 'Changes committed with message: "Fix: Optimize C++ engine parsing and add
-      memoization to get_mask"'
+  - user: 'Changes committed with message: "Optimize precompute3 engine: Fuse commit
+      GSS transforms and improve get_mask traversal"'
     metadata:
 ...
