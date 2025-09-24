@@ -943,19 +943,131 @@ class Model(GraphProvider):
 
         return removed_total
 
+    def _shortcut_unconditional_edges(
+        self,
+        nodeopts: Dict[NodeID, NodeOpt],
+        remove_covered_in_edges: bool = True,
+        max_passes: int = 4,
+    ) -> Tuple[int, int]:
+        """
+        Add unconditional shortcut edges A -(t, pop_in+pop_out)-> D for every unconditional chain
+        A -(t, pop_in)-> B and B -(t, pop_out)-> D. Only same-token chains are considered (t).
+
+        If remove_covered_in_edges is True and all of B's outgoing edges for token t are unconditional,
+        then after adding all A -> D shortcuts for that token, remove the covered A -> B edge for token t.
+
+        Returns:
+          (shortcuts_added, in_edges_removed)
+        """
+        shortcuts_total = 0
+        removed_total = 0
+
+        for _ in range(int(max_passes)):
+            shortcuts_this = 0
+            removed_this = 0
+
+            # Build incoming mapping per (node, token)
+            # (dst, tok) -> List[(src, pop_in, edge_in)]
+            incoming: Dict[Tuple[int, int], List[Tuple[int, int, Edge]]] = collections.defaultdict(list)
+            for src_id, nopt in nodeopts.items():
+                for tok, dest_map in nopt.children.items():
+                    for dst_id, (pop, edge) in dest_map.items():
+                        incoming[(int(dst_id), int(tok))].append((int(src_id), int(pop), edge))
+
+            # Collect outgoing unconditional edges and flags per (node, token)
+            # out_uncond_by_tok[(nid, tok)] = {dest: pop_out}
+            out_uncond_by_tok: Dict[Tuple[int, int], Dict[int, int]] = {}
+            all_out_uncond_flags: Set[Tuple[int, int]] = set()
+
+            for nid, nopt in nodeopts.items():
+                for tok, dest_map in nopt.children.items():
+                    uncond_map: Dict[int, int] = {}
+                    all_uncond = True
+                    for dest2, (pop2, edge2) in dest_map.items():
+                        if isinstance(edge2, UnconditionalEdge):
+                            uncond_map[int(dest2)] = int(pop2)
+                        else:
+                            all_uncond = False
+                    if uncond_map:
+                        out_uncond_by_tok[(int(nid), int(tok))] = uncond_map
+                    if all_uncond and dest_map:
+                        all_out_uncond_flags.add((int(nid), int(tok)))
+
+            # For each (B, tok), wire A -> D for unconditional A->B and B->D
+            for (nid, tok), parents in incoming.items():
+                # Need unconditional outgoing edges on this token from nid
+                targets = out_uncond_by_tok.get((nid, tok))
+                if not targets:
+                    continue
+
+                # Process parents with unconditional incoming edges for this token
+                for parent_id, pop_in, edge_in in parents:
+                    if not isinstance(edge_in, UnconditionalEdge):
+                        continue
+
+                    parent_node = nodeopts.get(parent_id)
+                    if parent_node is None:
+                        continue
+
+                    # Ensure token map exists for parent
+                    dm_parent = parent_node.children.get(tok)
+                    if dm_parent is None:
+                        dm_parent = {}
+                        parent_node.children[int(tok)] = dm_parent
+
+                    # Add shortcuts A -(t)-> D
+                    for dest2, pop_out in targets.items():
+                        if dest2 == parent_id:
+                            # Skip creating self-loops
+                            continue
+
+                        existing = dm_parent.get(int(dest2))
+                        if existing is None:
+                            # Compose pops
+                            new_pop = int(pop_in) + int(pop_out)
+                            dm_parent[int(dest2)] = (new_pop, UnconditionalEdge())
+                            shortcuts_this += 1
+                        else:
+                            ex_pop, ex_edge = existing
+                            # If an unconditional already exists, keep it (and its pop) per existing policy.
+                            # If it's a StateEdge, do NOT override here to avoid widening semantics.
+                            # So only add when no existing entry.
+                            pass
+
+                    # Optionally remove covered A -> B in-edge for token 'tok'
+                    # Only if ALL of B's outgoing edges for 'tok' are unconditional
+                    if remove_covered_in_edges and (nid, tok) in all_out_uncond_flags:
+                        if dm_parent.get(int(nid)) is not None:
+                            # Remove edge A -> B for token 'tok'
+                            dm_parent.pop(int(nid), None)
+                            removed_this += 1
+                            if not dm_parent:
+                                parent_node.children.pop(int(tok), None)
+
+            shortcuts_total += shortcuts_this
+            removed_total += removed_this
+
+            if shortcuts_this == 0 and removed_this == 0:
+                break
+
+        return shortcuts_total, removed_total
+
     def _unconditionalize_guaranteed_transitions(
         self,
         time_budget_sec: float = 10.0,
         stagnation_limit: int = 2000,
-        rng_seed: Optional[int] = None
+        rng_seed: Optional[int] = None,
+        contract_policy: str = "passthrough",
+        remove_covered_in_edges: bool = True,
+        shortcut_max_passes: int = 4,
     ) -> None:
         """
         Stochastic optimization pass that attempts to convert state-filtered edges
         to unconditional edges when doing so is guaranteed not to introduce new
         accepting paths or merge with existing alive sets.
 
-        After the stochastic pass, we also contract pure unconditional passthrough nodes
-        and compose consecutive pops, but only when we can remove the node entirely.
+        After the stochastic pass, we apply a configurable contraction/shortcut policy.
+
         Algorithm overview:
         1) Build NodeOpt graph and compute 'alive' parser states per node to fixpoint.
         2) Randomly pick state-filtered edges. Let S be alive at src; E be edge's allowed set.
@@ -969,7 +1081,7 @@ class Model(GraphProvider):
               then reject.
            - Otherwise, accept and flip to UnconditionalEdge().
         3) Continue until time budget exhausted or no successes for 'stagnation_limit' trials.
-        4) Contract unconditional passthrough nodes (compose pops) iteratively until fixed point.
+        4) Apply contraction/shortcut policy ("passthrough", "shortcut", "aggressive", "none").
         5) If any changes were made, convert back to arena.
         """
         t_start = time.perf_counter()
@@ -1082,13 +1194,42 @@ class Model(GraphProvider):
             else:
                 stagnation += 1
 
-        # After stochastic unconditionalization, contract unconditional passthrough nodes
-        removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
+        # After stochastic unconditionalization, apply contraction/shortcut policy
+        removed_nodes = 0
+        shortcuts_added = 0
+        removed_in_edges = 0
 
-        if converted > 0 or removed_nodes > 0:
+        if contract_policy == "passthrough":
+            removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
+        elif contract_policy == "shortcut":
+            shortcuts_added, removed_in_edges = self._shortcut_unconditional_edges(
+                nodeopts,
+                remove_covered_in_edges=remove_covered_in_edges,
+                max_passes=shortcut_max_passes,
+            )
+        elif contract_policy == "aggressive":
+            removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
+            s_added, r_in = self._shortcut_unconditional_edges(
+                nodeopts,
+                remove_covered_in_edges=remove_covered_in_edges,
+                max_passes=shortcut_max_passes,
+            )
+            shortcuts_added += s_added
+            removed_in_edges += r_in
+        elif contract_policy == "none":
+            pass
+        else:
+            # Fallback to passthrough if an unknown policy is provided
+            removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
+
+        if converted > 0 or removed_nodes > 0 or shortcuts_added > 0 or removed_in_edges > 0:
             # Convert NodeOpt back to arena inplace
             self._from_nodeopt_graph(nodeopts, alive)
-        # If no changes, arena remains unchanged.
 
         elapsed = round(time.perf_counter() - t_start, 2)
-        print(f"Unconditionalized {converted} edges; removed {removed_nodes} passthrough nodes in {elapsed} sec")
+        print(
+            f"Unconditionalized {converted} edges; "
+            f"removed {removed_nodes} passthrough nodes; "
+            f"added {shortcuts_added} shortcuts; "
+            f"removed {removed_in_edges} covered in-edges in {elapsed} sec"
+        )
