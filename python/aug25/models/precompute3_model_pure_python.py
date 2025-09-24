@@ -556,6 +556,7 @@ class Model(GraphProvider):
                 if popped.is_empty():
                     continue
 
+                peeked = popped.peek()
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                 acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
 
@@ -582,17 +583,27 @@ class Model(GraphProvider):
                     continue
 
                 for dest_idx, state_bv in dests:
-                    peeked = popped.peek()
-                    values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                    # Empty state_bv in arena means unconditional (applies to all states).
+                    if state_bv.is_empty():
+                        values_to_keep = peeked
+                        child_gss: GSS = popped
+                        reduced_child = reduced
+                    else:
+                        values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
 
                     if not values_to_keep:
                         continue
 
-                    child_gss: GSS = popped.isolate_many(values_to_keep)
+                    if state_bv.is_empty():
+                        # Already assigned above.
+                        pass
+                    else:
+                        child_gss = popped.isolate_many(values_to_keep)
                     if child_gss.is_empty():
                         continue
 
-                    reduced_child = child_gss.reduce_acc()
+                    if not state_bv.is_empty():
+                        reduced_child = child_gss.reduce_acc()
                     if not reduced_child or reduced_child.is_empty():
                         continue
 
@@ -722,7 +733,11 @@ class Model(GraphProvider):
                         q.append(dest_id)
         return {k: set(v) for k, v in alive.items()}
 
-    def _from_nodeopt_graph(self, nodeopts: Dict[NodeID, NodeOpt]) -> None:
+    def _from_nodeopt_graph(
+        self,
+        nodeopts: Dict[NodeID, NodeOpt],
+        alive: Optional[Dict[NodeID, Set[int]]] = None
+    ) -> None:
         """
         Convert NodeOpt back into the arena node format:
         - Group tokens by identical (pop, dest -> state_bv) mapping into shared llm_bv bitsets.
@@ -924,7 +939,7 @@ class Model(GraphProvider):
 
         if converted > 0:
             # Convert NodeOpt back to arena inplace
-            self._from_nodeopt_graph(nodeopts)
+            self._from_nodeopt_graph(nodeopts, alive)
         # If converted == 0, arena remains unchanged.
 
         print(f"Unconditionalized {converted} edges in {round(time.perf_counter() - t_start, 2)} sec")
