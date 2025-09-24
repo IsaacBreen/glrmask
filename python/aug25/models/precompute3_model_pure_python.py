@@ -105,34 +105,6 @@ class PyAcc:
     def is_empty(self):
         return self.llm_mask.is_empty()
 
-
-type State = int
-type LLMToken = int
-type Popn = int
-
-@dataclass
-class ArenaNodeOpt:
-    # llm_token -> dst -> popn -> condition (unconditional or conditional on one of set of states)
-    children: Dict[LLMToken, Dict[NodeID, Dict[Popn, Optional[Set[State]]]]]
-    is_end: bool
-    max_depth: int
-    is_cyclic: bool = False
-
-
-def _unconditionalize_transition(model: Model, llm_token: LLMToken, src: NodeID, dest: NodeID):
-    ...
-
-def _unconditionalize_guaranteed_transitions2(model: Model, llm_token: LLMToken, node: NodeID, states_alive: Set[State]) -> Set[State]:
-    ...
-
-def _unconditionalize_guaranteed_transitions(model: Model):
-    # Gather all states
-    all_states: Set[State] = {sid for m1 in model.arena_opt.values() for m2 in m1.children.values() for m3 in m2.values() for m4 in m3.values() if m4 is not None for sid in m4}
-    for node in model.roots_map.values():
-        for llm_token in model.all_internal_llm_tokens_bitset.to_indices():
-            _unconditionalize_guaranteed_transitions2(model, llm_token, node, all_states)
-
-
 @dataclass
 class Model(GraphProvider):
     """
@@ -140,10 +112,6 @@ class Model(GraphProvider):
     """
     roots_map_raw: List[Tuple[int, NodeID]]
     arena: Dict[NodeID, ArenaNode]  # This is Dict[int, ArenaNode] after __post_init__
-
-    # New fields for optimization
-    arena_opt: Dict[NodeID, ArenaNodeOpt] = field(init=False, default_factory=dict)
-    roots_map_opt: Dict[int, NodeID] = field(init=False, default_factory=dict)
 
     roots_map: Dict[int, NodeID] = field(init=False)
     id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
@@ -193,130 +161,6 @@ class Model(GraphProvider):
                 new_children.append(((int(pop), llm_bv), new_dest_map))
             node["children"] = new_children
             node["llm_bv_union"] = llm_bv_union
-
-    def _find_cycle_nodes(self) -> Set[NodeID]:
-        on_cycle: Set[NodeID] = set()
-        visiting: Set[NodeID] = set()  # Gray set
-        visited: Set[NodeID] = set()   # Black set
-
-        def get_neighbors(node_id: NodeID) -> Set[NodeID]:
-            neighbors = set()
-            node_data = self.arena_opt.get(node_id)
-            if node_data:
-                for dests_for_token in node_data.children.values():
-                    for dest_node_id in dests_for_token.keys():
-                        neighbors.add(dest_node_id)
-            return neighbors
-
-        def dfs(node_id: NodeID, path: List[NodeID]):
-            visiting.add(node_id)
-            path.append(node_id)
-
-            for neighbor_id in get_neighbors(node_id):
-                if neighbor_id in on_cycle:
-                    continue
-                if neighbor_id in visiting:
-                    # Cycle detected
-                    try:
-                        idx = path.index(neighbor_id)
-                        for i in range(idx, len(path)):
-                            on_cycle.add(path[i])
-                    except ValueError:
-                        pass  # Should not happen
-                elif neighbor_id not in visited:
-                    dfs(neighbor_id, path)
-
-            path.pop()
-            visiting.remove(node_id)
-            visited.add(node_id)
-
-        all_nodes = list(self.arena_opt.keys())
-        for node_id in all_nodes:
-            if node_id not in visited:
-                dfs(node_id, [])
-
-        return on_cycle
-
-    def _convert_to_opt_arena(self):
-        self.arena_opt = {}
-        for node_id, node_data in self.arena.items():
-            opt_children = collections.defaultdict(lambda: collections.defaultdict(dict))
-
-            # children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]]
-            for (pop, llm_bv), dests in node_data.get("children", []):
-                for llm_token in llm_bv.to_indices():
-                    # dests: List[Tuple[NodeID, StateIDSet]]
-                    for dest_node_id, state_bv in dests:
-                        if state_bv.is_empty():
-                            # Unconditional transition
-                            opt_children[llm_token][dest_node_id][pop] = None
-                        else:
-                            # Conditional transition
-                            if pop not in opt_children[llm_token][dest_node_id]:
-                                opt_children[llm_token][dest_node_id][pop] = set()
-
-                            current_condition = opt_children[llm_token][dest_node_id][pop]
-                            if current_condition is not None:
-                                for state_id in state_bv.to_indices():
-                                    current_condition.add(state_id)
-
-            self.arena_opt[node_id] = ArenaNodeOpt(
-                children={k: dict(v) for k, v in opt_children.items()},
-                is_end=self.is_end(node_id),
-                max_depth=self.max_depth.get(node_id, 0)
-            )
-
-        cycle_nodes = self._find_cycle_nodes()
-        for node_id in cycle_nodes:
-            if node_id in self.arena_opt:
-                self.arena_opt[node_id].is_cyclic = True
-
-        self.roots_map_opt = self.roots_map.copy()
-
-    def _convert_from_opt_arena(self):
-        new_arena = {}
-        for node_id, opt_node in self.arena_opt.items():
-            transitions_by_llm_token = opt_node.children
-
-            inverted_map = collections.defaultdict(list)
-            for llm_token, dests_for_token in transitions_by_llm_token.items():
-                pops_for_token = collections.defaultdict(dict)
-                for dest_node_id, pops in dests_for_token.items():
-                    for pop, condition in pops.items():
-                        pops_for_token[pop][dest_node_id] = condition
-
-                for pop, dest_map in pops_for_token.items():
-                    hashable_dest_map = frozenset(
-                        (dest_id, frozenset(states) if states is not None else None)
-                        for dest_id, states in dest_map.items()
-                    )
-                    key = (pop, hashable_dest_map)
-                    inverted_map[key].append(llm_token)
-
-            new_children = []
-            for (pop, hashable_dest_map), llm_tokens in inverted_map.items():
-                llm_bv = LLMTokenSet.from_indices(llm_tokens)
-                new_dests = []
-                for dest_node_id, condition in hashable_dest_map:
-                    state_bv = StateIDSet.empty() if condition is None else StateIDSet.from_indices(list(condition))
-                    new_dests.append((dest_node_id, state_bv))
-                new_dests.sort()
-                new_children.append(((pop, llm_bv), new_dests))
-
-            new_children.sort(key=lambda x: (x[0][0], min(x[0][1].to_indices()) if not x[0][1].is_empty() else 0))
-
-            llm_bv_union = LLMTokenSet.union_many(c[0][1] for c in new_children) if new_children else LLMTokenSet.empty()
-            new_arena_node: ArenaNode = {
-                "max_depth": opt_node.max_depth, "children": new_children, "llm_bv_union": llm_bv_union,
-            }
-            if opt_node.is_end:
-                new_arena_node["value"] = {"clean_end": True}
-            new_arena[node_id] = new_arena_node
-
-        self.arena = new_arena
-        self.roots_map = self.roots_map_opt.copy()
-        for uid, node in self.arena.items():
-            self.max_depth[int(uid)] = int(node.get("max_depth", 0) or 0)
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -393,10 +237,6 @@ class Model(GraphProvider):
         # Convert universe LLM tokens bitset to RangeSet
         all_internal = constraint.all_internal_llm_tokens_bitset()
         model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
-
-        model._convert_to_opt_arena()
-        _unconditionalize_guaranteed_transitions(model)
-        model._convert_from_opt_arena()
 
         return model
 
