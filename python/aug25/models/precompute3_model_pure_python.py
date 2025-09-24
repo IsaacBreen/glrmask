@@ -13,11 +13,11 @@ from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
 
 
-NodeId = int
+NodeID = int
 
 # Type aliases for different uses of RangeSet to improve clarity.
-LlmTokenSet = RangeSet
-StateIdSet = RangeSet
+LLMTokenSet = RangeSet
+StateIDSet = RangeSet
 TerminalIdSet = RangeSet
 
 
@@ -65,15 +65,15 @@ class ArenaValue(TypedDict, total=False):
 
 class ArenaNode(TypedDict, total=False):
     max_depth: int
-    children: List[Tuple[Tuple[int, LlmTokenSet], List[Tuple[NodeId, StateIdSet]]]]
-    llm_bv_union: LlmTokenSet
+    children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]]
+    llm_bv_union: LLMTokenSet
     value: ArenaValue
 
 
 @dataclass(frozen=True, eq=False)
 class PyAcc:
     terminals_union: Dict[int, TerminalIdSet]
-    llm_mask: LlmTokenSet
+    llm_mask: LLMTokenSet
 
     def __eq__(self, other):
         if not isinstance(other, PyAcc):
@@ -105,10 +105,10 @@ class PyAcc:
     def is_empty(self):
         return self.llm_mask.is_empty()
 
-def _unconditionalize_transition(model: Model, llm_token: int, src: NodeId, dest: NodeId):
+def _unconditionalize_transition(model: Model, llm_token: int, src: NodeID, dest: NodeID):
     ...
 
-def _unconditionalize_guaranteed_transitions2(model: Model, llm_token: int, node: NodeId):
+def _unconditionalize_guaranteed_transitions2(model: Model, llm_token: int, node: NodeID):
     ...
 
 def _unconditionalize_guaranteed_transitions(model: Model):
@@ -122,20 +122,20 @@ class Model(GraphProvider):
     """
     Precomputed trie model (third-generation), simplified and concise.
     """
-    roots_map_raw: List[Tuple[int, NodeId]]
-    arena: Dict[NodeId, ArenaNode]  # This is Dict[int, ArenaNode] after __post_init__
+    roots_map_raw: List[Tuple[int, NodeID]]
+    arena: Dict[NodeID, ArenaNode]  # This is Dict[int, ArenaNode] after __post_init__
 
-    roots_map: Dict[int, NodeId] = field(init=False)
+    roots_map: Dict[int, NodeID] = field(init=False)
     id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
-    max_depth: Dict[NodeId, int] = field(init=False, default_factory=dict)
-    possible_matches_cache: Optional[Dict[int, Dict[int, LlmTokenSet]]] = field(init=False, default=None)
+    max_depth: Dict[NodeID, int] = field(init=False, default_factory=dict)
+    possible_matches_cache: Optional[Dict[int, Dict[int, LLMTokenSet]]] = field(init=False, default=None)
     tokenizer: Optional[ffi.Regex] = field(init=False, default=None)
     glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
     ignore_terminal_id: Optional[int] = field(init=False, default=None)
     parser_table: Optional[ParserTable] = field(init=False, default=None)
     state: Dict[int, GSS] = field(init=False, default_factory=dict)
     internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
-    all_internal_llm_tokens_bitset: Optional[LlmTokenSet] = field(init=False, default=None)
+    all_internal_llm_tokens_bitset: Optional[LLMTokenSet] = field(init=False, default=None)
     tokenizer_initial_state: Optional[int] = field(init=False, default=None)
     tokenizer_max_state: Optional[int] = field(init=False, default=None)
     all_terminals_bitset: Optional[TerminalIdSet] = field(init=False, default=None)
@@ -154,21 +154,21 @@ class Model(GraphProvider):
             children = node.get("children") or []
             if not children:
                 node["children"] = []
-                node["llm_bv_union"] = LlmTokenSet.empty()
+                node["llm_bv_union"] = LLMTokenSet.empty()
                 continue
 
             new_children = []
-            llm_bv_union: LlmTokenSet = LlmTokenSet.empty()
+            llm_bv_union: LLMTokenSet = LLMTokenSet.empty()
             for edge_key, dest_map in children:
                 pop, llm_bv_json = edge_key
                 llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
                 # Convert to RangeSet for ffi-free operations in commit/get_mask
-                llm_bv: LlmTokenSet = LlmTokenSet.from_ranges(llm_bv_bitset.to_ranges())
+                llm_bv: LLMTokenSet = LLMTokenSet.from_ranges(llm_bv_bitset.to_ranges())
                 llm_bv_union = llm_bv_union.union(llm_bv)
                 new_dest_map = []
                 for dest_idx, state_bv_json in dest_map:
                     state_bv_bitset = bs_from_json(dumps(state_bv_json))
-                    state_bv: StateIdSet = StateIdSet.from_ranges(state_bv_bitset.to_ranges())
+                    state_bv: StateIDSet = StateIDSet.from_ranges(state_bv_bitset.to_ranges())
                     new_dest_map.append((int(dest_idx), state_bv))
                 new_children.append(((int(pop), llm_bv), new_dest_map))
             node["children"] = new_children
@@ -231,24 +231,24 @@ class Model(GraphProvider):
             all_terminals.add(model.ignore_terminal_id)
         model.all_terminals_bitset = TerminalIdSet.from_indices(list(all_terminals))
 
-        initial_acc = PyAcc(terminals_union={}, llm_mask=LlmTokenSet.empty())
+        initial_acc = PyAcc(terminals_union={}, llm_mask=LLMTokenSet.empty())
         initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
         model.state = {model.tokenizer_initial_state: initial_gss}
 
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         # Convert possible_matches_cache to RangeSet
         pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
-        pmc_rs: Dict[int, Dict[int, LlmTokenSet]] = {}
+        pmc_rs: Dict[int, Dict[int, LLMTokenSet]] = {}
         for tsid, inner in pmc_ffi.items():
-            mapped: Dict[int, LlmTokenSet] = {}
+            mapped: Dict[int, LLMTokenSet] = {}
             for term_id, bit in inner.items():
-                mapped[int(term_id)] = LlmTokenSet.from_ranges(bit.to_ranges())
+                mapped[int(term_id)] = LLMTokenSet.from_ranges(bit.to_ranges())
             pmc_rs[int(tsid)] = mapped
         model.possible_matches_cache = pmc_rs
         model.internal_to_original_map = constraint.internal_to_original_map()
         # Convert universe LLM tokens bitset to RangeSet
         all_internal = constraint.all_internal_llm_tokens_bitset()
-        model.all_internal_llm_tokens_bitset = LlmTokenSet.from_ranges(all_internal.to_ranges())
+        model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
 
         _unconditionalize_guaranteed_transitions(model)
 
@@ -288,13 +288,13 @@ class Model(GraphProvider):
             return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
         return gss.apply(apply_disallow)
 
-    def get_root(self, state_id: int) -> NodeId:
+    def get_root(self, state_id: int) -> NodeID:
         return self.roots_map[int(state_id)]
 
-    def is_end(self, node: NodeId) -> bool:
+    def is_end(self, node: NodeID) -> bool:
         return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
 
-    def iter_edges(self, node: NodeId, token: int):
+    def iter_edges(self, node: NodeID, token: int):
         """
         Explode packed transitions into (pop, state_id or None, dest_idx).
         """
@@ -424,7 +424,7 @@ class Model(GraphProvider):
                         handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
         return GSS.merge_many(shifted_gsses)
-    def get_mask(self) -> LlmTokenSet:
+    def get_mask(self) -> LLMTokenSet:
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
 
@@ -437,26 +437,26 @@ class Model(GraphProvider):
         """
         state_map: Dict[int, GSS] = self.state
 
-        all_ones: Optional[LlmTokenSet] = self.all_internal_llm_tokens_bitset
-        final_mask: LlmTokenSet = LlmTokenSet.empty()
+        all_ones: Optional[LLMTokenSet] = self.all_internal_llm_tokens_bitset
+        final_mask: LLMTokenSet = LLMTokenSet.empty()
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
-        values: Dict[NodeId, GSS] = {}
-        depth_heap: List[Tuple[int, NodeId]] = []  # Stores (-depth, node_id)
-        enqueued_nodes: Set[NodeId] = set()
+        values: Dict[NodeID, GSS] = {}
+        depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
+        enqueued_nodes: Set[NodeID] = set()
 
         hp, hpop = heapq.heappush, heapq.heappop
-        roots_map: Dict[int, NodeId] = self.roots_map
-        max_depth: Dict[NodeId, int] = self.max_depth
-        arena: Dict[NodeId, ArenaNode] = self.arena
+        roots_map: Dict[int, NodeID] = self.roots_map
+        max_depth: Dict[NodeID, int] = self.max_depth
+        arena: Dict[NodeID, ArenaNode] = self.arena
         is_end = self.is_end
-        pmc: Dict[int, Dict[int, LlmTokenSet]] = self.possible_matches_cache or {}
+        pmc: Dict[int, Dict[int, LLMTokenSet]] = self.possible_matches_cache or {}
         max_state: int = self.tokenizer_max_state
 
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
         def initialize_acc(acc: PyAcc) -> PyAcc:
             # Compute allowed LLM tokens from disallowed terminals for this accumulator
-            disallowed_llm_mask: LlmTokenSet = LlmTokenSet.empty()
+            disallowed_llm_mask: LLMTokenSet = LLMTokenSet.empty()
             disallowed_map = acc.terminals_union
 
             for tsid, disallowed_terminals in disallowed_map.items():
@@ -469,14 +469,14 @@ class Model(GraphProvider):
                             terminals_to_llm[terminal_id]
                         )
 
-            allowed_mask = (all_ones if all_ones is not None else LlmTokenSet.empty()).difference(disallowed_llm_mask)
+            allowed_mask = (all_ones if all_ones is not None else LLMTokenSet.empty()).difference(disallowed_llm_mask)
             return PyAcc(
                 terminals_union={},  # consume
                 llm_mask=allowed_mask,
             )
 
         for sid, gss in state_map.items():
-            r: NodeId = roots_map[int(sid)]
+            r: NodeID = roots_map[int(sid)]
             gss_initialized: GSS = gss.apply(initialize_acc)
             if r in values:
                 values[r] = values[r].merge(gss_initialized)
@@ -488,7 +488,7 @@ class Model(GraphProvider):
                 enqueued_nodes.add(r)
                 hp(depth_heap, (-d, r))
 
-        def enqueue(d: int, n: NodeId) -> None:
+        def enqueue(d: int, n: NodeID) -> None:
             if n not in enqueued_nodes:
                 enqueued_nodes.add(n)
                 hp(depth_heap, (-d, n))
@@ -505,7 +505,7 @@ class Model(GraphProvider):
                     final_mask = final_mask.union(reduced_acc.llm_mask)
 
             # Zombie traversal avoidance
-            node_llm_bv_union: LlmTokenSet = arena.get(node, {}).get("llm_bv_union", LlmTokenSet.empty())
+            node_llm_bv_union: LLMTokenSet = arena.get(node, {}).get("llm_bv_union", LLMTokenSet.empty())
             potential_new_tokens = node_llm_bv_union.difference(final_mask)
             if potential_new_tokens.is_empty():
                 continue
@@ -565,7 +565,7 @@ class Model(GraphProvider):
                     if not reduced_child or reduced_child.is_empty():
                         continue
 
-                    d: NodeId = int(dest_idx)
+                    d: NodeID = int(dest_idx)
                     if d in values:
                         values[d] = values[d].merge(child_gss)
                     else:
@@ -579,4 +579,4 @@ class Model(GraphProvider):
             if i in self.internal_to_original_map:
                 original_indices.append(self.internal_to_original_map[i])
 
-        return LlmTokenSet.from_indices(original_indices)
+        return LLMTokenSet.from_indices(original_indices)
