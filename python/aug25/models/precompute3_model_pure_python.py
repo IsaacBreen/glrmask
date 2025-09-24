@@ -13,6 +13,9 @@ from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
 
 
+NodeId = int
+
+
 # Add a dummy profiler for when not running under kernprof
 try:
     # This will be injected by the kernprof script.
@@ -57,7 +60,7 @@ class ArenaValue(TypedDict, total=False):
 
 class ArenaNode(TypedDict, total=False):
     max_depth: int
-    children: List[Tuple[Tuple[int, RangeSet], List[Tuple[int, RangeSet]]]]
+    children: List[Tuple[Tuple[int, RangeSet], List[Tuple[NodeId, RangeSet]]]]
     llm_bv_union: RangeSet
     value: ArenaValue
 
@@ -97,10 +100,10 @@ class PyAcc:
     def is_empty(self):
         return self.llm_mask.is_empty()
 
-def _unconditionalize_transition(model: Model, llm_token: int, src: int, dest: int):
+def _unconditionalize_transition(model: Model, llm_token: int, src: NodeId, dest: NodeId):
     ...
 
-def _unconditionalize_guaranteed_transitions2(model: Model, llm_token: int, node: int):
+def _unconditionalize_guaranteed_transitions2(model: Model, llm_token: int, node: NodeId):
     ...
 
 def _unconditionalize_guaranteed_transitions(model: Model):
@@ -114,12 +117,12 @@ class Model(GraphProvider):
     """
     Precomputed trie model (third-generation), simplified and concise.
     """
-    roots_map_raw: List[Tuple[int, int]]
-    arena: Dict[int, ArenaNode]  # This is Dict[int, ArenaNode] after __post_init__
+    roots_map_raw: List[Tuple[int, NodeId]]
+    arena: Dict[NodeId, ArenaNode]  # This is Dict[int, ArenaNode] after __post_init__
 
-    roots_map: Dict[int, int] = field(init=False)
+    roots_map: Dict[int, NodeId] = field(init=False)
     id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
-    max_depth: Dict[int, int] = field(init=False, default_factory=dict)
+    max_depth: Dict[NodeId, int] = field(init=False, default_factory=dict)
     possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = field(init=False, default=None)
     tokenizer: Optional[ffi.Regex] = field(init=False, default=None)
     glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
@@ -280,13 +283,13 @@ class Model(GraphProvider):
             return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
         return gss.apply(apply_disallow)
 
-    def get_root(self, state_id: int) -> int:
+    def get_root(self, state_id: int) -> NodeId:
         return self.roots_map[int(state_id)]
 
-    def is_end(self, node: int) -> bool:
+    def is_end(self, node: NodeId) -> bool:
         return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
 
-    def iter_edges(self, node: int, token: int):
+    def iter_edges(self, node: NodeId, token: int):
         """
         Explode packed transitions into (pop, state_id or None, dest_idx).
         """
@@ -433,14 +436,14 @@ class Model(GraphProvider):
         final_mask: RangeSet = RangeSet.empty()
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
-        values: Dict[int, GSS] = {}
-        depth_heap: List[Tuple[int, int]] = []  # Stores (-depth, node_id)
-        enqueued_nodes: Set = set()
+        values: Dict[NodeId, GSS] = {}
+        depth_heap: List[Tuple[int, NodeId]] = []  # Stores (-depth, node_id)
+        enqueued_nodes: Set[NodeId] = set()
 
         hp, hpop = heapq.heappush, heapq.heappop
-        roots_map: Dict[int, int] = self.roots_map
-        max_depth: Dict[int, int] = self.max_depth
-        arena: Dict[int, dict] = self.arena
+        roots_map: Dict[int, NodeId] = self.roots_map
+        max_depth: Dict[NodeId, int] = self.max_depth
+        arena: Dict[NodeId, ArenaNode] = self.arena
         is_end = self.is_end
         pmc: Dict[int, Dict[int, RangeSet]] = self.possible_matches_cache or {}
         max_state: int = self.tokenizer_max_state
@@ -468,7 +471,7 @@ class Model(GraphProvider):
             )
 
         for sid, gss in state_map.items():
-            r: int = roots_map[int(sid)]
+            r: NodeId = roots_map[int(sid)]
             gss_initialized: GSS = gss.apply(initialize_acc)
             if r in values:
                 values[r] = values[r].merge(gss_initialized)
@@ -480,7 +483,7 @@ class Model(GraphProvider):
                 enqueued_nodes.add(r)
                 hp(depth_heap, (-d, r))
 
-        def enqueue(d: int, n: int) -> None:
+        def enqueue(d: int, n: NodeId) -> None:
             if n not in enqueued_nodes:
                 enqueued_nodes.add(n)
                 hp(depth_heap, (-d, n))
@@ -557,7 +560,7 @@ class Model(GraphProvider):
                     if not reduced_child or reduced_child.is_empty():
                         continue
 
-                    d: int = int(dest_idx)
+                    d: NodeId = int(dest_idx)
                     if d in values:
                         values[d] = values[d].merge(child_gss)
                     else:
