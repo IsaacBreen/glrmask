@@ -21,6 +21,35 @@ StateIDSet = RangeSet
 TerminalIdSet = RangeSet
 
 
+# For optimization passes
+State = int
+LLMToken = int
+
+
+@dataclass
+class PopEdge:
+    n: int
+
+
+@dataclass
+class StateEdge:
+    states: Set[State]
+
+
+@dataclass
+class UnconditionalEdge:
+    pass
+
+
+Edge = Union[PopEdge, StateEdge, UnconditionalEdge]
+
+
+@dataclass
+class NodeOpt:
+    children: Dict[LLMToken, Dict[NodeID, Edge]]
+    is_end: bool
+
+
 # Add a dummy profiler for when not running under kernprof
 try:
     # This will be injected by the kernprof script.
@@ -253,6 +282,8 @@ class Model(GraphProvider):
         all_internal = constraint.all_internal_llm_tokens_bitset()
         model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
 
+        model._unconditionalize_guaranteed_transitions()
+
         return model
 
     @profile
@@ -288,6 +319,134 @@ class Model(GraphProvider):
             current_map[state_id] = new_bv
             return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
         return gss.apply(apply_disallow)
+
+    @profile
+    def _pop_states(self, states: Set[int], pop_len: int) -> Set[int]:
+        current_states = states
+        for _ in range(pop_len):
+            if not current_states:
+                return set()
+            next_states = set()
+            for s in current_states:
+                next_states.update(self.reverse_state_map.get(s, set()))
+            current_states = next_states
+        return current_states
+
+    @profile
+    def _is_ineffectual_propagation(self, start_node: NodeID, start_states: Set[int]) -> bool:
+        q = collections.deque()
+        visited = set()
+
+        for s in start_states:
+            item = (start_node, s)
+            q.append(item)
+            visited.add(item)
+
+        while q:
+            u, s = q.popleft()
+
+            if self.is_end(u):
+                return False
+
+            children = self.arena.get(u, {}).get("children") or []
+            for (pop, _), dests in children:
+                s_popped_set = self._pop_states({s}, pop)
+                if not s_popped_set:
+                    continue
+
+                for s_popped in s_popped_set:
+                    for v, state_bv in dests:
+                        if state_bv.is_empty() or state_bv.contains(s_popped):
+                            if (v, s_popped) not in visited:
+                                visited.add((v, s_popped))
+                                q.append((v, s_popped))
+        return True
+
+    @profile
+    def _unconditionalize_guaranteed_transitions(self):
+        # 1. Compute AliveStates map
+        alive_states: Dict[NodeID, Set[int]] = collections.defaultdict(set)
+        worklist = collections.deque()
+
+        for state_id, root_node in self.roots_map.items():
+            if state_id not in alive_states[root_node]:
+                alive_states[root_node].add(state_id)
+                worklist.append(root_node)
+        
+        worklist_set = set(worklist)
+
+        while worklist:
+            u = worklist.popleft()
+            worklist_set.remove(u)
+            
+            S_u = alive_states[u]
+            if not S_u:
+                continue
+
+            children = self.arena.get(u, {}).get("children") or []
+            for (pop, _), dests in children:
+                S_popped = self._pop_states(S_u, pop)
+                if not S_popped:
+                    continue
+
+                for v, state_bv in dests:
+                    C = set(state_bv.to_indices())
+                    S_masked = S_popped if not C else S_popped.intersection(C)
+                    
+                    if not S_masked.issubset(alive_states[v]):
+                        new_states = S_masked - alive_states[v]
+                        alive_states[v].update(new_states)
+                        if v not in worklist_set:
+                            worklist.append(v)
+                            worklist_set.add(v)
+
+        # 2. Find edges to make unconditional
+        changes = []
+        for u, node_data in self.arena.items():
+            children = node_data.get("children") or []
+            for child_idx, ((pop, _), dests) in enumerate(children):
+                for dest_idx_in_list, (v, state_bv) in enumerate(dests):
+                    if state_bv.is_empty():
+                        continue
+
+                    S_u = alive_states.get(u, set())
+                    S_popped = self._pop_states(S_u, pop)
+                    C = set(state_bv.to_indices())
+                    S_extra = S_popped - C
+
+                    if not S_extra or self._is_ineffectual_propagation(v, S_extra):
+                        changes.append((u, child_idx, dest_idx_in_list))
+
+        # 3. Apply changes
+        for u, child_idx, dest_idx_in_list in changes:
+            v, _ = self.arena[u]["children"][child_idx][1][dest_idx_in_list]
+            self.arena[u]["children"][child_idx][1][dest_idx_in_list] = (v, StateIDSet.empty())
+
+        # 4. Cleanup duplicate/subsumed edges
+        for u, node_data in self.arena.items():
+            children = node_data.get("children") or []
+            for child_idx, ((pop, llm_bv), dests) in enumerate(children):
+                new_dests: List[Tuple[int, StateIDSet]] = []
+                unconditional_dests: Set[int] = set()
+                conditional_dests: Dict[int, StateIDSet] = {}
+
+                for v, state_bv in dests:
+                    if state_bv.is_empty():
+                        unconditional_dests.add(v)
+                    else:
+                        if v in conditional_dests:
+                            conditional_dests[v] = conditional_dests[v].union(state_bv)
+                        else:
+                            conditional_dests[v] = state_bv
+                
+                for v in sorted(list(unconditional_dests)):
+                    new_dests.append((v, StateIDSet.empty()))
+                
+                for v, state_bv in sorted(conditional_dests.items()):
+                    if v not in unconditional_dests:
+                        new_dests.append((v, state_bv))
+                
+                self.arena[u]["children"][child_idx] = ((pop, llm_bv), new_dests)
 
     def get_root(self, state_id: int) -> NodeID:
         return self.roots_map[int(state_id)]
