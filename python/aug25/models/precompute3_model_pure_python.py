@@ -1066,224 +1066,125 @@ class Model(GraphProvider):
     def optimize_alive_prune_group(
         self,
     ) -> None:
-        # Fast, functionally equivalent implementation:
-        # - Compute alive directly over the arena (tokens don't affect alive propagation).
-        # - Overlay llm_bv groups via RangeSet segmentation to avoid per-token explosion,
-        #   preserving the exact merge semantics used in the NodeOpt path.
-        arena = self.arena
-        roots_map = self.roots_map
-        start_state_id = self.parser_table.start_state_id
-        node_preimage = self._nodeopt_pop_preimage
-        LLMBS = LLMTokenSet
-        StateBS = StateIDSet
-
-        # 1) Compute 'alive' via arena edges (equivalent to NodeOpt-based alive)
-        alive: Dict[int, Set[int]] = collections.defaultdict(set)
-        q = collections.deque()
-        for _, root in roots_map.items():
-            r = int(root)
-            if start_state_id not in alive[r]:
-                alive[r].add(start_state_id)
-                q.append(r)
-
-        while q:
-            nid = int(q.popleft())
-            S = alive[nid]
-            if not S:
-                continue
-            children = arena.get(nid, {}).get("children") or []
-            for (pop, _llm_bv), dests in children:
-                pre = node_preimage(S, int(pop))
-                if not pre:
-                    continue
-                for dest_id, state_bv in dests:
-                    if state_bv.is_empty():
-                        allowed = pre
-                    else:
-                        # Efficient: iterate 'pre' and test membership in the RangeSet
-                        allowed = {sid for sid in pre if state_bv.contains(sid)}
-                    if allowed:
-                        d = int(dest_id)
-                        dest_alive = alive[d]
-                        delta = allowed - dest_alive
-                        if delta:
-                            dest_alive.update(delta)
-                            q.append(d)
-
-        # 2) For each node, overlay and rebuild grouped children after alive-trimming
-        for node_id, node in arena.items():
-            node_id = int(node_id)
+        nodeopts: Dict[NodeID, NodeOpt] = {}
+        for uid, node in tqdm(self.arena.items(), desc="Converting to NodeOpt graph"):
+            token_map: Dict[int, Dict[int, Tuple[int, Edge]]] = collections.defaultdict(dict)
             children = node.get("children") or []
-            node_alive: Set[int] = alive.get(node_id, set())
-
-            # If node has no alive reachability, all outgoing edges trim away.
-            if not node_alive or not children:
-                node_ref = arena.get(node_id, {})
-                node_ref["children"] = []
-                node_ref["llm_bv_union"] = LLMBS.empty()
-                self.arena[node_id] = node_ref
-                continue
-
-            # Segments: list of dicts with
-            #  - "tokens": LLMTokenSet
-            #  - "pop_to_dest": Dict[pop, Dict[dest, Optional[RangeSet(states)]]], None => unconditional
-            #  - "dest_to_pop": Dict[dest, pop] (enforces single-pop per (token, dest))
-            segments: List[Dict[str, Any]] = []
-
-            def copy_map(pop_to_dest: Dict[int, Dict[int, Optional[LLMTokenSet]]]) -> Dict[int, Dict[int, Optional[LLMTokenSet]]]:
-                return {p: {d: v for d, v in dm.items()} for p, dm in pop_to_dest.items()}
-
             for (pop, llm_bv), dests in children:
-                p = int(pop)
-                llm = llm_bv  # LLMTokenSet
-
-                if not segments:
-                    pop_to_dest: Dict[int, Dict[int, Optional[LLMTokenSet]]] = {}
-                    dest_to_pop: Dict[int, int] = {}
-                    dm: Dict[int, Optional[LLMTokenSet]] = {}
-                    for dest_id, state_bv in dests:
-                        d = int(dest_id)
-                        dm[d] = None if state_bv.is_empty() else state_bv
-                        dest_to_pop[d] = p
-                    pop_to_dest[p] = dm
-                    segments.append({"tokens": llm, "pop_to_dest": pop_to_dest, "dest_to_pop": dest_to_pop})
-                    continue
-
-                remaining = llm
-                new_segments: List[Dict[str, Any]] = []
-
-                for seg in segments:
-                    seg_tokens: LLMTokenSet = seg["tokens"]
-                    I = seg_tokens.intersection(remaining)
-                    if I.is_empty():
-                        new_segments.append(seg)
-                        continue
-
-                    # Merge for intersection area
-                    merged_seg = {
-                        "tokens": I,
-                        "pop_to_dest": copy_map(seg["pop_to_dest"]),
-                        "dest_to_pop": dict(seg["dest_to_pop"]),
-                    }
-                    dm_p = merged_seg["pop_to_dest"].get(p)
-                    if dm_p is None:
-                        dm_p = {}
-                        merged_seg["pop_to_dest"][p] = dm_p
-                    dest_to_pop = merged_seg["dest_to_pop"]
-
-                    for dest_id, state_bv in dests:
-                        d = int(dest_id)
-                        ex_pop = dest_to_pop.get(d)
-                        if ex_pop is None:
-                            dm_p[d] = None if state_bv.is_empty() else state_bv
-                            dest_to_pop[d] = p
-                        else:
-                            if ex_pop == p:
-                                # Same pop: unconditional wins; else union states
-                                ex_val = dm_p.get(d)
-                                if ex_val is None:
-                                    # remains unconditional
-                                    pass
-                                else:
-                                    if state_bv.is_empty():
-                                        dm_p[d] = None
-                                    else:
-                                        dm_p[d] = ex_val.union(state_bv)
+                tokens = llm_bv.to_indices()
+                for dest_idx, state_bv in dests:
+                    if state_bv.is_empty():
+                        edge_obj: Edge = UnconditionalEdge()
+                    else:
+                        edge_obj = StateEdge(set(state_bv.to_indices()))
+                    for tok in tokens:
+                        existing = token_map[tok].get(int(dest_idx))
+                        if existing is None:
+                            # store a copy of states set if StateEdge
+                            if isinstance(edge_obj, StateEdge):
+                                token_map[tok][int(dest_idx)] = (int(pop), StateEdge(set(edge_obj.states)))
                             else:
-                                # Pops differ: keep existing pop and unconditionalize it
-                                ex_dm = merged_seg["pop_to_dest"].get(ex_pop)
-                                if ex_dm is None:
-                                    ex_dm = {}
-                                    merged_seg["pop_to_dest"][ex_pop] = ex_dm
-                                ex_dm[d] = None
-                                # Do not add under new pop; keep dest_to_pop[d] as ex_pop
+                                token_map[tok][int(dest_idx)] = (int(pop), UnconditionalEdge())
+                        else:
+                            # Merge if the exact same dest/token encountered again
+                            existing_pop, existing_edge = existing
+                            if existing_pop != int(pop):
+                                # Extremely rare; conservatively collapse to unconditional with the existing pop.
+                                token_map[tok][int(dest_idx)] = (existing_pop, UnconditionalEdge())
+                            else:
+                                if isinstance(existing_edge, UnconditionalEdge) or isinstance(edge_obj, UnconditionalEdge):
+                                    token_map[tok][int(dest_idx)] = (existing_pop, UnconditionalEdge())
+                                else:
+                                    merged = set(existing_edge.states)
+                                    merged.update(edge_obj.states)
+                                    token_map[tok][int(dest_idx)] = (existing_pop, StateEdge(merged))
 
-                    new_segments.append(merged_seg)
+            nodeopts[int(uid)] = NodeOpt(children={t: dict(dm) for t, dm in token_map.items()}, is_end=self.is_end(int(uid)))
 
-                    residual = seg_tokens.difference(I)
-                    if not residual.is_empty():
-                        new_segments.append({
-                            "tokens": residual,
-                            "pop_to_dest": seg["pop_to_dest"],
-                            "dest_to_pop": seg["dest_to_pop"],
-                        })
+        alive = self._compute_alive_states(nodeopts)
 
-                    remaining = remaining.difference(I)
-                    # keep looping to trim out any further intersections
-
-                if not remaining.is_empty():
-                    pop_to_dest = {}
-                    dest_to_pop = {}
-                    dm = {}
-                    for dest_id, state_bv in dests:
-                        d = int(dest_id)
-                        dm[d] = None if state_bv.is_empty() else state_bv
-                        dest_to_pop[d] = p
-                    pop_to_dest[p] = dm
-                    new_segments.append({"tokens": remaining, "pop_to_dest": pop_to_dest, "dest_to_pop": dest_to_pop})
-
-                segments = new_segments
-
-            # Precompute preimage for this node per pop
-            pre_cache: Dict[int, Set[int]] = {}
-
+        for node_id, nodeopt in tqdm(nodeopts.items(), desc="Converting from NodeOpt graph"):
             # Group tokens by (pop, signature-of-dest-map)
-            groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], LLMBS] = {}
+            # signature: tuple(sorted((dest_id, None|tuple(sorted(states))) ... ))
+            groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Set[int]] = {}
             groups_destmap: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Dict[int, Optional[Tuple[int, ...]]]] = {}
 
-            for seg in segments:
-                tokens_bv: LLMBS = seg["tokens"]
-                pop_to_dest: Dict[int, Dict[int, Optional[LLMBS]]] = seg["pop_to_dest"]
-                for p, dm in pop_to_dest.items():
-                    pre = pre_cache.get(p)
-                    if pre is None:
-                        pre = node_preimage(node_alive, int(p))
-                        pre_cache[p] = pre
-                    if not pre:
-                        continue
-                    submap: Dict[int, Optional[Tuple[int, ...]]] = {}
-                    for dest_id, val in dm.items():
-                        if val is None:
-                            submap[int(dest_id)] = None
-                        else:
-                            # Intersect RangeSet with 'pre' set
-                            trimmed_states = [sid for sid in pre if val.contains(sid)]
-                            if not trimmed_states:
-                                continue
-                            if len(trimmed_states) == len(pre):
-                                submap[int(dest_id)] = None
-                            else:
-                                submap[int(dest_id)] = tuple(sorted(trimmed_states))
-                    if not submap:
-                        continue
-                    signature = tuple(sorted((int(did), None if allowed is None else tuple(allowed))
-                                             for did, allowed in submap.items()))
-                    key = (int(p), signature)
-                    if key not in groups_tokens:
-                        groups_tokens[key] = tokens_bv
-                        groups_destmap[key] = submap
-                    else:
-                        groups_tokens[key] = groups_tokens[key].union(tokens_bv)
+            # Precompute preimage(alive[node_id], pop) for all pops used in this node
+            node_alive: Set[int] = alive.get(int(node_id), set())
+            pre_cache: Dict[int, Set[int]] = {}
 
-            new_children: List[Tuple[Tuple[int, LLMBS], List[Tuple[int, StateBS]]]] = []
-            llm_union: LLMBS = LLMBS.empty()
-            for (p, signature), llm_bv in groups_tokens.items():
+            for tok, dests in nodeopt.children.items():
+                # Split per-pop since original groups are by (pop, llm_bv)
+                pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = {}
+                for dest_id, (pop, edge) in dests.items():
+                    # Compute preimage for this pop once
+                    pre = pre_cache.get(pop)
+                    if pre is None:
+                        pre = self._nodeopt_pop_preimage(node_alive, pop)
+                        pre_cache[pop] = pre
+                    if not pre:
+                        # No reachable states at this pop — drop this destination entirely
+                        continue
+
+                    # Trim allowed states by intersecting with preimage
+                    if isinstance(edge, UnconditionalEdge):
+                        allowed: Optional[Tuple[int, ...]] = None
+                    elif isinstance(edge, StateEdge):
+                        trimmed = set(edge.states).intersection(pre)
+                        if not trimmed:
+                            # Unreachable for any alive-derived state; drop
+                            continue
+                        # If the trimmed set equals pre, it is effectively unconditional
+                        if trimmed == pre:
+                            allowed = None
+                        else:
+                            allowed = tuple(sorted(trimmed))
+                    else:
+                        # Defensive: treat unknown edge kinds as non-unconditional state edges
+                        # (shouldn't happen)
+                        continue
+
+                    sub = pop_to_submap.get(pop)
+                    if sub is None:
+                        sub = {}
+                        pop_to_submap[pop] = sub
+                    sub[int(dest_id)] = allowed
+
+                for pop, submap in pop_to_submap.items():
+                    if not submap:
+                        # All destinations for this pop were pruned away for this token
+                        continue
+                    signature = tuple(sorted(
+                        (int(did), None if allowed is None else tuple(allowed))
+                        for did, allowed in submap.items()
+                    ))
+                    key = (int(pop), signature)
+                    if key not in groups_tokens:
+                        groups_tokens[key] = set()
+                        groups_destmap[key] = dict(submap)
+                    groups_tokens[key].add(int(tok))
+
+            new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+            llm_union: LLMTokenSet = LLMTokenSet.empty()
+            for (pop, _signature), token_set in groups_tokens.items():
+                llm_bv = LLMTokenSet.from_indices(sorted(token_set))
                 llm_union = llm_union.union(llm_bv)
-                submap = groups_destmap[(p, signature)]
-                dests_list: List[Tuple[int, StateBS]] = []
+                submap = groups_destmap[(pop, _signature)]
+                dests_list: List[Tuple[int, StateIDSet]] = []
                 for dest_id in sorted(submap.keys()):
                     allowed = submap[dest_id]
                     if allowed is None:
-                        state_bv = StateBS.empty()
+                        state_bv = StateIDSet.empty()
                     else:
-                        state_bv = StateBS.from_indices(list(allowed))
+                        state_bv = StateIDSet.from_indices(list(allowed))
                     dests_list.append((int(dest_id), state_bv))
-                new_children.append(((int(p), llm_bv), dests_list))
+                new_children.append(((int(pop), llm_bv), dests_list))
 
-            node_ref = arena.get(node_id, {})
+            # Update arena node content in-place
+            node_ref = self.arena.get(int(node_id), {})
             node_ref["children"] = new_children
             node_ref["llm_bv_union"] = llm_union
-            self.arena[node_id] = node_ref
+            self.arena[int(node_id)] = node_ref
 
     def _unconditionalize_guaranteed_transitions(
         self,
