@@ -281,6 +281,8 @@ class Model(GraphProvider):
         all_internal = constraint.all_internal_llm_tokens_bitset()
         model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
 
+        model._unconditionalize_guaranteed_transitions()
+
         return model
 
     @profile
