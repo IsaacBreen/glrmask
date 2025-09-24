@@ -70,19 +70,6 @@ class ArenaNode(TypedDict, total=False):
     value: ArenaValue
 
 
-type State = int
-type LLMToken = int
-type Popn = int
-
-@dataclass
-class ArenaNodeOpt:
-    # llm_token -> dst -> popn -> condition (unconditional or conditional on one of set of states)
-    children: Dict[LLMToken, Dict[NodeID, Dict[Popn, Optional[Set[State]]]]]
-    is_end: bool
-    max_depth: int
-    is_cyclic: bool = False
-
-
 @dataclass(frozen=True, eq=False)
 class PyAcc:
     terminals_union: Dict[int, TerminalIdSet]
@@ -118,6 +105,20 @@ class PyAcc:
     def is_empty(self):
         return self.llm_mask.is_empty()
 
+
+type State = int
+type LLMToken = int
+type Popn = int
+
+@dataclass
+class ArenaNodeOpt:
+    # llm_token -> dst -> popn -> condition (unconditional or conditional on one of set of states)
+    children: Dict[LLMToken, Dict[NodeID, Dict[Popn, Optional[Set[State]]]]]
+    is_end: bool
+    max_depth: int
+    is_cyclic: bool = False
+
+
 def _unconditionalize_transition(model: Model, llm_token: int, src: NodeID, dest: NodeID):
     ...
 
@@ -126,8 +127,7 @@ def _unconditionalize_guaranteed_transitions2(model: Model, llm_token: int, node
 
 def _unconditionalize_guaranteed_transitions(model: Model):
     # Gather all states
-    all_states: Set[State] = set()
-    for node in  
+    all_states: Set[State] = {sid for m1 in model.arena_opt.values() for m2 in m1.children.values() for m3 in m2.values() for m4 in m3.values() if m4 is not None for sid in m4}
     for node in model.roots_map.values():
         for llm_token in model.all_internal_llm_tokens_bitset.to_indices():
             _unconditionalize_guaranteed_transitions2(model, llm_token, node, all_states)
