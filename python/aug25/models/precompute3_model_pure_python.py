@@ -1264,38 +1264,28 @@ class Model(GraphProvider):
         force_repack: bool = True,
     ) -> None:
         """
-        Stochastic optimization pass that attempts to convert state-filtered edges
-        to unconditional edges when doing so is guaranteed not to introduce new
-        accepting paths or merge with existing alive sets.
+        Deterministic, sweep-based optimization pass that attempts to convert
+        state-filtered edges to unconditional edges when doing so is guaranteed
+        not to introduce new accepting paths or merge with currently-alive state
+        sets.
 
-        After the stochastic pass, we apply a configurable contraction/shortcut policy.
+        This version performs repeated sweeps over all candidate edges in a
+        stable order (sorted by (src, token, dest)). In each sweep, any edge
+        that is proven safe is unconditionalized. The process repeats until a
+        sweep makes no further changes.
 
-        Algorithm overview:
-        1) Build NodeOpt graph and compute 'alive' parser states per node to fixpoint.
-        2) Randomly pick state-filtered edges. Let S be alive at src; E be edge's allowed set.
-           - X0 = S \ E
-           - If X0 is empty, we can immediately unconditionalize (edge is as restrictive as src allows).
-           - Else X1 = reverse_state_map^pop(X0). If X1 is empty, also safe to unconditionalize.
-           - If X1 intersects alive at destination, reject (would merge with existing alive states).
-           - Tentatively propagate X1 from destination; if it ever:
-               a) reaches an end node (nodeopt.is_end), or
-               b) intersects any alive set at any node,
-              then reject.
-           - Otherwise, accept and flip to UnconditionalEdge().
-        3) Continue until time budget exhausted or no successes for 'stagnation_limit' trials.
-        4) Apply contraction/shortcut policy ("passthrough", "shortcut", "aggressive", "none").
-        5) Convert back to arena. By default this is always done (force_repack=True) to
-           ensure the deterministic alive-based trim/group improvements materialize even
-           when no stochastic conversions occur.
+        Notes:
+        - Parameters time_budget_sec, stagnation_limit, rng_seed are ignored and
+          kept only for API compatibility.
+        - After the sweep phase, an optional contraction/shortcut policy is
+          applied, and the graph is repacked back into the arena.
         """
         t_start = time.perf_counter()
-        deadline = t_start + float(time_budget_sec)
-        rng = random.Random(rng_seed)
 
         nodeopts = self._to_nodeopt_graph()
         alive = self._compute_alive_states(nodeopts)
 
-        # Collect candidate edges: (src, token, dest)
+        # Collect candidate edges once; we will check their current state each sweep.
         candidates: List[Tuple[int, int, int]] = []
         for src_id, nodeopt in nodeopts.items():
             for tok, dest_map in nodeopt.children.items():
@@ -1303,9 +1293,11 @@ class Model(GraphProvider):
                     if isinstance(edge, StateEdge):
                         candidates.append((int(src_id), int(tok), int(dest_id)))
 
+        candidates.sort()
+
         def simulate_propagation_from(node_id: int, seed_states: Set[int]) -> bool:
             """
-            Return True if unsafe:
+            Return True if unsafe under the current nodeopts:
               - intersects any alive set during propagation, or
               - reaches an end node with a non-empty set.
             Else return False (safe / ineffectual).
@@ -1352,53 +1344,64 @@ class Model(GraphProvider):
                                 pending.append((dest2, diff))
             return False
 
-        converted = 0
-        stagnation = 0
-        while candidates and time.perf_counter() < deadline and stagnation < stagnation_limit:
-            src, tok, dst = rng.choice(candidates)
-            edge_tuple = nodeopts[src].children.get(tok, {}).get(dst)
-            if edge_tuple is None:
-                # Removed or changed; drop from candidates
-                candidates.remove((src, tok, dst))
-                continue
-            pop, edge = edge_tuple
-            if isinstance(edge, UnconditionalEdge):
-                # No longer a candidate
-                candidates.remove((src, tok, dst))
-                continue
-            if not isinstance(edge, StateEdge):
-                # Shouldn't happen, but skip to be safe
-                candidates.remove((src, tok, dst))
-                continue
+        converted_total = 0
+        sweeps = 0
 
-            src_alive = alive.get(src, set())
-            allowed = edge.states
-            extra = src_alive - allowed
-            safe = False
-            if not extra:
-                safe = True
-            else:
-                seed = self._nodeopt_pop_preimage(extra, pop)
-                if not seed:
+        while True:
+            sweeps += 1
+            changes_this_sweep = 0
+
+            for src, tok, dst in candidates:
+                # Edge may have changed in an earlier sweep; re-check its current type.
+                src_node = nodeopts.get(src)
+                if src_node is None:
+                    continue
+                dm = src_node.children.get(tok)
+                if dm is None:
+                    continue
+                entry = dm.get(dst)
+                if entry is None:
+                    continue
+                pop, edge = entry
+                if isinstance(edge, UnconditionalEdge):
+                    continue
+                if not isinstance(edge, StateEdge):
+                    continue
+
+                src_alive = alive.get(src, set())
+                allowed = edge.states
+
+                # Extra states at src that would be newly allowed by unconditionalization.
+                extra = src_alive - allowed
+                safe = False
+                if not extra:
+                    # Edge already as permissive as src's alive allows.
                     safe = True
                 else:
-                    # If new states at destination intersect existing alive, reject
-                    if seed & alive.get(dst, set()):
-                        safe = False
+                    seed = self._nodeopt_pop_preimage(extra, pop)
+                    if not seed:
+                        safe = True
                     else:
-                        unsafe = simulate_propagation_from(dst, seed)
-                        safe = not unsafe
+                        # If new states at destination intersect existing alive, reject.
+                        if seed & alive.get(dst, set()):
+                            safe = False
+                        else:
+                            unsafe = simulate_propagation_from(dst, seed)
+                            safe = not unsafe
 
-            if safe:
-                # Convert to unconditional
-                nodeopts[src].children[tok][dst] = (pop, UnconditionalEdge())
-                candidates.remove((src, tok, dst))
-                converted += 1
-                stagnation = 0
-            else:
-                stagnation += 1
+                if safe:
+                    # Convert to unconditional
+                    nodeopts[src].children[tok][dst] = (pop, UnconditionalEdge())
+                    changes_this_sweep += 1
+                    converted_total += 1
 
-        # After stochastic unconditionalization, apply contraction/shortcut policy
+            if changes_this_sweep == 0:
+                break
+
+            # Graph changed; recompute alive for the next sweep.
+            alive = self._compute_alive_states(nodeopts)
+
+        # After deterministic unconditionalization sweeps, apply optional structural policy
         removed_nodes = 0
         shortcuts_added = 0
         removed_in_edges = 0
@@ -1427,13 +1430,14 @@ class Model(GraphProvider):
             removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
 
         # Convert NodeOpt back to arena inplace
-        if force_repack or converted > 0 or removed_nodes > 0 or shortcuts_added > 0 or removed_in_edges > 0:
+        if force_repack or converted_total > 0 or removed_nodes > 0 or shortcuts_added > 0 or removed_in_edges > 0:
             self._from_nodeopt_graph(nodeopts, alive)
 
         elapsed = round(time.perf_counter() - t_start, 2)
         print(
-            f"Unconditionalized {converted} edges; "
+            f"Unconditionalized {converted_total} edges in {sweeps} sweeps; "
             f"removed {removed_nodes} passthrough nodes; "
             f"added {shortcuts_added} shortcuts; "
             f"removed {removed_in_edges} covered in-edges in {elapsed} sec"
         )
+
