@@ -283,8 +283,8 @@ class Model(GraphProvider):
         all_internal = constraint.all_internal_llm_tokens_bitset()
         model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
 
-        # nodeopt_graph = model._to_nodeopt_graph()
-        # model._from_nodeopt_graph(nodeopt_graph)
+        nodeopt_graph = model._to_nodeopt_graph()
+        model._from_nodeopt_graph(nodeopt_graph)
         model._unconditionalize_guaranteed_transitions()
 
         return model
@@ -1226,10 +1226,9 @@ class Model(GraphProvider):
             # Fallback to passthrough if an unknown policy is provided
             removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
 
-        # Always convert NodeOpt back to arena. This provides critical performance
-        # benefits from re-grouping tokens. We pass alive=None (by omitting it)
-        # to force recomputation on the (potentially modified) graph, ensuring correctness.
-        self._from_nodeopt_graph(nodeopts)
+        if converted > 0 or removed_nodes > 0 or shortcuts_added > 0 or removed_in_edges > 0:
+            # Convert NodeOpt back to arena inplace
+            self._from_nodeopt_graph(nodeopts, alive)
 
         elapsed = round(time.perf_counter() - t_start, 2)
         print(
