@@ -4,7 +4,7 @@ local_system:
   conversation_file:
   compile_command:
   initial_file_contents:
-    python/aug25/models/precompute3_model_pure_python.py: |
+    python/aug25/models/precompute3_model_pure_python.py: |-
       from __future__ import annotations
 
       import json
@@ -563,7 +563,6 @@ local_system:
                       if popped.is_empty():
                           continue
 
-                      peeked = popped.peek()
                       # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                       acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
 
@@ -590,27 +589,17 @@ local_system:
                           continue
 
                       for dest_idx, state_bv in dests:
-                          # Empty state_bv in arena means unconditional (applies to all states).
-                          if state_bv.is_empty():
-                              values_to_keep = peeked
-                              child_gss: GSS = popped
-                              reduced_child = reduced
-                          else:
-                              values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                          peeked = popped.peek()
+                          values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
 
                           if not values_to_keep:
                               continue
 
-                          if state_bv.is_empty():
-                              # Already assigned above.
-                              pass
-                          else:
-                              child_gss = popped.isolate_many(values_to_keep)
+                          child_gss: GSS = popped.isolate_many(values_to_keep)
                           if child_gss.is_empty():
                               continue
 
-                          if not state_bv.is_empty():
-                              reduced_child = child_gss.reduce_acc()
+                          reduced_child = child_gss.reduce_acc()
                           if not reduced_child or reduced_child.is_empty():
                               continue
 
@@ -740,64 +729,27 @@ local_system:
                               q.append(dest_id)
               return {k: set(v) for k, v in alive.items()}
 
-          def _from_nodeopt_graph(
-              self,
-              nodeopts: Dict[NodeID, NodeOpt],
-              alive: Optional[Dict[NodeID, Set[int]]] = None
-          ) -> None:
+          def _from_nodeopt_graph(self, nodeopts: Dict[NodeID, NodeOpt]) -> None:
               """
               Convert NodeOpt back into the arena node format:
-              - Optionally trims destination state sets using alive-state preimages:
-                  For each (node, pop), compute pre = reverse_state_map^pop(alive[node]).
-                  Drop destinations whose allowed set ∩ pre is empty.
-                  If allowed ∩ pre == pre, mark as unconditional.
-              - Group tokens by identical (pop, signature-of-dest-map) mapping into shared llm_bv bitsets.
+              - Group tokens by identical (pop, dest -> state_bv) mapping into shared llm_bv bitsets.
               - Recompute llm_bv_union for each node.
               """
-              if alive is None:
-                  alive = self._compute_alive_states(nodeopts)
-
               for node_id, nodeopt in nodeopts.items():
                   # Group tokens by (pop, signature-of-dest-map)
                   # signature: tuple(sorted((dest_id, None|tuple(sorted(states))) ... ))
                   groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Set[int]] = {}
                   groups_destmap: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Dict[int, Optional[Tuple[int, ...]]]] = {}
 
-                  # Precompute preimage(alive[node_id], pop) for all pops used in this node
-                  node_alive: Set[int] = alive.get(int(node_id), set())
-                  pre_cache: Dict[int, Set[int]] = {}
-
                   for tok, dests in nodeopt.children.items():
                       # Split per-pop since original groups are by (pop, llm_bv)
                       pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = {}
                       for dest_id, (pop, edge) in dests.items():
-                          # Compute preimage for this pop once
-                          pre = pre_cache.get(pop)
-                          if pre is None:
-                              pre = self._nodeopt_pop_preimage(node_alive, pop)
-                              pre_cache[pop] = pre
-                          if not pre:
-                              # No reachable states at this pop — drop this destination entirely
-                              continue
-
-                          # Trim allowed states by intersecting with preimage
-                          if isinstance(edge, UnconditionalEdge):
-                              allowed: Optional[Tuple[int, ...]] = None
-                          elif isinstance(edge, StateEdge):
-                              trimmed = set(edge.states).intersection(pre)
-                              if not trimmed:
-                                  # Unreachable for any alive-derived state; drop
-                                  continue
-                              # If the trimmed set equals pre, it is effectively unconditional
-                              if trimmed == pre:
-                                  allowed = None
-                              else:
-                                  allowed = tuple(sorted(trimmed))
+                          allowed: Optional[Tuple[int, ...]]
+                          if isinstance(edge, StateEdge):
+                              allowed = tuple(sorted(edge.states))
                           else:
-                              # Defensive: treat unknown edge kinds as non-unconditional state edges
-                              # (shouldn't happen)
-                              continue
-
+                              allowed = None
                           sub = pop_to_submap.get(pop)
                           if sub is None:
                               sub = {}
@@ -805,9 +757,6 @@ local_system:
                           sub[int(dest_id)] = allowed
 
                       for pop, submap in pop_to_submap.items():
-                          if not submap:
-                              # All destinations for this pop were pruned away for this token
-                              continue
                           signature = tuple(sorted(
                               (int(did), None if allowed is None else tuple(allowed))
                               for did, allowed in submap.items()
@@ -982,7 +931,7 @@ local_system:
 
               if converted > 0:
                   # Convert NodeOpt back to arena inplace
-                  self._from_nodeopt_graph(nodeopts, alive)
+                  self._from_nodeopt_graph(nodeopts)
               # If converted == 0, arena remains unchanged.
 
               print(f"Unconditionalized {converted} edges in {round(time.perf_counter() - t_start, 2)} sec")
@@ -1272,7 +1221,6 @@ local_system:
               model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
 
               model._unconditionalize_guaranteed_transitions()
-              model._contract_unconditional_nodes()
 
               return model
 
@@ -1970,190 +1918,9 @@ local_system:
               # If converted == 0, arena remains unchanged.
 
               print(f"Unconditionalized {converted} edges in {round(time.perf_counter() - t_start, 2)} sec")
-
-          def _contract_unconditional_nodes(
-              self,
-              max_passes: int = 5
-          ) -> None:
-              """
-              Contract away intermediate nodes that only contribute unconditional state flow for
-              the SAME token and can be fully eliminated. This allows:
-                - bypassing nodes that have only unconditional outgoing edges, and
-                - summing consecutive pop counts across those unconditional edges,
-              but ONLY if the node can be completely cut out (i.e., all parents for every token
-              that reaches this node can be rewired to its children for that token).
-
-              Safety constraints:
-                - Node is not an end node.
-                - Node has at least one outgoing edge.
-                - All outgoing edges (for every token present in the node) are unconditional.
-                - The node has at least one parent.
-                - For every token t such that any parent reaches the node with token t, the node
-                  must have outgoing edges for token t (so rewiring is defined).
-                - If a rewire would produce a duplicate (same parent, same token, same dest)
-                  with a different pop, we SKIP contracting the node (to avoid unsafe collapsing).
-
-              Implementation notes:
-                - Operates in passes. In each pass:
-                    1) Build NodeOpt and parent maps.
-                    2) Identify candidates and attempt rewiring.
-                    3) If any contraction happened, materialize back into arena and repeat.
-                - Edge merging when a (parent, token, dest) already exists with the same pop:
-                    * If either is unconditional, keep unconditional.
-                    * Else merge states (union).
-              """
-              t_start = time.perf_counter()
-
-              total_contracted = 0
-              passes = 0
-              while passes < int(max_passes):
-                  passes += 1
-                  nodeopts = self._to_nodeopt_graph()
-
-                  # Build parents map: parents[child][token] -> set(parents)
-                  parents: Dict[int, Dict[int, Set[int]]] = collections.defaultdict(lambda: collections.defaultdict(set))
-                  for pid, nopt in nodeopts.items():
-                      for tok, dest_map in nopt.children.items():
-                          for dest_id, (_pop, _edge) in dest_map.items():
-                              parents[int(dest_id)][int(tok)].add(int(pid))
-
-                  # Identify candidates that are fully unconditional and removable.
-                  candidates: List[int] = []
-                  for nid, nopt in nodeopts.items():
-                      # Must not be an accepting end node
-                      if nopt.is_end:
-                          continue
-                      # Must have at least one outgoing edge
-                      has_any_out = any(bool(dest_map) for dest_map in nopt.children.values())
-                      if not has_any_out:
-                          continue
-                      # Only consider nodes that actually have parents (reachable structurally)
-                      if nid not in parents:
-                          continue
-                      # All outgoing edges must be unconditional
-                      all_unconditional = True
-                      for _tok, dest_map in nopt.children.items():
-                          for _dest, (_pop, edge) in dest_map.items():
-                              if isinstance(edge, StateEdge):
-                                  all_unconditional = False
-                                  break
-                          if not all_unconditional:
-                              break
-                      if not all_unconditional:
-                          continue
-                      # For every token present in its parents, the node must have outgoing edges
-                      ok_for_all_incoming_tokens = True
-                      for tok in parents[nid].keys():
-                          if tok not in nopt.children or not nopt.children[tok]:
-                              ok_for_all_incoming_tokens = False
-                              break
-                      if not ok_for_all_incoming_tokens:
-                          continue
-                      candidates.append(int(nid))
-
-                  if not candidates:
-                      break
-
-                  changed = False
-
-                  # Try to contract each candidate.
-                  for nid in candidates:
-                      nopt = nodeopts.get(nid)
-                      if nopt is None:
-                          continue
-                      if nid not in parents:
-                          continue
-
-                      # Precheck for conflicts: if any parent already has an edge to a would-be
-                      # rewire destination with a different pop, skip this node.
-                      conflict = False
-                      for tok, parent_set in parents[nid].items():
-                          child_map = nopt.children.get(tok, {})
-                          if not child_map:
-                              conflict = True
-                              break
-                          for pid in parent_set:
-                              pmap = nodeopts[pid].children.get(tok)
-                              if pmap is None or nid not in pmap:
-                                  # Parent might have been changed by another contraction; ignore safely.
-                                  continue
-                              in_pop, in_edge = pmap[nid]
-                              for destC, (out_pop, _out_edge) in child_map.items():
-                                  new_pop = in_pop + out_pop
-                                  existing = pmap.get(destC)
-                                  if existing is None:
-                                      continue
-                                  ex_pop, _ex_edge = existing
-                                  if ex_pop != new_pop:
-                                      # Pop mismatch on same (parent, token, dest) — unsafe to merge
-                                      conflict = True
-                                      break
-                              if conflict:
-                                  break
-                          if conflict:
-                              break
-                      if conflict:
-                          continue
-
-                      # Apply rewiring:
-                      for tok, parent_set in parents[nid].items():
-                          child_map = nopt.children.get(tok, {})
-                          # Defensive guard (should hold per precheck)
-                          if not child_map:
-                              conflict = True
-                              break
-                          for pid in parent_set:
-                              pmap = nodeopts[pid].children.get(tok)
-                              if pmap is None or nid not in pmap:
-                                  # Already removed in this pass for some reason — skip.
-                                  continue
-                              in_pop, in_edge = pmap[nid]
-                              for destC, (out_pop, _out_edge) in child_map.items():
-                                  new_pop = in_pop + out_pop
-                                  # Preserve state gating from the incoming edge
-                                  new_edge: Edge
-                                  if isinstance(in_edge, StateEdge):
-                                      new_edge = StateEdge(set(in_edge.states))
-                                  else:
-                                      new_edge = UnconditionalEdge()
-                                  existing = pmap.get(destC)
-                                  if existing is None:
-                                      pmap[int(destC)] = (int(new_pop), new_edge)
-                                  else:
-                                      ex_pop, ex_edge = existing
-                                      # Already prechecked equal pops
-                                      if isinstance(ex_edge, UnconditionalEdge) or isinstance(new_edge, UnconditionalEdge):
-                                          merged_edge: Edge = UnconditionalEdge()
-                                      else:
-                                          merged_states = set(ex_edge.states)
-                                          merged_states.update(new_edge.states)
-                                          merged_edge = StateEdge(merged_states)
-                                      pmap[int(destC)] = (int(ex_pop), merged_edge)
-                              # Remove the indirection through nid for this parent and token
-                              try:
-                                  del pmap[nid]
-                              except KeyError:
-                                  pass
-                      if conflict:
-                          # If a conflict was discovered mid-apply (shouldn't happen given precheck),
-                          # skip marking changes and leave data structure as-is for safety.
-                          continue
-
-                      # Clear the contracted node's children to help GC/pruning and avoid future reuse.
-                      nopt.children.clear()
-                      changed = True
-                      total_contracted += 1
-
-                  if not changed:
-                      break
-
-                  # Materialize modified NodeOpt graph back into arena
-                  self._from_nodeopt_graph(nodeopts)
-
-              print(f"Contracted {total_contracted} nodes via unconditional bypass in {round(time.perf_counter() - t_start, 2)} sec")
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: git-llm
+  prev_apply_mode: llm
 system:
   message: |-
     You are a helpful assistant.
@@ -2161,7 +1928,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -2173,7 +1940,7 @@ system:
     - gpt-5
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: git-llm
+  apply_mode: llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -2755,7 +2522,6 @@ messages:
                       if popped.is_empty():
                           continue
 
-                      peeked = popped.peek()
                       # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                       acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
 
@@ -2782,27 +2548,17 @@ messages:
                           continue
 
                       for dest_idx, state_bv in dests:
-                          # Empty state_bv in arena means unconditional (applies to all states).
-                          if state_bv.is_empty():
-                              values_to_keep = peeked
-                              child_gss: GSS = popped
-                              reduced_child = reduced
-                          else:
-                              values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                          peeked = popped.peek()
+                          values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
 
                           if not values_to_keep:
                               continue
 
-                          if state_bv.is_empty():
-                              # Already assigned above.
-                              pass
-                          else:
-                              child_gss = popped.isolate_many(values_to_keep)
+                          child_gss: GSS = popped.isolate_many(values_to_keep)
                           if child_gss.is_empty():
                               continue
 
-                          if not state_bv.is_empty():
-                              reduced_child = child_gss.reduce_acc()
+                          reduced_child = child_gss.reduce_acc()
                           if not reduced_child or reduced_child.is_empty():
                               continue
 
@@ -2932,64 +2688,27 @@ messages:
                               q.append(dest_id)
               return {k: set(v) for k, v in alive.items()}
 
-          def _from_nodeopt_graph(
-              self,
-              nodeopts: Dict[NodeID, NodeOpt],
-              alive: Optional[Dict[NodeID, Set[int]]] = None
-          ) -> None:
+          def _from_nodeopt_graph(self, nodeopts: Dict[NodeID, NodeOpt]) -> None:
               """
               Convert NodeOpt back into the arena node format:
-              - Optionally trims destination state sets using alive-state preimages:
-                  For each (node, pop), compute pre = reverse_state_map^pop(alive[node]).
-                  Drop destinations whose allowed set ∩ pre is empty.
-                  If allowed ∩ pre == pre, mark as unconditional.
-              - Group tokens by identical (pop, signature-of-dest-map) mapping into shared llm_bv bitsets.
+              - Group tokens by identical (pop, dest -> state_bv) mapping into shared llm_bv bitsets.
               - Recompute llm_bv_union for each node.
               """
-              if alive is None:
-                  alive = self._compute_alive_states(nodeopts)
-
               for node_id, nodeopt in nodeopts.items():
                   # Group tokens by (pop, signature-of-dest-map)
                   # signature: tuple(sorted((dest_id, None|tuple(sorted(states))) ... ))
                   groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Set[int]] = {}
                   groups_destmap: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Dict[int, Optional[Tuple[int, ...]]]] = {}
 
-                  # Precompute preimage(alive[node_id], pop) for all pops used in this node
-                  node_alive: Set[int] = alive.get(int(node_id), set())
-                  pre_cache: Dict[int, Set[int]] = {}
-
                   for tok, dests in nodeopt.children.items():
                       # Split per-pop since original groups are by (pop, llm_bv)
                       pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = {}
                       for dest_id, (pop, edge) in dests.items():
-                          # Compute preimage for this pop once
-                          pre = pre_cache.get(pop)
-                          if pre is None:
-                              pre = self._nodeopt_pop_preimage(node_alive, pop)
-                              pre_cache[pop] = pre
-                          if not pre:
-                              # No reachable states at this pop — drop this destination entirely
-                              continue
-
-                          # Trim allowed states by intersecting with preimage
-                          if isinstance(edge, UnconditionalEdge):
-                              allowed: Optional[Tuple[int, ...]] = None
-                          elif isinstance(edge, StateEdge):
-                              trimmed = set(edge.states).intersection(pre)
-                              if not trimmed:
-                                  # Unreachable for any alive-derived state; drop
-                                  continue
-                              # If the trimmed set equals pre, it is effectively unconditional
-                              if trimmed == pre:
-                                  allowed = None
-                              else:
-                                  allowed = tuple(sorted(trimmed))
+                          allowed: Optional[Tuple[int, ...]]
+                          if isinstance(edge, StateEdge):
+                              allowed = tuple(sorted(edge.states))
                           else:
-                              # Defensive: treat unknown edge kinds as non-unconditional state edges
-                              # (shouldn't happen)
-                              continue
-
+                              allowed = None
                           sub = pop_to_submap.get(pop)
                           if sub is None:
                               sub = {}
@@ -2997,9 +2716,6 @@ messages:
                           sub[int(dest_id)] = allowed
 
                       for pop, submap in pop_to_submap.items():
-                          if not submap:
-                              # All destinations for this pop were pruned away for this token
-                              continue
                           signature = tuple(sorted(
                               (int(did), None if allowed is None else tuple(allowed))
                               for did, allowed in submap.items()
@@ -3174,11 +2890,10 @@ messages:
 
               if converted > 0:
                   # Convert NodeOpt back to arena inplace
-                  self._from_nodeopt_graph(nodeopts, alive)
+                  self._from_nodeopt_graph(nodeopts)
               # If converted == 0, arena remains unchanged.
 
               print(f"Unconditionalized {converted} edges in {round(time.perf_counter() - t_start, 2)} sec")
-
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
@@ -3212,271 +2927,274 @@ messages:
       Implement this.
     metadata:
   - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - Include lines like: `diff --git a/FILE b/FILE`
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
+      Mode instruction: For this turn, produce instructions only (no full code files, no diffs).
+                  - Give concrete, step-by-step edits the user can apply.
+                  - Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - Do NOT include full files or git diffs unless explicitly requested in this same message.
                   Additional general constraints:
       - Do not split your response across multiple messages.
       - Avoid local cache/config advice; focus on actionable fixes or outputs.
       - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
     metadata:
       kind: mode-guidance
-      mode: git-llm
+      mode: llm
       phase: default
   - assistant: |-
-      Below are the steps and the patch to implement the requested optimization: “merge through unconditional edges” and “sum pop counts across consecutive unconditional edges,” but only when we can eliminate the intermediate node entirely.
+      Below are the concrete steps to make the trie graph produced by _from_nodeopt_graph both minimal and get_mask-friendly, followed by the exact git patch.
 
       Step-by-step instructions
 
-      1) File to edit
-      - python/aug25/models/precompute3_model_pure_python.py
+      1) Optimize get_mask to correctly handle unconditional edges and avoid redundant work
+      - Fix unconditional edges: In the arena representation, a StateIDSet that is empty means “unconditional” (not “no states”). get_mask currently treats empty state sets as “no states,” which unintentionally drops unconditional edges. Update get_mask so that:
+        - If state_bv.is_empty(), treat it as unconditional: use all peeked states (no filtering).
+        - Reuse the reduction result already computed for popped to avoid re-running reduce_acc for unconditional destinations.
+        - Hoist popped.peek() out of the inner loop so it’s computed once per edge group.
 
-      2) Add a new optimization pass method
-      - Inside class Model, right after the existing _unconditionalize_guaranteed_transitions method, add a new method _contract_unconditional_nodes.
-      - This pass:
-        - Converts the arena to a NodeOpt graph.
-        - Finds nodes that are safe to eliminate:
-          - Not an end node.
-          - Have at least one outgoing edge.
-          - All outgoing edges are unconditional for every token present in the node.
-          - The node has at least one parent.
-          - For every token that parents use to reach this node, the node must have outgoing edges for that same token (so the path can be rewired).
-        - For each candidate:
-          - Rewire every parent’s edge that points to this node to point to the node’s children for the same token.
-          - Sum pops: new_pop = pop_in + pop_out.
-          - Preserve state gating: if the incoming edge is state-filtered, the new edge remains state-filtered with the same states; if the incoming edge is unconditional, the new edge is unconditional.
-          - If a parent already has an edge to the same child with the same token but a different pop, bail out (skip this node) to avoid unsafe collapsing.
-          - Merge state masks if an edge already exists with the same pop (union the state sets or make unconditional if either is unconditional).
-          - Remove the parent’s edge to the eliminated node, and clear the eliminated node’s children.
-        - Runs multiple passes (bounded) to flatten chains progressively.
-        - Writes changes back into the arena using _from_nodeopt_graph after each successful pass.
+      What to edit:
+      - File: python/aug25/models/precompute3_model_pure_python.py
+      - Function: Model.get_mask
+      - Region: Inside the “Traverse edges and propagate masks” block:
+        - Right after popped is pruned and before iterating dests, move peeked = popped.peek() outside the inner loop.
+        - Inside the loop over dests:
+          - If state_bv.is_empty(), set values_to_keep to peeked and reuse reduced (no second reduce).
+          - Else filter peeked using state_bv.contains(sid) and reduce only that child.
 
-      3) Wire the new pass into model initialization
-      - In from_json_string, after calling _unconditionalize_guaranteed_transitions, call the new _contract_unconditional_nodes to perform the contraction optimization on top of the unconditionalization results.
+      2) Make _from_nodeopt_graph produce compact, minimal groups using alive-state trimming
+      - Core idea: Use the alive state sets computed by _compute_alive_states together with reverse_state_map preimages to:
+        - Drop unreachable destinations for each token/pop (those that cannot be reached from any alive state).
+        - Trim state filters to only the states that could actually occur (edge.states ∩ preimage(alive[src], pop)).
+        - Recognize when that trimmed set equals the entire preimage set and thus can be marked unconditional (represented as None in NodeOpt and empty state bitset in the arena).
+        - After trimming, many tokens share identical (pop, dest→allowed) maps; group them to produce large llm_bv bitsets and fewer child groups.
 
-      4) Notes/assumptions
-      - The pass is conservative and avoids cases that would introduce ambiguous “same token, same dest, different pop” edges.
-      - It only performs contractions when the intermediate node can be fully bypassed in a semantics-preserving way for all incoming tokens, and the node is not an accepting node.
-      - It merges state sets when merging edges with matching pop values.
-      - It runs multiple passes (default up to 5), enabling collapsing of longer chains.
+      What to edit:
+      - File: python/aug25/models/precompute3_model_pure_python.py
+      - Function: Model._from_nodeopt_graph
+      - Changes:
+        - Extend signature to accept an optional alive mapping: _from_nodeopt_graph(self, nodeopts: Dict[NodeID, NodeOpt], alive: Optional[Dict[NodeID, Set[int]]] = None) -> None
+        - If alive is None, compute it via self._compute_alive_states(nodeopts).
+        - For each node:
+          - Precompute preimage(alive[node], pop) once per pop encountered in that node.
+          - While building per-token submaps, trim allowed state sets by intersecting with the preimage.
+          - If the trimmed set is empty, drop that destination entirely.
+          - If the trimmed set equals the preimage, mark it as unconditional (allowed=None).
+          - If all destinations for a token/pop are dropped, the token produces no group for that pop.
+        - Group tokens by (pop, signature) as before, but now with the pruned maps. This drastically reduces the number of child groups and the size of state bitsets.
 
-      Git diff patch
+      3) Pass the alive sets from unconditionalization into _from_nodeopt_graph
+      - In _unconditionalize_guaranteed_transitions, you already compute alive. Pass it into _from_nodeopt_graph so that the conversion uses the same fixedpoint sets and does not recompute them.
+      - Edit the call at the end of _unconditionalize_guaranteed_transitions to: self._from_nodeopt_graph(nodeopts, alive)
+
+      Why this works
+      - The trimming uses only information guaranteed to be a superset of runtime reachable parser states (alive) and their pop-preimages. Dropping destinations that cannot be reached from any alive state is semantically safe. Intersecting allowed state filters with the preimage is also safe because runtime states are a subset of that preimage; representing it as unconditional when the filter covers the entire preimage is likewise safe and helps get_mask skip unnecessary filtering work.
+      - After trimming, many tokens that previously had minor differences in state filters become identical, enabling much larger llm_bv token groups with fewer child entries. get_mask then traverses far fewer groups and isolates states less often, leading to the desired speedup.
+
+      Git patch
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      index 970ad1e..a1f43ab 100644
+      index 9b4ea60..b1a9ae3 100644
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -147,6 +147,7 @@ class Model(GraphProvider):
-               model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
+      @@ -420,6 +420,7 @@ class Model(GraphProvider):
+                       if popped.is_empty():
+                           continue
        
-               model._unconditionalize_guaranteed_transitions()
-      +        model._contract_unconditional_nodes()
+      +                peeked = popped.peek()
+                       # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                       acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
        
-               return model
+      @@ -441,20 +442,28 @@ class Model(GraphProvider):
+                       if popped.is_empty():
+                           continue
        
-      @@ -681,4 +682,176 @@ class Model(GraphProvider):
-                   self._from_nodeopt_graph(nodeopts, alive)
+      -                reduced = popped.reduce_acc()
+      -                if not reduced or reduced.is_empty():
+      -                    continue
+      +                reduced = popped.reduce_acc()
+      +                if not reduced or reduced.is_empty():
+      +                    continue
+       
+                       for dest_idx, state_bv in dests:
+      -                    peeked = popped.peek()
+      -                    values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+      +                    # Empty state_bv in arena means unconditional (applies to all states).
+      +                    if state_bv.is_empty():
+      +                        values_to_keep = peeked
+      +                        child_gss: GSS = popped
+      +                        reduced_child = reduced
+      +                    else:
+      +                        values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+       
+                           if not values_to_keep:
+                               continue
+       
+      -                    child_gss: GSS = popped.isolate_many(values_to_keep)
+      +                    if state_bv.is_empty():
+      +                        # Already assigned above.
+      +                        pass
+      +                    else:
+      +                        child_gss = popped.isolate_many(values_to_keep)
+                           if child_gss.is_empty():
+                               continue
+       
+      -                    reduced_child = child_gss.reduce_acc()
+      +                    if not state_bv.is_empty():
+      +                        reduced_child = child_gss.reduce_acc()
+                           if not reduced_child or reduced_child.is_empty():
+                               continue
+       
+      @@ -592,10 +601,17 @@ class Model(GraphProvider):
+                               q.append(dest_id)
+               return {k: set(v) for k, v in alive.items()}
+       
+      -    def _from_nodeopt_graph(self, nodeopts: Dict[NodeID, NodeOpt]) -> None:
+      +    def _from_nodeopt_graph(
+      +        self,
+      +        nodeopts: Dict[NodeID, NodeOpt],
+      +        alive: Optional[Dict[NodeID, Set[int]]] = None
+      +    ) -> None:
+               """
+               Convert NodeOpt back into the arena node format:
+      -        - Group tokens by identical (pop, signature-of-dest-map) mapping into shared llm_bv bitsets.
+      +        - Optionally trims destination state sets using alive-state preimages:
+      +            For each (node, pop), compute pre = reverse_state_map^pop(alive[node]).
+      +            Drop destinations whose allowed set ∩ pre is empty.
+      +            If allowed ∩ pre == pre, mark as unconditional.
+      +        - Group tokens by identical (pop, signature-of-dest-map) mapping into shared llm_bv bitsets.
+               - Recompute llm_bv_union for each node.
+               """
+      -        for node_id, nodeopt in nodeopts.items():
+      +        if alive is None:
+      +            alive = self._compute_alive_states(nodeopts)
+      +
+      +        for node_id, nodeopt in nodeopts.items():
+                   # Group tokens by (pop, signature-of-dest-map)
+                   # signature: tuple(sorted((dest_id, None|tuple(sorted(states))) ... ))
+      -            groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Set[int]] = {}
+      -            groups_destmap: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Dict[int, Optional[Tuple[int, ...]]]] = {}
+      +            groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Set[int]] = {}
+      +            groups_destmap: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Dict[int, Optional[Tuple[int, ...]]]] = {}
+      +
+      +            # Precompute preimage(alive[node_id], pop) for all pops used in this node
+      +            node_alive: Set[int] = alive.get(int(node_id), set())
+      +            pre_cache: Dict[int, Set[int]] = {}
+       
+                   for tok, dests in nodeopt.children.items():
+                       # Split per-pop since original groups are by (pop, llm_bv)
+      -                pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = {}
+      -                for dest_id, (pop, edge) in dests.items():
+      -                    allowed: Optional[Tuple[int, ...]]
+      -                    if isinstance(edge, StateEdge):
+      -                        allowed = tuple(sorted(edge.states))
+      -                    else:
+      -                        allowed = None
+      -                    sub = pop_to_submap.get(pop)
+      -                    if sub is None:
+      -                        sub = {}
+      -                        pop_to_submap[pop] = sub
+      -                    sub[int(dest_id)] = allowed
+      +                pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = {}
+      +                for dest_id, (pop, edge) in dests.items():
+      +                    # Compute preimage for this pop once
+      +                    pre = pre_cache.get(pop)
+      +                    if pre is None:
+      +                        pre = self._nodeopt_pop_preimage(node_alive, pop)
+      +                        pre_cache[pop] = pre
+      +                    if not pre:
+      +                        # No reachable states at this pop — drop this destination entirely
+      +                        continue
+      +
+      +                    # Trim allowed states by intersecting with preimage
+      +                    if isinstance(edge, UnconditionalEdge):
+      +                        allowed: Optional[Tuple[int, ...]] = None
+      +                    elif isinstance(edge, StateEdge):
+      +                        trimmed = set(edge.states).intersection(pre)
+      +                        if not trimmed:
+      +                            # Unreachable for any alive-derived state; drop
+      +                            continue
+      +                        # If the trimmed set equals pre, it is effectively unconditional
+      +                        if trimmed == pre:
+      +                            allowed = None
+      +                        else:
+      +                            allowed = tuple(sorted(trimmed))
+      +                    else:
+      +                        # Defensive: treat unknown edge kinds as non-unconditional state edges
+      +                        # (shouldn't happen)
+      +                        continue
+      +
+      +                    sub = pop_to_submap.get(pop)
+      +                    if sub is None:
+      +                        sub = {}
+      +                        pop_to_submap[pop] = sub
+      +                    sub[int(dest_id)] = allowed
+       
+                       for pop, submap in pop_to_submap.items():
+      +                    if not submap:
+      +                        # All destinations for this pop were pruned away for this token
+      +                        continue
+                           signature = tuple(sorted(
+                               (int(did), None if allowed is None else tuple(allowed))
+                               for did, allowed in submap.items()
+                           ))
+                           key = (int(pop), signature)
+                           if key not in groups_tokens:
+                               groups_tokens[key] = set()
+                               groups_destmap[key] = dict(submap)
+                           groups_tokens[key].add(int(tok))
+       
+                   new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+                   llm_union: LLMTokenSet = LLMTokenSet.empty()
+                   for (pop, _signature), token_set in groups_tokens.items():
+                       llm_bv = LLMTokenSet.from_indices(sorted(token_set))
+                       llm_union = llm_union.union(llm_bv)
+                       submap = groups_destmap[(pop, _signature)]
+                       dests_list: List[Tuple[int, StateIDSet]] = []
+                       for dest_id in sorted(submap.keys()):
+                           allowed = submap[dest_id]
+                           if allowed is None:
+                               state_bv = StateIDSet.empty()
+                           else:
+                               state_bv = StateIDSet.from_indices(list(allowed))
+                           dests_list.append((int(dest_id), state_bv))
+                       new_children.append(((int(pop), llm_bv), dests_list))
+       
+                   # Update arena node content in-place
+                   node_ref = self.arena.get(int(node_id), {})
+                   node_ref["children"] = new_children
+                   node_ref["llm_bv_union"] = llm_union
+                   self.arena[int(node_id)] = node_ref
+      @@ -747,7 +763,7 @@ class Model(GraphProvider):
+                       stagnation = 0
+                   else:
+                       stagnation += 1
+       
+               if converted > 0:
+                   # Convert NodeOpt back to arena inplace
+      -            self._from_nodeopt_graph(nodeopts)
+      +            self._from_nodeopt_graph(nodeopts, alive)
                # If converted == 0, arena remains unchanged.
        
                print(f"Unconditionalized {converted} edges in {round(time.perf_counter() - t_start, 2)} sec")
-      +
-      +    def _contract_unconditional_nodes(
-      +        self,
-      +        max_passes: int = 5
-      +    ) -> None:
-      +        """
-      +        Contract away intermediate nodes that only contribute unconditional state flow for
-      +        the SAME token and can be fully eliminated. This allows:
-      +          - bypassing nodes that have only unconditional outgoing edges, and
-      +          - summing consecutive pop counts across those unconditional edges,
-      +        but ONLY if the node can be completely cut out (i.e., all parents for every token
-      +        that reaches this node can be rewired to its children for that token).
-      +
-      +        Safety constraints:
-      +          - Node is not an end node.
-      +          - Node has at least one outgoing edge.
-      +          - All outgoing edges (for every token present in the node) are unconditional.
-      +          - The node has at least one parent.
-      +          - For every token t such that any parent reaches the node with token t, the node
-      +            must have outgoing edges for token t (so rewiring is defined).
-      +          - If a rewire would produce a duplicate (same parent, same token, same dest)
-      +            with a different pop, we SKIP contracting the node (to avoid unsafe collapsing).
-      +
-      +        Implementation notes:
-      +          - Operates in passes. In each pass:
-      +              1) Build NodeOpt and parent maps.
-      +              2) Identify candidates and attempt rewiring.
-      +              3) If any contraction happened, materialize back into arena and repeat.
-      +          - Edge merging when a (parent, token, dest) already exists with the same pop:
-      +              * If either is unconditional, keep unconditional.
-      +              * Else merge states (union).
-      +        """
-      +        t_start = time.perf_counter()
-      +
-      +        total_contracted = 0
-      +        passes = 0
-      +        while passes < int(max_passes):
-      +            passes += 1
-      +            nodeopts = self._to_nodeopt_graph()
-      +
-      +            # Build parents map: parents[child][token] -> set(parents)
-      +            parents: Dict[int, Dict[int, Set[int]]] = collections.defaultdict(lambda: collections.defaultdict(set))
-      +            for pid, nopt in nodeopts.items():
-      +                for tok, dest_map in nopt.children.items():
-      +                    for dest_id, (_pop, _edge) in dest_map.items():
-      +                        parents[int(dest_id)][int(tok)].add(int(pid))
-      +
-      +            # Identify candidates that are fully unconditional and removable.
-      +            candidates: List[int] = []
-      +            for nid, nopt in nodeopts.items():
-      +                # Must not be an accepting end node
-      +                if nopt.is_end:
-      +                    continue
-      +                # Must have at least one outgoing edge
-      +                has_any_out = any(bool(dest_map) for dest_map in nopt.children.values())
-      +                if not has_any_out:
-      +                    continue
-      +                # Only consider nodes that actually have parents (reachable structurally)
-      +                if nid not in parents:
-      +                    continue
-      +                # All outgoing edges must be unconditional
-      +                all_unconditional = True
-      +                for _tok, dest_map in nopt.children.items():
-      +                    for _dest, (_pop, edge) in dest_map.items():
-      +                        if isinstance(edge, StateEdge):
-      +                            all_unconditional = False
-      +                            break
-      +                    if not all_unconditional:
-      +                        break
-      +                if not all_unconditional:
-      +                    continue
-      +                # For every token present in its parents, the node must have outgoing edges
-      +                ok_for_all_incoming_tokens = True
-      +                for tok in parents[nid].keys():
-      +                    if tok not in nopt.children or not nopt.children[tok]:
-      +                        ok_for_all_incoming_tokens = False
-      +                        break
-      +                if not ok_for_all_incoming_tokens:
-      +                    continue
-      +                candidates.append(int(nid))
-      +
-      +            if not candidates:
-      +                break
-      +
-      +            changed = False
-      +
-      +            # Try to contract each candidate.
-      +            for nid in candidates:
-      +                nopt = nodeopts.get(nid)
-      +                if nopt is None:
-      +                    continue
-      +                if nid not in parents:
-      +                    continue
-      +
-      +                # Precheck for conflicts: if any parent already has an edge to a would-be
-      +                # rewire destination with a different pop, skip this node.
-      +                conflict = False
-      +                for tok, parent_set in parents[nid].items():
-      +                    child_map = nopt.children.get(tok, {})
-      +                    if not child_map:
-      +                        conflict = True
-      +                        break
-      +                    for pid in parent_set:
-      +                        pmap = nodeopts[pid].children.get(tok)
-      +                        if pmap is None or nid not in pmap:
-      +                            # Parent might have been changed by another contraction; ignore safely.
-      +                            continue
-      +                        in_pop, in_edge = pmap[nid]
-      +                        for destC, (out_pop, _out_edge) in child_map.items():
-      +                            new_pop = in_pop + out_pop
-      +                            existing = pmap.get(destC)
-      +                            if existing is None:
-      +                                continue
-      +                            ex_pop, _ex_edge = existing
-      +                            if ex_pop != new_pop:
-      +                                # Pop mismatch on same (parent, token, dest) — unsafe to merge
-      +                                conflict = True
-      +                                break
-      +                        if conflict:
-      +                            break
-      +                    if conflict:
-      +                        break
-      +                if conflict:
-      +                    continue
-      +
-      +                # Apply rewiring:
-      +                for tok, parent_set in parents[nid].items():
-      +                    child_map = nopt.children.get(tok, {})
-      +                    # Defensive guard (should hold per precheck)
-      +                    if not child_map:
-      +                        conflict = True
-      +                        break
-      +                    for pid in parent_set:
-      +                        pmap = nodeopts[pid].children.get(tok)
-      +                        if pmap is None or nid not in pmap:
-      +                            # Already removed in this pass for some reason — skip.
-      +                            continue
-      +                        in_pop, in_edge = pmap[nid]
-      +                        for destC, (out_pop, _out_edge) in child_map.items():
-      +                            new_pop = in_pop + out_pop
-      +                            # Preserve state gating from the incoming edge
-      +                            new_edge: Edge
-      +                            if isinstance(in_edge, StateEdge):
-      +                                new_edge = StateEdge(set(in_edge.states))
-      +                            else:
-      +                                new_edge = UnconditionalEdge()
-      +                            existing = pmap.get(destC)
-      +                            if existing is None:
-      +                                pmap[int(destC)] = (int(new_pop), new_edge)
-      +                            else:
-      +                                ex_pop, ex_edge = existing
-      +                                # Already prechecked equal pops
-      +                                if isinstance(ex_edge, UnconditionalEdge) or isinstance(new_edge, UnconditionalEdge):
-      +                                    merged_edge: Edge = UnconditionalEdge()
-      +                                else:
-      +                                    merged_states = set(ex_edge.states)
-      +                                    merged_states.update(new_edge.states)
-      +                                    merged_edge = StateEdge(merged_states)
-      +                                pmap[int(destC)] = (int(ex_pop), merged_edge)
-      +                        # Remove the indirection through nid for this parent and token
-      +                        try:
-      +                            del pmap[nid]
-      +                        except KeyError:
-      +                            pass
-      +                if conflict:
-      +                    # If a conflict was discovered mid-apply (shouldn't happen given precheck),
-      +                    # skip marking changes and leave data structure as-is for safety.
-      +                    continue
-      +
-      +                # Clear the contracted node's children to help GC/pruning and avoid future reuse.
-      +                nopt.children.clear()
-      +                changed = True
-      +                total_contracted += 1
-      +
-      +            if not changed:
-      +                break
-      +
-      +            # Materialize modified NodeOpt graph back into arena
-      +            self._from_nodeopt_graph(nodeopts)
-      +
-      +        print(f"Contracted {total_contracted} nodes via unconditional bypass in {round(time.perf_counter() - t_start, 2)} sec")
       ```
     metadata:
   - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Using model 'cp' for code completion.
 
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model_pure_python.py
-      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "python/aug25/models/precompute3_model_pure_python.py"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: python/aug25/models/precompute3_model_pure_python.py
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: python/aug25/models/precompute3_model_pure_python.py
     metadata:
-  - user: 'Changes committed with message: "feat: Add optimization to contract unconditional
-      nodes"'
+  - user: 'Changes committed with message: "Optimize graph generation and mask retrieval
+      by improving unconditional edge handling and state trimming."'
     metadata:
 ...
