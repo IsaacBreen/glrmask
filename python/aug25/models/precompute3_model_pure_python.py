@@ -121,6 +121,7 @@ class Model(GraphProvider):
     glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
     ignore_terminal_id: Optional[int] = field(init=False, default=None)
     parser_table: Optional[ParserTable] = field(init=False, default=None)
+    reverse_state_map: Dict[int, Set[int]] = field(init=False, default_factory=dict)
     state: Dict[int, GSS] = field(init=False, default_factory=dict)
     internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
     all_internal_llm_tokens_bitset: Optional[LLMTokenSet] = field(init=False, default=None)
@@ -211,6 +212,20 @@ class Model(GraphProvider):
                     py_row.gotos[nt_id] = goto_data['state_id']
             py_table[state_id] = py_row
         model.parser_table = ParserTable(start_state_id, py_table)
+
+        reverse_map: Dict[int, Set[int]] = collections.defaultdict(set)
+        for from_state, row in model.parser_table.table.items():
+            # Handle shifts
+            for action in row.actions.values():
+                if isinstance(action, int): # Shift
+                    reverse_map[action].add(from_state)
+                elif isinstance(action, Split):
+                    if action.shift is not None:
+                        reverse_map[action.shift].add(from_state)
+            # Handle gotos
+            for to_state in row.gotos.values():
+                reverse_map[to_state].add(from_state)
+        model.reverse_state_map = dict(reverse_map)
 
         all_terminals = set()
         for row in model.parser_table.table.values():
