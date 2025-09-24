@@ -8,6 +8,8 @@ import random
 from typing import Dict, List, Tuple, Optional, Union, Any, TypedDict, Set
 from dataclasses import dataclass, field
 
+from tqdm import tqdm
+
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
@@ -654,7 +656,7 @@ class Model(GraphProvider):
           StateEdge(states) or UnconditionalEdge() (pop carried separately).
         """
         nodeopts: Dict[NodeID, NodeOpt] = {}
-        for uid, node in self.arena.items():
+        for uid, node in tqdm(self.arena.items(), desc="Converting to NodeOpt graph"):
             token_map: Dict[int, Dict[int, Tuple[int, Edge]]] = collections.defaultdict(dict)
             children = node.get("children") or []
             for (pop, llm_bv), dests in children:
@@ -750,7 +752,7 @@ class Model(GraphProvider):
         if alive is None:
             alive = self._compute_alive_states(nodeopts)
 
-        for node_id, nodeopt in nodeopts.items():
+        for node_id, nodeopt in tqdm(nodeopts.items(), desc="Converting from NodeOpt graph"):
             # Group tokens by (pop, signature-of-dest-map)
             # signature: tuple(sorted((dest_id, None|tuple(sorted(states))) ... ))
             groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Set[int]] = {}
