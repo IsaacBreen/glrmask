@@ -729,54 +729,42 @@ class Model(GraphProvider):
         - Recompute llm_bv_union for each node.
         """
         for node_id, nodeopt in nodeopts.items():
-            # Group tokens by (pop, signature-of-dest-map)
-            # signature: tuple(sorted((dest_id, None|tuple(sorted(states))) ... ))
-            groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Set[int]] = {}
-            groups_destmap: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Dict[int, Optional[Tuple[int, ...]]]] = {}
-
+            # 1. For each token, determine its transition map, partitioned by pop.
+            #    token_transitions: {token -> {pop -> {dest -> states}}}
+            token_transitions = collections.defaultdict(lambda: collections.defaultdict(dict))
             for tok, dests in nodeopt.children.items():
-                # Split per-pop since original groups are by (pop, llm_bv)
-                pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = {}
                 for dest_id, (pop, edge) in dests.items():
-                    allowed: Optional[Tuple[int, ...]]
-                    if isinstance(edge, StateEdge):
-                        allowed = tuple(sorted(edge.states))
-                    else:
-                        allowed = None
-                    sub = pop_to_submap.get(pop)
-                    if sub is None:
-                        sub = {}
-                        pop_to_submap[pop] = sub
-                    sub[int(dest_id)] = allowed
+                    allowed = tuple(sorted(edge.states)) if isinstance(edge, StateEdge) else None
+                    token_transitions[tok][pop][dest_id] = allowed
 
-                for pop, submap in pop_to_submap.items():
-                    signature = tuple(sorted(
-                        (int(did), None if allowed is None else tuple(allowed))
-                        for did, allowed in submap.items()
-                    ))
-                    key = (int(pop), signature)
-                    if key not in groups_tokens:
-                        groups_tokens[key] = set()
-                        groups_destmap[key] = dict(submap)
-                    groups_tokens[key].add(int(tok))
+            # 2. Invert the mapping to group tokens by identical (pop, dest_map).
+            #    sig_to_tokens: {(pop, dest_map_sig) -> {token}}
+            sig_to_tokens = collections.defaultdict(set)
+            for tok, pop_maps in token_transitions.items():
+                for pop, dest_map in pop_maps.items():
+                    # The signature must be canonical and hashable.
+                    sig = tuple(sorted(dest_map.items()))
+                    sig_to_tokens[(pop, sig)].add(tok)
 
+            # 3. Build the new `children` list for the arena.
             new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
             llm_union: LLMTokenSet = LLMTokenSet.empty()
-            for (pop, _signature), token_set in groups_tokens.items():
-                llm_bv = LLMTokenSet.from_indices(sorted(token_set))
+            for (pop, dest_map_sig), tokens in sig_to_tokens.items():
+                llm_bv = LLMTokenSet.from_indices(sorted(list(tokens)))
                 llm_union = llm_union.union(llm_bv)
-                submap = groups_destmap[(pop, _signature)]
+
                 dests_list: List[Tuple[int, StateIDSet]] = []
-                for dest_id in sorted(submap.keys()):
-                    allowed = submap[dest_id]
+                for dest_id, allowed in dest_map_sig:  # sig is already a sorted tuple of items
+                    state_bv = StateIDSet.empty()
                     if allowed is None:
                         state_bv = StateIDSet.empty()
                     else:
                         state_bv = StateIDSet.from_indices(list(allowed))
                     dests_list.append((int(dest_id), state_bv))
+
                 new_children.append(((int(pop), llm_bv), dests_list))
 
-            # Update arena node content in-place
+            # 4. Update the arena node content in-place.
             node_ref = self.arena.get(int(node_id), {})
             node_ref["children"] = new_children
             node_ref["llm_bv_union"] = llm_union
