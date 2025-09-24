@@ -111,7 +111,7 @@ class Model(GraphProvider):
     Precomputed trie model (third-generation), simplified and concise.
     """
     roots_map_raw: List[Tuple[int, int]]
-    arena: Dict[int, Any]  # This is Dict[int, ArenaNode] after __post_init__
+    arena: Dict[int, ArenaNode]  # This is Dict[int, ArenaNode] after __post_init__
 
     roots_map: Dict[int, int] = field(init=False)
     id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
