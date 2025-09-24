@@ -119,10 +119,10 @@ class ArenaNodeOpt:
     is_cyclic: bool = False
 
 
-def _unconditionalize_transition(model: Model, llm_token: int, src: NodeID, dest: NodeID):
+def _unconditionalize_transition(model: Model, llm_token: LLMToken, src: NodeID, dest: NodeID):
     ...
 
-def _unconditionalize_guaranteed_transitions2(model: Model, llm_token: int, node: NodeID, states_alive: Set[State]):
+def _unconditionalize_guaranteed_transitions2(model: Model, llm_token: LLMToken, node: NodeID, states_alive: Set[State]) -> Set[State]:
     ...
 
 def _unconditionalize_guaranteed_transitions(model: Model):
