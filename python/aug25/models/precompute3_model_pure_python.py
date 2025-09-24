@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import heapq
 import collections
@@ -95,6 +97,13 @@ class PyAcc:
     def is_empty(self):
         return self.llm_mask.is_empty()
 
+def _unconditionalize_guaranteed_transitions_for_llm_token(model: Model, llm_token: int):
+    ...
+
+def _unconditionalize_guaranteed_transitions(model: Model):
+    for llm_token in model.all_internal_llm_tokens_bitset.to_indices():
+        _unconditionalize_guaranteed_transitions_for_llm_token(model, llm_token)
+
 
 @dataclass
 class Model(GraphProvider):
@@ -152,114 +161,6 @@ class Model(GraphProvider):
                 new_children.append(((int(pop), llm_bv), new_dest_map))
             node["children"] = new_children
             node["llm_bv_union"] = llm_bv_union
-
-    def _optimize_trie(self):
-        """
-        Prunes the precomputed trie by removing edges that are unreachable
-        based on a static analysis of possible parser states.
-        """
-        print("Optimizing trie...")
-        # 1. Build reverse transitions map for pops
-        rev_transitions = collections.defaultdict(set)
-        for state_id, row in self.parser_table.table.items():
-            # Gotos
-            for nt_id, goto_state_id in row.gotos.items():
-                rev_transitions[goto_state_id].add(state_id)
-            # Shifts
-            for term_id, action in row.actions.items():
-                shift_to = None
-                if isinstance(action, int):
-                    shift_to = action
-                elif isinstance(action, Split) and action.shift is not None:
-                    shift_to = action.shift
-
-                if shift_to is not None:
-                    rev_transitions[shift_to].add(state_id)
-
-        # Memoization for pop transformation
-        pop_memo = {}
-        def transform(states, pop_count):
-            states_tuple = tuple(sorted(list(states)))
-            if (states_tuple, pop_count) in pop_memo:
-                return pop_memo[(states_tuple, pop_count)]
-
-            if pop_count == 0:
-                return states
-
-            prev_states = transform(states, pop_count - 1)
-            if not prev_states:
-                pop_memo[(states_tuple, pop_count)] = set()
-                return set()
-
-            next_states = set()
-            for s in prev_states:
-                next_states.update(rev_transitions.get(s, set()))
-
-            pop_memo[(states_tuple, pop_count)] = next_states
-            return next_states
-
-        # 2. Dataflow analysis to find alive parser states at each trie node
-        alive_states = collections.defaultdict(set)
-        worklist = collections.deque()
-
-        all_parser_states = set(self.parser_table.table.keys())
-
-        for root_node_id in set(self.roots_map.values()):
-            if not alive_states[root_node_id]:
-                alive_states[root_node_id] = all_parser_states
-                worklist.append(root_node_id)
-
-        while worklist:
-            node_id = worklist.popleft()
-            node = self.arena.get(node_id)
-            if not node or not node.get("children"):
-                continue
-
-            current_states = alive_states[node_id]
-
-            for (pop, llm_bv), dests in node["children"]:
-                popped_states = transform(current_states, pop)
-                if not popped_states:
-                    continue
-
-                for dest_idx, state_bv in dests:
-                    edge_states = set(state_bv.to_indices())
-                    propagated_states = popped_states.intersection(edge_states)
-
-                    if propagated_states:
-                        if not propagated_states.issubset(alive_states[dest_idx]):
-                            alive_states[dest_idx].update(propagated_states)
-                            if dest_idx not in worklist:
-                                worklist.append(dest_idx)
-
-        # 3. Prune the trie
-        for node_id, node in self.arena.items():
-            if not node.get("children"):
-                continue
-
-            new_children = []
-            current_states = alive_states.get(node_id)
-            if not current_states:
-                node["children"] = []
-                continue
-
-            for (pop, llm_bv), dests in node["children"]:
-                popped_states = transform(current_states, pop)
-                if not popped_states:
-                    continue
-
-                new_dests = []
-                popped_states_rs = RangeSet.from_indices(list(popped_states))
-                for dest_idx, state_bv in dests:
-                    new_state_bv = state_bv.intersection(popped_states_rs)
-
-                    if not new_state_bv.is_empty():
-                        new_dests.append((dest_idx, new_state_bv))
-
-                if new_dests:
-                    new_children.append(((pop, llm_bv), new_dests))
-
-            node["children"] = new_children
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -337,7 +238,7 @@ class Model(GraphProvider):
         all_internal = constraint.all_internal_llm_tokens_bitset()
         model.all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
 
-        model._optimize_trie()
+        _unconditionalize_guaranteed_transitions(model)
 
         return model
 
