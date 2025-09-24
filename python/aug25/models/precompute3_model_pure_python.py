@@ -80,6 +80,7 @@ class ArenaNodeOpt:
     children: Dict[LLMToken, Dict[NodeID, Dict[Popn, Optional[Set[State]]]]]
     is_end: bool
     max_depth: int
+    is_cyclic: bool = False
 
 
 @dataclass(frozen=True, eq=False)
@@ -120,13 +121,16 @@ class PyAcc:
 def _unconditionalize_transition(model: Model, llm_token: int, src: NodeID, dest: NodeID):
     ...
 
+def _unconditionalize_guaranteed_transitions2(model: Model, llm_token: int, node: NodeID, states_alive: Set[State]):
+    ...
 
 def _unconditionalize_guaranteed_transitions(model: Model):
-    def _unconditionalize_guaranteed_transitions2(model: Model, llm_token: int, node: NodeID):
-        ...
+    # Gather all states
+    all_states: Set[State] = set()
+    for node in  
     for node in model.roots_map.values():
         for llm_token in model.all_internal_llm_tokens_bitset.to_indices():
-            _unconditionalize_guaranteed_transitions2(model, llm_token, node)
+            _unconditionalize_guaranteed_transitions2(model, llm_token, node, all_states)
 
 
 @dataclass
@@ -190,6 +194,49 @@ class Model(GraphProvider):
             node["children"] = new_children
             node["llm_bv_union"] = llm_bv_union
 
+    def _find_cycle_nodes(self) -> Set[NodeID]:
+        on_cycle: Set[NodeID] = set()
+        visiting: Set[NodeID] = set()  # Gray set
+        visited: Set[NodeID] = set()   # Black set
+
+        def get_neighbors(node_id: NodeID) -> Set[NodeID]:
+            neighbors = set()
+            node_data = self.arena_opt.get(node_id)
+            if node_data:
+                for dests_for_token in node_data.children.values():
+                    for dest_node_id in dests_for_token.keys():
+                        neighbors.add(dest_node_id)
+            return neighbors
+
+        def dfs(node_id: NodeID, path: List[NodeID]):
+            visiting.add(node_id)
+            path.append(node_id)
+
+            for neighbor_id in get_neighbors(node_id):
+                if neighbor_id in on_cycle:
+                    continue
+                if neighbor_id in visiting:
+                    # Cycle detected
+                    try:
+                        idx = path.index(neighbor_id)
+                        for i in range(idx, len(path)):
+                            on_cycle.add(path[i])
+                    except ValueError:
+                        pass  # Should not happen
+                elif neighbor_id not in visited:
+                    dfs(neighbor_id, path)
+
+            path.pop()
+            visiting.remove(node_id)
+            visited.add(node_id)
+
+        all_nodes = list(self.arena_opt.keys())
+        for node_id in all_nodes:
+            if node_id not in visited:
+                dfs(node_id, [])
+
+        return on_cycle
+
     def _convert_to_opt_arena(self):
         self.arena_opt = {}
         for node_id, node_data in self.arena.items():
@@ -218,6 +265,12 @@ class Model(GraphProvider):
                 is_end=self.is_end(node_id),
                 max_depth=self.max_depth.get(node_id, 0)
             )
+
+        cycle_nodes = self._find_cycle_nodes()
+        for node_id in cycle_nodes:
+            if node_id in self.arena_opt:
+                self.arena_opt[node_id].is_cyclic = True
+
         self.roots_map_opt = self.roots_map.copy()
 
     def _convert_from_opt_arena(self):
