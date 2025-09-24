@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import itertools
 import heapq
 import collections
 import time
@@ -39,6 +38,10 @@ State = int
 LLMToken = int
 
 @dataclass(frozen=True)
+class PopEdge:
+    n: int
+
+@dataclass(frozen=True)
 class StateEdge:
     states: Set[State]
 
@@ -51,18 +54,9 @@ class UnconditionalEdge:
 Edge = Union[PopEdge, StateEdge, UnconditionalEdge]
 
 @dataclass
-class NodeOptGroup:
-    # Token mask for this group
-    mask: LLMTokenSet
-    # Uniform pop count applied to the group
-    pop: int
-    # dest_id -> Edge (UnconditionalEdge or StateEdge)
-    dests: Dict[int, Edge]
-
-@dataclass
 class NodeOpt:
-    # groups[group_id] = NodeOptGroup
-    groups: Dict[int, NodeOptGroup]
+    # children[token][dest] = (pop, Edge)
+    children: Dict[LLMToken, Dict[int, Tuple[int, Edge]]]
     is_end: bool
 
 
@@ -669,21 +663,14 @@ class Model(GraphProvider):
 
         for uid, node in arena.items():
             uid_int = int(uid)
-            """
-            Convert arena to a compact NodeOpt graph without exploding per-token.
-            Each arena child entry ((pop, llm_bv), dests) becomes a group with:
-              - mask = llm_bv
-              - pop = pop (uniform across the group's dests)
-              - dests[dest] = Edge (UnconditionalEdge if empty state_bv, else StateEdge with concrete set)
-            """
-            groups: Dict[int, NodeOptGroup] = {}
-            gid_counter = 0
+            children_by_token: Dict[int, Dict[int, Tuple[int, Edge]]] = {}
 
             children = node.get("children") or []
             # Each child entry: ((pop, llm_bv: LLMTokenSet), [(dest_idx, state_bv: StateIDSet), ...])
             for (pop, llm_bv), dests in children:
-                pop_int = int(pop)
-                dest_map: Dict[int, Edge] = {}
+                pop = int(pop)
+                # Prepare per-destination edge descriptions for this (pop, llm_bv) group
+                dest_edges: List[Tuple[int, int, Edge]] = []
                 for dest_idx, state_bv in dests:
                     dest_int = int(dest_idx)
                     if state_bv.is_empty():
@@ -695,12 +682,38 @@ class Model(GraphProvider):
                             for sid in range(start, end + 1):
                                 states.add(int(sid))
                         edge = StateEdge(states=states)
-                    dest_map[dest_int] = edge
+                    dest_edges.append((dest_int, pop, edge))
 
-                groups[gid_counter] = NodeOptGroup(mask=llm_bv, pop=pop_int, dests=dest_map)
-                gid_counter += 1
+                # Explode llm_bv into individual tokens and attach dest edges
+                for tok in llm_bv.to_indices():
+                    tok_int = int(tok)
+                    dm = children_by_token.get(tok_int)
+                    if dm is None:
+                        dm = {}
+                        children_by_token[tok_int] = dm
+                    for dest_int, pop_int, edge in dest_edges:
+                        existing = dm.get(dest_int)
+                        if existing is None:
+                            dm[dest_int] = (pop_int, edge)
+                        else:
+                            ex_pop, ex_edge = existing
+                            # Merge policy:
+                            # - If either side is unconditional, keep unconditional and keep existing pop.
+                            # - If both are state-filtered and pops equal, union states.
+                            # - If pops differ for state-filtered edges, keep existing (stable policy).
+                            if isinstance(ex_edge, UnconditionalEdge) or isinstance(edge, UnconditionalEdge):
+                                dm[dest_int] = (ex_pop, UnconditionalEdge())
+                            else:
+                                # Both StateEdge
+                                if ex_pop == pop_int:
+                                    merged_states = set(ex_edge.states)
+                                    merged_states.update(edge.states)
+                                    dm[dest_int] = (ex_pop, StateEdge(states=merged_states))
+                                else:
+                                    # Keep existing per policy comment.
+                                    pass
 
-            nodeopts[uid_int] = NodeOpt(groups=groups, is_end=self.is_end(uid_int))
+            nodeopts[uid_int] = NodeOpt(children=children_by_token, is_end=self.is_end(uid_int))
 
         return nodeopts
 
@@ -1135,10 +1148,10 @@ class Model(GraphProvider):
         # Collect candidate edges once; we will check their current state each sweep.
         candidates: List[Tuple[int, int, int]] = []
         for src_id, nodeopt in tqdm(nodeopts.items(), desc="Collecting unconditionalization candidates"):
-            for gid, group in nodeopt.groups.items():
-                for dest_id, edge in group.dests.items():
+            for tok, dest_map in nodeopt.children.items():
+                for dest_id, (_pop, edge) in dest_map.items():
                     if isinstance(edge, StateEdge):
-                        candidates.append((int(src_id), int(gid), int(dest_id)))
+                        candidates.append((int(src_id), int(tok), int(dest_id)))
 
         candidates.sort()
 
@@ -1164,10 +1177,10 @@ class Model(GraphProvider):
                 nid, states_here = pending.popleft()
                 if not states_here:
                     continue
-                groups = nodeopts[nid].groups
-                for _gid2, group2 in groups.items():
-                    for dest2, edge2 in group2.dests.items():
-                        pre2 = self._nodeopt_pop_preimage(states_here, int(group2.pop))
+                children = nodeopts[nid].children
+                for _tok, dest_map in children.items():
+                    for dest2, (pop2, edge2) in dest_map.items():
+                        pre2 = self._nodeopt_pop_preimage(states_here, pop2)
                         if not pre2:
                             continue
                         if isinstance(edge2, StateEdge):
@@ -1198,17 +1211,18 @@ class Model(GraphProvider):
             sweeps += 1
             changes_this_sweep = 0
 
-            for src, gid, dst in tqdm(candidates, desc=f"Unconditionalization sweep {sweeps}"):
+            for src, tok, dst in tqdm(candidates, desc=f"Unconditionalization sweep {sweeps}"):
                 # Edge may have changed in an earlier sweep; re-check its current type.
                 src_node = nodeopts.get(src)
                 if src_node is None:
                     continue
-                group = src_node.groups.get(gid)
-                if group is None:
+                dm = src_node.children.get(tok)
+                if dm is None:
                     continue
-                edge = group.dests.get(dst)
-                if edge is None:
+                entry = dm.get(dst)
+                if entry is None:
                     continue
+                pop, edge = entry
                 if isinstance(edge, UnconditionalEdge):
                     continue
                 if not isinstance(edge, StateEdge):
@@ -1224,7 +1238,7 @@ class Model(GraphProvider):
                     # Edge already as permissive as src's alive allows.
                     safe = True
                 else:
-                    seed = self._nodeopt_pop_preimage(extra, int(group.pop))
+                    seed = self._nodeopt_pop_preimage(extra, pop)
                     if not seed:
                         safe = True
                     else:
@@ -1237,7 +1251,7 @@ class Model(GraphProvider):
 
                 if safe:
                     # Convert to unconditional
-                    nodeopts[src].groups[gid].dests[dst] = UnconditionalEdge()
+                    nodeopts[src].children[tok][dst] = (pop, UnconditionalEdge())
                     changes_this_sweep += 1
                     converted_total += 1
 
