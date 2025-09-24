@@ -97,12 +97,16 @@ class PyAcc:
     def is_empty(self):
         return self.llm_mask.is_empty()
 
-def _unconditionalize_guaranteed_transitions_for_llm_token(model: Model, llm_token: int):
+def _unconditionalize_transition(model: Model, llm_token: int, src: int, dest: int):
+    ...
+
+def _unconditionalize_guaranteed_transitions2(model: Model, llm_token: int, node: int):
     ...
 
 def _unconditionalize_guaranteed_transitions(model: Model):
-    for llm_token in model.all_internal_llm_tokens_bitset.to_indices():
-        _unconditionalize_guaranteed_transitions_for_llm_token(model, llm_token)
+    for node in model.roots_map.values():
+        for llm_token in model.all_internal_llm_tokens_bitset.to_indices():
+            _unconditionalize_guaranteed_transitions2(model, llm_token, node)
 
 
 @dataclass
