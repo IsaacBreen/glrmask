@@ -1084,40 +1084,130 @@ class Model(GraphProvider):
         you observed after a to/from conversion, without relying on stochastic changes.
         """
         t0 = time.perf_counter()
-        nodeopts = self._to_nodeopt_graph()
-        alive = self._compute_alive_states(nodeopts)
 
-        # Optional structural cleanups (deterministic; no stochastic search)
-        removed_nodes = 0
-        shortcuts_added = 0
-        removed_in_edges = 0
-        if contract_policy == "passthrough":
-            removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
-        elif contract_policy == "shortcut":
-            shortcuts_added, removed_in_edges = self._shortcut_unconditional_edges(
-                nodeopts,
-                remove_covered_in_edges=remove_covered_in_edges,
-                max_passes=shortcut_max_passes,
-            )
-        elif contract_policy == "aggressive":
-            removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
-            s_added, r_in = self._shortcut_unconditional_edges(
-                nodeopts,
-                remove_covered_in_edges=remove_covered_in_edges,
-                max_passes=shortcut_max_passes,
-            )
-            shortcuts_added += s_added
-            removed_in_edges += r_in
-        elif contract_policy == "none":
-            pass
+        if contract_policy != "none":
+            nodeopts = self._to_nodeopt_graph()
+            alive = self._compute_alive_states(nodeopts)
 
-        # Convert back to arena with alive-aware trimming and grouping
-        self._from_nodeopt_graph(nodeopts, alive)
+            # Optional structural cleanups (deterministic; no stochastic search)
+            removed_nodes = 0
+            shortcuts_added = 0
+            removed_in_edges = 0
+            if contract_policy == "passthrough":
+                removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
+            elif contract_policy == "shortcut":
+                shortcuts_added, removed_in_edges = self._shortcut_unconditional_edges(
+                    nodeopts,
+                    remove_covered_in_edges=remove_covered_in_edges,
+                    max_passes=shortcut_max_passes,
+                )
+            elif contract_policy == "aggressive":
+                removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
+                s_added, r_in = self._shortcut_unconditional_edges(
+                    nodeopts,
+                    remove_covered_in_edges=remove_covered_in_edges,
+                    max_passes=shortcut_max_passes,
+                )
+                shortcuts_added += s_added
+                removed_in_edges += r_in
+
+            # Convert back to arena with alive-aware trimming and grouping
+            self._from_nodeopt_graph(nodeopts, alive)
+            t1 = time.perf_counter()
+            elapsed_ms = round((t1 - t0) * 1000.0, 2)
+            print(
+                f"Alive-prune+group: removed {removed_nodes} nodes; "
+                f"added {shortcuts_added} shortcuts; removed {removed_in_edges} covered in-edges "
+                f"in {elapsed_ms} ms"
+            )
+            return
+
+        # Fast path for contract_policy="none" that avoids token explosion.
+        # 1. Compute alive states directly on the arena graph structure.
+        start_state = self.parser_table.start_state_id
+        alive: Dict[int, Set[int]] = collections.defaultdict(set)
+        q = collections.deque()
+        for _, root in self.roots_map.items():
+            if start_state not in alive[root]:
+                alive[root].add(start_state)
+                q.append(root)
+
+        while q:
+            node_id = q.popleft()
+            S = alive[node_id]
+            if not S:
+                continue
+            node = self.arena.get(node_id)
+            if not node:
+                continue
+            children = node.get("children") or []
+            for (pop, _llm_bv), dests in children:
+                pre = self._nodeopt_pop_preimage(S, pop)
+                if not pre:
+                    continue
+                for dest_id, state_bv in dests:
+                    final_pre = pre
+                    if not state_bv.is_empty():
+                        states = set(state_bv.to_indices())
+                        final_pre = pre.intersection(states)
+                    if not final_pre:
+                        continue
+                    dest_alive = alive[dest_id]
+                    new_states = final_pre - dest_alive
+                    if new_states:
+                        dest_alive.update(new_states)
+                        q.append(dest_id)
+
+        # 2. Rebuild arena by trimming states and regrouping LLM token sets.
+        for node_id, node in self.arena.items():
+            node_alive: Set[int] = alive.get(node_id, set())
+            groups: Dict[Tuple[int, Tuple[Tuple[int, StateIDSet], ...]], LLMTokenSet] = collections.defaultdict(LLMTokenSet.empty)
+            pre_cache: Dict[int, Set[int]] = {}
+
+            children = node.get("children") or []
+            for (pop, llm_bv), dests_list in children:
+                pre = pre_cache.get(pop)
+                if pre is None:
+                    pre = self._nodeopt_pop_preimage(node_alive, pop)
+                    pre_cache[pop] = pre
+                if not pre:
+                    continue
+
+                new_dests = {}
+                for dest_id, state_bv in dests_list:
+                    if state_bv.is_empty():
+                        new_dests[dest_id] = StateIDSet.empty()
+                    else:
+                        states = set(state_bv.to_indices())
+                        trimmed = states.intersection(pre)
+                        if not trimmed:
+                            continue
+                        if trimmed == pre:
+                            new_dests[dest_id] = StateIDSet.empty()
+                        else:
+                            new_dests[dest_id] = StateIDSet.from_indices(list(sorted(trimmed)))
+                if not new_dests:
+                    continue
+
+                dests_sig = tuple(sorted(new_dests.items()))
+                key = (pop, dests_sig)
+                groups[key] = groups[key].union(llm_bv)
+
+            new_children = []
+            llm_union = LLMTokenSet.empty()
+            for (pop, dests_sig), llm_bv in groups.items():
+                dests_list_new = list(dests_sig)
+                new_children.append(((pop, llm_bv), dests_list_new))
+                llm_union = llm_union.union(llm_bv)
+
+            node["children"] = new_children
+            node["llm_bv_union"] = llm_union
+
         t1 = time.perf_counter()
         elapsed_ms = round((t1 - t0) * 1000.0, 2)
         print(
-            f"Alive-prune+group: removed {removed_nodes} nodes; "
-            f"added {shortcuts_added} shortcuts; removed {removed_in_edges} covered in-edges "
+            f"Alive-prune+group: removed 0 nodes; "
+            f"added 0 shortcuts; removed 0 covered in-edges "
             f"in {elapsed_ms} ms"
         )
 
