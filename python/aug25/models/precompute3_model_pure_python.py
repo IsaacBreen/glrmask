@@ -282,6 +282,7 @@ class Model(GraphProvider):
         model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
 
         model._unconditionalize_guaranteed_transitions()
+        model._contract_unconditional_nodes()
 
         return model
 
@@ -979,3 +980,184 @@ class Model(GraphProvider):
         # If converted == 0, arena remains unchanged.
 
         print(f"Unconditionalized {converted} edges in {round(time.perf_counter() - t_start, 2)} sec")
+
+    def _contract_unconditional_nodes(
+        self,
+        max_passes: int = 5
+    ) -> None:
+        """
+        Contract away intermediate nodes that only contribute unconditional state flow for
+        the SAME token and can be fully eliminated. This allows:
+          - bypassing nodes that have only unconditional outgoing edges, and
+          - summing consecutive pop counts across those unconditional edges,
+        but ONLY if the node can be completely cut out (i.e., all parents for every token
+        that reaches this node can be rewired to its children for that token).
+
+        Safety constraints:
+          - Node is not an end node.
+          - Node has at least one outgoing edge.
+          - All outgoing edges (for every token present in the node) are unconditional.
+          - The node has at least one parent.
+          - For every token t such that any parent reaches the node with token t, the node
+            must have outgoing edges for token t (so rewiring is defined).
+          - If a rewire would produce a duplicate (same parent, same token, same dest)
+            with a different pop, we SKIP contracting the node (to avoid unsafe collapsing).
+
+        Implementation notes:
+          - Operates in passes. In each pass:
+              1) Build NodeOpt and parent maps.
+              2) Identify candidates and attempt rewiring.
+              3) If any contraction happened, materialize back into arena and repeat.
+          - Edge merging when a (parent, token, dest) already exists with the same pop:
+              * If either is unconditional, keep unconditional.
+              * Else merge states (union).
+        """
+        t_start = time.perf_counter()
+
+        total_contracted = 0
+        passes = 0
+        while passes < int(max_passes):
+            passes += 1
+            nodeopts = self._to_nodeopt_graph()
+
+            # Build parents map: parents[child][token] -> set(parents)
+            parents: Dict[int, Dict[int, Set[int]]] = collections.defaultdict(lambda: collections.defaultdict(set))
+            for pid, nopt in nodeopts.items():
+                for tok, dest_map in nopt.children.items():
+                    for dest_id, (_pop, _edge) in dest_map.items():
+                        parents[int(dest_id)][int(tok)].add(int(pid))
+
+            # Identify candidates that are fully unconditional and removable.
+            candidates: List[int] = []
+            for nid, nopt in nodeopts.items():
+                # Must not be an accepting end node
+                if nopt.is_end:
+                    continue
+                # Must have at least one outgoing edge
+                has_any_out = any(bool(dest_map) for dest_map in nopt.children.values())
+                if not has_any_out:
+                    continue
+                # Only consider nodes that actually have parents (reachable structurally)
+                if nid not in parents:
+                    continue
+                # All outgoing edges must be unconditional
+                all_unconditional = True
+                for _tok, dest_map in nopt.children.items():
+                    for _dest, (_pop, edge) in dest_map.items():
+                        if isinstance(edge, StateEdge):
+                            all_unconditional = False
+                            break
+                    if not all_unconditional:
+                        break
+                if not all_unconditional:
+                    continue
+                # For every token present in its parents, the node must have outgoing edges
+                ok_for_all_incoming_tokens = True
+                for tok in parents[nid].keys():
+                    if tok not in nopt.children or not nopt.children[tok]:
+                        ok_for_all_incoming_tokens = False
+                        break
+                if not ok_for_all_incoming_tokens:
+                    continue
+                candidates.append(int(nid))
+
+            if not candidates:
+                break
+
+            changed = False
+
+            # Try to contract each candidate.
+            for nid in candidates:
+                nopt = nodeopts.get(nid)
+                if nopt is None:
+                    continue
+                if nid not in parents:
+                    continue
+
+                # Precheck for conflicts: if any parent already has an edge to a would-be
+                # rewire destination with a different pop, skip this node.
+                conflict = False
+                for tok, parent_set in parents[nid].items():
+                    child_map = nopt.children.get(tok, {})
+                    if not child_map:
+                        conflict = True
+                        break
+                    for pid in parent_set:
+                        pmap = nodeopts[pid].children.get(tok)
+                        if pmap is None or nid not in pmap:
+                            # Parent might have been changed by another contraction; ignore safely.
+                            continue
+                        in_pop, in_edge = pmap[nid]
+                        for destC, (out_pop, _out_edge) in child_map.items():
+                            new_pop = in_pop + out_pop
+                            existing = pmap.get(destC)
+                            if existing is None:
+                                continue
+                            ex_pop, _ex_edge = existing
+                            if ex_pop != new_pop:
+                                # Pop mismatch on same (parent, token, dest) — unsafe to merge
+                                conflict = True
+                                break
+                        if conflict:
+                            break
+                    if conflict:
+                        break
+                if conflict:
+                    continue
+
+                # Apply rewiring:
+                for tok, parent_set in parents[nid].items():
+                    child_map = nopt.children.get(tok, {})
+                    # Defensive guard (should hold per precheck)
+                    if not child_map:
+                        conflict = True
+                        break
+                    for pid in parent_set:
+                        pmap = nodeopts[pid].children.get(tok)
+                        if pmap is None or nid not in pmap:
+                            # Already removed in this pass for some reason — skip.
+                            continue
+                        in_pop, in_edge = pmap[nid]
+                        for destC, (out_pop, _out_edge) in child_map.items():
+                            new_pop = in_pop + out_pop
+                            # Preserve state gating from the incoming edge
+                            new_edge: Edge
+                            if isinstance(in_edge, StateEdge):
+                                new_edge = StateEdge(set(in_edge.states))
+                            else:
+                                new_edge = UnconditionalEdge()
+                            existing = pmap.get(destC)
+                            if existing is None:
+                                pmap[int(destC)] = (int(new_pop), new_edge)
+                            else:
+                                ex_pop, ex_edge = existing
+                                # Already prechecked equal pops
+                                if isinstance(ex_edge, UnconditionalEdge) or isinstance(new_edge, UnconditionalEdge):
+                                    merged_edge: Edge = UnconditionalEdge()
+                                else:
+                                    merged_states = set(ex_edge.states)
+                                    merged_states.update(new_edge.states)
+                                    merged_edge = StateEdge(merged_states)
+                                pmap[int(destC)] = (int(ex_pop), merged_edge)
+                        # Remove the indirection through nid for this parent and token
+                        try:
+                            del pmap[nid]
+                        except KeyError:
+                            pass
+                if conflict:
+                    # If a conflict was discovered mid-apply (shouldn't happen given precheck),
+                    # skip marking changes and leave data structure as-is for safety.
+                    continue
+
+                # Clear the contracted node's children to help GC/pruning and avoid future reuse.
+                nopt.children.clear()
+                changed = True
+                total_contracted += 1
+
+            if not changed:
+                break
+
+            # Materialize modified NodeOpt graph back into arena
+            self._from_nodeopt_graph(nodeopts)
+
+        print(f"Contracted {total_contracted} nodes via unconditional bypass in {round(time.perf_counter() - t_start, 2)} sec")
