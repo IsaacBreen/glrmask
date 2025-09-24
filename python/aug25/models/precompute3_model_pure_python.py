@@ -630,6 +630,259 @@ class Model(GraphProvider):
     # ===========================
     # Optimization/conversion API
     # ===========================
+    def _preimage_states_rs(self, states: StateIDSet, pop: int) -> StateIDSet:
+        """
+        Compute reverse_state_map^pop(states) using RangeSet arithmetic.
+        Avoids token/state explosion; only iterates the states present in the RangeSet.
+        """
+        if pop <= 0:
+            return states
+        current: StateIDSet = states
+        for _ in range(int(pop)):
+            if current.is_empty():
+                return StateIDSet.empty()
+            nxt: StateIDSet = StateIDSet.empty()
+            # Iterate current states by ranges to reduce Python overhead
+            for start, end in current.to_ranges():
+                for sid in range(start, end + 1):
+                    preds = self.reverse_state_map.get(int(sid))
+                    if not preds:
+                        continue
+                    nxt = nxt.union(StateIDSet.from_indices(list(preds)))
+            current = nxt
+        return current
+
+    def _compute_alive_states_arena(self) -> Dict[NodeID, StateIDSet]:
+        """
+        Bitset-native alive-state computation directly on arena:
+        - Seed all root nodes with {start_state_id}.
+        - Propagate along arena edges:
+            pre = reverse^pop(alive[src])
+            allowed = pre     (if dest is unconditional)
+                    or pre ∩ state_bv
+          alive[dest] |= allowed
+        - Iterate to fixpoint.
+        """
+        start_state = self.parser_table.start_state_id
+        start_bv: StateIDSet = StateIDSet.from_indices([int(start_state)])
+
+        alive: Dict[int, StateIDSet] = {}
+        q = collections.deque()
+
+        # Seed roots
+        for _, root in self.roots_map.items():
+            root = int(root)
+            prev = alive.get(root)
+            if prev is None:
+                alive[root] = start_bv
+                q.append(root)
+            else:
+                newv = prev.union(start_bv)
+                if not newv.difference(prev).is_empty():
+                    alive[root] = newv
+                    q.append(root)
+
+        # Fixpoint propagation
+        while q:
+            node_id = int(q.popleft())
+            S = alive.get(node_id, StateIDSet.empty())
+            if S.is_empty():
+                continue
+
+            node = self.arena.get(node_id, {})
+            children = node.get("children") or []
+            if not children:
+                continue
+
+            # Preimage cache for this node_id for the current S
+            pre_by_pop: Dict[int, StateIDSet] = {}
+
+            for (pop, _llm_bv), dests in children:
+                pop_int = int(pop)
+                pre = pre_by_pop.get(pop_int)
+                if pre is None:
+                    pre = self._preimage_states_rs(S, pop_int)
+                    pre_by_pop[pop_int] = pre
+                if pre.is_empty():
+                    continue
+
+                for dest_idx, state_bv in dests:
+                    dest_id = int(dest_idx)
+                    if state_bv.is_empty():
+                        allowed = pre
+                    else:
+                        allowed = pre.intersection(state_bv)
+                    if allowed.is_empty():
+                        continue
+                    old = alive.get(dest_id)
+                    if old is None:
+                        alive[dest_id] = allowed
+                        q.append(dest_id)
+                    else:
+                        diff = allowed.difference(old)
+                        if not diff.is_empty():
+                            alive[dest_id] = old.union(allowed)
+                            q.append(dest_id)
+        return alive
+
+    def _arena_trim_and_group_node(
+        self,
+        node_id: int,
+        alive: Dict[int, StateIDSet],
+    ) -> None:
+        """
+        For a single node:
+          1) Trim each destination's state_bv by reverse-preimage of alive[node_id].
+          2) Drop destinations with empty allowed sets.
+          3) Mark as unconditional (empty) if allowed == preimage.
+          4) Group entries that share (pop, dest-map) by unioning their llm_bv.
+        """
+        node = self.arena.get(int(node_id), {})
+        children = node.get("children") or []
+        if not children:
+            # Ensure llm_bv_union is consistent
+            node["children"] = []
+            node["llm_bv_union"] = LLMTokenSet.empty()
+            self.arena[int(node_id)] = node
+            return
+
+        S = alive.get(int(node_id), StateIDSet.empty())
+        if S.is_empty():
+            # Nothing reachable; drop all children for compactness
+            node["children"] = []
+            node["llm_bv_union"] = LLMTokenSet.empty()
+            self.arena[int(node_id)] = node
+            return
+
+        # Trim
+        trimmed_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+        pre_by_pop: Dict[int, StateIDSet] = {}
+        for (pop, llm_bv), dests in children:
+            pop_int = int(pop)
+            pre = pre_by_pop.get(pop_int)
+            if pre is None:
+                pre = self._preimage_states_rs(S, pop_int)
+                pre_by_pop[pop_int] = pre
+            if pre.is_empty():
+                # Whole edge group is unreachable
+                continue
+            new_dests: List[Tuple[int, StateIDSet]] = []
+            for dest_idx, state_bv in dests:
+                if state_bv.is_empty():
+                    allowed = pre
+                else:
+                    allowed = pre.intersection(state_bv)
+                if allowed.is_empty():
+                    continue
+                # If allowed equals pre, make unconditional (empty)
+                if allowed.difference(pre).is_empty() and pre.difference(allowed).is_empty():
+                    new_dests.append((int(dest_idx), StateIDSet.empty()))
+                else:
+                    new_dests.append((int(dest_idx), allowed))
+            if new_dests:
+                trimmed_children.append(((pop_int, llm_bv), new_dests))
+
+        # Group by (pop, signature-of-dest-map)
+        groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[Tuple[int, int], ...]]], ...]], LLMTokenSet] = {}
+        groups_destmap: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[Tuple[int, int], ...]]], ...]], List[Tuple[int, StateIDSet]]] = {}
+
+        for (pop_int, llm_bv), dests in trimmed_children:
+            # Signature uses ranges for hashing and None for unconditional (empty) state_bv
+            sig_parts: List[Tuple[int, Optional[Tuple[Tuple[int, int], ...]]]] = []
+            for dest_idx, state_bv in sorted(dests, key=lambda x: int(x[0])):
+                if state_bv.is_empty():
+                    sig_parts.append((int(dest_idx), None))
+                else:
+                    ranges = tuple((int(a), int(b)) for a, b in state_bv.to_ranges())
+                    sig_parts.append((int(dest_idx), ranges))
+            signature = (int(pop_int), tuple(sig_parts))
+
+            if signature not in groups_tokens:
+                groups_tokens[signature] = llm_bv
+                groups_destmap[signature] = dests
+            else:
+                groups_tokens[signature] = groups_tokens[signature].union(llm_bv)
+
+        new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+        llm_union: LLMTokenSet = LLMTokenSet.empty()
+        # Emit in stable order by pop, then dest-signature
+        for (pop_int, _sig) in sorted(groups_tokens.keys(), key=lambda k: (k[0], k[1])):
+            llm = groups_tokens[(pop_int, _sig)]
+            llm_union = llm_union.union(llm)
+            dests_list = groups_destmap[(pop_int, _sig)]
+            new_children.append(((int(pop_int), llm), dests_list))
+
+        node["children"] = new_children
+        node["llm_bv_union"] = llm_union
+        self.arena[int(node_id)] = node
+
+    def _simulate_propagation_from_arena(
+        self,
+        start_node: int,
+        seed_states: StateIDSet,
+        alive: Dict[int, StateIDSet],
+    ) -> bool:
+        """
+        Return True if unsafe:
+          - reaches an end node with non-empty set, or
+          - intersects any alive set at any node.
+        Else False (safe / ineffectual).
+        Propagation uses arena edges + reverse preimages; all bitset-native.
+        """
+        if seed_states.is_empty():
+            return False
+        # Immediate checks
+        if self.is_end(int(start_node)):
+            return True
+        if not seed_states.intersection(alive.get(int(start_node), StateIDSet.empty())).is_empty():
+            return True
+
+        pending: collections.deque[Tuple[int, StateIDSet]] = collections.deque()
+        pending.append((int(start_node), seed_states))
+        added: Dict[int, StateIDSet] = {int(start_node): seed_states}
+
+        while pending:
+            nid, states_here = pending.popleft()
+            node = self.arena.get(int(nid), {})
+            children = node.get("children") or []
+            if not children:
+                continue
+
+            # Cache reverse preimages for this nid and states_here to amortize per-pop computations
+            pre_by_pop: Dict[int, StateIDSet] = {}
+
+            for (pop, _llm_bv), dests in children:
+                pop_int = int(pop)
+                pre = pre_by_pop.get(pop_int)
+                if pre is None:
+                    pre = self._preimage_states_rs(states_here, pop_int)
+                    pre_by_pop[pop_int] = pre
+                if pre.is_empty():
+                    continue
+
+                for dest_idx, state_bv in dests:
+                    dest_id = int(dest_idx)
+                    allowed = pre if state_bv.is_empty() else pre.intersection(state_bv)
+                    if allowed.is_empty():
+                        continue
+
+                    if self.is_end(dest_id):
+                        return True
+                    alive_dest = alive.get(dest_id, StateIDSet.empty())
+                    if not allowed.intersection(alive_dest).is_empty():
+                        return True
+
+                    prev = added.get(dest_id)
+                    if prev is None:
+                        added[dest_id] = allowed
+                        pending.append((dest_id, allowed))
+                    else:
+                        delta = allowed.difference(prev)
+                        if not delta.is_empty():
+                            added[dest_id] = prev.union(delta)
+                            pending.append((dest_id, delta))
+        return False
+
     def _nodeopt_pop_preimage(self, states: Set[int], pop: int) -> Set[int]:
         """
         Compute the preimage of 'states' by applying reverse_state_map 'pop' times.
@@ -1062,53 +1315,29 @@ class Model(GraphProvider):
         shortcut_max_passes: int = 4,
     ) -> None:
         """
-        Deterministic, fast optimization that captures the "learned" benefits from
-        converting to NodeOpt and back:
-          - Compute per-node alive parser states from the start state.
+        Deterministic, bitset-native alive prune + grouping without NodeOpt conversion:
+          - Compute per-node alive parser states directly on arena (RangeSet-based).
           - Trim state-filtered edges using reverse preimages of alive states.
-          - Unconditionalize edges when the trimmed set equals the preimage.
+          - Mark edges unconditional when trimmed set equals the preimage.
           - Group tokens by identical (pop, dest-map) signatures and recompute llm_bv_union.
-          - Optionally apply unconditional passthrough contraction and/or shortcuts.
 
-        This pass is designed to consistently produce the ~0.1 ms get_mask behavior
-        you observed after a to/from conversion, without relying on stochastic changes.
+        Notes:
+          - contract_policy/remove_covered_in_edges/shortcut_max_passes are accepted
+            for API compatibility but ignored in this arena-native pass to keep it fast
+            and avoid token/state explosion.
         """
         t0 = time.perf_counter()
-        nodeopts = self._to_nodeopt_graph()
-        alive = self._compute_alive_states(nodeopts)
+        alive = self._compute_alive_states_arena()
 
-        # Optional structural cleanups (deterministic; no stochastic search)
-        removed_nodes = 0
-        shortcuts_added = 0
-        removed_in_edges = 0
-        if contract_policy == "passthrough":
-            removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
-        elif contract_policy == "shortcut":
-            shortcuts_added, removed_in_edges = self._shortcut_unconditional_edges(
-                nodeopts,
-                remove_covered_in_edges=remove_covered_in_edges,
-                max_passes=shortcut_max_passes,
-            )
-        elif contract_policy == "aggressive":
-            removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
-            s_added, r_in = self._shortcut_unconditional_edges(
-                nodeopts,
-                remove_covered_in_edges=remove_covered_in_edges,
-                max_passes=shortcut_max_passes,
-            )
-            shortcuts_added += s_added
-            removed_in_edges += r_in
-        elif contract_policy == "none":
-            pass
+        # Trim and group for every node
+        for nid in list(self.arena.keys()):
+            self._arena_trim_and_group_node(int(nid), alive)
 
-        # Convert back to arena with alive-aware trimming and grouping
-        self._from_nodeopt_graph(nodeopts, alive)
         t1 = time.perf_counter()
         elapsed_ms = round((t1 - t0) * 1000.0, 2)
+        # Keep print signature for downstream tools
         print(
-            f"Alive-prune+group: removed {removed_nodes} nodes; "
-            f"added {shortcuts_added} shortcuts; removed {removed_in_edges} covered in-edges "
-            f"in {elapsed_ms} ms"
+            f"Alive-prune+group: removed 0 nodes; added 0 shortcuts; removed 0 covered in-edges in {elapsed_ms} ms"
         )
 
     def _unconditionalize_guaranteed_transitions(
@@ -1122,176 +1351,118 @@ class Model(GraphProvider):
         force_repack: bool = True,
     ) -> None:
         """
-        Stochastic optimization pass that attempts to convert state-filtered edges
-        to unconditional edges when doing so is guaranteed not to introduce new
-        accepting paths or merge with existing alive sets.
+        Bitset-native stochastic pass that tries to unconditionalize state-filtered edges
+        directly on the arena without token explosion.
 
-        After the stochastic pass, we apply a configurable contraction/shortcut policy.
-
-        Algorithm overview:
-        1) Build NodeOpt graph and compute 'alive' parser states per node to fixpoint.
-        2) Randomly pick state-filtered edges. Let S be alive at src; E be edge's allowed set.
-           - X0 = S \ E
-           - If X0 is empty, we can immediately unconditionalize (edge is as restrictive as src allows).
-           - Else X1 = reverse_state_map^pop(X0). If X1 is empty, also safe to unconditionalize.
-           - If X1 intersects alive at destination, reject (would merge with existing alive states).
-           - Tentatively propagate X1 from destination; if it ever:
-               a) reaches an end node (nodeopt.is_end), or
-               b) intersects any alive set at any node,
-              then reject.
-           - Otherwise, accept and flip to UnconditionalEdge().
-        3) Continue until time budget exhausted or no successes for 'stagnation_limit' trials.
-        4) Apply contraction/shortcut policy ("passthrough", "shortcut", "aggressive", "none").
-        5) Convert back to arena. By default this is always done (force_repack=True) to
-           ensure the deterministic alive-based trim/group improvements materialize even
-           when no stochastic conversions occur.
+        Algorithm overview (arena-native):
+        1) Compute alive states once on the current arena.
+        2) Iterate edges with state filters:
+             - Let S = alive[src], E = allowed states on the edge, p = pop.
+             - X0 = S \ E
+             - If X0 is empty -> safe unconditionalization.
+             - Else X1 = reverse^p(X0). If X1 is empty -> safe unconditionalization.
+             - Else if X1 ∩ alive[dst] ≠ ∅ -> reject.
+             - Else simulate propagation from dst with seed X1:
+                  return unsafe if reaches an end node or intersects any alive set.
+               If safe -> unconditionalize.
+        3) Stop on time budget or stagnation limit.
+        4) If force_repack or any conversion happened, run alive prune+group (arena-native).
         """
         t_start = time.perf_counter()
         deadline = t_start + float(time_budget_sec)
         rng = random.Random(rng_seed)
 
-        nodeopts = self._to_nodeopt_graph()
-        alive = self._compute_alive_states(nodeopts)
+        # Compute alive once for safety checks (same as NodeOpt pass intent)
+        alive = self._compute_alive_states_arena()
 
-        # Collect candidate edges: (src, token, dest)
-        candidates: List[Tuple[int, int, int]] = []
-        for src_id, nodeopt in nodeopts.items():
-            for tok, dest_map in nodeopt.children.items():
-                for dest_id, (_pop, edge) in dest_map.items():
-                    if isinstance(edge, StateEdge):
-                        candidates.append((int(src_id), int(tok), int(dest_id)))
-
-        def simulate_propagation_from(node_id: int, seed_states: Set[int]) -> bool:
-            """
-            Return True if unsafe:
-              - intersects any alive set during propagation, or
-              - reaches an end node with a non-empty set.
-            Else return False (safe / ineffectual).
-            """
-            if not seed_states:
-                return False
-            # Immediate checks on starting node
-            if nodeopts[node_id].is_end and seed_states:
-                return True
-            if seed_states & alive.get(node_id, set()):
-                return True
-            pending: collections.deque[Tuple[int, Set[int]]] = collections.deque()
-            pending.append((node_id, set(seed_states)))
-            added: Dict[int, Set[int]] = {node_id: set(seed_states)}
-
-            while pending:
-                nid, states_here = pending.popleft()
-                if not states_here:
-                    continue
-                children = nodeopts[nid].children
-                for _tok, dest_map in children.items():
-                    for dest2, (pop2, edge2) in dest_map.items():
-                        pre2 = self._nodeopt_pop_preimage(states_here, pop2)
-                        if not pre2:
-                            continue
-                        if isinstance(edge2, StateEdge):
-                            pre2 = pre2.intersection(edge2.states)
-                            if not pre2:
-                                continue
-                        # Check end node or intersection with alive
-                        if nodeopts[dest2].is_end and pre2:
-                            return True
-                        if pre2 & alive.get(dest2, set()):
-                            return True
-                        # Only propagate brand-new additions for this simulation
-                        already = added.get(dest2)
-                        if already is None:
-                            added[dest2] = set(pre2)
-                            pending.append((dest2, set(pre2)))
-                        else:
-                            diff = pre2 - already
-                            if diff:
-                                already.update(diff)
-                                pending.append((dest2, diff))
-            return False
+        # Candidate enumeration is implicit by scanning arena; we randomize node order
+        node_ids = list(self.arena.keys())
+        rng.shuffle(node_ids)
 
         converted = 0
         stagnation = 0
-        while candidates and time.perf_counter() < deadline and stagnation < stagnation_limit:
-            src, tok, dst = rng.choice(candidates)
-            edge_tuple = nodeopts[src].children.get(tok, {}).get(dst)
-            if edge_tuple is None:
-                # Removed or changed; drop from candidates
-                candidates.remove((src, tok, dst))
-                continue
-            pop, edge = edge_tuple
-            if isinstance(edge, UnconditionalEdge):
-                # No longer a candidate
-                candidates.remove((src, tok, dst))
-                continue
-            if not isinstance(edge, StateEdge):
-                # Shouldn't happen, but skip to be safe
-                candidates.remove((src, tok, dst))
-                continue
 
-            src_alive = alive.get(src, set())
-            allowed = edge.states
-            extra = src_alive - allowed
-            safe = False
-            if not extra:
-                safe = True
-            else:
-                seed = self._nodeopt_pop_preimage(extra, pop)
-                if not seed:
-                    safe = True
-                else:
-                    # If new states at destination intersect existing alive, reject
-                    if seed & alive.get(dst, set()):
+        # Loop with time/stagnation budget
+        while time.perf_counter() < deadline and stagnation < int(stagnation_limit):
+            made_progress_this_round = False
+            for src_id in node_ids:
+                if time.perf_counter() >= deadline:
+                    break
+                src_id = int(src_id)
+                src_alive = alive.get(src_id, StateIDSet.empty())
+                if src_alive.is_empty():
+                    continue
+                node = self.arena.get(src_id, {})
+                children = node.get("children") or []
+                if not children:
+                    continue
+
+                # Iterate child groups in randomized order to vary attempts
+                idxs = list(range(len(children)))
+                rng.shuffle(idxs)
+                for i in idxs:
+                    if time.perf_counter() >= deadline:
+                        break
+                    (pop, _llm_bv), dests = children[i]
+                    pop_int = int(pop)
+                    if not dests:
+                        continue
+
+                    # Evaluate each destination that has a state filter
+                    for j in range(len(dests)):
+                        dest_idx, state_bv = dests[j]
+                        if state_bv.is_empty():
+                            # Already unconditional
+                            continue
+                        dst_id = int(dest_idx)
+                        allowed = state_bv
+                        extra = src_alive.difference(allowed)
                         safe = False
-                    else:
-                        unsafe = simulate_propagation_from(dst, seed)
-                        safe = not unsafe
+                        if extra.is_empty():
+                            safe = True
+                        else:
+                            seed = self._preimage_states_rs(extra, pop_int)
+                            if seed.is_empty():
+                                safe = True
+                            else:
+                                alive_dst = alive.get(dst_id, StateIDSet.empty())
+                                if not seed.intersection(alive_dst).is_empty():
+                                    safe = False
+                                else:
+                                    unsafe = self._simulate_propagation_from_arena(dst_id, seed, alive)
+                                    safe = not unsafe
 
-            if safe:
-                # Convert to unconditional
-                nodeopts[src].children[tok][dst] = (pop, UnconditionalEdge())
-                candidates.remove((src, tok, dst))
-                converted += 1
+                        if safe:
+                            # Make this destination unconditional
+                            dests[j] = (int(dest_idx), StateIDSet.empty())
+                            converted += 1
+                            made_progress_this_round = True
+                            if time.perf_counter() >= deadline:
+                                break
+
+                # Re-assign possibly mutated dests
+                children[i] = ((int(pop), _llm_bv), dests)
+                node["children"] = children
+                self.arena[src_id] = node
+
+            if made_progress_this_round:
                 stagnation = 0
             else:
                 stagnation += 1
 
-        # After stochastic unconditionalization, apply contraction/shortcut policy
-        removed_nodes = 0
-        shortcuts_added = 0
-        removed_in_edges = 0
-
-        if contract_policy == "passthrough":
-            removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
-        elif contract_policy == "shortcut":
-            shortcuts_added, removed_in_edges = self._shortcut_unconditional_edges(
-                nodeopts,
+        # Repack via alive prune + group if requested or if we changed anything
+        if force_repack or converted > 0:
+            # Contract policies are ignored here to keep the pass token/state efficient
+            self.optimize_alive_prune_group(
+                contract_policy="none",
                 remove_covered_in_edges=remove_covered_in_edges,
-                max_passes=shortcut_max_passes,
+                shortcut_max_passes=shortcut_max_passes,
             )
-        elif contract_policy == "aggressive":
-            removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
-            s_added, r_in = self._shortcut_unconditional_edges(
-                nodeopts,
-                remove_covered_in_edges=remove_covered_in_edges,
-                max_passes=shortcut_max_passes,
-            )
-            shortcuts_added += s_added
-            removed_in_edges += r_in
-        elif contract_policy == "none":
-            pass
-        else:
-            # Fallback to passthrough if an unknown policy is provided
-            removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
-
-        # Convert NodeOpt back to arena inplace
-        if force_repack or converted > 0 or removed_nodes > 0 or shortcuts_added > 0 or removed_in_edges > 0:
-            self._from_nodeopt_graph(nodeopts, alive)
 
         elapsed = round(time.perf_counter() - t_start, 2)
         print(
             f"Unconditionalized {converted} edges; "
-            f"removed {removed_nodes} passthrough nodes; "
-            f"added {shortcuts_added} shortcuts; "
-            f"removed {removed_in_edges} covered in-edges in {elapsed} sec"
+            f"removed 0 passthrough nodes; "
+            f"added 0 shortcuts; "
+            f"removed 0 covered in-edges in {elapsed} sec"
         )
