@@ -409,7 +409,7 @@ class Model(GraphProvider):
         self.state = merged_states
 
         t1 = time.perf_counter()
-        print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
+        # print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
 
     @profile
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
@@ -822,6 +822,7 @@ class Model(GraphProvider):
                         candidates.append((int(src_id), int(tok), int(dest_id)))
 
         if not candidates:
+            print("No state-filtered edges found; skipping unconditionalization.")
             return
 
         def simulate_propagation_from(node_id: int, seed_states: Set[int]) -> bool:
@@ -924,3 +925,4 @@ class Model(GraphProvider):
             self._from_nodeopt_graph(nodeopts)
         # If converted == 0, arena remains unchanged.
 
+        print(f"Unconditionalized {converted} edges in {round(time.perf_counter() - t_start, 2)} sec")
