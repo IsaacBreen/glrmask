@@ -833,6 +833,116 @@ class Model(GraphProvider):
             node_ref["llm_bv_union"] = llm_union
             self.arena[int(node_id)] = node_ref
 
+    def _contract_unconditional_passthrough_nodes(
+        self,
+        nodeopts: Dict[NodeID, NodeOpt]
+    ) -> int:
+        """
+        Contract nodes that are pure unconditional passthroughs, and compose pops:
+        If a node B:
+          - is not an end node,
+          - is not a root node,
+          - all incoming edges to B are UnconditionalEdge,
+          - all outgoing edges from B are UnconditionalEdge,
+        then for every incoming edge A -(t, pop_in)-> B and every outgoing edge
+        B -(t, pop_out)-> D, add an unconditional edge A -(t, pop_in+pop_out)-> D.
+        Remove A->B edges and delete B. Repeat until no more nodes can be removed.
+
+        Returns the number of nodes removed.
+        """
+        roots_set: Set[int] = set(self.roots_map.values())
+        removed_total = 0
+
+        while True:
+            # Build incoming map: dest -> list of (src, token, pop, edge)
+            incoming: Dict[int, List[Tuple[int, int, int, Edge]]] = collections.defaultdict(list)
+            for src_id, nopt in nodeopts.items():
+                for tok, dest_map in nopt.children.items():
+                    for dst_id, (pop, edge) in dest_map.items():
+                        incoming[int(dst_id)].append((int(src_id), int(tok), int(pop), edge))
+
+            removable: List[int] = []
+            for nid, nopt in list(nodeopts.items()):
+                if int(nid) in roots_set:
+                    continue
+                if nopt.is_end:
+                    continue
+                inc = incoming.get(int(nid), [])
+                if not inc:
+                    # No parents to rewire; skip (could be unreachable or a root)
+                    continue
+                # Check all outgoing edges are unconditional
+                out_unconditional = True
+                for _tok, dest_map in nopt.children.items():
+                    for _dst, (_pop, e) in dest_map.items():
+                        if not isinstance(e, UnconditionalEdge):
+                            out_unconditional = False
+                            break
+                    if not out_unconditional:
+                        break
+                if not out_unconditional:
+                    continue
+                # Check all incoming edges are unconditional
+                in_unconditional = all(isinstance(e, UnconditionalEdge) for (_src, _tok, _pop, e) in inc)
+                if not in_unconditional:
+                    continue
+                removable.append(int(nid))
+
+            if not removable:
+                break
+
+            for nid in removable:
+                if nid not in nodeopts:
+                    continue
+                inc = incoming.get(nid, [])
+                children_of_nid = nodeopts[nid].children
+
+                # For each incoming parent edge A -(t, pop_in)-> nid,
+                # connect A directly to nid's children for the same token t.
+                for parent_id, tok, pop_in, _edge_in in inc:
+                    parent_node = nodeopts.get(parent_id)
+                    if parent_node is None:
+                        continue
+
+                    # All outgoing edges from nid are unconditional by construction,
+                    # but we still only forward those under the same token.
+                    dests_for_token = children_of_nid.get(tok)
+                    if dests_for_token:
+                        for dest2, (pop2, edge2) in dests_for_token.items():
+                            # Compose pops
+                            new_pop = pop_in + pop2
+                            # Merge into parent's mapping at token tok
+                            dm = parent_node.children.get(tok)
+                            if dm is None:
+                                dm = {}
+                                parent_node.children[tok] = dm
+                            existing = dm.get(dest2)
+                            if existing is None:
+                                dm[dest2] = (new_pop, UnconditionalEdge())
+                            else:
+                                ex_pop, ex_edge = existing
+                                # If any edge is unconditional, the result remains unconditional.
+                                # Following _to_nodeopt_graph policy: if pops differ, keep existing pop.
+                                if isinstance(ex_edge, UnconditionalEdge):
+                                    dm[dest2] = (ex_pop, UnconditionalEdge())
+                                else:
+                                    # Existing state-filter becomes unconditional; keep existing pop.
+                                    dm[dest2] = (ex_pop, UnconditionalEdge())
+
+                    # Remove the edge parent -> nid for this token
+                    dm_parent = parent_node.children.get(tok)
+                    if dm_parent is not None:
+                        if nid in dm_parent:
+                            dm_parent.pop(nid, None)
+                        if not dm_parent:
+                            parent_node.children.pop(tok, None)
+
+                # Remove the node itself
+                nodeopts.pop(nid, None)
+                removed_total += 1
+
+        return removed_total
+
     def _unconditionalize_guaranteed_transitions(
         self,
         time_budget_sec: float = 10.0,
@@ -844,6 +954,8 @@ class Model(GraphProvider):
         to unconditional edges when doing so is guaranteed not to introduce new
         accepting paths or merge with existing alive sets.
 
+        After the stochastic pass, we also contract pure unconditional passthrough nodes
+        and compose consecutive pops, but only when we can remove the node entirely.
         Algorithm overview:
         1) Build NodeOpt graph and compute 'alive' parser states per node to fixpoint.
         2) Randomly pick state-filtered edges. Let S be alive at src; E be edge's allowed set.
@@ -857,7 +969,8 @@ class Model(GraphProvider):
               then reject.
            - Otherwise, accept and flip to UnconditionalEdge().
         3) Continue until time budget exhausted or no successes for 'stagnation_limit' trials.
-        4) If any changes were made, convert back to arena.
+        4) Contract unconditional passthrough nodes (compose pops) iteratively until fixed point.
+        5) If any changes were made, convert back to arena.
         """
         t_start = time.perf_counter()
         deadline = t_start + float(time_budget_sec)
@@ -873,10 +986,6 @@ class Model(GraphProvider):
                 for dest_id, (_pop, edge) in dest_map.items():
                     if isinstance(edge, StateEdge):
                         candidates.append((int(src_id), int(tok), int(dest_id)))
-
-        if not candidates:
-            print("No state-filtered edges found; skipping unconditionalization.")
-            return
 
         def simulate_propagation_from(node_id: int, seed_states: Set[int]) -> bool:
             """
@@ -973,9 +1082,13 @@ class Model(GraphProvider):
             else:
                 stagnation += 1
 
-        if converted > 0:
+        # After stochastic unconditionalization, contract unconditional passthrough nodes
+        removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
+
+        if converted > 0 or removed_nodes > 0:
             # Convert NodeOpt back to arena inplace
             self._from_nodeopt_graph(nodeopts, alive)
-        # If converted == 0, arena remains unchanged.
+        # If no changes, arena remains unchanged.
 
-        print(f"Unconditionalized {converted} edges in {round(time.perf_counter() - t_start, 2)} sec")
+        elapsed = round(time.perf_counter() - t_start, 2)
+        print(f"Unconditionalized {converted} edges; removed {removed_nodes} passthrough nodes in {elapsed} sec")
