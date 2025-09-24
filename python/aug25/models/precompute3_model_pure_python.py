@@ -556,6 +556,7 @@ class Model(GraphProvider):
                 if popped.is_empty():
                     continue
 
+                peeked = popped.peek()
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                 acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
 
@@ -582,17 +583,27 @@ class Model(GraphProvider):
                     continue
 
                 for dest_idx, state_bv in dests:
-                    peeked = popped.peek()
-                    values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                    # Empty state_bv in arena means unconditional (applies to all states).
+                    if state_bv.is_empty():
+                        values_to_keep = peeked
+                        child_gss: GSS = popped
+                        reduced_child = reduced
+                    else:
+                        values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
 
                     if not values_to_keep:
                         continue
 
-                    child_gss: GSS = popped.isolate_many(values_to_keep)
+                    if state_bv.is_empty():
+                        # Already assigned above.
+                        pass
+                    else:
+                        child_gss = popped.isolate_many(values_to_keep)
                     if child_gss.is_empty():
                         continue
 
-                    reduced_child = child_gss.reduce_acc()
+                    if not state_bv.is_empty():
+                        reduced_child = child_gss.reduce_acc()
                     if not reduced_child or reduced_child.is_empty():
                         continue
 
@@ -722,27 +733,64 @@ class Model(GraphProvider):
                         q.append(dest_id)
         return {k: set(v) for k, v in alive.items()}
 
-    def _from_nodeopt_graph(self, nodeopts: Dict[NodeID, NodeOpt]) -> None:
+    def _from_nodeopt_graph(
+        self,
+        nodeopts: Dict[NodeID, NodeOpt],
+        alive: Optional[Dict[NodeID, Set[int]]] = None
+    ) -> None:
         """
         Convert NodeOpt back into the arena node format:
-        - Group tokens by identical (pop, dest -> state_bv) mapping into shared llm_bv bitsets.
+        - Optionally trims destination state sets using alive-state preimages:
+            For each (node, pop), compute pre = reverse_state_map^pop(alive[node]).
+            Drop destinations whose allowed set ∩ pre is empty.
+            If allowed ∩ pre == pre, mark as unconditional.
+        - Group tokens by identical (pop, signature-of-dest-map) mapping into shared llm_bv bitsets.
         - Recompute llm_bv_union for each node.
         """
+        if alive is None:
+            alive = self._compute_alive_states(nodeopts)
+
         for node_id, nodeopt in nodeopts.items():
             # Group tokens by (pop, signature-of-dest-map)
             # signature: tuple(sorted((dest_id, None|tuple(sorted(states))) ... ))
             groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Set[int]] = {}
             groups_destmap: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Dict[int, Optional[Tuple[int, ...]]]] = {}
 
+            # Precompute preimage(alive[node_id], pop) for all pops used in this node
+            node_alive: Set[int] = alive.get(int(node_id), set())
+            pre_cache: Dict[int, Set[int]] = {}
+
             for tok, dests in nodeopt.children.items():
                 # Split per-pop since original groups are by (pop, llm_bv)
                 pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = {}
                 for dest_id, (pop, edge) in dests.items():
-                    allowed: Optional[Tuple[int, ...]]
-                    if isinstance(edge, StateEdge):
-                        allowed = tuple(sorted(edge.states))
+                    # Compute preimage for this pop once
+                    pre = pre_cache.get(pop)
+                    if pre is None:
+                        pre = self._nodeopt_pop_preimage(node_alive, pop)
+                        pre_cache[pop] = pre
+                    if not pre:
+                        # No reachable states at this pop — drop this destination entirely
+                        continue
+
+                    # Trim allowed states by intersecting with preimage
+                    if isinstance(edge, UnconditionalEdge):
+                        allowed: Optional[Tuple[int, ...]] = None
+                    elif isinstance(edge, StateEdge):
+                        trimmed = set(edge.states).intersection(pre)
+                        if not trimmed:
+                            # Unreachable for any alive-derived state; drop
+                            continue
+                        # If the trimmed set equals pre, it is effectively unconditional
+                        if trimmed == pre:
+                            allowed = None
+                        else:
+                            allowed = tuple(sorted(trimmed))
                     else:
-                        allowed = None
+                        # Defensive: treat unknown edge kinds as non-unconditional state edges
+                        # (shouldn't happen)
+                        continue
+
                     sub = pop_to_submap.get(pop)
                     if sub is None:
                         sub = {}
@@ -750,6 +798,9 @@ class Model(GraphProvider):
                     sub[int(dest_id)] = allowed
 
                 for pop, submap in pop_to_submap.items():
+                    if not submap:
+                        # All destinations for this pop were pruned away for this token
+                        continue
                     signature = tuple(sorted(
                         (int(did), None if allowed is None else tuple(allowed))
                         for did, allowed in submap.items()
@@ -924,7 +975,7 @@ class Model(GraphProvider):
 
         if converted > 0:
             # Convert NodeOpt back to arena inplace
-            self._from_nodeopt_graph(nodeopts)
+            self._from_nodeopt_graph(nodeopts, alive)
         # If converted == 0, arena remains unchanged.
 
         print(f"Unconditionalized {converted} edges in {round(time.perf_counter() - t_start, 2)} sec")
