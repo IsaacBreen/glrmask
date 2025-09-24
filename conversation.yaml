@@ -2459,7 +2459,7 @@ local_system:
                   children = node.get("children") or []
                   for (pop, _llm_bv), dests in children:
                       for dest_id, state_bv in dests:
-                          unique_edges.add((int(pop), int(dest_id), tuple(state_bv.to_ranges())))
+                          unique_edges.add((int(pop), int(dest_id), tuple(map(tuple, state_bv.to_ranges()))))
 
                   for pop, dest_id, ranges in unique_edges:
                       propagation_graph[src_id].append((pop, dest_id, StateIDSet.from_ranges(ranges)))
@@ -2537,9 +2537,9 @@ local_system:
                       if not pruned_dests:
                           continue
 
-                      pruned_dests.sort(key=lambda x: (x[0], tuple(x[1].to_ranges())))
+                      pruned_dests.sort(key=lambda x: (x[0], tuple(map(tuple, x[1].to_ranges()))))
 
-                      signature = (pop, tuple((d, tuple(sbv.to_ranges())) for d, sbv in pruned_dests))
+                      signature = (pop, tuple((d, tuple(map(tuple, sbv.to_ranges()))) for d, sbv in pruned_dests))
                       groups[signature] = groups[signature].union(llm_bv)
 
                   new_children = []
@@ -4672,6 +4672,113 @@ messages:
        
       -                signature = (pop, tuple((d, sbv.to_ranges()) for d, sbv in pruned_dests))
       +                signature = (pop, tuple((d, tuple(sbv.to_ranges())) for d, sbv in pruned_dests))
+                       groups[signature] = groups[signature].union(llm_bv)
+       
+                   new_children = []
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Ensure hashable types for set/dict
+      operations in optimize_alive_prune_group"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Traceback (most recent call last):
+        File "<frozen runpy>", line 198, in _run_module_as_main
+        File "<frozen runpy>", line 88, in _run_code
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 319, in <module>
+          main()
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 315, in main
+          run_benchmark(args)
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 209, in run_benchmark
+          model = ModelClass.from_json_string(constraint_json_str)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python.py", line 294, in from_json_string
+          model.optimize_alive_prune_group()
+        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python.py", line 1077, in optimize_alive_prune_group
+          unique_edges.add((int(pop), int(dest_id), tuple(state_bv.to_ranges())))
+      TypeError: unhashable type: 'list'
+    metadata:
+  - assistant: |-
+      My apologies for that persistent error. You are correct, my previous fix was insufficient. The `to_ranges()` method returns a list of lists, and my fix only converted the outer list to a tuple, leaving the inner lists, which caused the `TypeError`.
+
+      The solution is to ensure the inner lists are also converted to tuples, creating a fully hashable tuple of tuples. I will now provide the corrected instructions and diff.
+
+      ### Step-by-step Instructions
+
+      In the file `python/aug25/models/precompute3_model_pure_python.py`, please apply the following three changes within the `optimize_alive_prune_group` method to recursively convert the range lists into tuples.
+
+      1.  **Make `unique_edges` elements fully hashable:**
+          Locate this line:
+          ```python
+          unique_edges.add((int(pop), int(dest_id), tuple(state_bv.to_ranges())))
+          ```
+          And replace it with this, which converts the inner lists to tuples as well:
+          ```python
+          unique_edges.add((int(pop), int(dest_id), tuple(map(tuple, state_bv.to_ranges()))))
+          ```
+
+      2.  **Update the sort key to be fully hashable:**
+          Locate this line:
+          ```python
+          pruned_dests.sort(key=lambda x: (x[0], tuple(x[1].to_ranges())))
+          ```
+          And replace it with:
+          ```python
+          pruned_dests.sort(key=lambda x: (x[0], tuple(map(tuple, x[1].to_ranges()))))
+          ```
+
+      3.  **Make the `signature` dictionary key fully hashable:**
+          Locate this line:
+          ```python
+          signature = (pop, tuple((d, tuple(sbv.to_ranges())) for d, sbv in pruned_dests))
+          ```
+          And replace it with:
+          ```python
+          signature = (pop, tuple((d, tuple(map(tuple, sbv.to_ranges()))) for d, sbv in pruned_dests))
+          ```
+
+      ### Git Diff
+
+      Here is the git diff to apply these corrections.
+
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      index 4d80d19..2057398 100644
+      --- a/python/aug25/models/precompute3_model_pure_python.py
+      +++ b/python/aug25/models/precompute3_model_pure_python.py
+      @@ -1074,7 +1074,7 @@
+                   children = node.get("children") or []
+                   for (pop, _llm_bv), dests in children:
+                       for dest_id, state_bv in dests:
+      -                    unique_edges.add((int(pop), int(dest_id), tuple(state_bv.to_ranges())))
+      +                    unique_edges.add((int(pop), int(dest_id), tuple(map(tuple, state_bv.to_ranges()))))
+       
+                   for pop, dest_id, ranges in unique_edges:
+                       propagation_graph[src_id].append((pop, dest_id, StateIDSet.from_ranges(ranges)))
+      @@ -1126,10 +1126,10 @@
+                       if not pruned_dests:
+                           continue
+       
+      -                pruned_dests.sort(key=lambda x: (x[0], tuple(x[1].to_ranges())))
+      +                pruned_dests.sort(key=lambda x: (x[0], tuple(map(tuple, x[1].to_ranges()))))
+       
+      -                signature = (pop, tuple((d, tuple(sbv.to_ranges())) for d, sbv in pruned_dests))
+      +                signature = (pop, tuple((d, tuple(map(tuple, sbv.to_ranges()))) for d, sbv in pruned_dests))
                        groups[signature] = groups[signature].union(llm_bv)
        
                    new_children = []
