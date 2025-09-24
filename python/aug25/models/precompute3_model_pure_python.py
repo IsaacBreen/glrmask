@@ -661,7 +661,7 @@ class Model(GraphProvider):
         nodeopts: Dict[int, NodeOpt] = {}
         arena = self.arena
 
-        for uid, node in arena.items():
+        for uid, node in tqdm(arena.items(), desc="Converting to NodeOpt"):
             uid_int = int(uid)
             children_by_token: Dict[int, Dict[int, Tuple[int, Edge]]] = {}
 
@@ -1145,16 +1145,6 @@ class Model(GraphProvider):
         nodeopts = self._to_nodeopt_graph()
         alive = self._compute_alive_states(nodeopts)
 
-        # Collect candidate edges once; we will check their current state each sweep.
-        candidates: List[Tuple[int, int, int]] = []
-        for src_id, nodeopt in tqdm(nodeopts.items(), desc="Collecting unconditionalization candidates"):
-            for tok, dest_map in nodeopt.children.items():
-                for dest_id, (_pop, edge) in dest_map.items():
-                    if isinstance(edge, StateEdge):
-                        candidates.append((int(src_id), int(tok), int(dest_id)))
-
-        candidates.sort()
-
         def simulate_propagation_from(node_id: int, seed_states: Set[int]) -> bool:
             """
             Return True if unsafe under the current nodeopts:
@@ -1207,53 +1197,97 @@ class Model(GraphProvider):
         converted_total = 0
         sweeps = 0
 
+        # Memoize simulation results within a sweep: (dst, tuple(sorted(seed_states))) -> unsafe?
+        simulate_cache: Dict[Tuple[int, Tuple[int, ...]], bool] = {}
+
         while True:
             sweeps += 1
             changes_this_sweep = 0
 
-            for src, tok, dst in tqdm(candidates, desc=f"Unconditionalization sweep {sweeps}"):
-                # Edge may have changed in an earlier sweep; re-check its current type.
-                src_node = nodeopts.get(src)
-                if src_node is None:
-                    continue
-                dm = src_node.children.get(tok)
-                if dm is None:
-                    continue
-                entry = dm.get(dst)
-                if entry is None:
-                    continue
-                pop, edge = entry
-                if isinstance(edge, UnconditionalEdge):
-                    continue
-                if not isinstance(edge, StateEdge):
+            # Process by node and group identical state-filtered edges by (dest, pop, edge-id).
+            src_ids_sorted = sorted(nodeopts.keys())
+            for src in tqdm(src_ids_sorted, desc=f"Unconditionalization sweep {sweeps} (grouped)"):
+                nopt = nodeopts.get(int(src))
+                if nopt is None:
                     continue
 
-                src_alive = alive.get(src, set())
-                allowed = edge.states
+                # Build groups for this node: (dst, pop, id(edge)) -> tokens list
+                group_map: Dict[Tuple[int, int, int], List[int]] = {}
+                edge_ref: Dict[Tuple[int, int, int], Edge] = {}
+                for tok, dest_map in nopt.children.items():
+                    for dst, (pop, edge) in dest_map.items():
+                        if isinstance(edge, StateEdge):
+                            key = (int(dst), int(pop), id(edge))
+                            lst = group_map.get(key)
+                            if lst is None:
+                                lst = []
+                                group_map[key] = lst
+                                edge_ref[key] = edge
+                            lst.append(int(tok))
 
-                # Extra states at src that would be newly allowed by unconditionalization.
-                extra = src_alive - allowed
-                safe = False
-                if not extra:
-                    # Edge already as permissive as src's alive allows.
-                    safe = True
-                else:
-                    seed = self._nodeopt_pop_preimage(extra, pop)
-                    if not seed:
+                # Deterministic order by (dst, pop, edge-id)
+                for (dst, pop, edge_id) in sorted(group_map.keys()):
+                    tok_list = group_map[(dst, pop, edge_id)]
+                    if not tok_list:
+                        continue
+                    # If representative is already unconditional or changed, skip
+                    rep_tok = tok_list[0]
+                    rep_entry = nopt.children.get(rep_tok, {}).get(dst)
+                    if not rep_entry:
+                        continue
+                    rep_pop, rep_edge = rep_entry
+                    if isinstance(rep_edge, UnconditionalEdge):
+                        continue
+                    if rep_pop != pop:
+                        continue
+
+                    edge = edge_ref[(dst, pop, edge_id)]
+                    if not isinstance(edge, StateEdge):
+                        continue
+
+                    # Safety check (once per group)
+                    src_alive = alive.get(int(src), set())
+                    allowed = edge.states
+                    extra = src_alive - allowed
+                    safe = False
+                    if not extra:
                         safe = True
                     else:
-                        # If new states at destination intersect existing alive, reject.
-                        if seed & alive.get(dst, set()):
-                            safe = False
+                        seed = self._nodeopt_pop_preimage(extra, int(pop))
+                        if not seed:
+                            safe = True
                         else:
-                            unsafe = simulate_propagation_from(dst, seed)
-                            safe = not unsafe
+                            if seed & alive.get(int(dst), set()):
+                                safe = False
+                            else:
+                                memo_key = (int(dst), tuple(sorted(seed)))
+                                unsafe = simulate_cache.get(memo_key)
+                                if unsafe is None:
+                                    unsafe = simulate_propagation_from(int(dst), seed)
+                                    simulate_cache[memo_key] = unsafe
+                                safe = not unsafe
 
-                if safe:
-                    # Convert to unconditional
-                    nodeopts[src].children[tok][dst] = (pop, UnconditionalEdge())
-                    changes_this_sweep += 1
-                    converted_total += 1
+                    if safe:
+                        changed_here = 0
+                        for tok in tok_list:
+                            dm_tok = nopt.children.get(int(tok))
+                            if not dm_tok:
+                                continue
+                            ex = dm_tok.get(int(dst))
+                            if not ex:
+                                continue
+                            ex_pop, ex_edge = ex
+                            if isinstance(ex_edge, UnconditionalEdge):
+                                continue
+                            # Ensure still the same edge
+                            if ex_pop != pop or (isinstance(ex_edge, StateEdge) and id(ex_edge) != edge_id):
+                                continue
+                            dm_tok[int(dst)] = (int(pop), UnconditionalEdge())
+                            changed_here += 1
+
+                        if changed_here:
+                            changes_this_sweep += changed_here
+                            converted_total += changed_here
 
             if changes_this_sweep == 0:
                 break
