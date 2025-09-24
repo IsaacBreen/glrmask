@@ -283,8 +283,17 @@ class Model(GraphProvider):
         all_internal = constraint.all_internal_llm_tokens_bitset()
         model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
 
-        model.optimize_alive_prune_group(contract_policy="none")
-        model._unconditionalize_guaranteed_transitions(force_repack=False)
+        # model.optimize_alive_prune_group(contract_policy="none")
+        # model._unconditionalize_guaranteed_transitions()
+        # model._unconditionalize_guaranteed_transitions(contract_policy="passthrough")
+        # model._unconditionalize_guaranteed_transitions(contract_policy="shortcut")
+        # model.optimize_alive_prune_group(contract_policy="none")
+        # model._unconditionalize_guaranteed_transitions(contract_policy="aggressive")
+        # model.optimize_alive_prune_group(contract_policy="none")
+        # model._unconditionalize_guaranteed_transitions(contract_policy="passthrough")
+        # model._unconditionalize_guaranteed_transitions(contract_policy="shortcut")
+        # model._unconditionalize_guaranteed_transitions(contract_policy="passthrough")
+        # model.optimize_alive_prune_group(contract_policy="none")
 
         return model
 
