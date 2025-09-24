@@ -293,8 +293,8 @@ class Model(GraphProvider):
         # model._unconditionalize_guaranteed_transitions(contract_policy="passthrough")
         # model._unconditionalize_guaranteed_transitions(contract_policy="shortcut")
         # model._unconditionalize_guaranteed_transitions(contract_policy="passthrough")
-        # model.optimize_alive_prune_group(contract_policy="none")
-        model.optimize_alive_prune_group()
+        model.optimize_alive_prune_group(contract_policy="none")
+        # model.optimize_alive_prune_group()
 
         return model
 
