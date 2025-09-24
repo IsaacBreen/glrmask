@@ -20,9 +20,9 @@ class FFIRangeSet(RangeSet[int]):
         """Returns the intervals as a tuple of tuples."""
         return tuple(cast(List[Tuple[int, int]], self._bitset.to_ranges()))
 
-    def to_ranges(self) -> List[List[int]]:
+    def to_ranges(self) -> List[Tuple[int]]:
         """Returns the intervals as a list of lists for JSON serialization."""
-        return [list(r) for r in self._bitset.to_ranges()]
+        return [tuple(r) for r in self._bitset.to_ranges()]
 
     @time_method
     def to_indices(self) -> List[int]:

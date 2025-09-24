@@ -64,9 +64,9 @@ class PyRangeSet(RangeSet[int]):
         """Creates a PyRangeSet from a list of [start, end] lists."""
         return PyRangeSet(iter(map(tuple, ranges)))
 
-    def to_ranges(self) -> List[List[int]]:
+    def to_ranges(self) -> List[Tuple[int]]:
         """Converts the PyRangeSet to a list of [start, end] lists."""
-        return [list(interval) for interval in self.intervals]
+        return [tuple(interval) for interval in self.intervals]
 
     @staticmethod
     def from_json(data: List[List[int]]) -> 'PyRangeSet':

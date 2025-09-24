@@ -84,7 +84,7 @@ class RangeSet(ABC, Generic[T]):
         raise NotImplementedError
 
     @abstractmethod
-    def to_ranges(self) -> List[List[T]]:
+    def to_ranges(self) -> List[Tuple[T]]:
         """Returns the intervals as a list of lists for JSON serialization."""
         raise NotImplementedError
 
