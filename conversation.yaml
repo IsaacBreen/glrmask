@@ -128,7 +128,6 @@ local_system:
           glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
           ignore_terminal_id: Optional[int] = field(init=False, default=None)
           parser_table: Optional[ParserTable] = field(init=False, default=None)
-          reverse_state_map: Dict[int, Set[int]] = field(init=False, default_factory=dict)
           state: Dict[int, GSS] = field(init=False, default_factory=dict)
           internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
           all_internal_llm_tokens_bitset: Optional[LLMTokenSet] = field(init=False, default=None)
@@ -219,20 +218,6 @@ local_system:
                           py_row.gotos[nt_id] = goto_data['state_id']
                   py_table[state_id] = py_row
               model.parser_table = ParserTable(start_state_id, py_table)
-
-              reverse_map: Dict[int, Set[int]] = collections.defaultdict(set)
-              for from_state, row in model.parser_table.table.items():
-                  # Handle shifts
-                  for action in row.actions.values():
-                      if isinstance(action, int): # Shift
-                          reverse_map[action].add(from_state)
-                      elif isinstance(action, Split):
-                          if action.shift is not None:
-                              reverse_map[action.shift].add(from_state)
-                  # Handle gotos
-                  for to_state in row.gotos.values():
-                      reverse_map[to_state].add(from_state)
-              model.reverse_state_map = dict(reverse_map)
 
               all_terminals = set()
               for row in model.parser_table.table.values():
@@ -512,15 +497,15 @@ local_system:
                       if reduced_acc:
                           final_mask = final_mask.union(reduced_acc.llm_mask)
 
-                  # # Zombie traversal avoidance
-                  # node_llm_bv_union: LLMTokenSet = arena.get(node, {}).get("llm_bv_union", LLMTokenSet.empty())
-                  # potential_new_tokens = node_llm_bv_union.difference(final_mask)
-                  # if potential_new_tokens.is_empty():
-                  #     continue
+                  # Zombie traversal avoidance
+                  node_llm_bv_union: LLMTokenSet = arena.get(node, {}).get("llm_bv_union", LLMTokenSet.empty())
+                  potential_new_tokens = node_llm_bv_union.difference(final_mask)
+                  if potential_new_tokens.is_empty():
+                      continue
 
-                  # gss_mask_acc = gss_node.reduce_acc()
-                  # if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
-                  #     continue
+                  gss_mask_acc = gss_node.reduce_acc()
+                  if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
+                      continue
 
                   # Traverse edges and propagate masks
                   edges = arena.get(node, {}).get("children") or []
@@ -611,35 +596,6 @@ local_system:
       LLMTokenSet = RangeSet
       StateIDSet = RangeSet
       TerminalIdSet = RangeSet
-
-
-      # For optimization passes
-      State = int
-      LLMToken = int
-
-
-      @dataclass
-      class PopEdge:
-          n: int
-
-
-      @dataclass
-      class StateEdge:
-          states: Set[State]
-
-
-      @dataclass
-      class UnconditionalEdge:
-          pass
-
-
-      Edge = Union[PopEdge, StateEdge, UnconditionalEdge]
-
-
-      @dataclass
-      class NodeOpt:
-          children: Dict[LLMToken, Dict[NodeID, Edge]]
-          is_end: bool
 
 
       # Add a dummy profiler for when not running under kernprof
@@ -874,8 +830,6 @@ local_system:
               all_internal = constraint.all_internal_llm_tokens_bitset()
               model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
 
-              model._unconditionalize_guaranteed_transitions()
-
               return model
 
           @profile
@@ -911,134 +865,6 @@ local_system:
                   current_map[state_id] = new_bv
                   return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
               return gss.apply(apply_disallow)
-
-          @profile
-          def _pop_states(self, states: Set[int], pop_len: int) -> Set[int]:
-              current_states = states
-              for _ in range(pop_len):
-                  if not current_states:
-                      return set()
-                  next_states = set()
-                  for s in current_states:
-                      next_states.update(self.reverse_state_map.get(s, set()))
-                  current_states = next_states
-              return current_states
-
-          @profile
-          def _is_ineffectual_propagation(self, start_node: NodeID, start_states: Set[int]) -> bool:
-              q = collections.deque()
-              visited = set()
-
-              for s in start_states:
-                  item = (start_node, s)
-                  q.append(item)
-                  visited.add(item)
-
-              while q:
-                  u, s = q.popleft()
-
-                  if self.is_end(u):
-                      return False
-
-                  children = self.arena.get(u, {}).get("children") or []
-                  for (pop, _), dests in children:
-                      s_popped_set = self._pop_states({s}, pop)
-                      if not s_popped_set:
-                          continue
-
-                      for s_popped in s_popped_set:
-                          for v, state_bv in dests:
-                              if state_bv.is_empty() or state_bv.contains(s_popped):
-                                  if (v, s_popped) not in visited:
-                                      visited.add((v, s_popped))
-                                      q.append((v, s_popped))
-              return True
-
-          @profile
-          def _unconditionalize_guaranteed_transitions(self):
-              # 1. Compute AliveStates map
-              alive_states: Dict[NodeID, Set[int]] = collections.defaultdict(set)
-              worklist = collections.deque()
-
-              for state_id, root_node in self.roots_map.items():
-                  if state_id not in alive_states[root_node]:
-                      alive_states[root_node].add(state_id)
-                      worklist.append(root_node)
-              
-              worklist_set = set(worklist)
-
-              while worklist:
-                  u = worklist.popleft()
-                  worklist_set.remove(u)
-                  
-                  S_u = alive_states[u]
-                  if not S_u:
-                      continue
-
-                  children = self.arena.get(u, {}).get("children") or []
-                  for (pop, _), dests in children:
-                      S_popped = self._pop_states(S_u, pop)
-                      if not S_popped:
-                          continue
-
-                      for v, state_bv in dests:
-                          C = set(state_bv.to_indices())
-                          S_masked = S_popped if not C else S_popped.intersection(C)
-                          
-                          if not S_masked.issubset(alive_states[v]):
-                              new_states = S_masked - alive_states[v]
-                              alive_states[v].update(new_states)
-                              if v not in worklist_set:
-                                  worklist.append(v)
-                                  worklist_set.add(v)
-
-              # 2. Find edges to make unconditional
-              changes = []
-              for u, node_data in self.arena.items():
-                  children = node_data.get("children") or []
-                  for child_idx, ((pop, _), dests) in enumerate(children):
-                      for dest_idx_in_list, (v, state_bv) in enumerate(dests):
-                          if state_bv.is_empty():
-                              continue
-
-                          S_u = alive_states.get(u, set())
-                          S_popped = self._pop_states(S_u, pop)
-                          C = set(state_bv.to_indices())
-                          S_extra = S_popped - C
-
-                          if not S_extra or self._is_ineffectual_propagation(v, S_extra):
-                              changes.append((u, child_idx, dest_idx_in_list))
-
-              # 3. Apply changes
-              for u, child_idx, dest_idx_in_list in changes:
-                  v, _ = self.arena[u]["children"][child_idx][1][dest_idx_in_list]
-                  self.arena[u]["children"][child_idx][1][dest_idx_in_list] = (v, StateIDSet.empty())
-
-              # 4. Cleanup duplicate/subsumed edges
-              for u, node_data in self.arena.items():
-                  children = node_data.get("children") or []
-                  for child_idx, ((pop, llm_bv), dests) in enumerate(children):
-                      new_dests: List[Tuple[int, StateIDSet]] = []
-                      unconditional_dests: Set[int] = set()
-                      conditional_dests: Dict[int, StateIDSet] = {}
-
-                      for v, state_bv in dests:
-                          if state_bv.is_empty():
-                              unconditional_dests.add(v)
-                          else:
-                              if v in conditional_dests:
-                                  conditional_dests[v] = conditional_dests[v].union(state_bv)
-                              else:
-                                  conditional_dests[v] = state_bv
-                      
-                      for v in sorted(list(unconditional_dests)):
-                          new_dests.append((v, StateIDSet.empty()))
-                      
-                      for v, state_bv in sorted(conditional_dests.items()):
-                          if v not in unconditional_dests:
-                              new_dests.append((v, state_bv))
-                      
-                      self.arena[u]["children"][child_idx] = ((pop, llm_bv), new_dests)
 
           def get_root(self, state_id: int) -> NodeID:
               return self.roots_map[int(state_id)]
@@ -1256,15 +1082,15 @@ local_system:
                       if reduced_acc:
                           final_mask = final_mask.union(reduced_acc.llm_mask)
 
-                  # # Zombie traversal avoidance
-                  # node_llm_bv_union: LLMTokenSet = arena.get(node, {}).get("llm_bv_union", LLMTokenSet.empty())
-                  # potential_new_tokens = node_llm_bv_union.difference(final_mask)
-                  # if potential_new_tokens.is_empty():
-                  #     continue
+                  # Zombie traversal avoidance
+                  node_llm_bv_union: LLMTokenSet = arena.get(node, {}).get("llm_bv_union", LLMTokenSet.empty())
+                  potential_new_tokens = node_llm_bv_union.difference(final_mask)
+                  if potential_new_tokens.is_empty():
+                      continue
 
-                  # gss_mask_acc = gss_node.reduce_acc()
-                  # if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
-                  #     continue
+                  gss_mask_acc = gss_node.reduce_acc()
+                  if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
+                      continue
 
                   # Traverse edges and propagate masks
                   edges = arena.get(node, {}).get("children") or []
@@ -1501,7 +1327,6 @@ messages:
           glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
           ignore_terminal_id: Optional[int] = field(init=False, default=None)
           parser_table: Optional[ParserTable] = field(init=False, default=None)
-          reverse_state_map: Dict[int, Set[int]] = field(init=False, default_factory=dict)
           state: Dict[int, GSS] = field(init=False, default_factory=dict)
           internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
           all_internal_llm_tokens_bitset: Optional[LLMTokenSet] = field(init=False, default=None)
@@ -1592,20 +1417,6 @@ messages:
                           py_row.gotos[nt_id] = goto_data['state_id']
                   py_table[state_id] = py_row
               model.parser_table = ParserTable(start_state_id, py_table)
-
-              reverse_map: Dict[int, Set[int]] = collections.defaultdict(set)
-              for from_state, row in model.parser_table.table.items():
-                  # Handle shifts
-                  for action in row.actions.values():
-                      if isinstance(action, int): # Shift
-                          reverse_map[action].add(from_state)
-                      elif isinstance(action, Split):
-                          if action.shift is not None:
-                              reverse_map[action.shift].add(from_state)
-                  # Handle gotos
-                  for to_state in row.gotos.values():
-                      reverse_map[to_state].add(from_state)
-              model.reverse_state_map = dict(reverse_map)
 
               all_terminals = set()
               for row in model.parser_table.table.values():
@@ -1885,15 +1696,15 @@ messages:
                       if reduced_acc:
                           final_mask = final_mask.union(reduced_acc.llm_mask)
 
-                  # # Zombie traversal avoidance
-                  # node_llm_bv_union: LLMTokenSet = arena.get(node, {}).get("llm_bv_union", LLMTokenSet.empty())
-                  # potential_new_tokens = node_llm_bv_union.difference(final_mask)
-                  # if potential_new_tokens.is_empty():
-                  #     continue
+                  # Zombie traversal avoidance
+                  node_llm_bv_union: LLMTokenSet = arena.get(node, {}).get("llm_bv_union", LLMTokenSet.empty())
+                  potential_new_tokens = node_llm_bv_union.difference(final_mask)
+                  if potential_new_tokens.is_empty():
+                      continue
 
-                  # gss_mask_acc = gss_node.reduce_acc()
-                  # if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
-                  #     continue
+                  gss_mask_acc = gss_node.reduce_acc()
+                  if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
+                      continue
 
                   # Traverse edges and propagate masks
                   edges = arena.get(node, {}).get("children") or []
@@ -1966,101 +1777,9 @@ messages:
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
   - user: |-
-      Implement `_unconditionalize_guaranteed_transitions`.
-      Basically we choose a single LLM token at a time.
-      Start at a root node. Values at each node are set of state IDs that are coming from the source node. Initially all states.
-      Recursion returns set of state IDs that make it to the destination node.
-
-      Skip cyclic nodes for now.
-
-      initialize set G
-      Look up this LLM token
-      Loop through dest nodes
-          Loop through popns
-              Init map from state -> {set of states} called A
-              Loop through alive states
-                  Determine popn set for this state. Add this to map A, but reversed direction.
-              Make a set B from keys of set A
-              Send set B to the dst node
-              Process the dst
-              ...
-              Get back a set C of nodes of all states that still exist at dst node as a condition (ie that appear in one of the sets in children). All other states have become unconditional.
-              Check if B is subset of C
-              
-
-      BUT don't actually use recursive algorithm because we need to ensure we've processed all of a node's parents before processing the node.
-      So where I say 'process the dst', don't actually process it there. We ned to process the dsts other parents first, as well as other popns from this parent.
-
-      ---
-
-      Hmm... fuck.
-      Imagine an edge
-      We have set of alive states
-      Imagine 
-      Traversing an edge involves:
-      - transforming each state to another state according to popn, getting another set of states
-      - applying the state filter to that new set of states
-
-      We consider whether we can replace the state set with None, an unconditional edge
-      We send that transfomed state set to the dest and receive back another state set
-      Iff there's a state in
-
-      ---
-
-      Ok consider edges to END node
-
-      Suppose pop 0 only
-      If the edge state IDs is a subset of the alive state IDs now, we can replace with unconditional edge.
-
-      ---
-
-      OK... Ignore the above. Fresh start. The below algo is right.
-
-      What if we only have pop edges, state edges, and blank (unconditional) edges?
-      Imagine we propogate state IDs across the whole graph iteratively until equalibrium.
-      States flow along pop edges via transformation (reverse_state_map), state edges via masking, and blank edges unconditionally.
-      Needs to be iterative because we have cycles.
-
-      Now pick a node at random.
-      Actually no, pick an EDGE at random. A state edge. Each state edge is a set of states.
-
-      If the alive states at the src node is equal to the edge states, then obviously we can replace this edge with an unconditional edge.
-
-      But what if there's an alive state that's not on the edge? Then we can only convert the edge to unconditional if that extra state is gonna die anyway. ie if it doesn't effect an end.
-
-      Perform a tentative propagation. ie propogate the extra state to the dst and throughout the graph.
-      If at any point a state getting added to a node's alive states is already there (in the alive state) OR it reaches an end node, then we *cannot* add the unconditional edge.
-      (Revert the propogation.)
-      Otherwise, we can.
-
-      Yes. This is the right algo.
-
-      So, subtract edge states from alive states. Ensure the propogation of each of the remaining states is *ineffectual*.  (True automatically if there's no states remaining, ie equal. So no need to treat set equality as special case.)
-
-      Implement this.
-
-      Define this for optimization purposes:
-      ```python
-      type State = int
-      type LLMToken = int
-
-      @dataclass
-      class PopEdge:
-          n: int
-      @dataclass
-      class StateEdge:
-          states: Set[state]
-      @dataclass
-      class UnconditionalEdge:
-          pass
-      type Edge = PopEdge | StateEdge | UnconditionalEdge
-
-      @dataclass
-      class NodeOpt:
-          children: Dict[LLMToken, Dict[NodeID, Edge]]
-          is_end: bool
-      ```
-      Write conversion functions. This NodeOpt really does contain all the info we need to convert back into a normal node.
+      Add a field that's a map parser state -> {set of states}
+      Set it by looking at all GLR states. Say we have on state x an action shift y. Add to the map for set y state x (ie reversed).
+      Do same for gotos.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -2079,379 +1798,92 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement the `_unconditionalize_guaranteed_transitions` optimization, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to add the reverse state map, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `python/aug25/models/precompute3_model_pure_python.py`**.
+      Here are the edits for `python/aug25/models/precompute3_model_pure_python.py`:
 
-      2.  **Add new type definitions for optimization passes.**
-          After the line `TerminalIdSet = RangeSet`, insert the following Python code to define several new dataclasses and type aliases that can be used for graph optimizations:
+      1.  **Declare the new field in the `Model` dataclass:**
+          In the `Model` class definition, add the `reverse_state_map` field right after `parser_table`.
+
+          *File*: `python/aug25/models/precompute3_model_pure_python.py`
+          *Around line 132*:
 
           ```python
-          # For optimization passes
-          State = int
-          LLMToken = int
-          
-          
-          @dataclass
-          class PopEdge:
-              n: int
-          
-          
-          @dataclass
-          class StateEdge:
-              states: Set[State]
-          
-          
-          @dataclass
-          class UnconditionalEdge:
-              pass
-          
-          
-          Edge = Union[PopEdge, StateEdge, UnconditionalEdge]
-          
-          
-          @dataclass
-          class NodeOpt:
-              children: Dict[LLMToken, Dict[NodeID, Edge]]
-              is_end: bool
+          # ...
+          parser_table: Optional[ParserTable] = field(init=False, default=None)
+          reverse_state_map: Dict[int, Set[int]] = field(init=False, default_factory=dict)
+          state: Dict[int, GSS] = field(init=False, default_factory=dict)
+          # ...
           ```
 
-      3.  **Add the new optimization methods to the `Model` class.**
-          Inside the `Model` class, just before the `commit` method definition, insert the following three new methods: `_pop_states`, `_is_ineffectual_propagation`, and `_unconditionalize_guaranteed_transitions`.
+      2.  **Populate the `reverse_state_map`:**
+          In the `from_json_string` method, after the parser table is created and assigned to `model.parser_table`, insert the logic to build the reverse map by iterating through all shifts and gotos.
+
+          *File*: `python/aug25/models/precompute3_model_pure_python.py`
+          *Around line 246*:
 
           ```python
-          @profile
-          def _pop_states(self, states: Set[int], pop_len: int) -> Set[int]:
-              current_states = states
-              for _ in range(pop_len):
-                  if not current_states:
-                      return set()
-                  next_states = set()
-                  for s in current_states:
-                      next_states.update(self.reverse_state_map.get(s, set()))
-                  current_states = next_states
-              return current_states
+          # ...
+              model.parser_table = ParserTable(start_state_id, py_table)
 
-          @profile
-          def _is_ineffectual_propagation(self, start_node: NodeID, start_states: Set[int]) -> bool:
-              q = collections.deque()
-              visited = set()
+              reverse_map: Dict[int, Set[int]] = collections.defaultdict(set)
+              for from_state, row in model.parser_table.table.items():
+                  # Handle shifts
+                  for action in row.actions.values():
+                      if isinstance(action, int): # Shift
+                          reverse_map[action].add(from_state)
+                      elif isinstance(action, Split):
+                          if action.shift is not None:
+                              reverse_map[action.shift].add(from_state)
+                  # Handle gotos
+                  for to_state in row.gotos.values():
+                      reverse_map[to_state].add(from_state)
+              model.reverse_state_map = dict(reverse_map)
 
-              for s in start_states:
-                  item = (start_node, s)
-                  q.append(item)
-                  visited.add(item)
-
-              while q:
-                  u, s = q.popleft()
-
-                  if self.is_end(u):
-                      return False
-
-                  children = self.arena.get(u, {}).get("children") or []
-                  for (pop, _), dests in children:
-                      s_popped_set = self._pop_states({s}, pop)
-                      if not s_popped_set:
-                          continue
-
-                      for s_popped in s_popped_set:
-                          for v, state_bv in dests:
-                              if state_bv.is_empty() or state_bv.contains(s_popped):
-                                  if (v, s_popped) not in visited:
-                                      visited.add((v, s_popped))
-                                      q.append((v, s_popped))
-              return True
-
-          @profile
-          def _unconditionalize_guaranteed_transitions(self):
-              # 1. Compute AliveStates map
-              alive_states: Dict[NodeID, Set[int]] = collections.defaultdict(set)
-              worklist = collections.deque()
-
-              for state_id, root_node in self.roots_map.items():
-                  if state_id not in alive_states[root_node]:
-                      alive_states[root_node].add(state_id)
-                      worklist.append(root_node)
-              
-              worklist_set = set(worklist)
-
-              while worklist:
-                  u = worklist.popleft()
-                  worklist_set.remove(u)
-                  
-                  S_u = alive_states[u]
-                  if not S_u:
-                      continue
-
-                  children = self.arena.get(u, {}).get("children") or []
-                  for (pop, _), dests in children:
-                      S_popped = self._pop_states(S_u, pop)
-                      if not S_popped:
-                          continue
-
-                      for v, state_bv in dests:
-                          C = set(state_bv.to_indices())
-                          S_masked = S_popped if not C else S_popped.intersection(C)
-                          
-                          if not S_masked.issubset(alive_states[v]):
-                              new_states = S_masked - alive_states[v]
-                              alive_states[v].update(new_states)
-                              if v not in worklist_set:
-                                  worklist.append(v)
-                                  worklist_set.add(v)
-
-              # 2. Find edges to make unconditional
-              changes = []
-              for u, node_data in self.arena.items():
-                  children = node_data.get("children") or []
-                  for child_idx, ((pop, _), dests) in enumerate(children):
-                      for dest_idx_in_list, (v, state_bv) in enumerate(dests):
-                          if state_bv.is_empty():
-                              continue
-
-                          S_u = alive_states.get(u, set())
-                          S_popped = self._pop_states(S_u, pop)
-                          C = set(state_bv.to_indices())
-                          S_extra = S_popped - C
-
-                          if not S_extra or self._is_ineffectual_propagation(v, S_extra):
-                              changes.append((u, child_idx, dest_idx_in_list))
-
-              # 3. Apply changes
-              for u, child_idx, dest_idx_in_list in changes:
-                  v, _ = self.arena[u]["children"][child_idx][1][dest_idx_in_list]
-                  self.arena[u]["children"][child_idx][1][dest_idx_in_list] = (v, StateIDSet.empty())
-
-              # 4. Cleanup duplicate/subsumed edges
-              for u, node_data in self.arena.items():
-                  children = node_data.get("children") or []
-                  for child_idx, ((pop, llm_bv), dests) in enumerate(children):
-                      new_dests = []
-                      unconditional_dests = set()
-                      conditional_dests: Dict[int, StateIDSet] = {}
-
-                      for v, state_bv in dests:
-                          if state_bv.is_empty():
-                              unconditional_dests.add(v)
-                          else:
-                              if v in conditional_dests:
-                                  conditional_dests[v] = conditional_dests[v].union(state_bv)
-                              else:
-                                  conditional_dests[v] = state_bv
-                      
-                      for v in sorted(list(unconditional_dests)):
-                          new_dests.append((v, StateIDSet.empty()))
-                      
-                      for v, state_bv in sorted(conditional_dests.items()):
-                          if v not in unconditional_dests:
-                              new_dests.append((v, state_bv))
-                      
-                      self.arena[u]["children"][child_idx] = ((pop, llm_bv), new_dests)
-          ```
-
-      4.  **Invoke the optimization method during model loading.**
-          In the `from_json_string` method, add a call to `model._unconditionalize_guaranteed_transitions()` right before the final `return model` statement.
-
-          ```python
-          # ... at the end of from_json_string()
-              # Convert universe LLM tokens bitset to RangeSet
-              all_internal = constraint.all_internal_llm_tokens_bitset()
-              model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
-
-              model._unconditionalize_guaranteed_transitions()
-
-              return model
+              all_terminals = set()
+          # ...
           ```
 
       ### Git Diff
 
-      Here is the git diff for the changes described above.
+      Here is the git patch that applies the changes described above.
 
       ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      index 2161681..188515c 100644
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -16,6 +16,32 @@
-       LLMTokenSet = RangeSet
-       StateIDSet = RangeSet
-       TerminalIdSet = RangeSet
-      +
-      +
-      +# For optimization passes
-      +State = int
-      +LLMToken = int
-      +
-      +
-      +@dataclass
-      +class PopEdge:
-      +    n: int
-      +
-      +
-      +@dataclass
-      +class StateEdge:
-      +    states: Set[State]
-      +
-      +
-      +@dataclass
-      +class UnconditionalEdge:
-      +    pass
-      +
-      +
-      +Edge = Union[PopEdge, StateEdge, UnconditionalEdge]
-      +
-      +
-      +@dataclass
-      +class NodeOpt:
-      +    children: Dict[LLMToken, Dict[NodeID, Edge]]
-      +    is_end: bool
+      @@ -131,6 +131,7 @@
+           glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
+           ignore_terminal_id: Optional[int] = field(init=False, default=None)
+           parser_table: Optional[ParserTable] = field(init=False, default=None)
+      +    reverse_state_map: Dict[int, Set[int]] = field(init=False, default_factory=dict)
+           state: Dict[int, GSS] = field(init=False, default_factory=dict)
+           internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
+           all_internal_llm_tokens_bitset: Optional[LLMTokenSet] = field(init=False, default=None)
+      @@ -245,6 +246,21 @@
+                   py_table[state_id] = py_row
+               model.parser_table = ParserTable(start_state_id, py_table)
        
-       
-       # Add a dummy profiler for when not running under kernprof
-      @@ -293,6 +319,115 @@
-                   return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
-               return gss.apply(apply_disallow)
-       
-      +    @profile
-      +    def _pop_states(self, states: Set[int], pop_len: int) -> Set[int]:
-      +        current_states = states
-      +        for _ in range(pop_len):
-      +            if not current_states:
-      +                return set()
-      +            next_states = set()
-      +            for s in current_states:
-      +                next_states.update(self.reverse_state_map.get(s, set()))
-      +            current_states = next_states
-      +        return current_states
+      +        reverse_map: Dict[int, Set[int]] = collections.defaultdict(set)
+      +        for from_state, row in model.parser_table.table.items():
+      +            # Handle shifts
+      +            for action in row.actions.values():
+      +                if isinstance(action, int): # Shift
+      +                    reverse_map[action].add(from_state)
+      +                elif isinstance(action, Split):
+      +                    if action.shift is not None:
+      +                        reverse_map[action.shift].add(from_state)
+      +            # Handle gotos
+      +            for to_state in row.gotos.values():
+      +                reverse_map[to_state].add(from_state)
+      +        model.reverse_state_map = dict(reverse_map)
       +
-      +    @profile
-      +    def _is_ineffectual_propagation(self, start_node: NodeID, start_states: Set[int]) -> bool:
-      +        q = collections.deque()
-      +        visited = set()
-      +
-      +        for s in start_states:
-      +            item = (start_node, s)
-      +            q.append(item)
-      +            visited.add(item)
-      +
-      +        while q:
-      +            u, s = q.popleft()
-      +
-      +            if self.is_end(u):
-      +                return False
-      +
-      +            children = self.arena.get(u, {}).get("children") or []
-      +            for (pop, _), dests in children:
-      +                s_popped_set = self._pop_states({s}, pop)
-      +                if not s_popped_set:
-      +                    continue
-      +
-      +                for s_popped in s_popped_set:
-      +                    for v, state_bv in dests:
-      +                        if state_bv.is_empty() or state_bv.contains(s_popped):
-      +                            if (v, s_popped) not in visited:
-      +                                visited.add((v, s_popped))
-      +                                q.append((v, s_popped))
-      +        return True
-      +
-      +    @profile
-      +    def _unconditionalize_guaranteed_transitions(self):
-      +        # 1. Compute AliveStates map
-      +        alive_states: Dict[NodeID, Set[int]] = collections.defaultdict(set)
-      +        worklist = collections.deque()
-      +
-      +        for state_id, root_node in self.roots_map.items():
-      +            if state_id not in alive_states[root_node]:
-      +                alive_states[root_node].add(state_id)
-      +                worklist.append(root_node)
-      +        
-      +        worklist_set = set(worklist)
-      +
-      +        while worklist:
-      +            u = worklist.popleft()
-      +            worklist_set.remove(u)
-      +            
-      +            S_u = alive_states[u]
-      +            if not S_u:
-      +                continue
-      +
-      +            children = self.arena.get(u, {}).get("children") or []
-      +            for (pop, _), dests in children:
-      +                S_popped = self._pop_states(S_u, pop)
-      +                if not S_popped:
-      +                    continue
-      +
-      +                for v, state_bv in dests:
-      +                    C = set(state_bv.to_indices())
-      +                    S_masked = S_popped if not C else S_popped.intersection(C)
-      +                    
-      +                    if not S_masked.issubset(alive_states[v]):
-      +                        new_states = S_masked - alive_states[v]
-      +                        alive_states[v].update(new_states)
-      +                        if v not in worklist_set:
-      +                            worklist.append(v)
-      +                            worklist_set.add(v)
-      +
-      +        # 2. Find edges to make unconditional
-      +        changes = []
-      +        for u, node_data in self.arena.items():
-      +            children = node_data.get("children") or []
-      +            for child_idx, ((pop, _), dests) in enumerate(children):
-      +                for dest_idx_in_list, (v, state_bv) in enumerate(dests):
-      +                    if state_bv.is_empty():
-      +                        continue
-      +
-      +                    S_u = alive_states.get(u, set())
-      +                    S_popped = self._pop_states(S_u, pop)
-      +                    C = set(state_bv.to_indices())
-      +                    S_extra = S_popped - C
-      +
-      +                    if not S_extra or self._is_ineffectual_propagation(v, S_extra):
-      +                        changes.append((u, child_idx, dest_idx_in_list))
-      +
-      +        # 3. Apply changes
-      +        for u, child_idx, dest_idx_in_list in changes:
-      +            v, _ = self.arena[u]["children"][child_idx][1][dest_idx_in_list]
-      +            self.arena[u]["children"][child_idx][1][dest_idx_in_list] = (v, StateIDSet.empty())
-      +
-      +        # 4. Cleanup duplicate/subsumed edges
-      +        for u, node_data in self.arena.items():
-      +            children = node_data.get("children") or []
-      +            for child_idx, ((pop, llm_bv), dests) in enumerate(children):
-      +                new_dests: List[Tuple[int, StateIDSet]] = []
-      +                unconditional_dests: Set[int] = set()
-      +                conditional_dests: Dict[int, StateIDSet] = {}
-      +
-      +                for v, state_bv in dests:
-      +                    if state_bv.is_empty():
-      +                        unconditional_dests.add(v)
-      +                    else:
-      +                        if v in conditional_dests:
-      +                            conditional_dests[v] = conditional_dests[v].union(state_bv)
-      +                        else:
-      +                            conditional_dests[v] = state_bv
-      +                
-      +                for v in sorted(list(unconditional_dests)):
-      +                    new_dests.append((v, StateIDSet.empty()))
-      +                
-      +                for v, state_bv in sorted(conditional_dests.items()):
-      +                    if v not in unconditional_dests:
-      +                        new_dests.append((v, state_bv))
-      +                
-      +                self.arena[u]["children"][child_idx] = ((pop, llm_bv), new_dests)
-      +
-           def get_root(self, state_id: int) -> NodeID:
-               return self.roots_map[int(state_id)]
-       
-      @@ -312,6 +447,10 @@
-               # Convert universe LLM tokens bitset to RangeSet
-               all_internal = constraint.all_internal_llm_tokens_bitset()
-               model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
-      +
-      +        model._unconditionalize_guaranteed_transitions()
-       
-               return model
-       
+               all_terminals = set()
+               for row in model.parser_table.table.values():
+                   all_terminals.update(row.actions.keys())
 
       ```
     metadata:
@@ -2464,7 +1896,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Implement unconditionalization optimization
-      for trie edges"'
+  - user: 'Changes committed with message: "feat: Add reverse_state_map to Model for
+      tracking state transitions"'
     metadata:
 ...
