@@ -283,17 +283,15 @@ class Model(GraphProvider):
         all_internal = constraint.all_internal_llm_tokens_bitset()
         model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
 
-        # model.optimize_alive_prune_group(contract_policy="none")
+        # model.optimize_alive_prune_group()
         # model._unconditionalize_guaranteed_transitions()
         # model._unconditionalize_guaranteed_transitions(contract_policy="passthrough")
         # model._unconditionalize_guaranteed_transitions(contract_policy="shortcut")
-        # model.optimize_alive_prune_group(contract_policy="none")
         # model._unconditionalize_guaranteed_transitions(contract_policy="aggressive")
-        # model.optimize_alive_prune_group(contract_policy="none")
         # model._unconditionalize_guaranteed_transitions(contract_policy="passthrough")
         # model._unconditionalize_guaranteed_transitions(contract_policy="shortcut")
         # model._unconditionalize_guaranteed_transitions(contract_policy="passthrough")
-        model.optimize_alive_prune_group(contract_policy="none")
+        model.optimize_alive_prune_group()
         # model.optimize_alive_prune_group()
 
         return model
@@ -1067,9 +1065,6 @@ class Model(GraphProvider):
 
     def optimize_alive_prune_group(
         self,
-        contract_policy: str = "none",
-        remove_covered_in_edges: bool = True,
-        shortcut_max_passes: int = 4,
     ) -> None:
         nodeopts: Dict[NodeID, NodeOpt] = {}
         for uid, node in tqdm(self.arena.items(), desc="Converting to NodeOpt graph"):
