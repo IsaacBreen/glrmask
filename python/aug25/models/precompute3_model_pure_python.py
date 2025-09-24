@@ -283,6 +283,8 @@ class Model(GraphProvider):
         all_internal = constraint.all_internal_llm_tokens_bitset()
         model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
 
+        nodeopt_graph = model._to_nodeopt_graph()
+        model._from_nodeopt_graph(nodeopt_graph)
         model._unconditionalize_guaranteed_transitions()
 
         return model
@@ -1056,10 +1058,10 @@ class Model(GraphProvider):
 
     def _unconditionalize_guaranteed_transitions(
         self,
-        time_budget_sec: float = 10.0,
+        time_budget_sec: float = 2.0,
         stagnation_limit: int = 2000,
         rng_seed: Optional[int] = None,
-        contract_policy: str = "passthrough",
+        contract_policy: str = "aggressive",
         remove_covered_in_edges: bool = True,
         shortcut_max_passes: int = 4,
     ) -> None:
