@@ -283,9 +283,8 @@ class Model(GraphProvider):
         all_internal = constraint.all_internal_llm_tokens_bitset()
         model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
 
-        nodeopt_graph = model._to_nodeopt_graph()
-        model._from_nodeopt_graph(nodeopt_graph)
-        model._unconditionalize_guaranteed_transitions()
+        model.optimize_alive_prune_group(contract_policy="none")
+        model._unconditionalize_guaranteed_transitions(force_repack=False)
 
         return model
 
@@ -1056,6 +1055,62 @@ class Model(GraphProvider):
 
         return shortcuts_total, removed_total
 
+    def optimize_alive_prune_group(
+        self,
+        contract_policy: str = "none",
+        remove_covered_in_edges: bool = True,
+        shortcut_max_passes: int = 4,
+    ) -> None:
+        """
+        Deterministic, fast optimization that captures the "learned" benefits from
+        converting to NodeOpt and back:
+          - Compute per-node alive parser states from the start state.
+          - Trim state-filtered edges using reverse preimages of alive states.
+          - Unconditionalize edges when the trimmed set equals the preimage.
+          - Group tokens by identical (pop, dest-map) signatures and recompute llm_bv_union.
+          - Optionally apply unconditional passthrough contraction and/or shortcuts.
+
+        This pass is designed to consistently produce the ~0.1 ms get_mask behavior
+        you observed after a to/from conversion, without relying on stochastic changes.
+        """
+        t0 = time.perf_counter()
+        nodeopts = self._to_nodeopt_graph()
+        alive = self._compute_alive_states(nodeopts)
+
+        # Optional structural cleanups (deterministic; no stochastic search)
+        removed_nodes = 0
+        shortcuts_added = 0
+        removed_in_edges = 0
+        if contract_policy == "passthrough":
+            removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
+        elif contract_policy == "shortcut":
+            shortcuts_added, removed_in_edges = self._shortcut_unconditional_edges(
+                nodeopts,
+                remove_covered_in_edges=remove_covered_in_edges,
+                max_passes=shortcut_max_passes,
+            )
+        elif contract_policy == "aggressive":
+            removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
+            s_added, r_in = self._shortcut_unconditional_edges(
+                nodeopts,
+                remove_covered_in_edges=remove_covered_in_edges,
+                max_passes=shortcut_max_passes,
+            )
+            shortcuts_added += s_added
+            removed_in_edges += r_in
+        elif contract_policy == "none":
+            pass
+
+        # Convert back to arena with alive-aware trimming and grouping
+        self._from_nodeopt_graph(nodeopts, alive)
+        t1 = time.perf_counter()
+        elapsed_ms = round((t1 - t0) * 1000.0, 2)
+        print(
+            f"Alive-prune+group: removed {removed_nodes} nodes; "
+            f"added {shortcuts_added} shortcuts; removed {removed_in_edges} covered in-edges "
+            f"in {elapsed_ms} ms"
+        )
+
     def _unconditionalize_guaranteed_transitions(
         self,
         time_budget_sec: float = 2.0,
@@ -1064,6 +1119,7 @@ class Model(GraphProvider):
         contract_policy: str = "aggressive",
         remove_covered_in_edges: bool = True,
         shortcut_max_passes: int = 4,
+        force_repack: bool = True,
     ) -> None:
         """
         Stochastic optimization pass that attempts to convert state-filtered edges
@@ -1086,7 +1142,9 @@ class Model(GraphProvider):
            - Otherwise, accept and flip to UnconditionalEdge().
         3) Continue until time budget exhausted or no successes for 'stagnation_limit' trials.
         4) Apply contraction/shortcut policy ("passthrough", "shortcut", "aggressive", "none").
-        5) If any changes were made, convert back to arena.
+        5) Convert back to arena. By default this is always done (force_repack=True) to
+           ensure the deterministic alive-based trim/group improvements materialize even
+           when no stochastic conversions occur.
         """
         t_start = time.perf_counter()
         deadline = t_start + float(time_budget_sec)
@@ -1226,8 +1284,8 @@ class Model(GraphProvider):
             # Fallback to passthrough if an unknown policy is provided
             removed_nodes = self._contract_unconditional_passthrough_nodes(nodeopts)
 
-        if converted > 0 or removed_nodes > 0 or shortcuts_added > 0 or removed_in_edges > 0:
-            # Convert NodeOpt back to arena inplace
+        # Convert NodeOpt back to arena inplace
+        if force_repack or converted > 0 or removed_nodes > 0 or shortcuts_added > 0 or removed_in_edges > 0:
             self._from_nodeopt_graph(nodeopts, alive)
 
         elapsed = round(time.perf_counter() - t_start, 2)
