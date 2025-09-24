@@ -1106,90 +1106,90 @@ class Model(GraphProvider):
 
             nodeopts[int(uid)] = NodeOpt(children={t: dict(dm) for t, dm in token_map.items()}, is_end=self.is_end(int(uid)))
 
-            alive = self._compute_alive_states(nodeopts)
+        alive = self._compute_alive_states(nodeopts)
 
-            for node_id, nodeopt in tqdm(nodeopts.items(), desc="Converting from NodeOpt graph"):
-                # Group tokens by (pop, signature-of-dest-map)
-                # signature: tuple(sorted((dest_id, None|tuple(sorted(states))) ... ))
-                groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Set[int]] = {}
-                groups_destmap: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Dict[int, Optional[Tuple[int, ...]]]] = {}
+        for node_id, nodeopt in tqdm(nodeopts.items(), desc="Converting from NodeOpt graph"):
+            # Group tokens by (pop, signature-of-dest-map)
+            # signature: tuple(sorted((dest_id, None|tuple(sorted(states))) ... ))
+            groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Set[int]] = {}
+            groups_destmap: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Dict[int, Optional[Tuple[int, ...]]]] = {}
 
-                # Precompute preimage(alive[node_id], pop) for all pops used in this node
-                node_alive: Set[int] = alive.get(int(node_id), set())
-                pre_cache: Dict[int, Set[int]] = {}
+            # Precompute preimage(alive[node_id], pop) for all pops used in this node
+            node_alive: Set[int] = alive.get(int(node_id), set())
+            pre_cache: Dict[int, Set[int]] = {}
 
-                for tok, dests in nodeopt.children.items():
-                    # Split per-pop since original groups are by (pop, llm_bv)
-                    pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = {}
-                    for dest_id, (pop, edge) in dests.items():
-                        # Compute preimage for this pop once
-                        pre = pre_cache.get(pop)
-                        if pre is None:
-                            pre = self._nodeopt_pop_preimage(node_alive, pop)
-                            pre_cache[pop] = pre
-                        if not pre:
-                            # No reachable states at this pop — drop this destination entirely
+            for tok, dests in nodeopt.children.items():
+                # Split per-pop since original groups are by (pop, llm_bv)
+                pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = {}
+                for dest_id, (pop, edge) in dests.items():
+                    # Compute preimage for this pop once
+                    pre = pre_cache.get(pop)
+                    if pre is None:
+                        pre = self._nodeopt_pop_preimage(node_alive, pop)
+                        pre_cache[pop] = pre
+                    if not pre:
+                        # No reachable states at this pop — drop this destination entirely
+                        continue
+
+                    # Trim allowed states by intersecting with preimage
+                    if isinstance(edge, UnconditionalEdge):
+                        allowed: Optional[Tuple[int, ...]] = None
+                    elif isinstance(edge, StateEdge):
+                        trimmed = set(edge.states).intersection(pre)
+                        if not trimmed:
+                            # Unreachable for any alive-derived state; drop
                             continue
-
-                        # Trim allowed states by intersecting with preimage
-                        if isinstance(edge, UnconditionalEdge):
-                            allowed: Optional[Tuple[int, ...]] = None
-                        elif isinstance(edge, StateEdge):
-                            trimmed = set(edge.states).intersection(pre)
-                            if not trimmed:
-                                # Unreachable for any alive-derived state; drop
-                                continue
-                            # If the trimmed set equals pre, it is effectively unconditional
-                            if trimmed == pre:
-                                allowed = None
-                            else:
-                                allowed = tuple(sorted(trimmed))
+                        # If the trimmed set equals pre, it is effectively unconditional
+                        if trimmed == pre:
+                            allowed = None
                         else:
-                            # Defensive: treat unknown edge kinds as non-unconditional state edges
-                            # (shouldn't happen)
-                            continue
+                            allowed = tuple(sorted(trimmed))
+                    else:
+                        # Defensive: treat unknown edge kinds as non-unconditional state edges
+                        # (shouldn't happen)
+                        continue
 
-                        sub = pop_to_submap.get(pop)
-                        if sub is None:
-                            sub = {}
-                            pop_to_submap[pop] = sub
-                        sub[int(dest_id)] = allowed
+                    sub = pop_to_submap.get(pop)
+                    if sub is None:
+                        sub = {}
+                        pop_to_submap[pop] = sub
+                    sub[int(dest_id)] = allowed
 
-                    for pop, submap in pop_to_submap.items():
-                        if not submap:
-                            # All destinations for this pop were pruned away for this token
-                            continue
-                        signature = tuple(sorted(
-                            (int(did), None if allowed is None else tuple(allowed))
-                            for did, allowed in submap.items()
-                        ))
-                        key = (int(pop), signature)
-                        if key not in groups_tokens:
-                            groups_tokens[key] = set()
-                            groups_destmap[key] = dict(submap)
-                        groups_tokens[key].add(int(tok))
+                for pop, submap in pop_to_submap.items():
+                    if not submap:
+                        # All destinations for this pop were pruned away for this token
+                        continue
+                    signature = tuple(sorted(
+                        (int(did), None if allowed is None else tuple(allowed))
+                        for did, allowed in submap.items()
+                    ))
+                    key = (int(pop), signature)
+                    if key not in groups_tokens:
+                        groups_tokens[key] = set()
+                        groups_destmap[key] = dict(submap)
+                    groups_tokens[key].add(int(tok))
 
-                new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-                llm_union: LLMTokenSet = LLMTokenSet.empty()
-                for (pop, _signature), token_set in groups_tokens.items():
-                    llm_bv = LLMTokenSet.from_indices(sorted(token_set))
-                    llm_union = llm_union.union(llm_bv)
-                    submap = groups_destmap[(pop, _signature)]
-                    dests_list: List[Tuple[int, StateIDSet]] = []
-                    for dest_id in sorted(submap.keys()):
-                        allowed = submap[dest_id]
-                        if allowed is None:
-                            state_bv = StateIDSet.empty()
-                        else:
-                            state_bv = StateIDSet.from_indices(list(allowed))
-                        dests_list.append((int(dest_id), state_bv))
-                    new_children.append(((int(pop), llm_bv), dests_list))
+            new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+            llm_union: LLMTokenSet = LLMTokenSet.empty()
+            for (pop, _signature), token_set in groups_tokens.items():
+                llm_bv = LLMTokenSet.from_indices(sorted(token_set))
+                llm_union = llm_union.union(llm_bv)
+                submap = groups_destmap[(pop, _signature)]
+                dests_list: List[Tuple[int, StateIDSet]] = []
+                for dest_id in sorted(submap.keys()):
+                    allowed = submap[dest_id]
+                    if allowed is None:
+                        state_bv = StateIDSet.empty()
+                    else:
+                        state_bv = StateIDSet.from_indices(list(allowed))
+                    dests_list.append((int(dest_id), state_bv))
+                new_children.append(((int(pop), llm_bv), dests_list))
 
-                # Update arena node content in-place
-                node_ref = self.arena.get(int(node_id), {})
-                node_ref["children"] = new_children
-                node_ref["llm_bv_union"] = llm_union
-                self.arena[int(node_id)] = node_ref
+            # Update arena node content in-place
+            node_ref = self.arena.get(int(node_id), {})
+            node_ref["children"] = new_children
+            node_ref["llm_bv_union"] = llm_union
+            self.arena[int(node_id)] = node_ref
 
     def _unconditionalize_guaranteed_transitions(
         self,
