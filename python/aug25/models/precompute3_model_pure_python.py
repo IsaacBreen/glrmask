@@ -57,32 +57,6 @@ class NodeOpt:
     children: Dict[LLMToken, Dict[int, Tuple[int, Edge]]]
     is_end: bool
 
-# Optimization-time edge types for state propagation/unconditionalization
-State = int
-LLMToken = int
-
-@dataclass(frozen=True)
-class PopEdge:
-    n: int
-
-@dataclass(frozen=True)
-class StateEdge:
-    states: Set[State]
-
-@dataclass(frozen=True)
-class UnconditionalEdge:
-    pass
-
-# One of pop-only, state-masked, or unconditional. For storage we keep pop
-# alongside Edge (i.e., children[token][dest] -> (pop, Edge)).
-Edge = Union[PopEdge, StateEdge, UnconditionalEdge]
-
-@dataclass
-class NodeOpt:
-    # children[token][dest] = (pop, Edge)
-    children: Dict[LLMToken, Dict[int, Tuple[int, Edge]]]
-    is_end: bool
-
 
 @dataclass(frozen=True)
 class Reduce:
@@ -303,7 +277,6 @@ class Model(GraphProvider):
             pmc_rs[int(tsid)] = mapped
         model.possible_matches_cache = pmc_rs
         model.internal_to_original_map = constraint.internal_to_original_map()
-        # Convert universe LLM tokens bitset to RangeSet
         # Convert universe LLM tokens bitset to RangeSet
         all_internal = constraint.all_internal_llm_tokens_bitset()
         model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
@@ -756,342 +729,54 @@ class Model(GraphProvider):
         - Recompute llm_bv_union for each node.
         """
         for node_id, nodeopt in nodeopts.items():
-            # 1. For each token, determine its transition map, partitioned by pop.
-            #    token_transitions: {token -> {pop -> {dest -> states}}}
-            token_transitions = collections.defaultdict(lambda: collections.defaultdict(dict))
+            # Group tokens by (pop, signature-of-dest-map)
+            # signature: tuple(sorted((dest_id, None|tuple(sorted(states))) ... ))
+            groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Set[int]] = {}
+            groups_destmap: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Dict[int, Optional[Tuple[int, ...]]]] = {}
+
             for tok, dests in nodeopt.children.items():
+                # Split per-pop since original groups are by (pop, llm_bv)
+                pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = {}
                 for dest_id, (pop, edge) in dests.items():
-                    allowed = tuple(sorted(edge.states)) if isinstance(edge, StateEdge) else None
-                    token_transitions[tok][pop][dest_id] = allowed
+                    allowed: Optional[Tuple[int, ...]]
+                    if isinstance(edge, StateEdge):
+                        allowed = tuple(sorted(edge.states))
+                    else:
+                        allowed = None
+                    sub = pop_to_submap.get(pop)
+                    if sub is None:
+                        sub = {}
+                        pop_to_submap[pop] = sub
+                    sub[int(dest_id)] = allowed
 
-            # 2. Invert the mapping to group tokens by identical (pop, dest_map).
-            #    sig_to_tokens: {(pop, dest_map_sig) -> {token}}
-            sig_to_tokens = collections.defaultdict(set)
-            for tok, pop_maps in token_transitions.items():
-                for pop, dest_map in pop_maps.items():
-                    # The signature must be canonical and hashable.
-                    sig = tuple(sorted(dest_map.items()))
-                    sig_to_tokens[(pop, sig)].add(tok)
+                for pop, submap in pop_to_submap.items():
+                    signature = tuple(sorted(
+                        (int(did), None if allowed is None else tuple(allowed))
+                        for did, allowed in submap.items()
+                    ))
+                    key = (int(pop), signature)
+                    if key not in groups_tokens:
+                        groups_tokens[key] = set()
+                        groups_destmap[key] = dict(submap)
+                    groups_tokens[key].add(int(tok))
 
-            # 3. Build the new `children` list for the arena.
             new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
             llm_union: LLMTokenSet = LLMTokenSet.empty()
-            for (pop, dest_map_sig), tokens in sig_to_tokens.items():
-                llm_bv = LLMTokenSet.from_indices(sorted(list(tokens)))
+            for (pop, _signature), token_set in groups_tokens.items():
+                llm_bv = LLMTokenSet.from_indices(sorted(token_set))
                 llm_union = llm_union.union(llm_bv)
-
+                submap = groups_destmap[(pop, _signature)]
                 dests_list: List[Tuple[int, StateIDSet]] = []
-                for dest_id, allowed in dest_map_sig:  # sig is already a sorted tuple of items
-                    state_bv = StateIDSet.empty()
+                for dest_id in sorted(submap.keys()):
+                    allowed = submap[dest_id]
                     if allowed is None:
                         state_bv = StateIDSet.empty()
                     else:
                         state_bv = StateIDSet.from_indices(list(allowed))
                     dests_list.append((int(dest_id), state_bv))
-
                 new_children.append(((int(pop), llm_bv), dests_list))
 
-            # 4. Update the arena node content in-place.
-            node_ref = self.arena.get(int(node_id), {})
-            node_ref["children"] = new_children
-            node_ref["llm_bv_union"] = llm_union
-            self.arena[int(node_id)] = node_ref
-
-    def _unconditionalize_guaranteed_transitions(
-        self,
-        time_budget_sec: float = 10.0,
-        stagnation_limit: int = 2000,
-        rng_seed: Optional[int] = None
-    ) -> None:
-        """
-        Stochastic optimization pass that attempts to convert state-filtered edges
-        to unconditional edges when doing so is guaranteed not to introduce new
-        accepting paths or merge with existing alive sets.
-
-        Algorithm overview:
-        1) Build NodeOpt graph and compute 'alive' parser states per node to fixpoint.
-        2) Randomly pick state-filtered edges. Let S be alive at src; E be edge's allowed set.
-           - X0 = S \ E
-           - If X0 is empty, we can immediately unconditionalize (edge is as restrictive as src allows).
-           - Else X1 = reverse_state_map^pop(X0). If X1 is empty, also safe to unconditionalize.
-           - If X1 intersects alive at destination, reject (would merge with existing alive states).
-           - Tentatively propagate X1 from destination; if it ever:
-               a) reaches an end node (nodeopt.is_end), or
-               b) intersects any alive set at any node,
-              then reject.
-           - Otherwise, accept and flip to UnconditionalEdge().
-        3) Continue until time budget exhausted or no successes for 'stagnation_limit' trials.
-        4) If any changes were made, convert back to arena.
-        """
-        t_start = time.perf_counter()
-        deadline = t_start + float(time_budget_sec)
-        rng = random.Random(rng_seed)
-
-        nodeopts = self._to_nodeopt_graph()
-        alive = self._compute_alive_states(nodeopts)
-
-        # Collect candidate edges: (src, token, dest)
-        candidates: List[Tuple[int, int, int]] = []
-        for src_id, nodeopt in nodeopts.items():
-            for tok, dest_map in nodeopt.children.items():
-                for dest_id, (_pop, edge) in dest_map.items():
-                    if isinstance(edge, StateEdge):
-                        candidates.append((int(src_id), int(tok), int(dest_id)))
-
-        if not candidates:
-            print("No state-filtered edges found; skipping unconditionalization.")
-            return
-
-        def simulate_propagation_from(node_id: int, seed_states: Set[int]) -> bool:
-            """
-            Return True if unsafe:
-              - intersects any alive set during propagation, or
-              - reaches an end node with a non-empty set.
-            Else return False (safe / ineffectual).
-            """
-            if not seed_states:
-                return False
-            # Immediate checks on starting node
-            if nodeopts[node_id].is_end and seed_states:
-                return True
-            if seed_states & alive.get(node_id, set()):
-                return True
-            pending: collections.deque[Tuple[int, Set[int]]] = collections.deque()
-            pending.append((node_id, set(seed_states)))
-            added: Dict[int, Set[int]] = {node_id: set(seed_states)}
-
-            while pending:
-                nid, states_here = pending.popleft()
-                if not states_here:
-                    continue
-                children = nodeopts[nid].children
-                for _tok, dest_map in children.items():
-                    for dest2, (pop2, edge2) in dest_map.items():
-                        pre2 = self._nodeopt_pop_preimage(states_here, pop2)
-                        if not pre2:
-                            continue
-                        if isinstance(edge2, StateEdge):
-                            pre2 = pre2.intersection(edge2.states)
-                            if not pre2:
-                                continue
-                        # Check end node or intersection with alive
-                        if nodeopts[dest2].is_end and pre2:
-                            return True
-                        if pre2 & alive.get(dest2, set()):
-                            return True
-                        # Only propagate brand-new additions for this simulation
-                        already = added.get(dest2)
-                        if already is None:
-                            added[dest2] = set(pre2)
-                            pending.append((dest2, set(pre2)))
-                        else:
-                            diff = pre2 - already
-                            if diff:
-                                already.update(diff)
-                                pending.append((dest2, diff))
-            return False
-
-        converted = 0
-        stagnation = 0
-        while candidates and time.perf_counter() < deadline and stagnation < stagnation_limit:
-            src, tok, dst = rng.choice(candidates)
-            edge_tuple = nodeopts[src].children.get(tok, {}).get(dst)
-            if edge_tuple is None:
-                # Removed or changed; drop from candidates
-                candidates.remove((src, tok, dst))
-                continue
-            pop, edge = edge_tuple
-            if isinstance(edge, UnconditionalEdge):
-                # No longer a candidate
-                candidates.remove((src, tok, dst))
-                continue
-            if not isinstance(edge, StateEdge):
-                # Shouldn't happen, but skip to be safe
-                candidates.remove((src, tok, dst))
-                continue
-
-            src_alive = alive.get(src, set())
-            allowed = edge.states
-            extra = src_alive - allowed
-            safe = False
-            if not extra:
-                safe = True
-            else:
-                seed = self._nodeopt_pop_preimage(extra, pop)
-                if not seed:
-                    safe = True
-                else:
-                    # If new states at destination intersect existing alive, reject
-                    if seed & alive.get(dst, set()):
-                        safe = False
-                    else:
-                        unsafe = simulate_propagation_from(dst, seed)
-                        safe = not unsafe
-
-            if safe:
-                # Convert to unconditional
-                nodeopts[src].children[tok][dst] = (pop, UnconditionalEdge())
-                candidates.remove((src, tok, dst))
-                converted += 1
-                stagnation = 0
-            else:
-                stagnation += 1
-
-        if converted > 0:
-            # Convert NodeOpt back to arena inplace
-            self._from_nodeopt_graph(nodeopts)
-        # If converted == 0, arena remains unchanged.
-
-        print(f"Unconditionalized {converted} edges in {round(time.perf_counter() - t_start, 2)} sec")
-    def _nodeopt_pop_preimage(self, states: Set[int], pop: int) -> Set[int]:
-        """
-        Compute the preimage of 'states' by applying reverse_state_map 'pop' times.
-        reverse_state_map maps to_state -> set(from_state) for one parser transition step.
-        """
-        if pop <= 0:
-            return set(states)
-        current = set(states)
-        for _ in range(pop):
-            if not current:
-                return set()
-            nxt: Set[int] = set()
-            for s in current:
-                preds = self.reverse_state_map.get(s, set())
-                if preds:
-                    nxt.update(preds)
-            current = nxt
-        return current
-
-    def _to_nodeopt_graph(self) -> Dict[NodeID, NodeOpt]:
-        """
-        Convert the arena children into a NodeOpt graph:
-        - Explode llm_bv into individual tokens
-        - Represent each edge as (pop, Edge), where Edge is either
-          StateEdge(states) or UnconditionalEdge() (pop carried separately).
-        """
-        nodeopts: Dict[NodeID, NodeOpt] = {}
-        for uid, node in self.arena.items():
-            token_map: Dict[int, Dict[int, Tuple[int, Edge]]] = collections.defaultdict(dict)
-            children = node.get("children") or []
-            for (pop, llm_bv), dests in children:
-                tokens = llm_bv.to_indices()
-                for dest_idx, state_bv in dests:
-                    if state_bv.is_empty():
-                        edge_obj: Edge = UnconditionalEdge()
-                    else:
-                        edge_obj = StateEdge(set(state_bv.to_indices()))
-                    for tok in tokens:
-                        existing = token_map[tok].get(int(dest_idx))
-                        if existing is None:
-                            # store a copy of states set if StateEdge
-                            if isinstance(edge_obj, StateEdge):
-                                token_map[tok][int(dest_idx)] = (int(pop), StateEdge(set(edge_obj.states)))
-                            else:
-                                token_map[tok][int(dest_idx)] = (int(pop), UnconditionalEdge())
-                        else:
-                            # Merge if the exact same dest/token encountered again
-                            existing_pop, existing_edge = existing
-                            if existing_pop != int(pop):
-                                # Extremely rare; conservatively collapse to unconditional with the existing pop.
-                                token_map[tok][int(dest_idx)] = (existing_pop, UnconditionalEdge())
-                            else:
-                                if isinstance(existing_edge, UnconditionalEdge) or isinstance(edge_obj, UnconditionalEdge):
-                                    token_map[tok][int(dest_idx)] = (existing_pop, UnconditionalEdge())
-                                else:
-                                    merged = set(existing_edge.states)
-                                    merged.update(edge_obj.states)
-                                    token_map[tok][int(dest_idx)] = (existing_pop, StateEdge(merged))
-
-            nodeopts[int(uid)] = NodeOpt(children={t: dict(dm) for t, dm in token_map.items()}, is_end=self.is_end(int(uid)))
-        return nodeopts
-
-    def _compute_alive_states(self, nodeopts: Dict[NodeID, NodeOpt]) -> Dict[NodeID, Set[int]]:
-        """
-        Compute per-node 'alive' parser state sets at fixpoint.
-        Seed with {start_state_id} at all root nodes.
-        Propagation rules:
-        - Across each edge (pop, Edge):
-            S' = reverse_state_map^pop(S)
-            If StateEdge(states): S'' = S' ∩ states
-            If UnconditionalEdge: S'' = S'
-        """
-        start_state = self.parser_table.start_state_id
-        alive: Dict[int, Set[int]] = collections.defaultdict(set)
-
-        q = collections.deque()
-        for _, root in self.roots_map.items():
-            if start_state not in alive[root]:
-                alive[root].add(start_state)
-                q.append(root)
-
-        while q:
-            node_id = q.popleft()
-            S = alive[node_id]
-            if not S:
-                continue
-            children = nodeopts.get(node_id)
-            if not children:
-                continue
-            for _tok, dest_map in children.children.items():
-                for dest_id, (pop, edge) in dest_map.items():
-                    pre = self._nodeopt_pop_preimage(S, pop)
-                    if not pre:
-                        continue
-                    if isinstance(edge, StateEdge):
-                        pre = pre.intersection(edge.states)
-                        if not pre:
-                            continue
-                    # unconditional leaves 'pre' unchanged
-                    dest_alive = alive[dest_id]
-                    new_states = pre - dest_alive
-                    if new_states:
-                        dest_alive.update(new_states)
-                        q.append(dest_id)
-        return {k: set(v) for k, v in alive.items()}
-
-    def _from_nodeopt_graph(self, nodeopts: Dict[NodeID, NodeOpt]) -> None:
-        """
-        Convert NodeOpt back into the arena node format:
-        - Group tokens by identical (pop, dest -> state_bv) mapping into shared llm_bv bitsets.
-        - Recompute llm_bv_union for each node.
-        """
-        for node_id, nodeopt in nodeopts.items():
-            # 1. For each token, determine its transition map, partitioned by pop.
-            #    token_transitions: {token -> {pop -> {dest -> states}}}
-            token_transitions = collections.defaultdict(lambda: collections.defaultdict(dict))
-            for tok, dests in nodeopt.children.items():
-                for dest_id, (pop, edge) in dests.items():
-                    allowed = tuple(sorted(edge.states)) if isinstance(edge, StateEdge) else None
-                    token_transitions[tok][pop][dest_id] = allowed
-
-            # 2. Invert the mapping to group tokens by identical (pop, dest_map).
-            #    sig_to_tokens: {(pop, dest_map_sig) -> {token}}
-            sig_to_tokens = collections.defaultdict(set)
-            for tok, pop_maps in token_transitions.items():
-                for pop, dest_map in pop_maps.items():
-                    # The signature must be canonical and hashable.
-                    sig = tuple(sorted(dest_map.items()))
-                    sig_to_tokens[(pop, sig)].add(tok)
-
-            # 3. Build the new `children` list for the arena.
-            new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-            llm_union: LLMTokenSet = LLMTokenSet.empty()
-            for (pop, dest_map_sig), tokens in sig_to_tokens.items():
-                llm_bv = LLMTokenSet.from_indices(sorted(list(tokens)))
-                llm_union = llm_union.union(llm_bv)
-
-                dests_list: List[Tuple[int, StateIDSet]] = []
-                for dest_id, allowed in dest_map_sig:  # sig is already a sorted tuple of items
-                    state_bv = StateIDSet.empty()
-                    if allowed is None:
-                        state_bv = StateIDSet.empty()
-                    else:
-                        state_bv = StateIDSet.from_indices(list(allowed))
-                    dests_list.append((int(dest_id), state_bv))
-
-                new_children.append(((int(pop), llm_bv), dests_list))
-
-            # 4. Update the arena node content in-place.
+            # Update arena node content in-place
             node_ref = self.arena.get(int(node_id), {})
             node_ref["children"] = new_children
             node_ref["llm_bv_union"] = llm_union
