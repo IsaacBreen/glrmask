@@ -1074,7 +1074,7 @@ class Model(GraphProvider):
             children = node.get("children") or []
             for (pop, _llm_bv), dests in children:
                 for dest_id, state_bv in dests:
-                    unique_edges.add((int(pop), int(dest_id), state_bv.to_ranges()))
+                    unique_edges.add((int(pop), int(dest_id), tuple(state_bv.to_ranges())))
 
             for pop, dest_id, ranges in unique_edges:
                 propagation_graph[src_id].append((pop, dest_id, StateIDSet.from_ranges(ranges)))
@@ -1152,9 +1152,9 @@ class Model(GraphProvider):
                 if not pruned_dests:
                     continue
 
-                pruned_dests.sort(key=lambda x: (x[0], x[1].to_ranges()))
+                pruned_dests.sort(key=lambda x: (x[0], tuple(x[1].to_ranges())))
 
-                signature = (pop, tuple((d, sbv.to_ranges()) for d, sbv in pruned_dests))
+                signature = (pop, tuple((d, tuple(sbv.to_ranges())) for d, sbv in pruned_dests))
                 groups[signature] = groups[signature].union(llm_bv)
 
             new_children = []
