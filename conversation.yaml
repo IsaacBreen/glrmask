@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - python/aug25/models/precompute3_model_pure_python.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     python/aug25/models/precompute3_model_pure_python.py: |+
@@ -2147,18 +2147,33 @@ local_system:
                   alive = self._compute_alive_states(nodeopts)
 
               for node_id, nodeopt in tqdm(nodeopts.items(), desc="Converting from NodeOpt graph"):
+                  node_id_int = int(node_id)
+                  node_alive: Set[int] = alive.get(node_id_int, set())
+
+                  if not node_alive:
+                      node_ref = self.arena.get(node_id_int, {})
+                      node_ref["children"] = []
+                      node_ref["llm_bv_union"] = LLMTokenSet.empty()
+                      self.arena[node_id_int] = node_ref
+                      continue
+
                   # Group tokens by (pop, signature-of-dest-map)
                   # signature: tuple(sorted((dest_id, None|tuple(sorted(states))) ... ))
-                  groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Set[int]] = {}
-                  groups_destmap: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Dict[int, Optional[Tuple[int, ...]]]] = {}
+                  groups_tokens: Dict[
+                      Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]],
+                      Set[int],
+                  ] = collections.defaultdict(set)
+                  groups_destmap: Dict[
+                      Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]],
+                      Dict[int, Optional[Tuple[int, ...]]],
+                  ] = {}
 
                   # Precompute preimage(alive[node_id], pop) for all pops used in this node
-                  node_alive: Set[int] = alive.get(int(node_id), set())
                   pre_cache: Dict[int, Set[int]] = {}
 
                   for tok, dests in nodeopt.children.items():
                       # Split per-pop since original groups are by (pop, llm_bv)
-                      pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = {}
+                      pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = collections.defaultdict(dict)
                       for dest_id, (pop, edge) in dests.items():
                           # Compute preimage for this pop once
                           pre = pre_cache.get(pop)
@@ -2187,23 +2202,16 @@ local_system:
                               # (shouldn't happen)
                               continue
 
-                          sub = pop_to_submap.get(pop)
-                          if sub is None:
-                              sub = {}
-                              pop_to_submap[pop] = sub
+                          sub = pop_to_submap[pop]
                           sub[int(dest_id)] = allowed
 
                       for pop, submap in pop_to_submap.items():
                           if not submap:
                               # All destinations for this pop were pruned away for this token
                               continue
-                          signature = tuple(sorted(
-                              (int(did), None if allowed is None else tuple(allowed))
-                              for did, allowed in submap.items()
-                          ))
+                          signature = tuple(sorted(submap.items()))
                           key = (int(pop), signature)
-                          if key not in groups_tokens:
-                              groups_tokens[key] = set()
+                          if key not in groups_destmap:
                               groups_destmap[key] = dict(submap)
                           groups_tokens[key].add(int(tok))
 
@@ -2224,10 +2232,10 @@ local_system:
                       new_children.append(((int(pop), llm_bv), dests_list))
 
                   # Update arena node content in-place
-                  node_ref = self.arena.get(int(node_id), {})
+                  node_ref = self.arena.get(node_id_int, {})
                   node_ref["children"] = new_children
                   node_ref["llm_bv_union"] = llm_union
-                  self.arena[int(node_id)] = node_ref
+                  self.arena[node_id_int] = node_ref
 
           def _contract_unconditional_passthrough_nodes(
               self,
@@ -2451,113 +2459,9 @@ local_system:
           def optimize_alive_prune_group(
               self,
           ) -> None:
-              # Fast alive-state computation without building a full token-exploded graph
-              propagation_graph = collections.defaultdict(list)
-              for src_id, node in self.arena.items():
-                  src_id = int(src_id)
-                  unique_edges = set()
-                  children = node.get("children") or []
-                  for (pop, _llm_bv), dests in children:
-                      for dest_id, state_bv in dests:
-                          unique_edges.add((int(pop), int(dest_id), tuple(map(tuple, state_bv.to_ranges()))))
-
-                  for pop, dest_id, ranges in unique_edges:
-                      propagation_graph[src_id].append((pop, dest_id, StateIDSet.from_ranges(ranges)))
-
-              start_state = self.parser_table.start_state_id
-              alive: Dict[int, Set[int]] = collections.defaultdict(set)
-              q = collections.deque()
-              for _, root in self.roots_map.items():
-                  if start_state not in alive[root]:
-                      alive[root].add(start_state)
-                      q.append(root)
-
-              while q:
-                  src_id = q.popleft()
-                  S = alive[src_id]
-                  if not S:
-                      continue
-
-                  for pop, dest_id, state_bv in propagation_graph.get(src_id, []):
-                      pre = self._nodeopt_pop_preimage(S, pop)
-                      if not pre:
-                          continue
-
-                      if not state_bv.is_empty():
-                          pre = {s for s in pre if state_bv.contains(s)}
-                          if not pre:
-                              continue
-
-                      dest_alive = alive[dest_id]
-                      new_states = pre - dest_alive
-                      if new_states:
-                          dest_alive.update(new_states)
-                          q.append(dest_id)
-
-              # Prune and repack graph based on alive states, avoiding token-explosion.
-              for node_id, node in tqdm(self.arena.items(), desc="Converting from NodeOpt graph"):
-                  node_id = int(node_id)
-
-                  groups: Dict[Any, LLMTokenSet] = collections.defaultdict(LLMTokenSet.empty)
-
-                  node_alive: Set[int] = alive.get(node_id, set())
-                  pre_cache: Dict[int, Set[int]] = {}
-
-                  children = node.get("children") or []
-                  for (pop, llm_bv), dests in children:
-                      pop = int(pop)
-
-                      pre = pre_cache.get(pop)
-                      if pre is None:
-                          pre = self._nodeopt_pop_preimage(node_alive, pop)
-                          pre_cache[pop] = pre
-
-                      if not pre:
-                          continue
-
-                      pruned_dests = []
-                      for dest_id, state_bv in dests:
-                          dest_id = int(dest_id)
-
-                          if state_bv.is_empty():
-                              pruned_dests.append((dest_id, StateIDSet.empty()))
-                              continue
-
-                          # Intersect state_bv with preimage states
-                          trimmed_states = {s for s in pre if state_bv.contains(s)}
-
-                          if not trimmed_states:
-                              continue
-
-                          if trimmed_states == pre:
-                              pruned_dests.append((dest_id, StateIDSet.empty()))
-                          else:
-                              pruned_dests.append((dest_id, StateIDSet.from_indices(list(trimmed_states))))
-
-                      if not pruned_dests:
-                          continue
-
-                      pruned_dests.sort(key=lambda x: (x[0], tuple(map(tuple, x[1].to_ranges()))))
-
-                      signature = (pop, tuple((d, tuple(map(tuple, sbv.to_ranges()))) for d, sbv in pruned_dests))
-                      groups[signature] = groups[signature].union(llm_bv)
-
-                  new_children = []
-                  llm_union: LLMTokenSet = LLMTokenSet.empty()
-                  for signature, llm_bv in groups.items():
-                      pop, dests_ranges = signature
-                      dests_list = []
-                      for dest_id, ranges in dests_ranges:
-                          dests_list.append((dest_id, StateIDSet.from_ranges(ranges)))
-
-                      new_children.append(((pop, llm_bv), dests_list))
-                      llm_union = llm_union.union(llm_bv)
-
-                  # Update arena node content in-place
-                  node_ref = self.arena.get(node_id, {})
-                  node_ref["children"] = new_children
-                  node_ref["llm_bv_union"] = llm_union
-                  self.arena[node_id] = node_ref
+              nodeopts = self._to_nodeopt_graph()
+              alive = self._compute_alive_states(nodeopts)
+              self._from_nodeopt_graph(nodeopts, alive)
 
           def _unconditionalize_guaranteed_transitions(
               self,
@@ -2757,7 +2661,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - openai/resp_68d3d9e565d48193a9b2dd46e42ffa920b32f5975f9d9bb7
   code_completion_model:
     - cp
   commit_message_model:
@@ -4173,7 +4077,9 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: Make optimize_alive_prune_group much faster.
+  - user: Make optimize_alive_prune_group faster. Ensure it's functionally the same.
+      Be careful. Be safe. Only safe changes. The most important thing is that it
+      remains functionally unchanged.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4192,147 +4098,184 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. I can help you optimize the `optimize_alive_prune_group` method for better performance. The main issue with the current implementation is its reliance on a `NodeOpt` intermediate graph representation that is "exploded" by individual LLM tokens. This leads to very large data structures and excessive iteration.
+      1. In `python/aug25/models/precompute3_model_pure_python.py`, locate the `for node_id, nodeopt in tqdm(...` loop inside `_from_nodeopt_graph`. Replace the entire block from the comment `# Group tokens by (pop, signature-of-dest-map)` down to the assignment to `self.arena[...]` with the following updated version. This introduces `node_id_int`, skips work for nodes with no alive states, reuses `collections.defaultdict` for the per-token and per-group structures, and builds grouping signatures with `tuple(sorted(submap.items()))`:
+         ```python
+                  node_id_int = int(node_id)
+                  node_alive: Set[int] = alive.get(node_id_int, set())
 
-      My proposed solution avoids this token-wise explosion by working directly with the more compact `arena` representation. Here's how we'll modify the `optimize_alive_prune_group` method:
-
-      1.  **Compute Alive States Efficiently**: First, we'll build a temporary, token-agnostic "propagation graph". This graph will only contain the unique structural edges relevant for calculating the "alive" parser states, without duplicating them for every token. We'll then run the fixpoint algorithm on this much smaller graph to compute the `alive` state sets for each node.
-
-      2.  **Prune and Repack in One Pass**: Next, we'll iterate through the `arena` representation of the graph. For each node, we'll use the pre-computed `alive` states to prune the state sets on its outgoing edges. As we do this, we'll dynamically re-group edges that become structurally identical after pruning. This avoids the expensive process of creating a huge intermediate graph and then converting it back.
-
-      This approach performs the same logical optimization but should be significantly faster by avoiding the costly creation and processing of the token-exploded `NodeOpt` graph.
-
-      Here are the step-by-step instructions to apply this change.
-
-      ### Step-by-step Instructions
-
-      In the file `python/aug25/models/precompute3_model_pure_python.py`, locate the `optimize_alive_prune_group` method within the `Model` class and replace its entire body with the new, optimized implementation below.
-
-      **File:** `python/aug25/models/precompute3_model_pure_python.py`
-
-      <details>
-      <summary>Click to see the code to replace the body of `optimize_alive_prune_group`</summary>
-
-      ```python
-              # Fast alive-state computation without building a full token-exploded graph
-              propagation_graph = collections.defaultdict(list)
-              for src_id, node in self.arena.items():
-                  src_id = int(src_id)
-                  unique_edges = set()
-                  children = node.get("children") or []
-                  for (pop, _llm_bv), dests in children:
-                      for dest_id, state_bv in dests:
-                          unique_edges.add((int(pop), int(dest_id), state_bv.to_ranges()))
-
-                  for pop, dest_id, ranges in unique_edges:
-                      propagation_graph[src_id].append((pop, dest_id, StateIDSet.from_ranges(ranges)))
-
-              start_state = self.parser_table.start_state_id
-              alive: Dict[int, Set[int]] = collections.defaultdict(set)
-              q = collections.deque()
-              for _, root in self.roots_map.items():
-                  if start_state not in alive[root]:
-                      alive[root].add(start_state)
-                      q.append(root)
-
-              while q:
-                  src_id = q.popleft()
-                  S = alive[src_id]
-                  if not S:
+                  if not node_alive:
+                      node_ref = self.arena.get(node_id_int, {})
+                      node_ref["children"] = []
+                      node_ref["llm_bv_union"] = LLMTokenSet.empty()
+                      self.arena[node_id_int] = node_ref
                       continue
 
-                  for pop, dest_id, state_bv in propagation_graph.get(src_id, []):
-                      pre = self._nodeopt_pop_preimage(S, pop)
-                      if not pre:
-                          continue
+                  # Group tokens by (pop, signature-of-dest-map)
+                  # signature: tuple(sorted((dest_id, None|tuple(sorted(states))) ... ))
+                  groups_tokens: Dict[
+                      Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]],
+                      Set[int],
+                  ] = collections.defaultdict(set)
+                  groups_destmap: Dict[
+                      Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]],
+                      Dict[int, Optional[Tuple[int, ...]]],
+                  ] = {}
 
-                      if not state_bv.is_empty():
-                          pre = {s for s in pre if state_bv.contains(s)}
-                          if not pre:
-                              continue
-
-                      dest_alive = alive[dest_id]
-                      new_states = pre - dest_alive
-                      if new_states:
-                          dest_alive.update(new_states)
-                          q.append(dest_id)
-
-              # Prune and repack graph based on alive states, avoiding token-explosion.
-              for node_id, node in tqdm(self.arena.items(), desc="Converting from NodeOpt graph"):
-                  node_id = int(node_id)
-
-                  groups: Dict[Any, LLMTokenSet] = collections.defaultdict(LLMTokenSet.empty)
-
-                  node_alive: Set[int] = alive.get(node_id, set())
+                  # Precompute preimage(alive[node_id], pop) for all pops used in this node
                   pre_cache: Dict[int, Set[int]] = {}
 
-                  children = node.get("children") or []
-                  for (pop, llm_bv), dests in children:
-                      pop = int(pop)
-
-                      pre = pre_cache.get(pop)
-                      if pre is None:
-                          pre = self._nodeopt_pop_preimage(node_alive, pop)
-                          pre_cache[pop] = pre
-
-                      if not pre:
-                          continue
-
-                      pruned_dests = []
-                      for dest_id, state_bv in dests:
-                          dest_id = int(dest_id)
-
-                          if state_bv.is_empty():
-                              pruned_dests.append((dest_id, StateIDSet.empty()))
+                  for tok, dests in nodeopt.children.items():
+                      # Split per-pop since original groups are by (pop, llm_bv)
+                      pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = collections.defaultdict(dict)
+                      for dest_id, (pop, edge) in dests.items():
+                          # Compute preimage for this pop once
+                          pre = pre_cache.get(pop)
+                          if pre is None:
+                              pre = self._nodeopt_pop_preimage(node_alive, pop)
+                              pre_cache[pop] = pre
+                          if not pre:
+                              # No reachable states at this pop — drop this destination entirely
                               continue
 
-                          # Intersect state_bv with preimage states
-                          trimmed_states = {s for s in pre if state_bv.contains(s)}
-
-                          if not trimmed_states:
-                              continue
-
-                          if trimmed_states == pre:
-                              pruned_dests.append((dest_id, StateIDSet.empty()))
+                          # Trim allowed states by intersecting with preimage
+                          if isinstance(edge, UnconditionalEdge):
+                              allowed: Optional[Tuple[int, ...]] = None
+                          elif isinstance(edge, StateEdge):
+                              trimmed = set(edge.states).intersection(pre)
+                              if not trimmed:
+                                  # Unreachable for any alive-derived state; drop
+                                  continue
+                              # If the trimmed set equals pre, it is effectively unconditional
+                              if trimmed == pre:
+                                  allowed = None
+                              else:
+                                  allowed = tuple(sorted(trimmed))
                           else:
-                              pruned_dests.append((dest_id, StateIDSet.from_indices(list(trimmed_states))))
+                              # Defensive: treat unknown edge kinds as non-unconditional state edges
+                              # (shouldn't happen)
+                              continue
 
-                      if not pruned_dests:
-                          continue
+                          sub = pop_to_submap[pop]
+                          sub[int(dest_id)] = allowed
 
-                      pruned_dests.sort(key=lambda x: (x[0], x[1].to_ranges()))
+                      for pop, submap in pop_to_submap.items():
+                          if not submap:
+                              # All destinations for this pop were pruned away for this token
+                              continue
+                          signature = tuple(sorted(submap.items()))
+                          key = (int(pop), signature)
+                          if key not in groups_destmap:
+                              groups_destmap[key] = dict(submap)
+                          groups_tokens[key].add(int(tok))
 
-                      signature = (pop, tuple((d, sbv.to_ranges()) for d, sbv in pruned_dests))
-                      groups[signature] = groups[signature].union(llm_bv)
-
-                  new_children = []
+                  new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
                   llm_union: LLMTokenSet = LLMTokenSet.empty()
-                  for signature, llm_bv in groups.items():
-                      pop, dests_ranges = signature
-                      dests_list = []
-                      for dest_id, ranges in dests_ranges:
-                          dests_list.append((dest_id, StateIDSet.from_ranges(ranges)))
-
-                      new_children.append(((pop, llm_bv), dests_list))
+                  for (pop, _signature), token_set in groups_tokens.items():
+                      llm_bv = LLMTokenSet.from_indices(sorted(token_set))
                       llm_union = llm_union.union(llm_bv)
+                      submap = groups_destmap[(pop, _signature)]
+                      dests_list: List[Tuple[int, StateIDSet]] = []
+                      for dest_id in sorted(submap.keys()):
+                          allowed = submap[dest_id]
+                          if allowed is None:
+                              state_bv = StateIDSet.empty()
+                          else:
+                              state_bv = StateIDSet.from_indices(list(allowed))
+                          dests_list.append((int(dest_id), state_bv))
+                      new_children.append(((int(pop), llm_bv), dests_list))
 
-                  node_ref = self.arena.get(node_id, {})
+                  # Update arena node content in-place
+                  node_ref = self.arena.get(node_id_int, {})
                   node_ref["children"] = new_children
                   node_ref["llm_bv_union"] = llm_union
-                  self.arena[node_id] = node_ref
-      ```
-      </details>
+                  self.arena[node_id_int] = node_ref
+         ```
 
-      ### Git Diff
-
-      Here is the git diff to apply the changes directly.
+      2. In the same file, replace the entire body of `optimize_alive_prune_group` with the streamlined delegation that reuses the existing helpers:
+         ```python
+              nodeopts = self._to_nodeopt_graph()
+              alive = self._compute_alive_states(nodeopts)
+              self._from_nodeopt_graph(nodeopts, alive)
+         ```
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      index 4558e4d..a77e84a 100644
+      index 1b6f63f..8c2c4b1 100644
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -1202,128 +1202,91 @@
+      @@
+      -        for node_id, nodeopt in tqdm(nodeopts.items(), desc="Converting from NodeOpt graph"):
+      -            # Group tokens by (pop, signature-of-dest-map)
+      -            # signature: tuple(sorted((dest_id, None|tuple(sorted(states))) ... ))
+      -            groups_tokens: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Set[int]] = {}
+      -            groups_destmap: Dict[Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]], Dict[int, Optional[Tuple[int, ...]]]] = {}
+      -
+      -            # Precompute preimage(alive[node_id], pop) for all pops used in this node
+      -            node_alive: Set[int] = alive.get(int(node_id), set())
+      -            pre_cache: Dict[int, Set[int]] = {}
+      +        for node_id, nodeopt in tqdm(nodeopts.items(), desc="Converting from NodeOpt graph"):
+      +            node_id_int = int(node_id)
+      +            node_alive: Set[int] = alive.get(node_id_int, set())
+      +
+      +            if not node_alive:
+      +                node_ref = self.arena.get(node_id_int, {})
+      +                node_ref["children"] = []
+      +                node_ref["llm_bv_union"] = LLMTokenSet.empty()
+      +                self.arena[node_id_int] = node_ref
+      +                continue
+      +
+      +            # Group tokens by (pop, signature-of-dest-map)
+      +            # signature: tuple(sorted((dest_id, None|tuple(sorted(states))) ... ))
+      +            groups_tokens: Dict[
+      +                Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]],
+      +                Set[int],
+      +            ] = collections.defaultdict(set)
+      +            groups_destmap: Dict[
+      +                Tuple[int, Tuple[Tuple[int, Optional[Tuple[int, ...]]], ...]],
+      +                Dict[int, Optional[Tuple[int, ...]]],
+      +            ] = {}
+      +
+      +            # Precompute preimage(alive[node_id], pop) for all pops used in this node
+      +            pre_cache: Dict[int, Set[int]] = {}
+      @@
+      -                pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = {}
+      +                pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = collections.defaultdict(dict)
+                       for dest_id, (pop, edge) in dests.items():
+      @@
+      -                    sub = pop_to_submap.get(pop)
+      -                    if sub is None:
+      -                        sub = {}
+      -                        pop_to_submap[pop] = sub
+      -                    sub[int(dest_id)] = allowed
+      +                    sub = pop_to_submap[pop]
+      +                    sub[int(dest_id)] = allowed
+      @@
+      -                    signature = tuple(sorted(
+      -                        (int(did), None if allowed is None else tuple(allowed))
+      -                        for did, allowed in submap.items()
+      -                    ))
+      -                    key = (int(pop), signature)
+      -                    if key not in groups_tokens:
+      -                        groups_tokens[key] = set()
+      -                        groups_destmap[key] = dict(submap)
+      -                    groups_tokens[key].add(int(tok))
+      +                    signature = tuple(sorted(submap.items()))
+      +                    key = (int(pop), signature)
+      +                    if key not in groups_destmap:
+      +                        groups_destmap[key] = dict(submap)
+      +                    groups_tokens[key].add(int(tok))
+      @@
+      -            # Update arena node content in-place
+      -            node_ref = self.arena.get(int(node_id), {})
+      -            node_ref["children"] = new_children
+      -            node_ref["llm_bv_union"] = llm_union
+      -            self.arena[int(node_id)] = node_ref
+      +            # Update arena node content in-place
+      +            node_ref = self.arena.get(node_id_int, {})
+      +            node_ref["children"] = new_children
+      +            node_ref["llm_bv_union"] = llm_union
+      +            self.arena[node_id_int] = node_ref
+      @@
            def optimize_alive_prune_group(
                self,
            ) -> None:
@@ -4381,58 +4324,8 @@ messages:
       -
       -            # Precompute preimage(alive[node_id], pop) for all pops used in this node
       -            node_alive: Set[int] = alive.get(int(node_id), set())
-      +        # Fast alive-state computation without building a full token-exploded graph
-      +        propagation_graph = collections.defaultdict(list)
-      +        for src_id, node in self.arena.items():
-      +            src_id = int(src_id)
-      +            unique_edges = set()
-      +            children = node.get("children") or []
-      +            for (pop, _llm_bv), dests in children:
-      +                for dest_id, state_bv in dests:
-      +                    unique_edges.add((int(pop), int(dest_id), state_bv.to_ranges()))
-      +
-      +            for pop, dest_id, ranges in unique_edges:
-      +                propagation_graph[src_id].append((pop, dest_id, StateIDSet.from_ranges(ranges)))
-      +
-      +        start_state = self.parser_table.start_state_id
-      +        alive: Dict[int, Set[int]] = collections.defaultdict(set)
-      +        q = collections.deque()
-      +        for _, root in self.roots_map.items():
-      +            if start_state not in alive[root]:
-      +                alive[root].add(start_state)
-      +                q.append(root)
-      +
-      +        while q:
-      +            src_id = q.popleft()
-      +            S = alive[src_id]
-      +            if not S:
-      +                continue
-      +
-      +            for pop, dest_id, state_bv in propagation_graph.get(src_id, []):
-      +                pre = self._nodeopt_pop_preimage(S, pop)
-      +                if not pre:
-      +                    continue
-      +
-      +                if not state_bv.is_empty():
-      +                    pre = {s for s in pre if state_bv.contains(s)}
-      +                    if not pre:
-      +                        continue
-      +
-      +                dest_alive = alive[dest_id]
-      +                new_states = pre - dest_alive
-      +                if new_states:
-      +                    dest_alive.update(new_states)
-      +                    q.append(dest_id)
-      +
-      +        # Prune and repack graph based on alive states, avoiding token-explosion.
-      +        for node_id, node in tqdm(self.arena.items(), desc="Converting from NodeOpt graph"):
-      +            node_id = int(node_id)
-      +
-      +            groups: Dict[Any, LLMTokenSet] = collections.defaultdict(LLMTokenSet.empty)
-      +
-      +            node_alive: Set[int] = alive.get(node_id, set())
-                   pre_cache: Dict[int, Set[int]] = {}
-       
+      -            pre_cache: Dict[int, Set[int]] = {}
+      -
       -            for tok, dests in nodeopt.children.items():
       -                # Split per-pop since original groups are by (pop, llm_bv)
       -                pop_to_submap: Dict[int, Dict[int, Optional[Tuple[int, ...]]]] = {}
@@ -4499,67 +4392,15 @@ messages:
       -                        state_bv = StateIDSet.from_indices(list(allowed))
       -                    dests_list.append((int(dest_id), state_bv))
       -                new_children.append(((int(pop), llm_bv), dests_list))
-      +            children = node.get("children") or []
-      +            for (pop, llm_bv), dests in children:
-      +                pop = int(pop)
-      +
-      +                pre = pre_cache.get(pop)
-      +                if pre is None:
-      +                    pre = self._nodeopt_pop_preimage(node_alive, pop)
-      +                    pre_cache[pop] = pre
-      +
-      +                if not pre:
-      +                    continue
-      +
-      +                pruned_dests = []
-      +                for dest_id, state_bv in dests:
-      +                    dest_id = int(dest_id)
-      +
-      +                    if state_bv.is_empty():
-      +                        pruned_dests.append((dest_id, StateIDSet.empty()))
-      +                        continue
-      +
-      +                    # Intersect state_bv with preimage states
-      +                    trimmed_states = {s for s in pre if state_bv.contains(s)}
-      +
-      +                    if not trimmed_states:
-      +                        continue
-      +
-      +                    if trimmed_states == pre:
-      +                        pruned_dests.append((dest_id, StateIDSet.empty()))
-      +                    else:
-      +                        pruned_dests.append((dest_id, StateIDSet.from_indices(list(trimmed_states))))
-      +
-      +                if not pruned_dests:
-      +                    continue
-      +
-      +                pruned_dests.sort(key=lambda x: (x[0], x[1].to_ranges()))
-      +
-      +                signature = (pop, tuple((d, sbv.to_ranges()) for d, sbv in pruned_dests))
-      +                groups[signature] = groups[signature].union(llm_bv)
-      +
-      +            new_children = []
-      +            llm_union: LLMTokenSet = LLMTokenSet.empty()
-      +            for signature, llm_bv in groups.items():
-      +                pop, dests_ranges = signature
-      +                dests_list = []
-      +                for dest_id, ranges in dests_ranges:
-      +                    dests_list.append((dest_id, StateIDSet.from_ranges(ranges)))
-      +
-      +                new_children.append(((pop, llm_bv), dests_list))
-      +                llm_union = llm_union.union(llm_bv)
-       
-                   # Update arena node content in-place
+      -
+      -            # Update arena node content in-place
       -            node_ref = self.arena.get(int(node_id), {})
-      +            node_ref = self.arena.get(node_id, {})
-                   node_ref["children"] = new_children
-                   node_ref["llm_bv_union"] = llm_union
+      -            node_ref["children"] = new_children
+      -            node_ref["llm_bv_union"] = llm_union
       -            self.arena[int(node_id)] = node_ref
-      +            self.arena[node_id] = node_ref
-       
-           def _unconditionalize_guaranteed_transitions(
-               self,
-
+      +        nodeopts = self._to_nodeopt_graph()
+      +        alive = self._compute_alive_states(nodeopts)
+      +        self._from_nodeopt_graph(nodeopts, alive)
       ```
     metadata:
   - user: |
@@ -4571,230 +4412,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Optimize `optimize_alive_prune_group`
-      by avoiding token-exploded NodeOpt graph"'
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_model_pure_python.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      python -m python.aug25.benchmark_runner --code ./src/example_code5.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint copy 8.json.gz --model python/aug25/models/precompute3_model_pure_python.py --output benchmark_results/2025-09-24_19-29-44
-      --- Setting up benchmark environment ---
-      Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint copy 8.json.gz
-      Loading model from: python/aug25/models/precompute3_model_pure_python.py
-      Traceback (most recent call last):
-        File "<frozen runpy>", line 198, in _run_module_as_main
-        File "<frozen runpy>", line 88, in _run_code
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 319, in <module>
-          main()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 315, in main
-          run_benchmark(args)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 209, in run_benchmark
-          model = ModelClass.from_json_string(constraint_json_str)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python.py", line 294, in from_json_string
-          model.optimize_alive_prune_group()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python.py", line 1077, in optimize_alive_prune_group
-          unique_edges.add((int(pop), int(dest_id), state_bv.to_ranges()))
-      TypeError: unhashable type: 'list'
-    metadata:
-  - assistant: |-
-      You've run into a `TypeError` because the code is attempting to use a mutable `list` in a context that requires a hashable, immutable type. Specifically:
-
-      1.  A `list` (from `state_bv.to_ranges()`) is being added to a `set` (`unique_edges`), which is not allowed.
-      2.  Later, a `tuple` containing a `list` (again from `to_ranges()`) is used as a dictionary key (`signature`), which is also not allowed.
-
-      The solution is to convert these lists into immutable `tuple`s before they are used in sets or as parts of dictionary keys.
-
-      Here are the step-by-step instructions to fix this.
-
-      ### Step-by-step Instructions
-
-      In the file `python/aug25/models/precompute3_model_pure_python.py`, you need to make three small changes inside the `optimize_alive_prune_group` method.
-
-      1.  **Make `unique_edges` elements hashable:**
-          Locate this line:
-          ```python
-          unique_edges.add((int(pop), int(dest_id), state_bv.to_ranges()))
-          ```
-          And change it to convert the ranges to a tuple:
-          ```python
-          unique_edges.add((int(pop), int(dest_id), tuple(state_bv.to_ranges())))
-          ```
-
-      2.  **Update the sort key for consistency (optional but recommended):**
-          Locate this line:
-          ```python
-          pruned_dests.sort(key=lambda x: (x[0], x[1].to_ranges()))
-          ```
-          And change it to also use a tuple for the ranges:
-          ```python
-          pruned_dests.sort(key=lambda x: (x[0], tuple(x[1].to_ranges())))
-          ```
-
-      3.  **Make the `signature` dictionary key hashable:**
-          Locate this line:
-          ```python
-          signature = (pop, tuple((d, sbv.to_ranges()) for d, sbv in pruned_dests))
-          ```
-          And change it to convert the inner ranges to a tuple:
-          ```python
-          signature = (pop, tuple((d, tuple(sbv.to_ranges())) for d, sbv in pruned_dests))
-          ```
-
-      ### Git Diff
-
-      Here is the git diff to apply these changes.
-
-      ```diff
-      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      index a77e84a..4d80d19 100644
-      --- a/python/aug25/models/precompute3_model_pure_python.py
-      +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -1074,7 +1074,7 @@
-                   children = node.get("children") or []
-                   for (pop, _llm_bv), dests in children:
-                       for dest_id, state_bv in dests:
-      -                    unique_edges.add((int(pop), int(dest_id), state_bv.to_ranges()))
-      +                    unique_edges.add((int(pop), int(dest_id), tuple(state_bv.to_ranges())))
-       
-                   for pop, dest_id, ranges in unique_edges:
-                       propagation_graph[src_id].append((pop, dest_id, StateIDSet.from_ranges(ranges)))
-      @@ -1126,10 +1126,10 @@
-                       if not pruned_dests:
-                           continue
-       
-      -                pruned_dests.sort(key=lambda x: (x[0], x[1].to_ranges()))
-      +                pruned_dests.sort(key=lambda x: (x[0], tuple(x[1].to_ranges())))
-       
-      -                signature = (pop, tuple((d, sbv.to_ranges()) for d, sbv in pruned_dests))
-      +                signature = (pop, tuple((d, tuple(sbv.to_ranges())) for d, sbv in pruned_dests))
-                       groups[signature] = groups[signature].union(llm_bv)
-       
-                   new_children = []
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model_pure_python.py
-      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
-    metadata:
-  - user: 'Changes committed with message: "Fix: Ensure hashable types for set/dict
-      operations in optimize_alive_prune_group"'
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_model_pure_python.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Traceback (most recent call last):
-        File "<frozen runpy>", line 198, in _run_module_as_main
-        File "<frozen runpy>", line 88, in _run_code
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 319, in <module>
-          main()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 315, in main
-          run_benchmark(args)
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/benchmark_runner.py", line 209, in run_benchmark
-          model = ModelClass.from_json_string(constraint_json_str)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python.py", line 294, in from_json_string
-          model.optimize_alive_prune_group()
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python.py", line 1077, in optimize_alive_prune_group
-          unique_edges.add((int(pop), int(dest_id), tuple(state_bv.to_ranges())))
-      TypeError: unhashable type: 'list'
-    metadata:
-  - assistant: |-
-      My apologies for that persistent error. You are correct, my previous fix was insufficient. The `to_ranges()` method returns a list of lists, and my fix only converted the outer list to a tuple, leaving the inner lists, which caused the `TypeError`.
-
-      The solution is to ensure the inner lists are also converted to tuples, creating a fully hashable tuple of tuples. I will now provide the corrected instructions and diff.
-
-      ### Step-by-step Instructions
-
-      In the file `python/aug25/models/precompute3_model_pure_python.py`, please apply the following three changes within the `optimize_alive_prune_group` method to recursively convert the range lists into tuples.
-
-      1.  **Make `unique_edges` elements fully hashable:**
-          Locate this line:
-          ```python
-          unique_edges.add((int(pop), int(dest_id), tuple(state_bv.to_ranges())))
-          ```
-          And replace it with this, which converts the inner lists to tuples as well:
-          ```python
-          unique_edges.add((int(pop), int(dest_id), tuple(map(tuple, state_bv.to_ranges()))))
-          ```
-
-      2.  **Update the sort key to be fully hashable:**
-          Locate this line:
-          ```python
-          pruned_dests.sort(key=lambda x: (x[0], tuple(x[1].to_ranges())))
-          ```
-          And replace it with:
-          ```python
-          pruned_dests.sort(key=lambda x: (x[0], tuple(map(tuple, x[1].to_ranges()))))
-          ```
-
-      3.  **Make the `signature` dictionary key fully hashable:**
-          Locate this line:
-          ```python
-          signature = (pop, tuple((d, tuple(sbv.to_ranges())) for d, sbv in pruned_dests))
-          ```
-          And replace it with:
-          ```python
-          signature = (pop, tuple((d, tuple(map(tuple, sbv.to_ranges()))) for d, sbv in pruned_dests))
-          ```
-
-      ### Git Diff
-
-      Here is the git diff to apply these corrections.
-
-      ```diff
-      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      index 4d80d19..2057398 100644
-      --- a/python/aug25/models/precompute3_model_pure_python.py
-      +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -1074,7 +1074,7 @@
-                   children = node.get("children") or []
-                   for (pop, _llm_bv), dests in children:
-                       for dest_id, state_bv in dests:
-      -                    unique_edges.add((int(pop), int(dest_id), tuple(state_bv.to_ranges())))
-      +                    unique_edges.add((int(pop), int(dest_id), tuple(map(tuple, state_bv.to_ranges()))))
-       
-                   for pop, dest_id, ranges in unique_edges:
-                       propagation_graph[src_id].append((pop, dest_id, StateIDSet.from_ranges(ranges)))
-      @@ -1126,10 +1126,10 @@
-                       if not pruned_dests:
-                           continue
-       
-      -                pruned_dests.sort(key=lambda x: (x[0], tuple(x[1].to_ranges())))
-      +                pruned_dests.sort(key=lambda x: (x[0], tuple(map(tuple, x[1].to_ranges()))))
-       
-      -                signature = (pop, tuple((d, tuple(sbv.to_ranges())) for d, sbv in pruned_dests))
-      +                signature = (pop, tuple((d, tuple(map(tuple, sbv.to_ranges()))) for d, sbv in pruned_dests))
-                       groups[signature] = groups[signature].union(llm_bv)
-       
-                   new_children = []
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model_pure_python.py
-      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
-    metadata:
-  - user: 'Changes committed with message: "Fix: Ensure hashable types for set/dict
-      operations in optimize_alive_prune_group"'
+  - user: 'Changes committed with message: "Refactor: Simplify optimize_alive_prune_group
+      by delegating to helpers"'
     metadata:
 ...
