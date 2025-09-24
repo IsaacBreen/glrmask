@@ -283,8 +283,7 @@ class Model(GraphProvider):
         all_internal = constraint.all_internal_llm_tokens_bitset()
         model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
 
-        nodeopt_graph = model._to_nodeopt_graph()
-        model._from_nodeopt_graph(nodeopt_graph)
+        model._prune_and_recompact_graph()
         model._unconditionalize_guaranteed_transitions()
 
         return model
@@ -836,6 +835,28 @@ class Model(GraphProvider):
             node_ref["children"] = new_children
             node_ref["llm_bv_union"] = llm_union
             self.arena[int(node_id)] = node_ref
+
+    def _prune_and_recompact_graph(self) -> None:
+        """
+        Performs a lossless graph optimization pass based on alive-state analysis.
+
+        This pass is the source of the significant speedup observed when converting
+        the graph to the `NodeOpt` format and back. It works by:
+        1.  Calculating the set of all possible "alive" parser states at each node.
+        2.  Using this information to prune unreachable states from `StateEdge` filters.
+        3.  Converting a `StateEdge` to a more efficient `UnconditionalEdge` if its
+            filter is redundant (i.e., it allows all possible alive states that can
+            reach it).
+        4.  Re-grouping LLM tokens that now share identical transitions into compact
+            bitsets, reducing the total number of edges.
+
+        This is achieved by a round-trip conversion through the `NodeOpt` graph
+        representation, where the `_from_nodeopt_graph` method applies these
+        optimizations.
+        """
+        nodeopts = self._to_nodeopt_graph()
+        # _from_nodeopt_graph computes alive states and performs the optimizations.
+        self._from_nodeopt_graph(nodeopts)
 
     def _contract_unconditional_passthrough_nodes(
         self,
