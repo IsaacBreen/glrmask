@@ -283,15 +283,15 @@ class Model(GraphProvider):
         all_internal = constraint.all_internal_llm_tokens_bitset()
         model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
 
-        # model.optimize_alive_prune_group()
+        model.optimize_alive_prune_group()
         # model._unconditionalize_guaranteed_transitions()
         # model._unconditionalize_guaranteed_transitions(contract_policy="passthrough")
         # model._unconditionalize_guaranteed_transitions(contract_policy="shortcut")
         # model._unconditionalize_guaranteed_transitions(contract_policy="aggressive")
         # model._unconditionalize_guaranteed_transitions(contract_policy="passthrough")
         # model._unconditionalize_guaranteed_transitions(contract_policy="shortcut")
-        # model._unconditionalize_guaranteed_transitions(contract_policy="passthrough")
-        model.optimize_alive_prune_group()
+        model._unconditionalize_guaranteed_transitions(contract_policy="passthrough")
+        # model.optimize_alive_prune_group()
         # model.optimize_alive_prune_group()
 
         return model
@@ -1147,7 +1147,7 @@ class Model(GraphProvider):
 
         # Collect candidate edges once; we will check their current state each sweep.
         candidates: List[Tuple[int, int, int]] = []
-        for src_id, nodeopt in nodeopts.items():
+        for src_id, nodeopt in tqdm(nodeopts.items(), desc="Collecting unconditionalization candidates"):
             for tok, dest_map in nodeopt.children.items():
                 for dest_id, (_pop, edge) in dest_map.items():
                     if isinstance(edge, StateEdge):
@@ -1211,7 +1211,7 @@ class Model(GraphProvider):
             sweeps += 1
             changes_this_sweep = 0
 
-            for src, tok, dst in candidates:
+            for src, tok, dst in tqdm(candidates, desc=f"Unconditionalization sweep {sweeps}"):
                 # Edge may have changed in an earlier sweep; re-check its current type.
                 src_node = nodeopts.get(src)
                 if src_node is None:
