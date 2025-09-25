@@ -315,6 +315,8 @@ class Model(GraphProvider):
 
         model._merge_equivalent_llm_tokens()
         model._reorder_llm_tokens_for_range_minimization()
+        model._merge_equivalent_llm_tokens()
+        model._reorder_llm_tokens_for_range_minimization()
         # model._unconditionalize_guaranteed_transitions()
 
         model._convert_to_bitset_range_set()
