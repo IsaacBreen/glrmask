@@ -398,12 +398,9 @@ class Model(GraphProvider):
         for (pop, llm_bv), dests in children:
             if llm_bv.contains(token):
                 for dest_idx, state_bv in dests:
-                    if state_bv.is_empty():
-                        yield (int(pop), None, int(dest_idx))
-                    else:
-                        for start, end in state_bv.to_ranges():
-                            for sid in range(start, end + 1):
-                                yield (int(pop), sid, int(dest_idx))
+                    for start, end in state_bv.to_ranges():
+                        for sid in range(start, end + 1):
+                            yield (int(pop), sid, int(dest_idx))
 
     @profile
     def commit(self, token_id: int):
@@ -649,27 +646,16 @@ class Model(GraphProvider):
                     continue
 
                 for dest_idx, state_bv in dests:
-                    # Empty state_bv in arena means unconditional (applies to all states).
-                    if state_bv.is_empty():
-                        values_to_keep = peeked
-                        child_gss: GSS = popped
-                        reduced_child = reduced
-                    else:
-                        values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                    values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
 
                     if not values_to_keep:
                         continue
 
-                    if state_bv.is_empty():
-                        # Already assigned above.
-                        pass
-                    else:
-                        child_gss = popped.isolate_many(values_to_keep)
+                    child_gss = popped.isolate_many(values_to_keep)
                     if child_gss.is_empty():
                         continue
 
-                    if not state_bv.is_empty():
-                        reduced_child = child_gss.reduce_acc()
+                    reduced_child = child_gss.reduce_acc()
                     if not reduced_child or reduced_child.is_empty():
                         continue
 
