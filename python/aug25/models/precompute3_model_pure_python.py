@@ -922,123 +922,7 @@ class Model(GraphProvider):
         return count
 
     def _merge_equivalent_llm_tokens(self) -> None:
-        """
-        Finds sets of LLM tokens that are equivalent (always appear together in token sets)
-        and merges them into a single internal token. This reduces the number of internal
-        tokens and can reduce the number of ranges.
-        """
-        print("Merging equivalent LLM tokens...", end='', flush=True)
-        ranges_before = self._count_total_ranges()
-
-        # 1. Collect all unique LLMTokenSets from the model
-        all_sets: Set[frozenset[int]] = set()
-        all_tokens = set(self.all_internal_llm_tokens_bitset.to_indices())
-
-        if not all_tokens:
-            print(" done (no internal tokens).")
-            return
-
-        for node in self.arena.values():
-            for _, llm_bv in (c[0] for c in node.get("children", [])):
-                if not llm_bv.is_empty():
-                    all_sets.add(frozenset(llm_bv.to_indices()))
-            union_bv = node.get("llm_bv_union", LLMTokenSet.empty())
-            if not union_bv.is_empty():
-                all_sets.add(frozenset(union_bv.to_indices()))
-
-        if self.possible_matches_cache:
-            for inner in self.possible_matches_cache.values():
-                for llm_bv in inner.values():
-                    if not llm_bv.is_empty():
-                        all_sets.add(frozenset(llm_bv.to_indices()))
-
-        if not all_sets:
-            print(" done (no sets to analyze).")
-            return
-
-        # 2. Find equivalence classes using Disjoint Set Union (DSU)
-        parent = {i: i for i in all_tokens}
-        def find(i):
-            if parent[i] == i:
-                return i
-            parent[i] = find(parent[i])
-            return parent[i]
-
-        def union(i, j):
-            root_i = find(i)
-            root_j = find(j)
-            if root_i != root_j:
-                # smaller to larger for determinism
-                if root_i < root_j:
-                    parent[root_j] = root_i
-                else:
-                    parent[root_i] = root_j
-
-        for s in all_sets:
-            if len(s) < 2:
-                continue
-            it = iter(sorted(list(s))) # sorted for determinism
-            first = next(it)
-            for token in it:
-                union(first, token)
-
-        # 3. Build mapping from old token to new representative token
-        # and create the new internal_to_original map.
-        representatives: Dict[int, Set[int]] = collections.defaultdict(set)
-        for token in all_tokens:
-            representatives[find(token)].add(token)
-
-        # Check if any merging happened
-        if len(representatives) == len(all_tokens):
-            print(" done (no equivalent tokens found).")
-            return
-
-        old_to_new_map: Dict[int, int] = {}
-        new_internal_to_original_map: Dict[int, Set[int]] = {}
-
-        for rep, old_tokens_in_class in representatives.items():
-            # All old tokens in this class map to the representative
-            for old_token in old_tokens_in_class:
-                old_to_new_map[old_token] = rep
-
-            # Build the new internal_to_original map
-            original_ids: Set[int] = set()
-            for old_token in old_tokens_in_class:
-                if old_token in self.internal_to_original_map:
-                    original_ids.update(self.internal_to_original_map[old_token])
-            new_internal_to_original_map[rep] = original_ids
-
-        self.internal_to_original_map = new_internal_to_original_map
-
-        # 4. Remap all LLMTokenSets throughout the model
-        def remap_llm_token_set(s: LLMTokenSet) -> LLMTokenSet:
-            if s.is_empty():
-                return s
-            new_indices = {old_to_new_map[i] for i in s.to_indices() if i in old_to_new_map}
-            if not new_indices:
-                return LLMTokenSet.empty()
-            return LLMTokenSet.from_indices(sorted(list(new_indices)))
-
-        # Remap possible_matches_cache
-        if self.possible_matches_cache:
-            new_pmc: Dict[int, Dict[int, LLMTokenSet]] = {}
-            for tsid, inner in self.possible_matches_cache.items():
-                new_inner: Dict[int, LLMTokenSet] = {}
-                for term_id, llm_bv in inner.items():
-                    new_inner[int(term_id)] = remap_llm_token_set(llm_bv)
-                new_pmc[int(tsid)] = new_inner
-            self.possible_matches_cache = new_pmc
-
-        # Remap the universe of all internal tokens
-        self.all_internal_llm_tokens_bitset = remap_llm_token_set(self.all_internal_llm_tokens_bitset)
-
-        # Remap arena by regrouping tokens and merging edges
-        self._remap_llm_tokens_permutation(old_to_new_map)
-
-        ranges_after = self._count_total_ranges()
-        num_tokens_before = len(all_tokens)
-        num_tokens_after = len(self.all_internal_llm_tokens_bitset)
-        print(f" done. Ranges: {ranges_before} -> {ranges_after}. Tokens: {num_tokens_before} -> {num_tokens_after}.", flush=True)
+        ...
 
     def _unconditionalize_guaranteed_transitions(
         self,
@@ -1364,12 +1248,8 @@ class Model(GraphProvider):
         # Remap internal_to_original_map (pure permutation)
         if self.internal_to_original_map:
             new_internal_to_original_map: Dict[int, Set[int]] = {}
-            # Use defaultdict to handle merging correctly
-            new_internal_to_original_map_merged: Dict[int, Set[int]] = collections.defaultdict(set)
             for old_tok, orig_set in self.internal_to_original_map.items():
                 if old_tok in old_to_new_map:
-                    new_internal_to_original_map_merged[old_to_new_map[old_tok]].update(orig_set)
-            self.internal_to_original_map = dict(new_internal_to_original_map_merged)
-
-
+                    new_internal_to_original_map[old_to_new_map[old_tok]] = set(orig_set)
+            self.internal_to_original_map = new_internal_to_original_map
 
