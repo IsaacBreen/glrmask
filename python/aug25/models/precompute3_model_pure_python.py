@@ -325,7 +325,9 @@ class Model(GraphProvider):
         model._merge_equivalent_llm_tokens()
         model._reorder_llm_tokens_for_range_minimization()
 
-        model._unconditionalize_guaranteed_transitions()
+        # model._unconditionalize_guaranteed_transitions()
+        a, b = model._to_nodeopt()
+        model._from_nodeopt(a, b)
 
         # model._convert_to_bitset_range_set()
 
@@ -1113,8 +1115,9 @@ class Model(GraphProvider):
         def add_edge(src: NodeID, token: LLMToken, dest: NodeID, edge: Edge):
             """
             Insert edge into nodeopt[src].children[token][dest] with dedup rules.
-            For conflicts with PopEdge, route the new edge via a helper node so
-            every (token, dest) stays unique.
+            This is carefully designed to be compatible with _from_nodeopt's folding logic,
+            which only looks ahead from PopEdges. Therefore, non-PopEdges are prioritized
+            for the direct src->dest slot.
             """
             src_node = nodeopt[src]
             tok_map = src_node.children.get(int(token))
@@ -1123,71 +1126,49 @@ class Model(GraphProvider):
                 src_node.children[int(token)] = tok_map
 
             existing = tok_map.get(int(dest))
-            if existing is None:
+            if not existing:
                 tok_map[int(dest)] = edge
                 return
 
-            # Dedup rules:
-            # - Unconditional dominates StateEdge
-            # - StateEdge unions with StateEdge
-            # - PopEdge conflicts => route new edge via helper
-            if isinstance(existing, UnconditionalEdge):
-                if isinstance(edge, StateEdge):
-                    # Unconditional dominates: ignore the new StateEdge
-                    return
-                elif isinstance(edge, UnconditionalEdge):
-                    return
-                else:
-                    # existing Unconditional vs new PopEdge or other: route new via helper
-                    h = new_helper_node(False)
-                    # helper forwards to dest unconditionally
-                    add_edge(h, token, dest, UnconditionalEdge())
-                    tok_map[int(h)] = edge
-                    return
-            elif isinstance(existing, StateEdge):
-                if isinstance(edge, UnconditionalEdge):
-                    # Replace with unconditional (dominates state filter)
-                    tok_map[int(dest)] = UnconditionalEdge()
-                    return
-                if isinstance(edge, StateEdge):
-                    # Union states
-                    merged_states = set(existing.states)
-                    merged_states.update(edge.states)
-                    tok_map[int(dest)] = StateEdge(states=merged_states)
-                    return
-                else:
-                    # existing StateEdge vs new PopEdge: route new via helper
-                    h = new_helper_node(False)
-                    # helper applies the state filter to dest
-                    add_edge(h, token, dest, StateEdge(states=set(existing.states)))
-                    tok_map[int(h)] = edge
-                    return
-            elif isinstance(existing, PopEdge):
-                if isinstance(edge, PopEdge):
-                    if existing.n == edge.n:
-                        # Identical; nothing to add
-                        return
-                    # Different pop counts: route new via helper
-                    h = new_helper_node(False)
-                    add_edge(h, token, dest, UnconditionalEdge())
-                    tok_map[int(h)] = edge
-                    return
-                elif isinstance(edge, UnconditionalEdge):
-                    # Keep existing pop to dest; add unconditional via helper so both flows exist
-                    h = new_helper_node(False)
-                    add_edge(h, token, dest, UnconditionalEdge())
-                    tok_map[int(h)] = UnconditionalEdge()
-                    return
-                else:
-                    # existing PopEdge vs new StateEdge: route the state path via helper
-                    h = new_helper_node(False)
-                    add_edge(h, token, dest, StateEdge(states=set(edge.states if isinstance(edge, StateEdge) else [])))
-                    # The above line is not reached since edge is StateEdge; keep explicit
-                    add_edge(h, token, dest, edge)  # state path to dest
-                    tok_map[int(h)] = existing  # keep original pop to dest
-                    # After adding, restore tok_map[dest] to existing explicitly (safety)
-                    tok_map[int(dest)] = existing
-                    return
+            if existing == edge:
+                return
+
+            # --- Conflict Resolution ---
+            # Strategy: PopEdges are routed via helpers if a non-PopEdge needs the slot.
+
+            # Case 1: New edge is a PopEdge.
+            if isinstance(edge, PopEdge):
+                # If existing is also a PopEdge but with a different pop count, or not a PopEdge,
+                # the new PopEdge must be routed via a helper.
+                if not isinstance(existing, PopEdge) or existing.n != edge.n:
+                    h = new_helper_node()
+                    add_edge(src, token, h, edge)  # src --PopEdge--> h
+                    add_edge(h, token, dest, UnconditionalEdge())  # h --Unconditional--> dest
+                # If it's the same PopEdge, we did nothing due to the `existing == edge` check.
+                return
+
+            # Case 2: New edge is NOT a PopEdge, but existing is.
+            if isinstance(existing, PopEdge):
+                # The existing PopEdge must be moved to a helper path to make way for the new edge.
+                h = new_helper_node()
+                add_edge(src, token, h, existing)  # src --PopEdge--> h
+                add_edge(h, token, dest, UnconditionalEdge())  # h --Unconditional--> dest
+                # Now, the direct slot is free. Install the new edge.
+                tok_map[int(dest)] = edge
+                return
+
+            # Case 3: Neither is a PopEdge. Both are StateEdge or UnconditionalEdge.
+            if isinstance(existing, StateEdge) and isinstance(edge, StateEdge):
+                merged_states = existing.states.union(edge.states)
+                tok_map[int(dest)] = StateEdge(states=merged_states)
+                return
+
+            if isinstance(existing, UnconditionalEdge) and isinstance(edge, StateEdge):
+                return  # Unconditional wins, do nothing.
+
+            if isinstance(edge, UnconditionalEdge) and isinstance(existing, StateEdge):
+                tok_map[int(dest)] = edge  # New Unconditional wins.
+                return
 
         # Convert arena transitions
         for src_id, node in arena.items():
