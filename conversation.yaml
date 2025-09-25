@@ -2115,6 +2115,9 @@ local_system:
               for nid in arena.keys():
                   ensure_node(int(nid))
 
+              # Track helper mids introduced solely to split pop>0 + state edges.
+              artificial_mid_nodes: Set[int] = set()
+
               def new_node(is_end: bool = False) -> int:
                   nonlocal next_id
                   nid = int(next_id)
@@ -2174,6 +2177,7 @@ local_system:
                               S = set(int(s) for s in state_bv.to_indices())
                               for t in tokens:
                                   mid = new_node(is_end=False)
+                                  artificial_mid_nodes.add(mid)
                                   add_edge(src, t, mid, PopEdge(n=pop))
                                   add_edge(mid, t, dest, StateEdge(states=S))
                           elif pop > 0 and state_bv.is_empty():
@@ -2469,6 +2473,9 @@ local_system:
                   For a given node, produce packed arena children:
                   - Fold short chains pop->(optional state)
                   - Group tokens that share identical signatures (pop and dest map)
+                  # For a given node, produce packed arena children:
+                  # - Fold short chains pop->(optional state)
+                  # - Group tokens that share identical signatures (pop and dest map)
                   """
                   # signature: (pop, ((dest, ((start,end),...)), ...))
                   signatures: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = {}
@@ -2484,17 +2491,16 @@ local_system:
                               folded_pop = int(e.n)
                               folded_dest = int(dest)
                               folded_state: Optional[Set[int]] = None
-                              # Check if dest has exactly one outgoing under token t
-                              child_edges = nodes[folded_dest].children.get(int(t), {})
-                              if len(child_edges) == 1:
-                                  (d2, e2) = next(iter(child_edges.items()))
-                                  if isinstance(e2, StateEdge):
-                                      folded_dest = int(d2)
-                                      folded_state = set(e2.states)
-                                  elif isinstance(e2, UnconditionalEdge):
-                                      folded_dest = int(d2)
-                                      folded_state = None
-                                  # PopEdge after PopEdge cannot be folded; leave as is
+                              # Only fold across artificial mids introduced for pop+state splitting.
+                              if folded_dest in artificial_mid_nodes:
+                                  # Check if mid has exactly one outgoing under token t and it is a StateEdge.
+                                  child_edges = nodes[folded_dest].children.get(int(t), {})
+                                  if len(child_edges) == 1:
+                                      (d2, e2) = next(iter(child_edges.items()))
+                                      if isinstance(e2, StateEdge):
+                                          folded_dest = int(d2)
+                                          folded_state = set(e2.states)
+                                      # Do NOT fold over UnconditionalEdge; artificial mids should not have it anyway.
                               # Record
                               agg.setdefault(folded_pop, {})
                               # combine per dest
@@ -3107,7 +3113,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -5312,5 +5318,160 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Add tqdm progress bars to unconditionalization
       and compaction"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python.py since previous turn:
+      ```diff
+      --- original version of python/aug25/models/precompute3_model_pure_python.py+++ current version of python/aug25/models/precompute3_model_pure_python.py@@ -1041,6 +1041,7 @@         # Unconditionalization: per token, deepest-first
+               # ---------------------------------------------
+               for t in tqdm(sorted(all_tokens), desc="[Opt] Unconditionalize"):
+      +            break
+                   alive0_t = compute_alive0_for_token(int(t))
+                   depths_t = compute_depths_for_token(int(t))
+       
+      @@ -1183,6 +1184,7 @@ 
+               # Iterate compaction steps to a fixpoint (bounded passes)
+               for _ in tqdm(range(5), desc="[Opt] Compaction"):
+      +            break
+                   changed1 = merge_pop_chains_once()
+                   changed2 = remove_passthroughs_once()
+                   if not (changed1 or changed2):
+
+      ```
+    metadata:
+  - user: There's a bug in it. We get mismatches in get_mask outputs. I've added breaks
+      at the start of the main loops, and we still get them, so it's not those. Fix
+      it.
+    metadata:
+  - assistant: |-
+      Below are the concrete steps to fix the get_mask mismatches and keep progress bars. The core issue is in the NodeOpt → arena repacking: we were folding PopEdge chains through arbitrary nodes whenever they had a single outgoing edge under the same token. That is not lossless and can change reachability of end nodes, causing mismatches even when unconditionalization/compaction is effectively disabled. The safe fold must only occur across “artificial mid” nodes we created during the arena → NodeOpt explosion for pop+state edges.
+
+      What I changed:
+      - Track which intermediate nodes are artificial mids.
+      - Only fold pop→state through those mids (never fold through arbitrary existing nodes).
+      - Remove the temporary debug break statements to restore the full optimization flow.
+
+      Step-by-step instructions
+
+      File: python/aug25/models/precompute3_model_pure_python.py
+
+      1) In Model._unconditionalize_guaranteed_transitions, create a set to track artificial mid nodes created during arena → NodeOpt conversion:
+         - Add artificial_mid_nodes: Set[int] = set() before the conversion loop over arena nodes.
+
+      2) When splitting pop>0 and state_bv non-empty into a PopEdge followed by StateEdge via a helper node mid, register mid into artificial_mid_nodes.
+
+      3) In pack_node_to_arena_children, restrict the folding logic for PopEdge to only fold across those artificial mids, and only if the unique outgoing edge under the same token is a StateEdge. Do not fold across UnconditionalEdge or any other scenario.
+
+      4) Remove the debug break statements that were added at the start of the per-token unconditionalization loop and the compaction loop so the pass runs fully.
+
+      5) Keep the tqdm progress bars you added previously.
+
+      Git diffs
+
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      index 124e414..bdacba5 100644
+      --- a/python/aug25/models/precompute3_model_pure_python.py
+      +++ b/python/aug25/models/precompute3_model_pure_python.py
+      @@ -851,6 +851,9 @@ class Model(GraphProvider):
+       
+               for nid in arena.keys():
+                   ensure_node(int(nid))
+      +
+      +        # Track helper mids introduced solely to split pop>0 + state edges.
+      +        artificial_mid_nodes: Set[int] = set()
+       
+               def new_node(is_end: bool = False) -> int:
+                   nonlocal next_id
+      @@ -899,12 +902,14 @@ class Model(GraphProvider):
+                           if pop > 0 and (not state_bv.is_empty()):
+                               # Split into Pop then State via intermediate
+                               S = set(int(s) for s in state_bv.to_indices())
+                               for t in tokens:
+                                   mid = new_node(is_end=False)
+      +                            artificial_mid_nodes.add(mid)
+                                   add_edge(src, t, mid, PopEdge(n=pop))
+                                   add_edge(mid, t, dest, StateEdge(states=S))
+                           elif pop > 0 and state_bv.is_empty():
+                               for t in tokens:
+                                   add_edge(src, t, dest, PopEdge(n=pop))
+                           elif pop == 0 and (not state_bv.is_empty()):
+      @@ -1052,7 +1057,6 @@ class Model(GraphProvider):
+               # ---------------------------------------------
+               # Unconditionalization: per token, deepest-first
+               # ---------------------------------------------
+      -        for t in tqdm(sorted(all_tokens), desc="[Opt] Unconditionalize"):
+      -            break
+      +        for t in tqdm(sorted(all_tokens), desc="[Opt] Unconditionalize"):
+                   alive0_t = compute_alive0_for_token(int(t))
+                   depths_t = compute_depths_for_token(int(t))
+       
+      @@ -1212,7 +1216,6 @@ class Model(GraphProvider):
+                   return changed
+       
+               # Iterate compaction steps to a fixpoint (bounded passes)
+      -        for _ in tqdm(range(5), desc="[Opt] Compaction"):
+      -            break
+      +        for _ in tqdm(range(5), desc="[Opt] Compaction"):
+                   changed1 = merge_pop_chains_once()
+                   changed2 = remove_passthroughs_once()
+                   if not (changed1 or changed2):
+      @@ -1234,19 +1237,22 @@ class Model(GraphProvider):
+                   # For a given node, produce packed arena children:
+                   # - Fold short chains pop->(optional state)
+                   # - Group tokens that share identical signatures (pop and dest map)
+                   """
+                   # signature: (pop, ((dest, ((start,end),...)), ...))
+                   signatures: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = {}
+       
+                   # For each token, aggregate dests under the same pop value
+                   for t, dest_map in nodes[nid].children.items():
+                       # pop_value -> dest -> state_set_or_None (None means unconditional / empty state set)
+                       agg: Dict[int, Dict[int, Optional[Set[int]]]] = {}
+       
+                       for dest, e in dest_map.items():
+                           # Try to fold pop->(state|uncond) chains
+                           if isinstance(e, PopEdge):
+                               folded_pop = int(e.n)
+                               folded_dest = int(dest)
+                               folded_state: Optional[Set[int]] = None
+      -                        # Check if dest has exactly one outgoing under token t
+      -                        child_edges = nodes[folded_dest].children.get(int(t), {})
+      -                        if len(child_edges) == 1:
+      -                            (d2, e2) = next(iter(child_edges.items()))
+      -                            if isinstance(e2, StateEdge):
+      -                                folded_dest = int(d2)
+      -                                folded_state = set(e2.states)
+      -                            elif isinstance(e2, UnconditionalEdge):
+      -                                folded_dest = int(d2)
+      -                                folded_state = None
+      +                        # Only fold across artificial mids introduced for pop+state splitting.
+      +                        if folded_dest in artificial_mid_nodes:
+      +                            # Check if mid has exactly one outgoing under token t and it is a StateEdge.
+      +                            child_edges = nodes[folded_dest].children.get(int(t), {})
+      +                            if len(child_edges) == 1:
+      +                                (d2, e2) = next(iter(child_edges.items()))
+      +                                if isinstance(e2, StateEdge):
+      +                                    folded_dest = int(d2)
+      +                                    folded_state = set(e2.states)
+      +                                # Do NOT fold over UnconditionalEdge; artificial mids should not have it anyway.
+                               # Record
+                               agg.setdefault(folded_pop, {})
+                               # combine per dest
+                               if folded_dest not in agg[folded_pop]:
+                                   agg[folded_pop][folded_dest] = (None if folded_state is None else set(folded_state))
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
+    metadata:
+  - user: 'Changes committed with message: "feat: Implement unconditionalization and
+      graph compaction pass"'
     metadata:
 ...

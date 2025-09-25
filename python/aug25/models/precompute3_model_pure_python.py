@@ -842,6 +842,9 @@ class Model(GraphProvider):
         for nid in arena.keys():
             ensure_node(int(nid))
 
+        # Track helper mids introduced solely to split pop>0 + state edges.
+        artificial_mid_nodes: Set[int] = set()
+
         def new_node(is_end: bool = False) -> int:
             nonlocal next_id
             nid = int(next_id)
@@ -901,6 +904,7 @@ class Model(GraphProvider):
                         S = set(int(s) for s in state_bv.to_indices())
                         for t in tokens:
                             mid = new_node(is_end=False)
+                            artificial_mid_nodes.add(mid)
                             add_edge(src, t, mid, PopEdge(n=pop))
                             add_edge(mid, t, dest, StateEdge(states=S))
                     elif pop > 0 and state_bv.is_empty():
@@ -1041,7 +1045,6 @@ class Model(GraphProvider):
         # Unconditionalization: per token, deepest-first
         # ---------------------------------------------
         for t in tqdm(sorted(all_tokens), desc="[Opt] Unconditionalize"):
-            break
             alive0_t = compute_alive0_for_token(int(t))
             depths_t = compute_depths_for_token(int(t))
 
@@ -1184,7 +1187,6 @@ class Model(GraphProvider):
 
         # Iterate compaction steps to a fixpoint (bounded passes)
         for _ in tqdm(range(5), desc="[Opt] Compaction"):
-            break
             changed1 = merge_pop_chains_once()
             changed2 = remove_passthroughs_once()
             if not (changed1 or changed2):
@@ -1198,6 +1200,9 @@ class Model(GraphProvider):
             For a given node, produce packed arena children:
             - Fold short chains pop->(optional state)
             - Group tokens that share identical signatures (pop and dest map)
+            # For a given node, produce packed arena children:
+            # - Fold short chains pop->(optional state)
+            # - Group tokens that share identical signatures (pop and dest map)
             """
             # signature: (pop, ((dest, ((start,end),...)), ...))
             signatures: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = {}
@@ -1213,17 +1218,16 @@ class Model(GraphProvider):
                         folded_pop = int(e.n)
                         folded_dest = int(dest)
                         folded_state: Optional[Set[int]] = None
-                        # Check if dest has exactly one outgoing under token t
-                        child_edges = nodes[folded_dest].children.get(int(t), {})
-                        if len(child_edges) == 1:
-                            (d2, e2) = next(iter(child_edges.items()))
-                            if isinstance(e2, StateEdge):
-                                folded_dest = int(d2)
-                                folded_state = set(e2.states)
-                            elif isinstance(e2, UnconditionalEdge):
-                                folded_dest = int(d2)
-                                folded_state = None
-                            # PopEdge after PopEdge cannot be folded; leave as is
+                        # Only fold across artificial mids introduced for pop+state splitting.
+                        if folded_dest in artificial_mid_nodes:
+                            # Check if mid has exactly one outgoing under token t and it is a StateEdge.
+                            child_edges = nodes[folded_dest].children.get(int(t), {})
+                            if len(child_edges) == 1:
+                                (d2, e2) = next(iter(child_edges.items()))
+                                if isinstance(e2, StateEdge):
+                                    folded_dest = int(d2)
+                                    folded_state = set(e2.states)
+                                # Do NOT fold over UnconditionalEdge; artificial mids should not have it anyway.
                         # Record
                         agg.setdefault(folded_pop, {})
                         # combine per dest
