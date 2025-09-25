@@ -413,7 +413,6 @@ class Model(GraphProvider):
         self.state = merged_states
 
         t1 = time.perf_counter()
-        # print(f"commit (ms): {round((t1 - t0) * 1000, 2)}")
 
     @profile
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
