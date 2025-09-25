@@ -1154,12 +1154,23 @@ class Model(GraphProvider):
                         elif isinstance(e, StateEdge):
                             children_list.append(((0, token_rs), [(dest_id, PyRangeSet.from_indices(e.states))]))
 
-            # TODO: compute precise llm_bv_union afterwards in one sweep of graph.
-            new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=self.all_internal_llm_tokens_bitset, clean_end=nopt.is_end)
+            new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=PyRangeSet.empty(), clean_end=nopt.is_end)
 
         self.arena = new_arena
+        self._recompute_llm_bv_unions()
         self.roots_map = graph.roots_map.copy()
         self.max_depth = self._recompute_max_depth_from_arena()
+
+    def _recompute_llm_bv_unions(self) -> None:
+        """
+        Iterate through the arena and recompute the llm_bv_union for each node
+        based on the union of llm_bvs of its direct children edges.
+        """
+        for node in self.arena.values():
+            union_bv: LLMTokenSet = PyRangeSet.empty()
+            for (_pop, llm_bv), _dests in node.children:
+                union_bv = union_bv.union(llm_bv)
+            node.llm_bv_union = union_bv
 
     def _recompute_max_depth_from_arena(self) -> Dict[NodeID, int]:
         """

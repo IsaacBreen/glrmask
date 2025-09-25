@@ -2574,15 +2574,23 @@ local_system:
                               elif isinstance(e, StateEdge):
                                   children_list.append(((0, token_rs), [(dest_id, PyRangeSet.from_indices(e.states))]))
 
-                  llm_bv_union: LLMTokenSet = PyRangeSet.empty()
-                  for (_pop, llm_bv), _dests in children_list:
-                      llm_bv_union = llm_bv_union.union(llm_bv)
-
-                  new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=llm_bv_union, clean_end=nopt.is_end)
+                  new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=PyRangeSet.empty(), clean_end=nopt.is_end)
 
               self.arena = new_arena
+              self._recompute_llm_bv_unions()
               self.roots_map = graph.roots_map.copy()
               self.max_depth = self._recompute_max_depth_from_arena()
+
+          def _recompute_llm_bv_unions(self) -> None:
+              """
+              Iterate through the arena and recompute the llm_bv_union for each node
+              based on the union of llm_bvs of its direct children edges.
+              """
+              for node in self.arena.values():
+                  union_bv: LLMTokenSet = PyRangeSet.empty()
+                  for (_pop, llm_bv), _dests in node.children:
+                      union_bv = union_bv.union(llm_bv)
+                  node.llm_bv_union = union_bv
 
           def _recompute_max_depth_from_arena(self) -> Dict[NodeID, int]:
               """
@@ -4292,8 +4300,9 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: 'Complete the TODO: compute precise llm_bv_union afterwards in one sweep
-      of graph.'
+  - user: 'Complete the `TODO: compute precise llm_bv_union afterwards in one sweep
+      of graph.`. Create a function that computes the LLM token bvs for the whole
+      graph. On `self`.'
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4312,52 +4321,90 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course! Here are the step-by-step instructions to compute the precise `llm_bv_union` and the corresponding git diff.
+      Of course. Here are the step-by-step instructions to implement the required changes, followed by the corresponding git diff.
 
-      ### Step-by-step Instructions
+      ### Step-by-Step Instructions
 
-      1.  **Open the file:** `python/aug25/models/precompute3_model_pure_python.py`.
-      2.  **Locate the method:** Find the `_from_nodeopt` method within the `Model` class.
-      3.  **Find the target code block:** Inside the `for` loop that iterates over `nodes.items()`, locate the following lines:
+      1.  **Open the file `python/aug25/models/precompute3_model_pure_python.py`.**
+
+      2.  **Navigate to the `_from_nodeopt` method.** Locate the end of the `for` loop within this method, where the `new_arena` dictionary is populated. The code block looks like this:
 
           ```python
                       # TODO: compute precise llm_bv_union afterwards in one sweep of graph.
                       new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=self.all_internal_llm_tokens_bitset, clean_end=nopt.is_end)
+          
+              self.arena = new_arena
+              self.roots_map = graph.roots_map.copy()
+              self.max_depth = self._recompute_max_depth_from_arena()
           ```
 
-      4.  **Replace the code:** Replace the two lines from the previous step with the following code. This will iterate through the generated `children_list`, calculate the union of all `LLMTokenSet`s for the current node, and use that precise union when creating the `ArenaNode`.
+      3.  **Modify this section.**
+          *   Remove the `TODO` comment.
+          *   Change the `llm_bv_union` argument in the `ArenaNode` constructor from `self.all_internal_llm_tokens_bitset` to `PyRangeSet.empty()`.
+          *   Insert a call to a new method, `self._recompute_llm_bv_unions()`, after the `self.arena = new_arena` line.
+
+          The modified section should look like this:
 
           ```python
-                      llm_bv_union: LLMTokenSet = PyRangeSet.empty()
-                      for (_pop, llm_bv), _dests in children_list:
-                          llm_bv_union = llm_bv_union.union(llm_bv)
+                      new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=PyRangeSet.empty(), clean_end=nopt.is_end)
           
-                      new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=llm_bv_union, clean_end=nopt.is_end)
+              self.arena = new_arena
+              self._recompute_llm_bv_unions()
+              self.roots_map = graph.roots_map.copy()
+              self.max_depth = self._recompute_max_depth_from_arena()
+          ```
+
+      4.  **Add the new `_recompute_llm_bv_unions` method.** Insert the following method definition immediately after the `_from_nodeopt` method and before the `_recompute_max_depth_from_arena` method.
+
+          ```python
+              def _recompute_llm_bv_unions(self) -> None:
+                  """
+                  Iterate through the arena and recompute the llm_bv_union for each node
+                  based on the union of llm_bvs of its direct children edges.
+                  """
+                  for node in self.arena.values():
+                      union_bv: LLMTokenSet = PyRangeSet.empty()
+                      for (_pop, llm_bv), _dests in node.children:
+                          union_bv = union_bv.union(llm_bv)
+                      node.llm_bv_union = union_bv
           ```
 
       ### Git Diff
 
-      Here is the git diff to apply the changes:
+      Here is the git diff for the changes:
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      index 9235e16..410a51c 100644
+      index 455474c..76e279a 100644
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -1281,8 +1281,11 @@
+      @@ -1202,13 +1202,25 @@
                                elif isinstance(e, StateEdge):
                                    children_list.append(((0, token_rs), [(dest_id, PyRangeSet.from_indices(e.states))]))
        
       -            # TODO: compute precise llm_bv_union afterwards in one sweep of graph.
       -            new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=self.all_internal_llm_tokens_bitset, clean_end=nopt.is_end)
-      +            llm_bv_union: LLMTokenSet = PyRangeSet.empty()
-      +            for (_pop, llm_bv), _dests in children_list:
-      +                llm_bv_union = llm_bv_union.union(llm_bv)
-      +
-      +            new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=llm_bv_union, clean_end=nopt.is_end)
+      +            new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=PyRangeSet.empty(), clean_end=nopt.is_end)
        
                self.arena = new_arena
+      +        self._recompute_llm_bv_unions()
                self.roots_map = graph.roots_map.copy()
+               self.max_depth = self._recompute_max_depth_from_arena()
+       
+      +    def _recompute_llm_bv_unions(self) -> None:
+      +        """
+      +        Iterate through the arena and recompute the llm_bv_union for each node
+      +        based on the union of llm_bvs of its direct children edges.
+      +        """
+      +        for node in self.arena.values():
+      +            union_bv: LLMTokenSet = PyRangeSet.empty()
+      +            for (_pop, llm_bv), _dests in node.children:
+      +                union_bv = union_bv.union(llm_bv)
+      +            node.llm_bv_union = union_bv
+      +
+           def _recompute_max_depth_from_arena(self) -> Dict[NodeID, int]:
+               """
+               Compute a simple upper bound on max depth (longest distance to sink/end),
 
       ```
     metadata:
@@ -4370,7 +4417,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Compute precise llm_bv_union for
-      ArenaNodes"'
+  - user: 'Changes committed with message: "feat: Compute LLM token bitset unions
+      accurately from children edges"'
     metadata:
 ...
