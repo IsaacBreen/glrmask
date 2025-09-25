@@ -1898,6 +1898,17 @@ local_system:
               Non-trivial candidates (S_src \\ S_edge != ∅) require the tentative
               propagation check described in the main algorithm.
           """
+          # Stats collection
+          total_edges = 0
+          state_edges_before = 0
+          for node in nodes.values():
+              for pop_map in node.children.values():
+                  for dest_map in pop_map.values():
+                      total_edges += len(dest_map)
+                      for edge in dest_map.values():
+                          if isinstance(edge, StateEdge):
+                              state_edges_before += 1
+
           changed = 0
           # Reuse a single instance; it's immutable and fine to share.
           UNCOND = UnconditionalEdge()
@@ -1915,6 +1926,16 @@ local_system:
                               if s_src.issubset(edge.states):
                                   dest_map[dest] = UNCOND
                                   changed += 1
+
+          # Print stats
+          if state_edges_before > 0:
+              percent_converted = (changed / state_edges_before) * 100
+              print(
+                  f"Optimizer: Converted {changed} of {state_edges_before} state-filtered edges "
+                  f"to unconditional ({percent_converted:.1f}%)."
+              )
+          elif total_edges > 0:
+              print("Optimizer: No state-filtered edges to optimize.")
 
           return changed
   diffs_applied_this_send: true
@@ -3321,5 +3342,112 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Add nodeopt_optimizer module and
       export its components"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/range_set/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/range_set/bitset_range_set.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/range_set/ffi_range_set.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/range_set/py_range_set.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/range_set/range_set_abc.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/range_set/rangeset_stats.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/range_set/nodeopt_optimizer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: No, I mean print useful stats at the end of _unconditionalize_guaranteed_transitions
+    metadata:
+  - assistant: |-
+      Of course. I will add logic to `_unconditionalize_guaranteed_transitions` to compute and print statistics about the optimization pass.
+
+      ### Step-by-step instructions
+
+      1.  **Edit `python/aug25/range_set/nodeopt_optimizer.py`**:
+          *   Inside the `_unconditionalize_guaranteed_transitions` function, before the main optimization loop, add a section to iterate through the graph and count the initial number of total edges and state-filtered edges.
+          *   After the optimization loop, add a section to print a summary. This summary will report how many state-filtered edges were converted to unconditional edges and what percentage of the optimizable edges this represents. The message will be suppressed if there were no state-filtered edges to begin with.
+
+      ### Git diff
+
+      ```diff
+      diff --git a/python/aug25/range_set/nodeopt_optimizer.py b/python/aug25/range_set/nodeopt_optimizer.py
+      --- a/python/aug25/range_set/nodeopt_optimizer.py
+      +++ b/python/aug25/range_set/nodeopt_optimizer.py
+      @@ -47,6 +47,17 @@
+               Non-trivial candidates (S_src \\ S_edge != ∅) require the tentative
+               propagation check described in the main algorithm.
+           """
+      +    # Stats collection
+      +    total_edges = 0
+      +    state_edges_before = 0
+      +    for node in nodes.values():
+      +        for pop_map in node.children.values():
+      +            for dest_map in pop_map.values():
+      +                total_edges += len(dest_map)
+      +                for edge in dest_map.values():
+      +                    if isinstance(edge, StateEdge):
+      +                        state_edges_before += 1
+      +
+           changed = 0
+           # Reuse a single instance; it's immutable and fine to share.
+           UNCOND = UnconditionalEdge()
+      @@ -63,5 +74,14 @@
+                               if s_src.issubset(edge.states):
+                                   dest_map[dest] = UNCOND
+                                   changed += 1
+       
+      +    # Print stats
+      +    if state_edges_before > 0:
+      +        percent_converted = (changed / state_edges_before) * 100
+      +        print(
+      +            f"Optimizer: Converted {changed} of {state_edges_before} state-filtered edges "
+      +            f"to unconditional ({percent_converted:.1f}%)."
+      +        )
+      +    elif total_edges > 0:
+      +        print("Optimizer: No state-filtered edges to optimize.")
+      +
+           return changed
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/range_set/nodeopt_optimizer.py
+      Applying patch to 'python/aug25/range_set/nodeopt_optimizer.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/range_set/nodeopt_optimizer.py.
+    metadata:
+  - user: 'Changes committed with message: "feat: Add statistics reporting to _unconditionalize_guaranteed_transitions"'
     metadata:
 ...

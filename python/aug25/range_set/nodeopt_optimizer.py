@@ -64,6 +64,17 @@ def _unconditionalize_guaranteed_transitions(
         Non-trivial candidates (S_src \\ S_edge != ∅) require the tentative
         propagation check described in the main algorithm.
     """
+    # Stats collection
+    total_edges = 0
+    state_edges_before = 0
+    for node in nodes.values():
+        for pop_map in node.children.values():
+            for dest_map in pop_map.values():
+                total_edges += len(dest_map)
+                for edge in dest_map.values():
+                    if isinstance(edge, StateEdge):
+                        state_edges_before += 1
+
     changed = 0
     # Reuse a single instance; it's immutable and fine to share.
     UNCOND = UnconditionalEdge()
@@ -81,5 +92,15 @@ def _unconditionalize_guaranteed_transitions(
                         if s_src.issubset(edge.states):
                             dest_map[dest] = UNCOND
                             changed += 1
+
+    # Print stats
+    if state_edges_before > 0:
+        percent_converted = (changed / state_edges_before) * 100
+        print(
+            f"Optimizer: Converted {changed} of {state_edges_before} state-filtered edges "
+            f"to unconditional ({percent_converted:.1f}%)."
+        )
+    elif total_edges > 0:
+        print("Optimizer: No state-filtered edges to optimize.")
 
     return changed
