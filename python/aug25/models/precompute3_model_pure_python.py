@@ -1128,7 +1128,68 @@ class Model(GraphProvider):
 
 
     def _from_nodeopt(self, graph: NodeOptGraph) -> None:
-        ...
+        """
+        Rebuild a straightforward Arena from a NodeOptGraph.
+        For each (node, token, dest), emit a separate child entry:
+          ((pop, {token}), [(dest, state_bv)])
+        where:
+          - pop comes from PopEdge if present, else 0.
+          - state_bv is the union of all StateEdge states.
+          - if UnconditionalEdge is present OR no StateEdge is present,
+            state_bv is set to "all parser states".
+        """
+        nodes = graph.nodes
+
+        # Build a "universal" parser state set for unconditional edges.
+        all_parser_states = list(self.parser_table.table.keys())
+        all_states_bv: StateIDSet = (
+            PyRangeSet.from_indices(all_parser_states) if all_parser_states else PyRangeSet.empty()
+        )
+
+        new_arena: Dict[NodeID, ArenaNode] = {}
+
+        for node_id, nopt in nodes.items():
+            children_list: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = []
+            llm_union: LLMTokenSet = PyRangeSet.empty()
+
+            # Deterministic ordering: sort tokens and dests
+            for token in sorted(nopt.children.keys()):
+                dest_map = nopt.children[token]
+                token_rs = PyRangeSet.from_indices([int(token)])
+                for dest_id in sorted(dest_map.keys()):
+                    edges = dest_map[dest_id]
+
+                    pop_val = 0
+                    pop_seen = False
+                    states_union: Set[int] = set()
+                    has_state = False
+                    unconditional = False
+
+                    for e in edges:
+                        if isinstance(e, PopEdge):
+                            if not pop_seen:
+                                pop_val = int(e.n)
+                                pop_seen = True
+                        elif isinstance(e, StateEdge):
+                            has_state = True
+                            for s in e.states:
+                                states_union.add(int(s))
+                        elif isinstance(e, UnconditionalEdge):
+                            unconditional = True
+
+                    if unconditional or not has_state:
+                        state_bv: StateIDSet = all_states_bv
+                    else:
+                        state_bv = PyRangeSet.from_indices(sorted(states_union)) if states_union else PyRangeSet.empty()
+
+                    children_list.append(((int(pop_val), token_rs), [(int(dest_id), state_bv)]))
+                    llm_union = llm_union.union(token_rs)
+
+            new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=llm_union, clean_end=bool(nopt.is_end))
+
+        self.arena = new_arena
+        self.roots_map = graph.roots_map.copy()
+        self.max_depth = self._recompute_max_depth_from_arena()
 
     def _recompute_max_depth_from_arena(self) -> Dict[NodeID, int]:
         """
