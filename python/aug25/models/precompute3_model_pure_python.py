@@ -69,7 +69,7 @@ class NodeOpt:
     is_end:
         True if this node corresponds to an arena node with clean_end=True.
     """
-    children: Dict[LLMToken, Dict[NodeID, Edge]] = field(default_factory=dict)
+    children: Dict[LLMToken, Dict[NodeID, List[Edge]]] = field(default_factory=dict)
     is_end: bool = False
 
 @dataclass
