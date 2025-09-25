@@ -1136,9 +1136,7 @@ class Model(GraphProvider):
                     else:
                         raise Exception("Unreachable")
 
-
         return NodeOptGraph(nodes=nodes, roots_map=self.roots_map.copy())
-
 
     def _from_nodeopt(self, graph: NodeOptGraph) -> None:
         """
