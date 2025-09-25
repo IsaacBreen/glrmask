@@ -989,23 +989,39 @@ class Model(GraphProvider):
 
         self.all_internal_llm_tokens_bitset = remap_llm_token_set(self.all_internal_llm_tokens_bitset)
 
-        # 6. Remap arena using the NodeOpt intermediate representation
-        nodeopts = self._to_nodeopt_graph()
-        new_nodeopts: Dict[NodeID, NodeOpt] = {}
-        for nid, nopt in nodeopts.items():
-            new_children: Dict[LLMToken, Dict[int, Tuple[int, Edge]]] = {}
-            for old_tok, dest_map in nopt.children.items():
-                if old_tok not in old_to_new_map:
-                    continue
-                new_tok = old_to_new_map[old_tok]
-                if new_tok not in new_children:
-                    new_children[new_tok] = dest_map
-                else:
-                    # This assertion verifies that all tokens in an equivalence class
-                    # have identical transitions.
-                    assert new_children[new_tok] == dest_map
-            new_nodeopts[nid] = NodeOpt(children=new_children, is_end=nopt.is_end)
-        self._from_nodeopt_graph(new_nodeopts)
+        # 6. Remap arena directly
+        for node in self.arena.values():
+            new_children = []
+            llm_union = LLMTokenSet.empty()
+            children = node.get("children", [])
+            if not children:
+                node["llm_bv_union"] = llm_union
+                continue
+
+            for (pop, llm_bv), dests in children:
+                new_llm_bv = remap_llm_token_set(llm_bv)
+                if not new_llm_bv.is_empty():
+                    new_children.append(((pop, new_llm_bv), dests))
+                    llm_union = llm_union.union(new_llm_bv)
+
+            # The structure of transitions for equivalent tokens is identical, so we don't need to regroup.
+            # We just need to re-sort to maintain deterministic order.
+            def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+                try:
+                    return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+                except Exception:
+                    return ()
+
+            new_children.sort(
+                key=lambda item: (
+                    int(item[0][0]),
+                    _ranges_key(item[0][1]),
+                    tuple(int(d[0]) for d in item[1]),
+                )
+            )
+
+            node["children"] = new_children
+            node["llm_bv_union"] = llm_union
 
         print(" done.")
 
@@ -1275,24 +1291,57 @@ class Model(GraphProvider):
         # Remap the universe
         self.all_internal_llm_tokens_bitset = remap_llm_token_set(self.all_internal_llm_tokens_bitset)
 
-        # Remap arena using NodeOpt intermediate representation
-        nodeopts = self._to_nodeopt_graph()
-        new_nodeopts: Dict[NodeID, NodeOpt] = {}
-        for nid, nopt in nodeopts.items():
-            new_children: Dict[int, Dict[int, Tuple[int, Edge]]] = {}
-            for old_tok, dest_map in (nopt.children or {}).items():
-                if old_tok not in old_to_new_map:
-                    # Skip tokens outside the mapping domain (shouldn't happen)
+        # Remap arena directly by regrouping tokens
+        for node in self.arena.values():
+            children = node.get("children", [])
+            if not children:
+                continue
+
+            # Group old tokens by their transition signature (pop, dests)
+            groups: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = collections.defaultdict(set)
+            for (pop, llm_bv), dests in children:
+                # Sort dests for a canonical signature. Each dest is (dest_id, state_bv).
+                # state_bv is a RangeSet, so we use its ranges for the signature.
+                dests_sig = tuple(sorted(
+                    (dest_id, tuple(state_bv.to_ranges())) for dest_id, state_bv in dests
+                ))
+                signature = (pop, dests_sig)
+                groups[signature].update(llm_bv.to_indices())
+
+            # Rebuild children with remapped tokens
+            new_children = []
+            llm_union = LLMTokenSet.empty()
+            for (pop, dests_sig), old_tokens in groups.items():
+                new_tokens = {old_to_new_map[t] for t in old_tokens if t in old_to_new_map}
+                if not new_tokens:
                     continue
-                new_tok = old_to_new_map[old_tok]
-                if new_tok in new_children:
-                    # Since this is a pure permutation, collisions should not occur.
-                    # If they do, require identical transitions.
-                    assert new_children[new_tok] == dest_map
-                else:
-                    new_children[new_tok] = dest_map
-            new_nodeopts[int(nid)] = NodeOpt(children=new_children, is_end=nopt.is_end)
-        self._from_nodeopt_graph(new_nodeopts)
+
+                new_llm_bv = LLMTokenSet.from_indices(sorted(list(new_tokens)))
+                llm_union = llm_union.union(new_llm_bv)
+                # Convert dests_sig back to list of (int, StateIDSet)
+                dests_list = [
+                    (dest_id, StateIDSet.from_ranges(list(ranges)))
+                    for dest_id, ranges in dests_sig
+                ]
+                new_children.append(((pop, new_llm_bv), dests_list))
+
+            # Deterministic sort
+            def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+                try:
+                    return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+                except Exception:
+                    return ()
+
+            new_children.sort(
+                key=lambda item: (
+                    int(item[0][0]),
+                    _ranges_key(item[0][1]),
+                    tuple(sorted(int(d[0]) for d in item[1])),
+                )
+            )
+
+            node["children"] = new_children
+            node["llm_bv_union"] = llm_union
 
         # Remap internal_to_original_map (pure permutation)
         if self.internal_to_original_map:

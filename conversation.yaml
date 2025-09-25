@@ -317,8 +317,9 @@ local_system:
                   state=state,
               )
 
-              model._unconditionalize_guaranteed_transitions()
               model._merge_equivalent_llm_tokens()
+              model._reorder_llm_tokens_for_range_minimization()
+              model._unconditionalize_guaranteed_transitions()
 
               return model
 
@@ -686,7 +687,7 @@ local_system:
               nodeopts: Dict[int, NodeOpt] = {}
               arena = self.arena
 
-              for uid, node in arena.items():
+              for uid, node in tqdm(arena.items(), desc="Converting to NodeOpt"):
                   uid_int = int(uid)
                   children_by_token: Dict[int, Dict[int, Tuple[int, Edge]]] = {}
 
@@ -919,6 +920,7 @@ local_system:
               Finds sets of LLM tokens that are equivalent (always appear together in LLMTokenSets)
               and merges them into a single internal token to reduce complexity.
               """
+              print("Merging equivalent LLM tokens...", end='', flush=True)
               # 1. Collect all unique LLMTokenSet instances from the model
               all_sets: Set[LLMTokenSet] = set()
               for node in self.arena.values():
@@ -1012,11 +1014,300 @@ local_system:
                   new_nodeopts[nid] = NodeOpt(children=new_children, is_end=nopt.is_end)
               self._from_nodeopt_graph(new_nodeopts)
 
+              print(" done.")
+
           def _unconditionalize_guaranteed_transitions(
               self,
               # etc
           ) -> None:
+              print("Unconditionalizing guaranteed transitions...", end='', flush=True)
               ...
+              print(" done.")
+
+          def _reorder_llm_tokens_for_range_minimization(self) -> None:
+              """
+              Permute internal LLM token IDs to reduce the number of ranges present in
+              all RangeSet occurrences across the model (arena edges, unions, and possible_matches_cache).
+              External token IDs remain unchanged; we only adjust internal indices used in RangeSets.
+
+              Heuristic:
+              - Build weighted "groups" of tokens that co-occur:
+                * Each child edge's llm_bv contributes a high-weight group.
+                * Each node's llm_bv_union contributes a small-weight group.
+                * Each possible_matches_cache entry contributes a medium-weight group.
+              - Greedily construct an ordering that keeps overlapping groups contiguous.
+              - Apply a permutation remapping of internal tokens to this order, then repack arena via NodeOpt.
+              """
+              print("Reordering LLM tokens for range minimization...", end='', flush=True)
+              # Collect universe of current internal tokens
+              all_tokens_list = list(self.all_internal_llm_tokens_bitset.to_indices())
+              if len(all_tokens_list) <= 1:
+                  return  # Nothing to do
+
+              all_tokens: Set[int] = set(int(t) for t in all_tokens_list)
+
+              # 1) Collect weighted co-occurrence groups.
+              # Weights are chosen to prioritize edge groups over unions and pmc sets.
+              # - Edge LLM sets: high weight (10)
+              # - Node llm_bv_union: low weight (2)
+              # - possible_matches_cache sets: medium weight (3)
+              edge_weight = 10
+              union_weight = 2
+              pmc_weight = 3
+
+              groups_counter: Dict[Tuple[int, ...], int] = collections.Counter()
+
+              # Arena children groups
+              for node in self.arena.values():
+                  children = node.get("children") or []
+                  if children:
+                      for (pop, llm_bv), _dests in children:
+                          idxs = [int(x) for x in llm_bv.to_indices() if int(x) in all_tokens]
+                          if len(idxs) > 1:
+                              groups_counter[tuple(idxs)] += edge_weight
+                  # Node union (optional)
+                  union_bv: LLMTokenSet = node.get("llm_bv_union") or LLMTokenSet.empty()
+                  if not union_bv.is_empty():
+                      idxs = [int(x) for x in union_bv.to_indices() if int(x) in all_tokens]
+                      if len(idxs) > 1:
+                          groups_counter[tuple(idxs)] += union_weight
+
+              # possible_matches_cache groups
+              if self.possible_matches_cache:
+                  for _tsid, inner in self.possible_matches_cache.items():
+                      for _term_id, llm_bv in inner.items():
+                          if llm_bv.is_empty():
+                              continue
+                          idxs = [int(x) for x in llm_bv.to_indices() if int(x) in all_tokens]
+                          if len(idxs) > 1:
+                              groups_counter[tuple(idxs)] += pmc_weight
+
+              # Early exit if we don't have any groups to optimize against
+              if not groups_counter:
+                  return
+
+              # Deduplicate groups (tuples already sorted by to_indices), compute a stable id for tie-breaking.
+              def stable_hash_of_ints(ints: Tuple[int, ...]) -> int:
+                  # 64-bit FNV-1a over the sorted ints (ints already sorted)
+                  h = 1469598103934665603
+                  for x in ints:
+                      v = x & 0xFFFFFFFFFFFFFFFF
+                      h ^= v
+                      h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+                  return h
+
+              groups_tokens: List[Set[int]] = []
+              groups_weight: List[int] = []
+              groups_stable_id: List[int] = []
+
+              for tup, w in groups_counter.items():
+                  # Filter out any token that somehow escaped the current universe
+                  s = [int(x) for x in tup if int(x) in all_tokens]
+                  if len(s) <= 1:
+                      continue
+                  st = set(s)
+                  groups_tokens.append(st)
+                  groups_weight.append(int(w))
+                  groups_stable_id.append(stable_hash_of_ints(tuple(sorted(st))))
+
+              if not groups_tokens:
+                  return
+
+              G = len(groups_tokens)
+
+              # 2) Build inverted index: token -> groups, and token "importance"
+              token_to_groups: Dict[int, List[int]] = collections.defaultdict(list)
+              token_importance: Dict[int, int] = {t: 0 for t in all_tokens}
+
+              for gi in range(G):
+                  g = groups_tokens[gi]
+                  w = groups_weight[gi]
+                  for t in g:
+                      token_to_groups[t].append(gi)
+                      token_importance[t] += w
+
+              # 3) Greedy ordering to cluster co-occurring tokens
+              unplaced: Set[int] = set(all_tokens)
+              placed: Set[int] = set()
+              order: List[int] = []
+
+              # Track per-group placed/unplaced counts incrementally.
+              placed_count = [0] * G
+              unplaced_count = [len(groups_tokens[i]) for i in range(G)]
+
+              def place_token(t: int):
+                  if t in placed:
+                      return
+                  placed.add(t)
+                  unplaced.discard(t)
+                  order.append(t)
+                  for gi in token_to_groups.get(t, []):
+                      placed_count[gi] += 1
+                      unplaced_count[gi] -= 1
+
+              def pick_seed_token() -> Optional[int]:
+                  if not unplaced:
+                      return None
+                  # Highest importance, deterministic tie-break on token id
+                  best_t = None
+                  best_key = None
+                  for t in unplaced:
+                      key = (token_importance.get(t, 0), -int(t))
+                      if (best_key is None) or (key > best_key):
+                          best_key = key
+                          best_t = t
+                  return best_t
+
+              def pick_best_group() -> Optional[int]:
+                  # Among groups with both placed and unplaced tokens, pick one maximizing:
+                  # score = weight * placed_count * unplaced_count
+                  best_gi = None
+                  best_score = None
+                  for gi in range(G):
+                      pc = placed_count[gi]
+                      uc = unplaced_count[gi]
+                      if pc > 0 and uc > 0:
+                          score = groups_weight[gi] * pc * uc
+                          key = (score, groups_weight[gi], -groups_stable_id[gi])
+                          if (best_score is None) or (key > best_score):
+                              best_score = key
+                              best_gi = gi
+                  return best_gi
+
+              # Seed with the best single token's heaviest group if available
+              seed = pick_seed_token()
+              if seed is None:
+                  return
+              # Determine a heavy group containing the seed (if any)
+              seed_groups = token_to_groups.get(seed, [])
+              if seed_groups:
+                  best_gi = None
+                  best_key = None
+                  for gi in seed_groups:
+                      key = (groups_weight[gi], -groups_stable_id[gi])
+                      if (best_key is None) or (key > best_key):
+                          best_key = key
+                          best_gi = gi
+                  # Place all tokens in that group first (by descending importance)
+                  if best_gi is not None:
+                      candidates = [t for t in groups_tokens[best_gi] if t in unplaced]
+                      candidates.sort(key=lambda x: (token_importance.get(x, 0), -int(x)), reverse=True)
+                      for t in candidates:
+                          place_token(t)
+              else:
+                  # No groups include the seed; place it alone
+                  place_token(seed)
+
+              # Grow ordering by picking best-overlap groups
+              while unplaced:
+                  gi = pick_best_group()
+                  if gi is None:
+                      # Start a new cluster
+                      seed = pick_seed_token()
+                      if seed is None:
+                          break
+                      seed_groups = token_to_groups.get(seed, [])
+                      if seed_groups:
+                          best_gi = None
+                          best_key = None
+                          for sgi in seed_groups:
+                              key = (groups_weight[sgi], -groups_stable_id[sgi])
+                              if (best_key is None) or (key > best_key):
+                                  best_key = key
+                                  best_gi = sgi
+                          if best_gi is not None:
+                              candidates = [t for t in groups_tokens[best_gi] if t in unplaced]
+                              candidates.sort(key=lambda x: (token_importance.get(x, 0), -int(x)), reverse=True)
+                              for t in candidates:
+                                  place_token(t)
+                              continue
+                      # If seed isn't in any group, just place it
+                      place_token(seed)
+                      continue
+
+                  # Place remaining tokens from the chosen group in importance order
+                  to_place = [t for t in groups_tokens[gi] if t in unplaced]
+                  if not to_place:
+                      # No-op (can happen due to incremental updates); pick again
+                      continue
+                  to_place.sort(key=lambda x: (token_importance.get(x, 0), -int(x)), reverse=True)
+                  for t in to_place:
+                      place_token(t)
+
+              # Sanity check: every token must be placed exactly once
+              if len(order) != len(all_tokens):
+                  # Fallback to identity if something went wrong
+                  return
+
+              # 4) Build permutation mapping and apply it
+              old_to_new: Dict[int, int] = {old: new for new, old in enumerate(order)}
+              self._remap_llm_tokens_permutation(old_to_new)
+
+              print(" done.", flush=True)
+
+          def _remap_llm_tokens_permutation(self, old_to_new_map: Dict[int, int]) -> None:
+              """
+              Apply a bijective mapping old_token_id -> new_token_id to all model RangeSets.
+              Does not modify id_to_token (external mapping). Updates:
+              - internal_to_original_map (permutation)
+              - possible_matches_cache
+              - all_internal_llm_tokens_bitset
+              - arena (via NodeOpt remap + repack)
+              """
+              # Ensure mapping is bijection over the current universe
+              domain = set(old_to_new_map.keys())
+              image = set(old_to_new_map.values())
+              if len(domain) != len(image):
+                  # Not a permutation; do nothing
+                  return
+
+              def remap_llm_token_set(s: LLMTokenSet) -> LLMTokenSet:
+                  if s.is_empty():
+                      return s
+                  new_indices = [old_to_new_map[i] for i in s.to_indices() if i in old_to_new_map]
+                  if not new_indices:
+                      return LLMTokenSet.empty()
+                  return LLMTokenSet.from_indices(sorted(new_indices))
+
+              # Remap possible_matches_cache
+              if self.possible_matches_cache:
+                  new_pmc: Dict[int, Dict[int, LLMTokenSet]] = {}
+                  for tsid, inner in self.possible_matches_cache.items():
+                      new_inner: Dict[int, LLMTokenSet] = {}
+                      for term_id, llm_bv in inner.items():
+                          new_inner[int(term_id)] = remap_llm_token_set(llm_bv)
+                      new_pmc[int(tsid)] = new_inner
+                  self.possible_matches_cache = new_pmc
+
+              # Remap the universe
+              self.all_internal_llm_tokens_bitset = remap_llm_token_set(self.all_internal_llm_tokens_bitset)
+
+              # Remap arena using NodeOpt intermediate representation
+              nodeopts = self._to_nodeopt_graph()
+              new_nodeopts: Dict[NodeID, NodeOpt] = {}
+              for nid, nopt in nodeopts.items():
+                  new_children: Dict[int, Dict[int, Tuple[int, Edge]]] = {}
+                  for old_tok, dest_map in (nopt.children or {}).items():
+                      if old_tok not in old_to_new_map:
+                          # Skip tokens outside the mapping domain (shouldn't happen)
+                          continue
+                      new_tok = old_to_new_map[old_tok]
+                      if new_tok in new_children:
+                          # Since this is a pure permutation, collisions should not occur.
+                          # If they do, require identical transitions.
+                          assert new_children[new_tok] == dest_map
+                      else:
+                          new_children[new_tok] = dest_map
+                  new_nodeopts[int(nid)] = NodeOpt(children=new_children, is_end=nopt.is_end)
+              self._from_nodeopt_graph(new_nodeopts)
+
+              # Remap internal_to_original_map (pure permutation)
+              if self.internal_to_original_map:
+                  new_internal_to_original_map: Dict[int, Set[int]] = {}
+                  for old_tok, orig_set in self.internal_to_original_map.items():
+                      if old_tok in old_to_new_map:
+                          new_internal_to_original_map[old_to_new_map[old_tok]] = set(orig_set)
+                  self.internal_to_original_map = new_internal_to_original_map
 
   prev_file_contents:
     python/aug25/models/precompute3_model_pure_python.py: |+
@@ -1332,10 +1623,10 @@ local_system:
                   state=state,
               )
 
-              model._unconditionalize_guaranteed_transitions()
               model._merge_equivalent_llm_tokens()
-
               model._reorder_llm_tokens_for_range_minimization()
+              model._unconditionalize_guaranteed_transitions()
+
               return model
 
           @profile
@@ -1702,7 +1993,7 @@ local_system:
               nodeopts: Dict[int, NodeOpt] = {}
               arena = self.arena
 
-              for uid, node in arena.items():
+              for uid, node in tqdm(arena.items(), desc="Converting to NodeOpt"):
                   uid_int = int(uid)
                   children_by_token: Dict[int, Dict[int, Tuple[int, Edge]]] = {}
 
@@ -1935,6 +2226,7 @@ local_system:
               Finds sets of LLM tokens that are equivalent (always appear together in LLMTokenSets)
               and merges them into a single internal token to reduce complexity.
               """
+              print("Merging equivalent LLM tokens...", end='', flush=True)
               # 1. Collect all unique LLMTokenSet instances from the model
               all_sets: Set[LLMTokenSet] = set()
               for node in self.arena.values():
@@ -2010,29 +2302,49 @@ local_system:
 
               self.all_internal_llm_tokens_bitset = remap_llm_token_set(self.all_internal_llm_tokens_bitset)
 
-              # 6. Remap arena using the NodeOpt intermediate representation
-              nodeopts = self._to_nodeopt_graph()
-              new_nodeopts: Dict[NodeID, NodeOpt] = {}
-              for nid, nopt in nodeopts.items():
-                  new_children: Dict[LLMToken, Dict[int, Tuple[int, Edge]]] = {}
-                  for old_tok, dest_map in nopt.children.items():
-                      if old_tok not in old_to_new_map:
-                          continue
-                      new_tok = old_to_new_map[old_tok]
-                      if new_tok not in new_children:
-                          new_children[new_tok] = dest_map
-                      else:
-                          # This assertion verifies that all tokens in an equivalence class
-                          # have identical transitions.
-                          assert new_children[new_tok] == dest_map
-                  new_nodeopts[nid] = NodeOpt(children=new_children, is_end=nopt.is_end)
-              self._from_nodeopt_graph(new_nodeopts)
+              # 6. Remap arena directly
+              for node in self.arena.values():
+                  new_children = []
+                  llm_union = LLMTokenSet.empty()
+                  children = node.get("children", [])
+                  if not children:
+                      node["llm_bv_union"] = llm_union
+                      continue
+
+                  for (pop, llm_bv), dests in children:
+                      new_llm_bv = remap_llm_token_set(llm_bv)
+                      if not new_llm_bv.is_empty():
+                          new_children.append(((pop, new_llm_bv), dests))
+                          llm_union = llm_union.union(new_llm_bv)
+
+                  # The structure of transitions for equivalent tokens is identical, so we don't need to regroup.
+                  # We just need to re-sort to maintain deterministic order.
+                  def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+                      try:
+                          return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+                      except Exception:
+                          return ()
+
+                  new_children.sort(
+                      key=lambda item: (
+                          int(item[0][0]),
+                          _ranges_key(item[0][1]),
+                          tuple(int(d[0]) for d in item[1]),
+                      )
+                  )
+
+                  node["children"] = new_children
+                  node["llm_bv_union"] = llm_union
+
+              print(" done.")
 
           def _unconditionalize_guaranteed_transitions(
               self,
               # etc
           ) -> None:
+              print("Unconditionalizing guaranteed transitions...", end='', flush=True)
               ...
+              print(" done.")
 
           def _reorder_llm_tokens_for_range_minimization(self) -> None:
               """
@@ -2048,6 +2360,7 @@ local_system:
               - Greedily construct an ordering that keeps overlapping groups contiguous.
               - Apply a permutation remapping of internal tokens to this order, then repack arena via NodeOpt.
               """
+              print("Reordering LLM tokens for range minimization...", end='', flush=True)
               # Collect universe of current internal tokens
               all_tokens_list = list(self.all_internal_llm_tokens_bitset.to_indices())
               if len(all_tokens_list) <= 1:
@@ -2252,6 +2565,8 @@ local_system:
               old_to_new: Dict[int, int] = {old: new for new, old in enumerate(order)}
               self._remap_llm_tokens_permutation(old_to_new)
 
+              print(" done.", flush=True)
+
           def _remap_llm_tokens_permutation(self, old_to_new_map: Dict[int, int]) -> None:
               """
               Apply a bijective mapping old_token_id -> new_token_id to all model RangeSets.
@@ -2289,24 +2604,57 @@ local_system:
               # Remap the universe
               self.all_internal_llm_tokens_bitset = remap_llm_token_set(self.all_internal_llm_tokens_bitset)
 
-              # Remap arena using NodeOpt intermediate representation
-              nodeopts = self._to_nodeopt_graph()
-              new_nodeopts: Dict[NodeID, NodeOpt] = {}
-              for nid, nopt in nodeopts.items():
-                  new_children: Dict[int, Dict[int, Tuple[int, Edge]]] = {}
-                  for old_tok, dest_map in (nopt.children or {}).items():
-                      if old_tok not in old_to_new_map:
-                          # Skip tokens outside the mapping domain (shouldn't happen)
+              # Remap arena directly by regrouping tokens
+              for node in self.arena.values():
+                  children = node.get("children", [])
+                  if not children:
+                      continue
+
+                  # Group old tokens by their transition signature (pop, dests)
+                  groups: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = collections.defaultdict(set)
+                  for (pop, llm_bv), dests in children:
+                      # Sort dests for a canonical signature. Each dest is (dest_id, state_bv).
+                      # state_bv is a RangeSet, so we use its ranges for the signature.
+                      dests_sig = tuple(sorted(
+                          (dest_id, tuple(state_bv.to_ranges())) for dest_id, state_bv in dests
+                      ))
+                      signature = (pop, dests_sig)
+                      groups[signature].update(llm_bv.to_indices())
+
+                  # Rebuild children with remapped tokens
+                  new_children = []
+                  llm_union = LLMTokenSet.empty()
+                  for (pop, dests_sig), old_tokens in groups.items():
+                      new_tokens = {old_to_new_map[t] for t in old_tokens if t in old_to_new_map}
+                      if not new_tokens:
                           continue
-                      new_tok = old_to_new_map[old_tok]
-                      if new_tok in new_children:
-                          # Since this is a pure permutation, collisions should not occur.
-                          # If they do, require identical transitions.
-                          assert new_children[new_tok] == dest_map
-                      else:
-                          new_children[new_tok] = dest_map
-                  new_nodeopts[int(nid)] = NodeOpt(children=new_children, is_end=nopt.is_end)
-              self._from_nodeopt_graph(new_nodeopts)
+
+                      new_llm_bv = LLMTokenSet.from_indices(sorted(list(new_tokens)))
+                      llm_union = llm_union.union(new_llm_bv)
+                      # Convert dests_sig back to list of (int, StateIDSet)
+                      dests_list = [
+                          (dest_id, StateIDSet.from_ranges(list(ranges)))
+                          for dest_id, ranges in dests_sig
+                      ]
+                      new_children.append(((pop, new_llm_bv), dests_list))
+
+                  # Deterministic sort
+                  def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+                      try:
+                          return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+                      except Exception:
+                          return ()
+
+                  new_children.sort(
+                      key=lambda item: (
+                          int(item[0][0]),
+                          _ranges_key(item[0][1]),
+                          tuple(sorted(int(d[0]) for d in item[1])),
+                      )
+                  )
+
+                  node["children"] = new_children
+                  node["llm_bv_union"] = llm_union
 
               # Remap internal_to_original_map (pure permutation)
               if self.internal_to_original_map:
@@ -2326,7 +2674,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -2674,8 +3022,9 @@ messages:
                   state=state,
               )
 
-              model._unconditionalize_guaranteed_transitions()
               model._merge_equivalent_llm_tokens()
+              model._reorder_llm_tokens_for_range_minimization()
+              model._unconditionalize_guaranteed_transitions()
 
               return model
 
@@ -3043,7 +3392,7 @@ messages:
               nodeopts: Dict[int, NodeOpt] = {}
               arena = self.arena
 
-              for uid, node in arena.items():
+              for uid, node in tqdm(arena.items(), desc="Converting to NodeOpt"):
                   uid_int = int(uid)
                   children_by_token: Dict[int, Dict[int, Tuple[int, Edge]]] = {}
 
@@ -3276,6 +3625,7 @@ messages:
               Finds sets of LLM tokens that are equivalent (always appear together in LLMTokenSets)
               and merges them into a single internal token to reduce complexity.
               """
+              print("Merging equivalent LLM tokens...", end='', flush=True)
               # 1. Collect all unique LLMTokenSet instances from the model
               all_sets: Set[LLMTokenSet] = set()
               for node in self.arena.values():
@@ -3369,26 +3719,310 @@ messages:
                   new_nodeopts[nid] = NodeOpt(children=new_children, is_end=nopt.is_end)
               self._from_nodeopt_graph(new_nodeopts)
 
+              print(" done.")
+
           def _unconditionalize_guaranteed_transitions(
               self,
               # etc
           ) -> None:
+              print("Unconditionalizing guaranteed transitions...", end='', flush=True)
               ...
+              print(" done.")
+
+          def _reorder_llm_tokens_for_range_minimization(self) -> None:
+              """
+              Permute internal LLM token IDs to reduce the number of ranges present in
+              all RangeSet occurrences across the model (arena edges, unions, and possible_matches_cache).
+              External token IDs remain unchanged; we only adjust internal indices used in RangeSets.
+
+              Heuristic:
+              - Build weighted "groups" of tokens that co-occur:
+                * Each child edge's llm_bv contributes a high-weight group.
+                * Each node's llm_bv_union contributes a small-weight group.
+                * Each possible_matches_cache entry contributes a medium-weight group.
+              - Greedily construct an ordering that keeps overlapping groups contiguous.
+              - Apply a permutation remapping of internal tokens to this order, then repack arena via NodeOpt.
+              """
+              print("Reordering LLM tokens for range minimization...", end='', flush=True)
+              # Collect universe of current internal tokens
+              all_tokens_list = list(self.all_internal_llm_tokens_bitset.to_indices())
+              if len(all_tokens_list) <= 1:
+                  return  # Nothing to do
+
+              all_tokens: Set[int] = set(int(t) for t in all_tokens_list)
+
+              # 1) Collect weighted co-occurrence groups.
+              # Weights are chosen to prioritize edge groups over unions and pmc sets.
+              # - Edge LLM sets: high weight (10)
+              # - Node llm_bv_union: low weight (2)
+              # - possible_matches_cache sets: medium weight (3)
+              edge_weight = 10
+              union_weight = 2
+              pmc_weight = 3
+
+              groups_counter: Dict[Tuple[int, ...], int] = collections.Counter()
+
+              # Arena children groups
+              for node in self.arena.values():
+                  children = node.get("children") or []
+                  if children:
+                      for (pop, llm_bv), _dests in children:
+                          idxs = [int(x) for x in llm_bv.to_indices() if int(x) in all_tokens]
+                          if len(idxs) > 1:
+                              groups_counter[tuple(idxs)] += edge_weight
+                  # Node union (optional)
+                  union_bv: LLMTokenSet = node.get("llm_bv_union") or LLMTokenSet.empty()
+                  if not union_bv.is_empty():
+                      idxs = [int(x) for x in union_bv.to_indices() if int(x) in all_tokens]
+                      if len(idxs) > 1:
+                          groups_counter[tuple(idxs)] += union_weight
+
+              # possible_matches_cache groups
+              if self.possible_matches_cache:
+                  for _tsid, inner in self.possible_matches_cache.items():
+                      for _term_id, llm_bv in inner.items():
+                          if llm_bv.is_empty():
+                              continue
+                          idxs = [int(x) for x in llm_bv.to_indices() if int(x) in all_tokens]
+                          if len(idxs) > 1:
+                              groups_counter[tuple(idxs)] += pmc_weight
+
+              # Early exit if we don't have any groups to optimize against
+              if not groups_counter:
+                  return
+
+              # Deduplicate groups (tuples already sorted by to_indices), compute a stable id for tie-breaking.
+              def stable_hash_of_ints(ints: Tuple[int, ...]) -> int:
+                  # 64-bit FNV-1a over the sorted ints (ints already sorted)
+                  h = 1469598103934665603
+                  for x in ints:
+                      v = x & 0xFFFFFFFFFFFFFFFF
+                      h ^= v
+                      h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+                  return h
+
+              groups_tokens: List[Set[int]] = []
+              groups_weight: List[int] = []
+              groups_stable_id: List[int] = []
+
+              for tup, w in groups_counter.items():
+                  # Filter out any token that somehow escaped the current universe
+                  s = [int(x) for x in tup if int(x) in all_tokens]
+                  if len(s) <= 1:
+                      continue
+                  st = set(s)
+                  groups_tokens.append(st)
+                  groups_weight.append(int(w))
+                  groups_stable_id.append(stable_hash_of_ints(tuple(sorted(st))))
+
+              if not groups_tokens:
+                  return
+
+              G = len(groups_tokens)
+
+              # 2) Build inverted index: token -> groups, and token "importance"
+              token_to_groups: Dict[int, List[int]] = collections.defaultdict(list)
+              token_importance: Dict[int, int] = {t: 0 for t in all_tokens}
+
+              for gi in range(G):
+                  g = groups_tokens[gi]
+                  w = groups_weight[gi]
+                  for t in g:
+                      token_to_groups[t].append(gi)
+                      token_importance[t] += w
+
+              # 3) Greedy ordering to cluster co-occurring tokens
+              unplaced: Set[int] = set(all_tokens)
+              placed: Set[int] = set()
+              order: List[int] = []
+
+              # Track per-group placed/unplaced counts incrementally.
+              placed_count = [0] * G
+              unplaced_count = [len(groups_tokens[i]) for i in range(G)]
+
+              def place_token(t: int):
+                  if t in placed:
+                      return
+                  placed.add(t)
+                  unplaced.discard(t)
+                  order.append(t)
+                  for gi in token_to_groups.get(t, []):
+                      placed_count[gi] += 1
+                      unplaced_count[gi] -= 1
+
+              def pick_seed_token() -> Optional[int]:
+                  if not unplaced:
+                      return None
+                  # Highest importance, deterministic tie-break on token id
+                  best_t = None
+                  best_key = None
+                  for t in unplaced:
+                      key = (token_importance.get(t, 0), -int(t))
+                      if (best_key is None) or (key > best_key):
+                          best_key = key
+                          best_t = t
+                  return best_t
+
+              def pick_best_group() -> Optional[int]:
+                  # Among groups with both placed and unplaced tokens, pick one maximizing:
+                  # score = weight * placed_count * unplaced_count
+                  best_gi = None
+                  best_score = None
+                  for gi in range(G):
+                      pc = placed_count[gi]
+                      uc = unplaced_count[gi]
+                      if pc > 0 and uc > 0:
+                          score = groups_weight[gi] * pc * uc
+                          key = (score, groups_weight[gi], -groups_stable_id[gi])
+                          if (best_score is None) or (key > best_score):
+                              best_score = key
+                              best_gi = gi
+                  return best_gi
+
+              # Seed with the best single token's heaviest group if available
+              seed = pick_seed_token()
+              if seed is None:
+                  return
+              # Determine a heavy group containing the seed (if any)
+              seed_groups = token_to_groups.get(seed, [])
+              if seed_groups:
+                  best_gi = None
+                  best_key = None
+                  for gi in seed_groups:
+                      key = (groups_weight[gi], -groups_stable_id[gi])
+                      if (best_key is None) or (key > best_key):
+                          best_key = key
+                          best_gi = gi
+                  # Place all tokens in that group first (by descending importance)
+                  if best_gi is not None:
+                      candidates = [t for t in groups_tokens[best_gi] if t in unplaced]
+                      candidates.sort(key=lambda x: (token_importance.get(x, 0), -int(x)), reverse=True)
+                      for t in candidates:
+                          place_token(t)
+              else:
+                  # No groups include the seed; place it alone
+                  place_token(seed)
+
+              # Grow ordering by picking best-overlap groups
+              while unplaced:
+                  gi = pick_best_group()
+                  if gi is None:
+                      # Start a new cluster
+                      seed = pick_seed_token()
+                      if seed is None:
+                          break
+                      seed_groups = token_to_groups.get(seed, [])
+                      if seed_groups:
+                          best_gi = None
+                          best_key = None
+                          for sgi in seed_groups:
+                              key = (groups_weight[sgi], -groups_stable_id[sgi])
+                              if (best_key is None) or (key > best_key):
+                                  best_key = key
+                                  best_gi = sgi
+                          if best_gi is not None:
+                              candidates = [t for t in groups_tokens[best_gi] if t in unplaced]
+                              candidates.sort(key=lambda x: (token_importance.get(x, 0), -int(x)), reverse=True)
+                              for t in candidates:
+                                  place_token(t)
+                              continue
+                      # If seed isn't in any group, just place it
+                      place_token(seed)
+                      continue
+
+                  # Place remaining tokens from the chosen group in importance order
+                  to_place = [t for t in groups_tokens[gi] if t in unplaced]
+                  if not to_place:
+                      # No-op (can happen due to incremental updates); pick again
+                      continue
+                  to_place.sort(key=lambda x: (token_importance.get(x, 0), -int(x)), reverse=True)
+                  for t in to_place:
+                      place_token(t)
+
+              # Sanity check: every token must be placed exactly once
+              if len(order) != len(all_tokens):
+                  # Fallback to identity if something went wrong
+                  return
+
+              # 4) Build permutation mapping and apply it
+              old_to_new: Dict[int, int] = {old: new for new, old in enumerate(order)}
+              self._remap_llm_tokens_permutation(old_to_new)
+
+              print(" done.", flush=True)
+
+          def _remap_llm_tokens_permutation(self, old_to_new_map: Dict[int, int]) -> None:
+              """
+              Apply a bijective mapping old_token_id -> new_token_id to all model RangeSets.
+              Does not modify id_to_token (external mapping). Updates:
+              - internal_to_original_map (permutation)
+              - possible_matches_cache
+              - all_internal_llm_tokens_bitset
+              - arena (via NodeOpt remap + repack)
+              """
+              # Ensure mapping is bijection over the current universe
+              domain = set(old_to_new_map.keys())
+              image = set(old_to_new_map.values())
+              if len(domain) != len(image):
+                  # Not a permutation; do nothing
+                  return
+
+              def remap_llm_token_set(s: LLMTokenSet) -> LLMTokenSet:
+                  if s.is_empty():
+                      return s
+                  new_indices = [old_to_new_map[i] for i in s.to_indices() if i in old_to_new_map]
+                  if not new_indices:
+                      return LLMTokenSet.empty()
+                  return LLMTokenSet.from_indices(sorted(new_indices))
+
+              # Remap possible_matches_cache
+              if self.possible_matches_cache:
+                  new_pmc: Dict[int, Dict[int, LLMTokenSet]] = {}
+                  for tsid, inner in self.possible_matches_cache.items():
+                      new_inner: Dict[int, LLMTokenSet] = {}
+                      for term_id, llm_bv in inner.items():
+                          new_inner[int(term_id)] = remap_llm_token_set(llm_bv)
+                      new_pmc[int(tsid)] = new_inner
+                  self.possible_matches_cache = new_pmc
+
+              # Remap the universe
+              self.all_internal_llm_tokens_bitset = remap_llm_token_set(self.all_internal_llm_tokens_bitset)
+
+              # Remap arena using NodeOpt intermediate representation
+              nodeopts = self._to_nodeopt_graph()
+              new_nodeopts: Dict[NodeID, NodeOpt] = {}
+              for nid, nopt in nodeopts.items():
+                  new_children: Dict[int, Dict[int, Tuple[int, Edge]]] = {}
+                  for old_tok, dest_map in (nopt.children or {}).items():
+                      if old_tok not in old_to_new_map:
+                          # Skip tokens outside the mapping domain (shouldn't happen)
+                          continue
+                      new_tok = old_to_new_map[old_tok]
+                      if new_tok in new_children:
+                          # Since this is a pure permutation, collisions should not occur.
+                          # If they do, require identical transitions.
+                          assert new_children[new_tok] == dest_map
+                      else:
+                          new_children[new_tok] = dest_map
+                  new_nodeopts[int(nid)] = NodeOpt(children=new_children, is_end=nopt.is_end)
+              self._from_nodeopt_graph(new_nodeopts)
+
+              # Remap internal_to_original_map (pure permutation)
+              if self.internal_to_original_map:
+                  new_internal_to_original_map: Dict[int, Set[int]] = {}
+                  for old_tok, orig_set in self.internal_to_original_map.items():
+                      if old_tok in old_to_new_map:
+                          new_internal_to_original_map[old_to_new_map[old_tok]] = set(orig_set)
+                  self.internal_to_original_map = new_internal_to_original_map
 
 
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: |-
-      We make extensive use of RangeSet in this code for representing sets of LLM tokens.
-      The complexity of dealing with range sets is basically proportional to the number of ranges in the set.
-      We want to minimize this.
-
-      Look at the ranges on the edges.
-      Try to figure out a way to minimize complexity.
-      For example, if we have just one range `[0..=5, 7..=9]`, we could remap internal token 6 to 9, and tokens 7-9 to 6-8 so we get just `[0..=8]`.
-      Essentially, we can make the internal LLM tokens whatever we want, since they're going to be mapped back to original tokens before we return from `get_mask` anyway. They're purely *internal*.
-      Optimize this.
+  - user: Modify `_merge_equivalent_llm_tokens` and `_reorder_llm_tokens_for_range_minimization`
+      to *not* use NodeOpt. It's *way* too slow to convert to NodeOpt and back. Until,
+      that is, we finish `_merge_equivalent_llm_tokens` and `_reorder_llm_tokens_for_range_minimization`,
+      by which point it becomes much faster due to having fewer internal LLM tokens
+      and bigger ranges. Which is why we *don't want to use NodeOpt in those functions.*
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3407,351 +4041,263 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are concrete, actionable steps to add an internal token reordering pass that minimizes the number of ranges in RangeSet instances by permuting internal LLM token IDs. This keeps external token IDs intact and only adjusts internal indices used inside RangeSets. The reordering clusters tokens that frequently co-occur across edges and possible-matches into contiguous runs, which reduces RangeSet fragmentation and improves performance.
+      Of course. Dealing with performance bottlenecks in data structure conversions is critical. Here are the step-by-step instructions to modify `_merge_equivalent_llm_tokens` and `_reorder_llm_tokens_for_range_minimization` to operate directly on the `arena` without converting to and from `NodeOpt`, followed by the corresponding git diff.
 
-      Step-by-step instructions
+      ### Step-by-step Instructions
 
-      1) Open file: python/aug25/models/precompute3_model_pure_python.py
+      #### File: `python/aug25/models/precompute3_model_pure_python.py`
 
-      2) Add a call to a new optimization pass after _merge_equivalent_llm_tokens in Model.from_json_string:
-         - Find the block at the end of from_json_string where model._merge_equivalent_llm_tokens() is called.
-         - Immediately after that line, insert a call to model._reorder_llm_tokens_for_range_minimization().
+      1.  **Modify `_merge_equivalent_llm_tokens()`**
 
-      3) Add a new private method _reorder_llm_tokens_for_range_minimization to the Model class:
-         - Place it after the existing _merge_equivalent_llm_tokens method (near other optimization methods).
-         - This method:
-           - Collects all unique LLMTokenSet occurrences (from arena edges, llm_bv_union, and possible_matches_cache).
-           - Builds weighted “groups” of tokens that appear together.
-           - Greedily computes a token ordering that places highly overlapping groups contiguously.
-           - Applies a permutation remapping to all RangeSets via a helper method, updating:
-             - possible_matches_cache
-             - all_internal_llm_tokens_bitset
-             - internal_to_original_map
-             - arena (via NodeOpt conversion and repacking)
+          In this method, we will replace the section that converts the graph to `NodeOpt` and back with a direct manipulation of the `arena` data structure. Since this function only re-labels equivalent tokens, we can simply remap the `LLMTokenSet` for each edge.
 
-      4) Add a helper method _remap_llm_tokens_permutation to apply a bijective old->new token ID mapping:
-         - This is similar to the remap step inside _merge_equivalent_llm_tokens but handles pure permutations rather than merges.
+          -   Navigate to the `_merge_equivalent_llm_tokens` method.
+          -   Find the comment `# 6. Remap arena using the NodeOpt intermediate representation`.
+          -   Delete the block of code that follows this comment, starting with `nodeopts = self._to_nodeopt_graph()` and ending with `self._from_nodeopt_graph(new_nodeopts)`.
+          -   In its place, insert the following code:
 
-      5) Save the file and run your tests/benchmarks. The internal RangeSets should now exhibit fewer ranges, improving performance without changing external behavior.
+          ```python
+                  # 6. Remap arena directly
+                  for node in self.arena.values():
+                      new_children = []
+                      llm_union = LLMTokenSet.empty()
+                      children = node.get("children", [])
+                      if not children:
+                          node["llm_bv_union"] = llm_union
+                          continue
+          
+                      for (pop, llm_bv), dests in children:
+                          new_llm_bv = remap_llm_token_set(llm_bv)
+                          if not new_llm_bv.is_empty():
+                              new_children.append(((pop, new_llm_bv), dests))
+                              llm_union = llm_union.union(new_llm_bv)
+          
+                      # The structure of transitions for equivalent tokens is identical, so we don't need to regroup.
+                      # We just need to re-sort to maintain deterministic order.
+                      def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+                          try:
+                              return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+                          except Exception:
+                              return ()
+          
+                      new_children.sort(
+                          key=lambda item: (
+                              int(item[0][0]),
+                              _ranges_key(item[0][1]),
+                              tuple(int(d[0]) for d in item[1]),
+                          )
+                      )
+          
+                      node["children"] = new_children
+                      node["llm_bv_union"] = llm_union
+          ```
 
+      2.  **Modify `_remap_llm_tokens_permutation()`**
 
-      Diff patch
+          The `_reorder_llm_tokens_for_range_minimization` function relies on `_remap_llm_tokens_permutation`. We will modify this helper function to avoid the `NodeOpt` conversion. This change is more complex because token reordering requires regrouping tokens that now belong to the same edge signature.
+
+          -   Navigate to the `_remap_llm_tokens_permutation` method.
+          -   Find the comment `# Remap arena using NodeOpt intermediate representation`.
+          -   Delete the block of code that follows, from `nodeopts = self._to_nodeopt_graph()` to `self._from_nodeopt_graph(new_nodeopts)`.
+          -   Replace it with the following implementation that directly rebuilds the arena edges:
+
+          ```python
+                  # Remap arena directly by regrouping tokens
+                  for node in self.arena.values():
+                      children = node.get("children", [])
+                      if not children:
+                          continue
+          
+                      # Group old tokens by their transition signature (pop, dests)
+                      groups: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = collections.defaultdict(set)
+                      for (pop, llm_bv), dests in children:
+                          # Sort dests for a canonical signature. Each dest is (dest_id, state_bv).
+                          # state_bv is a RangeSet, so we use its ranges for the signature.
+                          dests_sig = tuple(sorted(
+                              (dest_id, tuple(state_bv.to_ranges())) for dest_id, state_bv in dests
+                          ))
+                          signature = (pop, dests_sig)
+                          groups[signature].update(llm_bv.to_indices())
+          
+                      # Rebuild children with remapped tokens
+                      new_children = []
+                      llm_union = LLMTokenSet.empty()
+                      for (pop, dests_sig), old_tokens in groups.items():
+                          new_tokens = {old_to_new_map[t] for t in old_tokens if t in old_to_new_map}
+                          if not new_tokens:
+                              continue
+          
+                          new_llm_bv = LLMTokenSet.from_indices(sorted(list(new_tokens)))
+                          llm_union = llm_union.union(new_llm_bv)
+                          # Convert dests_sig back to list of (int, StateIDSet)
+                          dests_list = [
+                              (dest_id, StateIDSet.from_ranges(list(ranges)))
+                              for dest_id, ranges in dests_sig
+                          ]
+                          new_children.append(((pop, new_llm_bv), dests_list))
+          
+                      # Deterministic sort
+                      def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+                          try:
+                              return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+                          except Exception:
+                              return ()
+          
+                      new_children.sort(
+                          key=lambda item: (
+                              int(item[0][0]),
+                              _ranges_key(item[0][1]),
+                              tuple(sorted(int(d[0]) for d in item[1])),
+                          )
+                      )
+          
+                      node["children"] = new_children
+                      node["llm_bv_union"] = llm_union
+          ```
+
+      ### Git Diff
+
+      Here is the git diff that applies the changes described above.
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      index 8b2e7c1..a7a3f38 100644
+      index 9205562..0588147 100644
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -1,4 +1,4 @@
-      -from __future__ import annotations
-      +from __future__ import annotations
+      @@ -1025,23 +1025,41 @@
        
-       import json
-       import heapq
-      @@ -234,6 +234,7 @@ class Model(GraphProvider):
-               model._unconditionalize_guaranteed_transitions()
-               model._merge_equivalent_llm_tokens()
+               self.all_internal_llm_tokens_bitset = remap_llm_token_set(self.all_internal_llm_tokens_bitset)
        
-      +        model._reorder_llm_tokens_for_range_minimization()
-               return model
-       
-           @profile
-      @@ -875,6 +876,247 @@ class Model(GraphProvider):
-                       else:
-                           # This assertion verifies that all tokens in an equivalence class
-                           # have identical transitions.
-                           assert new_children[new_tok] == dest_map
-                   new_nodeopts[nid] = NodeOpt(children=new_children, is_end=nopt.is_end)
-               self._from_nodeopt_graph(new_nodeopts)
-       
-           def _unconditionalize_guaranteed_transitions(
-               self,
-               # etc
-           ) -> None:
-               ...
-       
-      +    def _reorder_llm_tokens_for_range_minimization(self) -> None:
-      +        """
-      +        Permute internal LLM token IDs to reduce the number of ranges present in
-      +        all RangeSet occurrences across the model (arena edges, unions, and possible_matches_cache).
-      +        External token IDs remain unchanged; we only adjust internal indices used in RangeSets.
-      +
-      +        Heuristic:
-      +        - Build weighted "groups" of tokens that co-occur:
-      +          * Each child edge's llm_bv contributes a high-weight group.
-      +          * Each node's llm_bv_union contributes a small-weight group.
-      +          * Each possible_matches_cache entry contributes a medium-weight group.
-      +        - Greedily construct an ordering that keeps overlapping groups contiguous.
-      +        - Apply a permutation remapping of internal tokens to this order, then repack arena via NodeOpt.
-      +        """
-      +        # Collect universe of current internal tokens
-      +        all_tokens_list = list(self.all_internal_llm_tokens_bitset.to_indices())
-      +        if len(all_tokens_list) <= 1:
-      +            return  # Nothing to do
-      +
-      +        all_tokens: Set[int] = set(int(t) for t in all_tokens_list)
-      +
-      +        # 1) Collect weighted co-occurrence groups.
-      +        # Weights are chosen to prioritize edge groups over unions and pmc sets.
-      +        # - Edge LLM sets: high weight (10)
-      +        # - Node llm_bv_union: low weight (2)
-      +        # - possible_matches_cache sets: medium weight (3)
-      +        edge_weight = 10
-      +        union_weight = 2
-      +        pmc_weight = 3
-      +
-      +        groups_counter: Dict[Tuple[int, ...], int] = collections.Counter()
-      +
-      +        # Arena children groups
+      -        # 6. Remap arena using the NodeOpt intermediate representation
+      -        nodeopts = self._to_nodeopt_graph()
+      -        new_nodeopts: Dict[NodeID, NodeOpt] = {}
+      -        for nid, nopt in nodeopts.items():
+      -            new_children: Dict[LLMToken, Dict[int, Tuple[int, Edge]]] = {}
+      -            for old_tok, dest_map in nopt.children.items():
+      -                if old_tok not in old_to_new_map:
+      -                    continue
+      -                new_tok = old_to_new_map[old_tok]
+      -                if new_tok not in new_children:
+      -                    new_children[new_tok] = dest_map
+      -                else:
+      -                    # This assertion verifies that all tokens in an equivalence class
+      -                    # have identical transitions.
+      -                    assert new_children[new_tok] == dest_map
+      -            new_nodeopts[nid] = NodeOpt(children=new_children, is_end=nopt.is_end)
+      -        self._from_nodeopt_graph(new_nodeopts)
+      +        # 6. Remap arena directly
       +        for node in self.arena.values():
-      +            children = node.get("children") or []
-      +            if children:
-      +                for (pop, llm_bv), _dests in children:
-      +                    idxs = [int(x) for x in llm_bv.to_indices() if int(x) in all_tokens]
-      +                    if len(idxs) > 1:
-      +                        groups_counter[tuple(idxs)] += edge_weight
-      +            # Node union (optional)
-      +            union_bv: LLMTokenSet = node.get("llm_bv_union") or LLMTokenSet.empty()
-      +            if not union_bv.is_empty():
-      +                idxs = [int(x) for x in union_bv.to_indices() if int(x) in all_tokens]
-      +                if len(idxs) > 1:
-      +                    groups_counter[tuple(idxs)] += union_weight
-      +
-      +        # possible_matches_cache groups
-      +        if self.possible_matches_cache:
-      +            for _tsid, inner in self.possible_matches_cache.items():
-      +                for _term_id, llm_bv in inner.items():
-      +                    if llm_bv.is_empty():
-      +                        continue
-      +                    idxs = [int(x) for x in llm_bv.to_indices() if int(x) in all_tokens]
-      +                    if len(idxs) > 1:
-      +                        groups_counter[tuple(idxs)] += pmc_weight
-      +
-      +        # Early exit if we don't have any groups to optimize against
-      +        if not groups_counter:
-      +            return
-      +
-      +        # Deduplicate groups (tuples already sorted by to_indices), compute a stable id for tie-breaking.
-      +        def stable_hash_of_ints(ints: Tuple[int, ...]) -> int:
-      +            # 64-bit FNV-1a over the sorted ints (ints already sorted)
-      +            h = 1469598103934665603
-      +            for x in ints:
-      +                v = x & 0xFFFFFFFFFFFFFFFF
-      +                h ^= v
-      +                h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
-      +            return h
-      +
-      +        groups_tokens: List[Set[int]] = []
-      +        groups_weight: List[int] = []
-      +        groups_stable_id: List[int] = []
-      +
-      +        for tup, w in groups_counter.items():
-      +            # Filter out any token that somehow escaped the current universe
-      +            s = [int(x) for x in tup if int(x) in all_tokens]
-      +            if len(s) <= 1:
-      +                continue
-      +            st = set(s)
-      +            groups_tokens.append(st)
-      +            groups_weight.append(int(w))
-      +            groups_stable_id.append(stable_hash_of_ints(tuple(sorted(st))))
-      +
-      +        if not groups_tokens:
-      +            return
-      +
-      +        G = len(groups_tokens)
-      +
-      +        # 2) Build inverted index: token -> groups, and token "importance"
-      +        token_to_groups: Dict[int, List[int]] = collections.defaultdict(list)
-      +        token_importance: Dict[int, int] = {t: 0 for t in all_tokens}
-      +
-      +        for gi in range(G):
-      +            g = groups_tokens[gi]
-      +            w = groups_weight[gi]
-      +            for t in g:
-      +                token_to_groups[t].append(gi)
-      +                token_importance[t] += w
-      +
-      +        # 3) Greedy ordering to cluster co-occurring tokens
-      +        unplaced: Set[int] = set(all_tokens)
-      +        placed: Set[int] = set()
-      +        order: List[int] = []
-      +
-      +        # Track per-group placed/unplaced counts incrementally.
-      +        placed_count = [0] * G
-      +        unplaced_count = [len(groups_tokens[i]) for i in range(G)]
-      +
-      +        def place_token(t: int):
-      +            if t in placed:
-      +                return
-      +            placed.add(t)
-      +            unplaced.discard(t)
-      +            order.append(t)
-      +            for gi in token_to_groups.get(t, []):
-      +                placed_count[gi] += 1
-      +                unplaced_count[gi] -= 1
-      +
-      +        def pick_seed_token() -> Optional[int]:
-      +            if not unplaced:
-      +                return None
-      +            # Highest importance, deterministic tie-break on token id
-      +            best_t = None
-      +            best_key = None
-      +            for t in unplaced:
-      +                key = (token_importance.get(t, 0), -int(t))
-      +                if (best_key is None) or (key > best_key):
-      +                    best_key = key
-      +                    best_t = t
-      +            return best_t
-      +
-      +        def pick_best_group() -> Optional[int]:
-      +            # Among groups with both placed and unplaced tokens, pick one maximizing:
-      +            # score = weight * placed_count * unplaced_count
-      +            best_gi = None
-      +            best_score = None
-      +            for gi in range(G):
-      +                pc = placed_count[gi]
-      +                uc = unplaced_count[gi]
-      +                if pc > 0 and uc > 0:
-      +                    score = groups_weight[gi] * pc * uc
-      +                    key = (score, groups_weight[gi], -groups_stable_id[gi])
-      +                    if (best_score is None) or (key > best_score):
-      +                        best_score = key
-      +                        best_gi = gi
-      +            return best_gi
-      +
-      +        # Seed with the best single token's heaviest group if available
-      +        seed = pick_seed_token()
-      +        if seed is None:
-      +            return
-      +        # Determine a heavy group containing the seed (if any)
-      +        seed_groups = token_to_groups.get(seed, [])
-      +        if seed_groups:
-      +            best_gi = None
-      +            best_key = None
-      +            for gi in seed_groups:
-      +                key = (groups_weight[gi], -groups_stable_id[gi])
-      +                if (best_key is None) or (key > best_key):
-      +                    best_key = key
-      +                    best_gi = gi
-      +            # Place all tokens in that group first (by descending importance)
-      +            if best_gi is not None:
-      +                candidates = [t for t in groups_tokens[best_gi] if t in unplaced]
-      +                candidates.sort(key=lambda x: (token_importance.get(x, 0), -int(x)), reverse=True)
-      +                for t in candidates:
-      +                    place_token(t)
-      +        else:
-      +            # No groups include the seed; place it alone
-      +            place_token(seed)
-      +
-      +        # Grow ordering by picking best-overlap groups
-      +        while unplaced:
-      +            gi = pick_best_group()
-      +            if gi is None:
-      +                # Start a new cluster
-      +                seed = pick_seed_token()
-      +                if seed is None:
-      +                    break
-      +                seed_groups = token_to_groups.get(seed, [])
-      +                if seed_groups:
-      +                    best_gi = None
-      +                    best_key = None
-      +                    for sgi in seed_groups:
-      +                        key = (groups_weight[sgi], -groups_stable_id[sgi])
-      +                        if (best_key is None) or (key > best_key):
-      +                            best_key = key
-      +                            best_gi = sgi
-      +                    if best_gi is not None:
-      +                        candidates = [t for t in groups_tokens[best_gi] if t in unplaced]
-      +                        candidates.sort(key=lambda x: (token_importance.get(x, 0), -int(x)), reverse=True)
-      +                        for t in candidates:
-      +                            place_token(t)
-      +                        continue
-      +                # If seed isn't in any group, just place it
-      +                place_token(seed)
+      +            new_children = []
+      +            llm_union = LLMTokenSet.empty()
+      +            children = node.get("children", [])
+      +            if not children:
+      +                node["llm_bv_union"] = llm_union
       +                continue
       +
-      +            # Place remaining tokens from the chosen group in importance order
-      +            to_place = [t for t in groups_tokens[gi] if t in unplaced]
-      +            if not to_place:
-      +                # No-op (can happen due to incremental updates); pick again
+      +            for (pop, llm_bv), dests in children:
+      +                new_llm_bv = remap_llm_token_set(llm_bv)
+      +                if not new_llm_bv.is_empty():
+      +                    new_children.append(((pop, new_llm_bv), dests))
+      +                    llm_union = llm_union.union(new_llm_bv)
+      +
+      +            # The structure of transitions for equivalent tokens is identical, so we don't need to regroup.
+      +            # We just need to re-sort to maintain deterministic order.
+      +            def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+      +                try:
+      +                    return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+      +                except Exception:
+      +                    return ()
+      +
+      +            new_children.sort(
+      +                key=lambda item: (
+      +                    int(item[0][0]),
+      +                    _ranges_key(item[0][1]),
+      +                    tuple(int(d[0]) for d in item[1]),
+      +                )
+      +            )
+      +
+      +            node["children"] = new_children
+      +            node["llm_bv_union"] = llm_union
+       
+               print(" done.")
+       
+      @@ -1263,26 +1281,59 @@
+               # Remap the universe
+               self.all_internal_llm_tokens_bitset = remap_llm_token_set(self.all_internal_llm_tokens_bitset)
+       
+      -        # Remap arena using NodeOpt intermediate representation
+      -        nodeopts = self._to_nodeopt_graph()
+      -        new_nodeopts: Dict[NodeID, NodeOpt] = {}
+      -        for nid, nopt in nodeopts.items():
+      -            new_children: Dict[int, Dict[int, Tuple[int, Edge]]] = {}
+      -            for old_tok, dest_map in (nopt.children or {}).items():
+      -                if old_tok not in old_to_new_map:
+      -                    # Skip tokens outside the mapping domain (shouldn't happen)
+      -                    continue
+      -                new_tok = old_to_new_map[old_tok]
+      -                if new_tok in new_children:
+      -                    # Since this is a pure permutation, collisions should not occur.
+      -                    # If they do, require identical transitions.
+      -                    assert new_children[new_tok] == dest_map
+      -                else:
+      -                    new_children[new_tok] = dest_map
+      -            new_nodeopts[int(nid)] = NodeOpt(children=new_children, is_end=nopt.is_end)
+      -        self._from_nodeopt_graph(new_nodeopts)
+      +        # Remap arena directly by regrouping tokens
+      +        for node in self.arena.values():
+      +            children = node.get("children", [])
+      +            if not children:
       +                continue
-      +            to_place.sort(key=lambda x: (token_importance.get(x, 0), -int(x)), reverse=True)
-      +            for t in to_place:
-      +                place_token(t)
       +
-      +        # Sanity check: every token must be placed exactly once
-      +        if len(order) != len(all_tokens):
-      +            # Fallback to identity if something went wrong
-      +            return
+      +            # Group old tokens by their transition signature (pop, dests)
+      +            groups: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = collections.defaultdict(set)
+      +            for (pop, llm_bv), dests in children:
+      +                # Sort dests for a canonical signature. Each dest is (dest_id, state_bv).
+      +                # state_bv is a RangeSet, so we use its ranges for the signature.
+      +                dests_sig = tuple(sorted(
+      +                    (dest_id, tuple(state_bv.to_ranges())) for dest_id, state_bv in dests
+      +                ))
+      +                signature = (pop, dests_sig)
+      +                groups[signature].update(llm_bv.to_indices())
       +
-      +        # 4) Build permutation mapping and apply it
-      +        old_to_new: Dict[int, int] = {old: new for new, old in enumerate(order)}
-      +        self._remap_llm_tokens_permutation(old_to_new)
-      +
-      +    def _remap_llm_tokens_permutation(self, old_to_new_map: Dict[int, int]) -> None:
-      +        """
-      +        Apply a bijective mapping old_token_id -> new_token_id to all model RangeSets.
-      +        Does not modify id_to_token (external mapping). Updates:
-      +        - internal_to_original_map (permutation)
-      +        - possible_matches_cache
-      +        - all_internal_llm_tokens_bitset
-      +        - arena (via NodeOpt remap + repack)
-      +        """
-      +        # Ensure mapping is bijection over the current universe
-      +        domain = set(old_to_new_map.keys())
-      +        image = set(old_to_new_map.values())
-      +        if len(domain) != len(image):
-      +            # Not a permutation; do nothing
-      +            return
-      +
-      +        def remap_llm_token_set(s: LLMTokenSet) -> LLMTokenSet:
-      +            if s.is_empty():
-      +                return s
-      +            new_indices = [old_to_new_map[i] for i in s.to_indices() if i in old_to_new_map]
-      +            if not new_indices:
-      +                return LLMTokenSet.empty()
-      +            return LLMTokenSet.from_indices(sorted(new_indices))
-      +
-      +        # Remap possible_matches_cache
-      +        if self.possible_matches_cache:
-      +            new_pmc: Dict[int, Dict[int, LLMTokenSet]] = {}
-      +            for tsid, inner in self.possible_matches_cache.items():
-      +                new_inner: Dict[int, LLMTokenSet] = {}
-      +                for term_id, llm_bv in inner.items():
-      +                    new_inner[int(term_id)] = remap_llm_token_set(llm_bv)
-      +                new_pmc[int(tsid)] = new_inner
-      +            self.possible_matches_cache = new_pmc
-      +
-      +        # Remap the universe
-      +        self.all_internal_llm_tokens_bitset = remap_llm_token_set(self.all_internal_llm_tokens_bitset)
-      +
-      +        # Remap arena using NodeOpt intermediate representation
-      +        nodeopts = self._to_nodeopt_graph()
-      +        new_nodeopts: Dict[NodeID, NodeOpt] = {}
-      +        for nid, nopt in nodeopts.items():
-      +            new_children: Dict[int, Dict[int, Tuple[int, Edge]]] = {}
-      +            for old_tok, dest_map in (nopt.children or {}).items():
-      +                if old_tok not in old_to_new_map:
-      +                    # Skip tokens outside the mapping domain (shouldn't happen)
+      +            # Rebuild children with remapped tokens
+      +            new_children = []
+      +            llm_union = LLMTokenSet.empty()
+      +            for (pop, dests_sig), old_tokens in groups.items():
+      +                new_tokens = {old_to_new_map[t] for t in old_tokens if t in old_to_new_map}
+      +                if not new_tokens:
       +                    continue
-      +                new_tok = old_to_new_map[old_tok]
-      +                if new_tok in new_children:
-      +                    # Since this is a pure permutation, collisions should not occur.
-      +                    # If they do, require identical transitions.
-      +                    assert new_children[new_tok] == dest_map
-      +                else:
-      +                    new_children[new_tok] = dest_map
-      +            new_nodeopts[int(nid)] = NodeOpt(children=new_children, is_end=nopt.is_end)
-      +        self._from_nodeopt_graph(new_nodeopts)
       +
-      +        # Remap internal_to_original_map (pure permutation)
-      +        if self.internal_to_original_map:
-      +            new_internal_to_original_map: Dict[int, Set[int]] = {}
-      +            for old_tok, orig_set in self.internal_to_original_map.items():
-      +                if old_tok in old_to_new_map:
-      +                    new_internal_to_original_map[old_to_new_map[old_tok]] = set(orig_set)
-      +            self.internal_to_original_map = new_internal_to_original_map
+      +                new_llm_bv = LLMTokenSet.from_indices(sorted(list(new_tokens)))
+      +                llm_union = llm_union.union(new_llm_bv)
+      +                # Convert dests_sig back to list of (int, StateIDSet)
+      +                dests_list = [
+      +                    (dest_id, StateIDSet.from_ranges(list(ranges)))
+      +                    for dest_id, ranges in dests_sig
+      +                ]
+      +                new_children.append(((pop, new_llm_bv), dests_list))
       +
+      +            # Deterministic sort
+      +            def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+      +                try:
+      +                    return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+      +                except Exception:
+      +                    return ()
+      +
+      +            new_children.sort(
+      +                key=lambda item: (
+      +                    int(item[0][0]),
+      +                    _ranges_key(item[0][1]),
+      +                    tuple(sorted(int(d[0]) for d in item[1])),
+      +                )
+      +            )
+      +
+      +            node["children"] = new_children
+      +            node["llm_bv_union"] = llm_union
+       
+               # Remap internal_to_original_map (pure permutation)
+               if self.internal_to_original_map:
+
       ```
     metadata:
   - user: |
@@ -3763,7 +4309,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Add LLM token reordering pass to
-      minimize RangeSet fragmentation"'
+  - user: 'Changes committed with message: "Optimize LLM token remapping by removing
+      NodeOpt conversion in precompute3_model"'
     metadata:
 ...
