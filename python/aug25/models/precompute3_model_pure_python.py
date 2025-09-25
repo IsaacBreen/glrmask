@@ -312,8 +312,8 @@ class Model(GraphProvider):
 
         model._unconditionalize_guaranteed_transitions()
         model._merge_equivalent_llm_tokens()
-
         model._reorder_llm_tokens_for_range_minimization()
+
         return model
 
     @profile
@@ -913,6 +913,7 @@ class Model(GraphProvider):
         Finds sets of LLM tokens that are equivalent (always appear together in LLMTokenSets)
         and merges them into a single internal token to reduce complexity.
         """
+        print("Merging equivalent LLM tokens...", end='', flush=True)
         # 1. Collect all unique LLMTokenSet instances from the model
         all_sets: Set[LLMTokenSet] = set()
         for node in self.arena.values():
@@ -1006,11 +1007,15 @@ class Model(GraphProvider):
             new_nodeopts[nid] = NodeOpt(children=new_children, is_end=nopt.is_end)
         self._from_nodeopt_graph(new_nodeopts)
 
+        print(" done.")
+
     def _unconditionalize_guaranteed_transitions(
         self,
         # etc
     ) -> None:
+        print("Unconditionalizing guaranteed transitions...", end='', flush=True)
         ...
+        print(" done.")
 
     def _reorder_llm_tokens_for_range_minimization(self) -> None:
         """
@@ -1026,6 +1031,7 @@ class Model(GraphProvider):
         - Greedily construct an ordering that keeps overlapping groups contiguous.
         - Apply a permutation remapping of internal tokens to this order, then repack arena via NodeOpt.
         """
+        print("Reordering LLM tokens for range minimization...", end='', flush=True)
         # Collect universe of current internal tokens
         all_tokens_list = list(self.all_internal_llm_tokens_bitset.to_indices())
         if len(all_tokens_list) <= 1:
@@ -1229,6 +1235,8 @@ class Model(GraphProvider):
         # 4) Build permutation mapping and apply it
         old_to_new: Dict[int, int] = {old: new for new, old in enumerate(order)}
         self._remap_llm_tokens_permutation(old_to_new)
+
+        print(" done.", flush=True)
 
     def _remap_llm_tokens_permutation(self, old_to_new_map: Dict[int, int]) -> None:
         """
