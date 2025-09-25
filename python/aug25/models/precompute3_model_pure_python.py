@@ -56,7 +56,7 @@ class UnconditionalEdge:
 # alongside Edge (i.e., children[token][dest] -> (pop, Edge)).
 Edge = Union[PopEdge, StateEdge, UnconditionalEdge]
 
-@dataclass(eq=False)
+@dataclass
 class NodeOpt:
     """
     Working optimization graph for a single-token analysis pass.
