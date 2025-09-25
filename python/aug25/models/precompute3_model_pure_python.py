@@ -72,6 +72,12 @@ class NodeOpt:
     children: Dict[LLMToken, Dict[NodeID, Edge]] = field(default_factory=dict)
     is_end: bool = False
 
+@dataclass
+class NodeOptGraph:
+    nodes: Dict[NodeID, NodeOpt]
+    roots_map: Dict[int, NodeID]
+
+
 @dataclass(frozen=True)
 class Reduce:
     nonterminal_id: int
@@ -326,8 +332,8 @@ class Model(GraphProvider):
         model._reorder_llm_tokens_for_range_minimization()
 
         # model._unconditionalize_guaranteed_transitions()
-        a, b = model._to_nodeopt()
-        model._from_nodeopt(a, b)
+        graph = model._to_nodeopt()
+        model._from_nodeopt(graph)
 
         # model._convert_to_bitset_range_set()
 
@@ -1074,7 +1080,7 @@ class Model(GraphProvider):
     # ==============================
     # Arena <-> NodeOpt conversions
     # ==============================
-    def _to_nodeopt(self) -> Tuple[Dict[NodeID, NodeOpt], Dict[int, NodeID]]:
+    def _to_nodeopt(self) -> NodeOptGraph:
         """
         Convert the current arena into a NodeOpt graph.
         Semantics preservation target: get_mask.
@@ -1221,9 +1227,9 @@ class Model(GraphProvider):
 
         # Build NodeOpt roots map (same as current roots)
         roots_map = {int(k): int(v) for k, v in self.roots_map.items()}
-        return nodeopt, roots_map
+        return NodeOptGraph(nodes=nodeopt, roots_map=roots_map)
 
-    def _from_nodeopt(self, nodes: Dict[NodeID, NodeOpt], roots_map: Dict[int, NodeID]) -> None:
+    def _from_nodeopt(self, graph: NodeOptGraph) -> None:
         """
         Convert a NodeOpt graph back into the arena.
         Behavioral equivalence for get_mask is sufficient.
@@ -1234,6 +1240,8 @@ class Model(GraphProvider):
         (same pop and same dest-list with the same state masks) into a single llm_bv.
         Recompute llm_bv_union and max_depth. Update roots_map.
         """
+        nodes = graph.nodes
+        roots_map = graph.roots_map
         # Assemble packed transitions per node:
         # For source node s and token t, produce key: (pop, dests_signature),
         # where dests_signature is a tuple of (dest, state_spec) with state_spec
