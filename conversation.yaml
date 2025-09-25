@@ -6,874 +6,10 @@ local_system:
     - python/aug25/range_set/py_range_set.py
     - python/aug25/range_set/range_set_abc.py
     - python/aug25/range_set/rangeset_stats.py
+    - python/aug25/range_set/nodeopt_optimizer.py
   conversation_file:
   compile_command:
   initial_file_contents:
-    python/aug25/range_set/__init__.py: |+
-      from .py_range_set import PyRangeSet
-      from .ffi_range_set import FFIRangeSet
-      from .bitset_range_set import BitsetRangeSet
-
-      # RangeSet = PyRangeSet
-      RangeSet = FFIRangeSet
-
-      __all__ = ["RangeSet", "PyRangeSet", "FFIRangeSet", "BitsetRangeSet"]
-
-    python/aug25/range_set/bitset_range_set.py: |
-      from __future__ import annotations
-      from typing import Iterable, Optional, Tuple, List
-
-      from .range_set_abc import RangeSet
-      from .py_range_set import PyRangeSet
-
-      BIT_COUNTS = tuple(bin(i).count('1') for i in range(256))
-
-      class BitsetRangeSet(RangeSet[int]):
-          """
-          Represents a set of non-negative integers using a bitset.
-          Implements the generic RangeSet[int] interface.
-          This implementation is efficient for dense sets within a small range of integers.
-          """
-          __slots__ = ('_bitset', '_len')
-
-          def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
-              if not intervals:
-                  self._bitset = bytearray()
-                  self._len = 0
-                  return
-
-              # Using PyRangeSet's logic to handle unsorted/overlapping intervals
-              normalized_intervals = PyRangeSet._normalize(intervals)
-
-              if not normalized_intervals:
-                  self._bitset = bytearray()
-                  self._len = 0
-                  return
-
-              max_val = normalized_intervals[-1][1]
-              if max_val < 0:
-                  raise ValueError("BitsetRangeSet only supports non-negative integers.")
-
-              size = (max_val // 8) + 1
-              self._bitset = bytearray(size)
-
-              for start, end in normalized_intervals:
-                  if start < 0:
-                      raise ValueError("BitsetRangeSet only supports non-negative integers.")
-                  
-                  start_byte = start // 8
-                  start_bit = start % 8
-                  end_byte = end // 8
-                  end_bit = end % 8
-
-                  if start_byte == end_byte:
-                      mask = (0xff >> (8 - (end_bit - start_bit + 1))) << start_bit
-                      self._bitset[start_byte] |= mask
-                  else:
-                      # First byte
-                      self._bitset[start_byte] |= (0xff << start_bit)
-                      # Middle bytes
-                      for i in range(start_byte + 1, end_byte):
-                          self._bitset[i] = 0xff
-                      # Last byte
-                      self._bitset[end_byte] |= (0xff >> (7 - end_bit))
-              
-              self._len = sum(BIT_COUNTS[byte] for byte in self._bitset)
-
-          @property
-          def intervals(self) -> Tuple[Tuple[int, int], ...]:
-              # This is not efficient, but it is correct.
-              # A more performant implementation would scan bits directly.
-              return PyRangeSet.from_indices(self.to_indices()).intervals
-
-          def to_ranges(self) -> List[Tuple[int]]:
-              return list(self.intervals)
-
-          def to_indices(self) -> List[int]:
-              indices = []
-              for i in range(len(self._bitset) * 8):
-                  byte_idx = i // 8
-                  bit_idx = i % 8
-                  if (self._bitset[byte_idx] >> bit_idx) & 1:
-                      indices.append(i)
-              return indices
-
-          def contains(self, x: int) -> bool:
-              if x < 0:
-                  return False
-              byte_idx = x // 8
-              if byte_idx >= len(self._bitset):
-                  return False
-              bit_idx = x % 8
-              return (self._bitset[byte_idx] >> bit_idx) & 1 != 0
-
-          def union(self, other: RangeSet[int]) -> "BitsetRangeSet":
-              if not isinstance(other, RangeSet):
-                  return NotImplemented
-              
-              if isinstance(other, BitsetRangeSet):
-                  len_a = len(self._bitset)
-                  len_b = len(other._bitset)
-                  new_len = max(len_a, len_b)
-                  new_bitset = bytearray(new_len)
-                  
-                  new_bitset[:len_a] = self._bitset
-                  
-                  for i in range(len_b):
-                      new_bitset[i] |= other._bitset[i]
-                      
-                  res = BitsetRangeSet()
-                  res._bitset = new_bitset
-                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
-                  return res
-              else:
-                  # Generic path for other RangeSet types
-                  return BitsetRangeSet(self.intervals + other.intervals)
-
-          def intersection(self, other: RangeSet[int]) -> "BitsetRangeSet":
-              if not isinstance(other, RangeSet):
-                  return NotImplemented
-              
-              if isinstance(other, BitsetRangeSet):
-                  len_a = len(self._bitset)
-                  len_b = len(other._bitset)
-                  new_len = min(len_a, len_b)
-                  new_bitset = bytearray(new_len)
-                  
-                  for i in range(new_len):
-                      new_bitset[i] = self._bitset[i] & other._bitset[i]
-                      
-                  res = BitsetRangeSet()
-                  res._bitset = new_bitset
-                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
-                  return res
-              else:
-                  # Generic path
-                  py_self = PyRangeSet(self.intervals)
-                  intersected = py_self.intersection(other)
-                  return BitsetRangeSet(intersected.intervals)
-
-          def difference(self, other: RangeSet[int]) -> "BitsetRangeSet":
-              if not isinstance(other, RangeSet):
-                  return NotImplemented
-              
-              if isinstance(other, BitsetRangeSet):
-                  len_a = len(self._bitset)
-                  len_b = len(other._bitset)
-                  new_bitset = self._bitset[:]
-                  
-                  limit = min(len_a, len_b)
-                  for i in range(limit):
-                      new_bitset[i] &= ~other._bitset[i]
-                      
-                  res = BitsetRangeSet()
-                  res._bitset = new_bitset
-                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
-                  return res
-              else:
-                  py_self = PyRangeSet(self.intervals)
-                  differenced = py_self.difference(other)
-                  return BitsetRangeSet(differenced.intervals)
-
-          def is_empty(self) -> bool:
-              return self._len == 0
-
-          def __len__(self) -> int:
-              return self._len
-
-          def __repr__(self) -> str:
-              return f"BitsetRangeSet({self.intervals!r})"
-
-          def __eq__(self, other) -> bool:
-              if isinstance(other, BitsetRangeSet):
-                  a, b = self._bitset, other._bitset
-                  if len(a) > len(b):
-                      a, b = b, a
-                  
-                  if a != b[:len(a)]:
-                      return False
-                  
-                  for i in range(len(a), len(b)):
-                      if b[i] != 0:
-                          return False
-                  return True
-
-              if isinstance(other, RangeSet):
-                  return self.intervals == other.intervals
-              return NotImplemented
-
-          def __hash__(self) -> int:
-              return hash(self.intervals)
-
-          @classmethod
-          def from_ranges(cls, ranges: List[List[int]]) -> 'BitsetRangeSet':
-              return cls(iter(map(tuple, ranges)))
-
-          @classmethod
-          def from_indices(cls, indices: Iterable[int]) -> 'BitsetRangeSet':
-              indices = list(indices)
-              if not indices:
-                  return cls()
-              
-              if any(i < 0 for i in indices):
-                  raise ValueError("BitsetRangeSet only supports non-negative integers.")
-              
-              max_val = max(indices)
-              
-              size = (max_val // 8) + 1
-              bitset = bytearray(size)
-              
-              unique_indices = set(indices)
-              for i in unique_indices:
-                  byte_idx = i // 8
-                  bit_idx = i % 8
-                  bitset[byte_idx] |= (1 << bit_idx)
-                  
-              res = cls()
-              res._bitset = bitset
-              res._len = len(unique_indices)
-              return res
-
-          @classmethod
-          def empty(cls) -> 'BitsetRangeSet':
-              return cls()
-
-          @classmethod
-          def from_json(cls, data: List[List[int]]) -> 'BitsetRangeSet':
-              return cls.from_ranges(data)
-
-          def to_json(self) -> List[List[int]]:
-              return [list(r) for r in self.intervals]
-    python/aug25/range_set/ffi_range_set.py: |
-      import _sep1 as ffi
-      from typing import List, Tuple, Iterable, cast
-
-      from .range_set_abc import RangeSet
-      from .rangeset_stats import time_method, time_func, record_metric
-
-
-
-      class FFIRangeSet(RangeSet[int]):
-          """A FFIRangeSet implementation backed by the Rust ffi.Bitset."""
-
-          __slots__ = ('_bitset',)
-
-          def __init__(self, intervals: Iterable[Tuple[int, int]] = ()):
-              # ffi.Bitset.from_ranges expects a list of [start, end] lists/tuples
-              self._bitset = ffi.Bitset.from_ranges(list(intervals))
-
-          @property
-          def intervals(self) -> Tuple[Tuple[int, int], ...]:
-              """Returns the intervals as a tuple of tuples."""
-              return tuple(cast(List[Tuple[int, int]], self._bitset.to_ranges()))
-
-          def to_ranges(self) -> List[Tuple[int]]:
-              """Returns the intervals as a list of lists for JSON serialization."""
-              return [tuple(r) for r in self._bitset.to_ranges()]
-
-          @time_method
-          def to_indices(self) -> List[int]:
-              """Returns the elements of the set as a list."""
-              res = self._bitset.to_indices()
-              try:
-                  record_metric('FFIRangeSet.to_indices.out_len', len(res))
-              except Exception:
-                  pass
-              return res
-
-          @time_method
-          def contains(self, x: int) -> bool:
-              """Return True if x is contained in the set."""
-              res = self._bitset.contains(x)
-              record_metric('FFIRangeSet.contains.true' if res else 'FFIRangeSet.contains.false', 1)
-              return res
-
-          @time_method
-          def union(self, other: RangeSet[int]) -> "FFIRangeSet":
-              """Return the union of two RangeSets."""
-              if not isinstance(other, FFIRangeSet):
-                  raise TypeError("other must be a FFIRangeSet")
-              try:
-                  record_metric('FFIRangeSet.union.in_len_a', len(self))
-                  record_metric('FFIRangeSet.union.in_len_b', len(other))
-              except Exception:
-                  pass
-              new_bs = self._bitset.union(other._bitset)
-              res = FFIRangeSet()
-              res._bitset = new_bs
-              try:
-                  record_metric('FFIRangeSet.union.out_len', len(res))
-              except Exception:
-                  pass
-              return res
-
-          @time_method
-          def intersection(self, other: RangeSet[int]) -> "FFIRangeSet":
-              """Return the intersection of two RangeSets."""
-              if not isinstance(other, FFIRangeSet):
-                  raise TypeError("other must be a FFIRangeSet")
-              try:
-                  record_metric('FFIRangeSet.intersection.in_len_a', len(self))
-                  record_metric('FFIRangeSet.intersection.in_len_b', len(other))
-              except Exception:
-                  pass
-              new_bs = self._bitset.intersection(other._bitset)
-              res = FFIRangeSet()
-              res._bitset = new_bs
-              try:
-                  record_metric('FFIRangeSet.intersection.out_len', len(res))
-              except Exception:
-                  pass
-              return res
-
-          @time_method
-          def difference(self, other: RangeSet[int]) -> "FFIRangeSet":
-              """Return the set difference self \\ other."""
-              if not isinstance(other, FFIRangeSet):
-                  raise TypeError("other must be a FFIRangeSet")
-              try:
-                  record_metric('FFIRangeSet.difference.in_len_a', len(self))
-                  record_metric('FFIRangeSet.difference.in_len_b', len(other))
-              except Exception:
-                  pass
-              new_bs = self._bitset.difference(other._bitset)
-              res = FFIRangeSet()
-              res._bitset = new_bs
-              try:
-                  record_metric('FFIRangeSet.difference.out_len', len(res))
-              except Exception:
-                  pass
-              return res
-
-          @time_method
-          def is_empty(self) -> bool:
-              res = self._bitset.is_empty()
-              record_metric('FFIRangeSet.is_empty.true' if res else 'FFIRangeSet.is_empty.false', 1)
-              return res
-
-          @time_method
-          def __len__(self) -> int:
-              v = self._bitset.len()
-              # Sum of cardinalities observed; you can divide by calls to get an average size
-              record_metric('FFIRangeSet.__len__.sum', v)
-              return v
-
-          def __repr__(self) -> str:
-              return f"FFIRangeSet.from_ranges({self.intervals!r})"
-
-          @time_method
-          def __eq__(self, other) -> bool:
-              if not isinstance(other, FFIRangeSet):
-                  raise TypeError("other must be a FFIRangeSet")
-              res = self._bitset == other._bitset
-              record_metric('FFIRangeSet.__eq__.true' if res else 'FFIRangeSet.__eq__.false', 1)
-              return res
-
-          @time_method
-          def __hash__(self) -> int:
-              # The PyHybridBitset has a __hash__ method
-              h = hash(self._bitset)
-              record_metric('FFIRangeSet.__hash__', 1)
-              return h
-
-          @staticmethod
-          def _merge_unsorted(ranges: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
-              """
-              Normalizes a list of [start, end] intervals into a sorted, merged, disjoint list of pairs.
-              This can be achieved by creating a temporary FFIRangeSet.
-              """
-              # The ffi.Bitset constructor handles merging and sorting.
-              temp_rs = FFIRangeSet.from_ranges(ranges)
-              return temp_rs._bitset.to_ranges()
-
-          @staticmethod
-          @time_func('FFIRangeSet.from_ranges')
-          def from_ranges(ranges: List[List[int]]) -> 'FFIRangeSet':
-              """Creates a FFIRangeSet from a list of [start, end] lists."""
-              # return FFIRangeSet(tuple(map(tuple, ranges)))
-              self = FFIRangeSet()
-              try:
-                  record_metric('FFIRangeSet.from_ranges.in_ranges_count', len(ranges))
-              except Exception:
-                  pass
-              self._bitset = ffi.Bitset.from_ranges(ranges)
-              try:
-                  record_metric('FFIRangeSet.from_ranges.out_len', len(self))
-              except Exception:
-                  pass
-              return self
-
-          @staticmethod
-          @time_func('FFIRangeSet.from_indices')
-          def from_indices(indices: Iterable[int]) -> 'FFIRangeSet':
-              """Creates a FFIRangeSet from an iterable of individual indices."""
-              new_set = FFIRangeSet.from_ranges([])
-              # The FFI function expects a list.
-              idx_list = list(indices)
-              record_metric('FFIRangeSet.from_indices.in_len', len(idx_list))
-              new_set._bitset = ffi.Bitset.from_indices(idx_list)
-              try:
-                  record_metric('FFIRangeSet.from_indices.out_len', len(new_set))
-              except Exception:
-                  pass
-              return new_set
-
-          @staticmethod
-          @time_func('FFIRangeSet.empty')
-          def empty() -> 'FFIRangeSet':
-              """Creates an empty FFIRangeSet."""
-              record_metric('FFIRangeSet.empty.calls', 1)
-              return FFIRangeSet.from_ranges([])
-
-          @staticmethod
-          def from_json(data: List[List[int]]) -> 'FFIRangeSet':
-              return FFIRangeSet.from_ranges(tuple(map(tuple, data)))
-
-          def to_json(self) -> List[List[int]]:
-              return self.to_ranges()
-    python/aug25/range_set/py_range_set.py: |
-      from __future__ import annotations
-      from typing import Iterable, Optional, Tuple, List
-      from .range_set_abc import RangeSet
-
-      class PyRangeSet(RangeSet[int]):
-          """
-          Represents a set of integers as a sorted, disjoint list of closed intervals.
-          Implements the generic RangeSet[int] interface.
-          """
-          __slots__ = ('_intervals',)
-
-          def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
-              if intervals:
-                  self._intervals = self._normalize(intervals)
-              else:
-                  self._intervals = tuple()
-
-          @property
-          def intervals(self) -> Tuple[Tuple[int, int], ...]:
-              return self._intervals
-
-          @staticmethod
-          def _normalize(intervals: Iterable[Tuple[int, int]]) -> Tuple[Tuple[int, int], ...]:
-              """
-              Normalizes a list of [start, end] intervals into a sorted, merged, disjoint tuple of pairs.
-              """
-              items = sorted(intervals)
-              if not items:
-                  return tuple()
-
-              merged: List[Tuple[int, int]] = []
-              cs, ce = items[0]
-              for ns, ne in items[1:]:
-                  if ns <= ce + 1:
-                      ce = max(ce, ne)
-                  else:
-                      merged.append((cs, ce))
-                      cs, ce = ns, ne
-              merged.append((cs, ce))
-              return tuple(merged)
-
-          @staticmethod
-          def _merge_unsorted(intervals: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
-              """
-              Same as normalize but returns a list. Used by optimizer.
-              """
-              items = sorted(intervals)
-              if not items:
-                  return []
-
-              merged: List[Tuple[int, int]] = []
-              cs, ce = items[0]
-              for ns, ne in items[1:]:
-                  if ns <= ce + 1:
-                      ce = max(ce, ne)
-                  else:
-                      merged.append((cs, ce))
-                      cs, ce = ns, ne
-              merged.append((cs, ce))
-              return merged
-
-          @staticmethod
-          def from_ranges(ranges: List[List[int]]) -> 'PyRangeSet':
-              """Creates a PyRangeSet from a list of [start, end] lists."""
-              return PyRangeSet(iter(map(tuple, ranges)))
-
-          def to_ranges(self) -> List[Tuple[int]]:
-              """Converts the PyRangeSet to a list of [start, end] lists."""
-              return [tuple(interval) for interval in self.intervals]
-
-          @staticmethod
-          def from_json(data: List[List[int]]) -> 'PyRangeSet':
-              """Creates a PyRangeSet from a list of [start, end] lists (JSON format)."""
-              return PyRangeSet(iter(map(tuple, data)))
-
-          def to_json(self) -> List[List[int]]:
-              """Converts the PyRangeSet to a list of [start, end] lists (JSON format)."""
-              return self.to_ranges()
-
-          @staticmethod
-          def from_indices(indices: Iterable[int]) -> 'PyRangeSet':
-              """Creates a PyRangeSet from an iterable of individual indices."""
-              indices_sorted = sorted(set(indices))
-              if not indices_sorted:
-                  return PyRangeSet.empty()
-              intervals: List[Tuple[int, int]] = []
-              start = indices_sorted[0]
-              prev = start
-              for i in indices_sorted[1:]:
-                  if i == prev + 1:
-                      prev = i
-                  else:
-                      intervals.append((start, prev))
-                      start = i
-                      prev = i
-              intervals.append((start, prev))
-              return PyRangeSet(intervals)
-
-          @staticmethod
-          def empty() -> 'PyRangeSet':
-              """Creates an empty PyRangeSet."""
-              return PyRangeSet()
-
-          def to_indices(self) -> List[int]:
-              """Converts the PyRangeSet to a list of individual indices."""
-              result = []
-              for start, end in self.intervals:
-                  result.extend(range(start, end + 1))
-              return result
-
-          @staticmethod
-          def from_numpy(bv) -> 'PyRangeSet':
-              """Creates a PyRangeSet from a numpy array of booleans."""
-              intervals = []
-              in_range = False
-              start = 0
-              for i in range(len(bv)):
-                  if bv[i] and not in_range:
-                      start = i
-                      in_range = True
-                  elif not bv[i] and in_range:
-                      intervals.append((start, i - 1))
-                      in_range = False
-              if in_range:
-                  intervals.append((start, len(bv) - 1))
-              return PyRangeSet(intervals)
-
-          def __eq__(self, other):
-              if isinstance(other, PyRangeSet):
-                  return self.intervals == other.intervals
-              if isinstance(other, RangeSet):
-                  # Compare by normalized intervals for any RangeSet implementation
-                  return self.intervals == other.intervals
-              return NotImplemented
-
-          def __hash__(self):
-              return hash(self.intervals)
-
-          def __repr__(self):
-              return f"PyRangeSet({self.intervals!r})"
-
-          # New utilities for set-like operations
-          def is_empty(self) -> bool:
-              """Return True if no indices are present."""
-              return not self.intervals
-
-          def __len__(self) -> int:
-              """Return the total number of elements in the set."""
-              return sum(e - s + 1 for s, e in self._intervals)
-
-          def contains(self, x: int) -> bool:
-              """Return True if x is contained in the set."""
-              for s, e in self.intervals:
-                  if s <= x <= e:
-                      return True
-                  if x < s:
-                      return False
-              return False
-
-          def union(self, other: 'RangeSet[int]') -> 'PyRangeSet':
-              """Return the union of two RangeSets."""
-              if not isinstance(other, RangeSet):
-                  return NotImplemented
-              if self.is_empty():
-                  return PyRangeSet(other.intervals)
-              if other.is_empty():
-                  return self
-              return PyRangeSet(self.intervals + other.intervals)
-
-          def intersection(self, other: 'RangeSet[int]') -> 'PyRangeSet':
-              """Return the intersection of two RangeSets."""
-              if not isinstance(other, RangeSet):
-                  return NotImplemented
-              if self.is_empty() or other.is_empty():
-                  return PyRangeSet.empty()
-              a = list(self.intervals)
-              b = list(other.intervals)
-              i = j = 0
-              res: List[Tuple[int, int]] = []
-              while i < len(a) and j < len(b):
-                  s1, e1 = a[i]
-                  s2, e2 = b[j]
-                  s = max(s1, s2)
-                  e = min(e1, e2)
-                  if s <= e:
-                      res.append((s, e))
-                  if e1 < e2:
-                      i += 1
-                  else:
-                      j += 1
-              return PyRangeSet(res)
-
-          def difference(self, other: 'RangeSet[int]') -> 'PyRangeSet':
-              """Return the set difference self \\ other as a PyRangeSet."""
-              if self.is_empty():
-                  return PyRangeSet.empty()
-              if other.is_empty():
-                  return self
-              a = list(self.intervals)
-              b = list(other.intervals)
-              res: List[Tuple[int, int]] = []
-              j = 0
-              for s1, e1 in a:
-                  curr = s1
-                  while j < len(b) and b[j][1] < curr:
-                      j += 1
-                  k = j
-                  while k < len(b) and b[k][0] <= e1:
-                      s2, e2 = b[k]
-                      if s2 > curr:
-                          res.append((curr, s2 - 1))
-                      if e2 + 1 > curr:
-                          curr = e2 + 1
-                      if curr > e1:
-                          break
-                      k += 1
-                  if curr <= e1:
-                      res.append((curr, e1))
-              return PyRangeSet(res)
-    python/aug25/range_set/range_set_abc.py: |
-      from __future__ import annotations
-
-      from abc import ABC, abstractmethod
-      from typing import Generic, Iterable, List, Tuple, TypeVar
-
-      T = TypeVar("T")
-
-
-      class RangeSet(ABC, Generic[T]):
-          """
-          Abstract base class for range-based sets of comparable elements.
-          Implementations represent sets as normalized, sorted, disjoint closed intervals.
-          """
-
-          @property
-          @abstractmethod
-          def intervals(self) -> Tuple[Tuple[T, T], ...]:
-              """
-              The normalized, sorted, disjoint closed intervals representing the set.
-              Implementations should guarantee:
-              - intervals are sorted by start
-              - no overlaps and no gaps of size 0 (i.e., [a,b] and [b+1,c] should be merged where applicable)
-              """
-              raise NotImplementedError
-
-          @abstractmethod
-          def is_empty(self) -> bool:
-              """Return True if the set is empty."""
-              raise NotImplementedError
-
-          @abstractmethod
-          def __len__(self) -> int:
-              """Return the total number of elements in the set."""
-              raise NotImplementedError
-
-          def __or__(self, other: "RangeSet[T]") -> "RangeSet[T]":
-              if other is None:
-                  return self
-              return self.union(other)
-
-          def __ror__(self, other: "RangeSet[T]") -> "RangeSet[T]":
-              if other is None:
-                  return self
-              return self.union(other)
-
-          def __and__(self, other: "RangeSet[T]") -> "RangeSet[T]":
-              if other is None:
-                  return self
-              return self.intersection(other)
-
-          def __rand__(self, other: "RangeSet[T]") -> "RangeSet[T]":
-              if other is None:
-                  return self
-              return self.intersection(other)
-
-          def __sub__(self, other: "RangeSet[T]") -> "RangeSet[T]":
-              if other is None:
-                  return self
-              return self.difference(other)
-
-          def __rsub__(self, other: "RangeSet[T]") -> "RangeSet[T]":
-              if other is None:
-                  return self
-              return other.difference(self)
-
-          @abstractmethod
-          def contains(self, x: T) -> bool:
-              """Return True if x is contained in the set."""
-              raise NotImplementedError
-
-          @abstractmethod
-          def union(self, other: "RangeSet[T]") -> "RangeSet[T]":
-              """Return the union of two RangeSets."""
-              raise NotImplementedError
-
-          @abstractmethod
-          def intersection(self, other: "RangeSet[T]") -> "RangeSet[T]":
-              """Return the intersection of two RangeSets."""
-              raise NotImplementedError
-
-          @abstractmethod
-          def difference(self, other: "RangeSet[T]") -> "RangeSet[T]":
-              """Return the set difference self \\ other."""
-              raise NotImplementedError
-
-          @abstractmethod
-          def to_ranges(self) -> List[Tuple[T]]:
-              """Returns the intervals as a list of lists for JSON serialization."""
-              raise NotImplementedError
-
-          @abstractmethod
-          def to_indices(self) -> List[T]:
-              """Returns the elements of the set as a list."""
-              raise NotImplementedError
-
-          @classmethod
-          @abstractmethod
-          def from_json(cls, data: List[List[T]]) -> "RangeSet[T]":
-              """Creates a RangeSet from a list of [start, end] lists (JSON format)."""
-              raise NotImplementedError
-
-          @abstractmethod
-          def to_json(self) -> List[List[T]]:
-              """Converts the RangeSet to a list of [start, end] lists (JSON format)."""
-              raise NotImplementedError
-
-          @classmethod
-          @abstractmethod
-          def from_ranges(cls, ranges: List[List[T]]) -> "RangeSet[T]":
-              """Creates a RangeSet from a list of [start, end] lists."""
-              raise NotImplementedError
-
-          @classmethod
-          @abstractmethod
-          def from_indices(cls, indices: Iterable[T]) -> "RangeSet[T]":
-              """Creates a RangeSet from an iterable of individual indices."""
-              raise NotImplementedError
-
-          @classmethod
-          @abstractmethod
-          def empty(cls) -> "RangeSet[T]":
-              """Creates an empty RangeSet."""
-              raise NotImplementedError
-    python/aug25/range_set/rangeset_stats.py: |
-      import os
-      from typing import Callable, Any
-
-      PROFILING_ENABLED = os.environ.get('RANGESET_PROFILING', '0') == '1'
-
-      if PROFILING_ENABLED:
-          import time
-          import collections
-
-          # Wall-time per labeled operation
-          RANGESET_STATS = collections.defaultdict(float)   # label -> seconds
-          # Call counts per labeled operation
-          RANGESET_CALLS = collections.defaultdict(int)     # label -> calls
-          # Additional numeric metrics (sums/counters); keys are arbitrary metric names
-          RANGESET_METRICS = collections.defaultdict(float) # metric_name -> value
-
-          def reset_rangeset_stats() -> None:
-              RANGESET_STATS.clear()
-              RANGESET_CALLS.clear()
-              RANGESET_METRICS.clear()
-
-          def record_metric(name: str, value: float = 1.0) -> None:
-              RANGESET_METRICS[name] += float(value)
-
-          def time_method(func: Callable) -> Callable:
-              """
-              Decorator for instance methods; label includes the runtime class name.
-              """
-              def wrapper(*args, **kwargs):
-                  # Expecting instance method, so args[0] is self
-                  self = args[0] if args else None
-                  cls_name = type(self).__name__ if self is not None else "<unknown>"
-                  label = f"{cls_name}.{func.__name__}"
-                  t0 = time.time()
-                  try:
-                      return func(*args, **kwargs)
-                  finally:
-                      RANGESET_STATS[label] += time.time() - t0
-                      RANGESET_CALLS[label] += 1
-              return wrapper
-
-          def time_func(label: str) -> Callable[[Callable], Callable]:
-              """
-              Decorator for static functions or for forcing a specific label.
-              """
-              def deco(func: Callable) -> Callable:
-                  def wrapper(*args, **kwargs):
-                      t0 = time.time()
-                      try:
-                          return func(*args, **kwargs)
-                      finally:
-                          RANGESET_STATS[label] += time.time() - t0
-                          RANGESET_CALLS[label] += 1
-                  return wrapper
-              return deco
-
-          def print_rangeset_stats() -> None:
-              print("\n--- RangeSet stats ---")
-              total_time = sum(RANGESET_STATS.values())
-              # Times and calls
-              for label in sorted(RANGESET_STATS.keys()):
-                  v = RANGESET_STATS[label]
-                  calls = RANGESET_CALLS.get(label, 0)
-                  if total_time > 1e-6:
-                      print(f"t_{label:<30}: {v:8.4f}s ({v/total_time*100:5.1f}%) | calls: {calls}")
-                  else:
-                      print(f"t_{label:<30}: {v:8.4f}s | calls: {calls}")
-              # Additional metrics
-              if RANGESET_METRICS:
-                  print("\nRangeSet metrics (sums/counters):")
-                  for k in sorted(RANGESET_METRICS.keys()):
-                      v = RANGESET_METRICS[k]
-                      # print ints where applicable
-                      if abs(v - int(v)) < 1e-9:
-                          print(f"{k:<35}: {int(v)}")
-                      else:
-                          print(f"{k:<35}: {v:.4f}")
-              print("----------------------\n")
-
-      else:
-          # No-op versions for when profiling is disabled.
-          def reset_rangeset_stats() -> None:
-              pass
-
-          def record_metric(name: str, value: float = 1.0) -> None:
-              pass
-
-          def time_method(func: Callable) -> Callable:
-              return func
-
-          def time_func(label: str) -> Callable[[Callable], Callable]:
-              def deco(func: Callable) -> Callable:
-                  return func
-              return deco
-
-          def print_rangeset_stats() -> None:
-              print("\n--- RangeSet stats (profiling disabled) ---\n")
-  prev_file_contents:
     python/aug25/range_set/__init__.py: |+
       from .py_range_set import PyRangeSet
       from .ffi_range_set import FFIRangeSet
@@ -1738,6 +874,1049 @@ local_system:
 
           def print_rangeset_stats() -> None:
               print("\n--- RangeSet stats (profiling disabled) ---\n")
+    python/aug25/range_set/nodeopt_optimizer.py: |
+      from __future__ import annotations
+
+      from dataclasses import dataclass, field
+      from typing import Dict, Set, MutableMapping, Mapping, Union
+
+
+      @dataclass(frozen=True)
+      class UnconditionalEdge:
+          """
+          Edge that does not filter by parser state.
+          """
+          __slots__ = ()
+
+
+      @dataclass
+      class StateEdge:
+          """
+          Edge that filters by a set of parser states.
+          """
+          states: Set[int]
+
+
+      EdgeLike = Union[UnconditionalEdge, StateEdge]
+
+
+      @dataclass
+      class NodeOpt:
+          """
+          Optimizer-friendly node representation.
+          children[token][pop][dest] = Edge
+            - token: int (LLM token id)
+            - pop: int
+            - dest: int (node id)
+            - Edge: UnconditionalEdge or StateEdge(states: Set[int])
+          """
+          children: Dict[int, Dict[int, Dict[int, EdgeLike]]] = field(default_factory=dict)
+          is_end: bool = False
+
+
+      def _unconditionalize_guaranteed_transitions(
+          nodes: MutableMapping[int, NodeOpt],
+          alive: Mapping[int, Set[int]],
+      ) -> int:
+          """
+          Fast unconditionalization pass: turn StateEdge into UnconditionalEdge
+          when it's provably redundant given the current Alive set.
+
+          Safety criterion (local fast path from the spec):
+            Let S_src = Alive[src], S_edge = edge.states. If S_src ⊆ S_edge,
+            then making this edge unconditional cannot introduce any new
+            parser state on its first hop, so it’s safe immediately.
+
+          Parameters:
+            nodes: NodeOpt graph as a mapping of node_id -> NodeOpt
+            alive: mapping node_id -> set of parser states Alive at that node
+
+          Returns:
+            The number of edges converted from StateEdge to UnconditionalEdge.
+
+          Notes:
+            - This pass does not modify the Alive map because the accepted
+              transformations do not add newly reachable states at this stage.
+            - This only handles the guaranteed (trivial) unconditionalizations.
+              Non-trivial candidates (S_src \\ S_edge != ∅) require the tentative
+              propagation check described in the main algorithm.
+          """
+          changed = 0
+          # Reuse a single instance; it's immutable and fine to share.
+          UNCOND = UnconditionalEdge()
+
+          for src_id, node in nodes.items():
+              s_src = alive.get(src_id, set())
+              # If s_src is empty, upgrading is still safe under the current Alive.
+              # It can also help expose passthrough nodes for removal.
+              for token, pop_map in node.children.items():
+                  for pop, dest_map in pop_map.items():
+                      # We overwrite edge values without changing keys, so it's safe
+                      # to iterate items directly.
+                      for dest, edge in list(dest_map.items()):
+                          if isinstance(edge, StateEdge):
+                              if s_src.issubset(edge.states):
+                                  dest_map[dest] = UNCOND
+                                  changed += 1
+
+          return changed
+  prev_file_contents:
+    python/aug25/range_set/__init__.py: |+
+      from .py_range_set import PyRangeSet
+      from .ffi_range_set import FFIRangeSet
+      from .bitset_range_set import BitsetRangeSet
+      from .nodeopt_optimizer import (
+          NodeOpt,
+          UnconditionalEdge,
+          StateEdge,
+          _unconditionalize_guaranteed_transitions,
+      )
+
+      # RangeSet = PyRangeSet
+      RangeSet = FFIRangeSet
+
+      __all__ = ["RangeSet", "PyRangeSet", "FFIRangeSet", "BitsetRangeSet", "NodeOpt", "UnconditionalEdge", "StateEdge", "_unconditionalize_guaranteed_transitions"]
+
+    python/aug25/range_set/bitset_range_set.py: |
+      from __future__ import annotations
+      from typing import Iterable, Optional, Tuple, List
+
+      from .range_set_abc import RangeSet
+      from .py_range_set import PyRangeSet
+
+      BIT_COUNTS = tuple(bin(i).count('1') for i in range(256))
+
+      class BitsetRangeSet(RangeSet[int]):
+          """
+          Represents a set of non-negative integers using a bitset.
+          Implements the generic RangeSet[int] interface.
+          This implementation is efficient for dense sets within a small range of integers.
+          """
+          __slots__ = ('_bitset', '_len')
+
+          def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
+              if not intervals:
+                  self._bitset = bytearray()
+                  self._len = 0
+                  return
+
+              # Using PyRangeSet's logic to handle unsorted/overlapping intervals
+              normalized_intervals = PyRangeSet._normalize(intervals)
+
+              if not normalized_intervals:
+                  self._bitset = bytearray()
+                  self._len = 0
+                  return
+
+              max_val = normalized_intervals[-1][1]
+              if max_val < 0:
+                  raise ValueError("BitsetRangeSet only supports non-negative integers.")
+
+              size = (max_val // 8) + 1
+              self._bitset = bytearray(size)
+
+              for start, end in normalized_intervals:
+                  if start < 0:
+                      raise ValueError("BitsetRangeSet only supports non-negative integers.")
+                  
+                  start_byte = start // 8
+                  start_bit = start % 8
+                  end_byte = end // 8
+                  end_bit = end % 8
+
+                  if start_byte == end_byte:
+                      mask = (0xff >> (8 - (end_bit - start_bit + 1))) << start_bit
+                      self._bitset[start_byte] |= mask
+                  else:
+                      # First byte
+                      self._bitset[start_byte] |= (0xff << start_bit) & 0xff
+                      # Middle bytes
+                      for i in range(start_byte + 1, end_byte):
+                          self._bitset[i] = 0xff
+                      # Last byte
+                      self._bitset[end_byte] |= (0xff >> (7 - end_bit))
+              
+              self._len = sum(BIT_COUNTS[byte] for byte in self._bitset)
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              # This is not efficient, but it is correct.
+              # A more performant implementation would scan bits directly.
+              return PyRangeSet.from_indices(self.to_indices()).intervals
+
+          def to_ranges(self) -> List[Tuple[int]]:
+              return list(self.intervals)
+
+          def to_indices(self) -> List[int]:
+              indices = []
+              for i in range(len(self._bitset) * 8):
+                  byte_idx = i // 8
+                  bit_idx = i % 8
+                  if (self._bitset[byte_idx] >> bit_idx) & 1:
+                      indices.append(i)
+              return indices
+
+          def contains(self, x: int) -> bool:
+              if x < 0:
+                  return False
+              byte_idx = x // 8
+              if byte_idx >= len(self._bitset):
+                  return False
+              bit_idx = x % 8
+              return (self._bitset[byte_idx] >> bit_idx) & 1 != 0
+
+          def union(self, other: RangeSet[int]) -> "BitsetRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              
+              if isinstance(other, BitsetRangeSet):
+                  len_a = len(self._bitset)
+                  len_b = len(other._bitset)
+                  new_len = max(len_a, len_b)
+                  new_bitset = bytearray(new_len)
+                  
+                  new_bitset[:len_a] = self._bitset
+                  
+                  for i in range(len_b):
+                      new_bitset[i] |= other._bitset[i]
+                      
+                  res = BitsetRangeSet()
+                  res._bitset = new_bitset
+                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
+                  return res
+              else:
+                  # Generic path for other RangeSet types
+                  return BitsetRangeSet(self.intervals + other.intervals)
+
+          def intersection(self, other: RangeSet[int]) -> "BitsetRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              
+              if isinstance(other, BitsetRangeSet):
+                  len_a = len(self._bitset)
+                  len_b = len(other._bitset)
+                  new_len = min(len_a, len_b)
+                  new_bitset = bytearray(new_len)
+                  
+                  for i in range(new_len):
+                      new_bitset[i] = self._bitset[i] & other._bitset[i]
+                      
+                  res = BitsetRangeSet()
+                  res._bitset = new_bitset
+                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
+                  return res
+              else:
+                  # Generic path
+                  py_self = PyRangeSet(self.intervals)
+                  intersected = py_self.intersection(other)
+                  return BitsetRangeSet(intersected.intervals)
+
+          def difference(self, other: RangeSet[int]) -> "BitsetRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              
+              if isinstance(other, BitsetRangeSet):
+                  len_a = len(self._bitset)
+                  len_b = len(other._bitset)
+                  new_bitset = self._bitset[:]
+                  
+                  limit = min(len_a, len_b)
+                  for i in range(limit):
+                      new_bitset[i] &= ~other._bitset[i]
+                      
+                  res = BitsetRangeSet()
+                  res._bitset = new_bitset
+                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
+                  return res
+              else:
+                  py_self = PyRangeSet(self.intervals)
+                  differenced = py_self.difference(other)
+                  return BitsetRangeSet(differenced.intervals)
+
+          def is_empty(self) -> bool:
+              return self._len == 0
+
+          def __len__(self) -> int:
+              return self._len
+
+          def __repr__(self) -> str:
+              return f"BitsetRangeSet({self.intervals!r})"
+
+          def __eq__(self, other) -> bool:
+              if isinstance(other, BitsetRangeSet):
+                  a, b = self._bitset, other._bitset
+                  if len(a) > len(b):
+                      a, b = b, a
+                  
+                  if a != b[:len(a)]:
+                      return False
+                  
+                  for i in range(len(a), len(b)):
+                      if b[i] != 0:
+                          return False
+                  return True
+
+              if isinstance(other, RangeSet):
+                  return self.intervals == other.intervals
+              return NotImplemented
+
+          def __hash__(self) -> int:
+              return hash(self.intervals)
+
+          @classmethod
+          def from_ranges(cls, ranges: List[List[int]]) -> 'BitsetRangeSet':
+              return cls(iter(map(tuple, ranges)))
+
+          @classmethod
+          def from_indices(cls, indices: Iterable[int]) -> 'BitsetRangeSet':
+              indices = list(indices)
+              if not indices:
+                  return cls()
+              
+              if any(i < 0 for i in indices):
+                  raise ValueError("BitsetRangeSet only supports non-negative integers.")
+              
+              max_val = max(indices)
+              
+              size = (max_val // 8) + 1
+              bitset = bytearray(size)
+              
+              unique_indices = set(indices)
+              for i in unique_indices:
+                  byte_idx = i // 8
+                  bit_idx = i % 8
+                  bitset[byte_idx] |= (1 << bit_idx)
+                  
+              res = cls()
+              res._bitset = bitset
+              res._len = len(unique_indices)
+              return res
+
+          @classmethod
+          def empty(cls) -> 'BitsetRangeSet':
+              return cls()
+
+          @classmethod
+          def from_json(cls, data: List[List[int]]) -> 'BitsetRangeSet':
+              return cls.from_ranges(data)
+
+          def to_json(self) -> List[List[int]]:
+              return [list(r) for r in self.intervals]
+    python/aug25/range_set/ffi_range_set.py: |
+      import _sep1 as ffi
+      from typing import List, Tuple, Iterable, cast
+
+      from .range_set_abc import RangeSet
+      from .rangeset_stats import time_method, time_func, record_metric
+
+
+
+      class FFIRangeSet(RangeSet[int]):
+          """A FFIRangeSet implementation backed by the Rust ffi.Bitset."""
+
+          __slots__ = ('_bitset',)
+
+          def __init__(self, intervals: Iterable[Tuple[int, int]] = ()):
+              # ffi.Bitset.from_ranges expects a list of [start, end] lists/tuples
+              self._bitset = ffi.Bitset.from_ranges(list(intervals))
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              """Returns the intervals as a tuple of tuples."""
+              return tuple(cast(List[Tuple[int, int]], self._bitset.to_ranges()))
+
+          def to_ranges(self) -> List[Tuple[int]]:
+              """Returns the intervals as a list of lists for JSON serialization."""
+              return [tuple(r) for r in self._bitset.to_ranges()]
+
+          @time_method
+          def to_indices(self) -> List[int]:
+              """Returns the elements of the set as a list."""
+              res = self._bitset.to_indices()
+              try:
+                  record_metric('FFIRangeSet.to_indices.out_len', len(res))
+              except Exception:
+                  pass
+              return res
+
+          @time_method
+          def contains(self, x: int) -> bool:
+              """Return True if x is contained in the set."""
+              res = self._bitset.contains(x)
+              record_metric('FFIRangeSet.contains.true' if res else 'FFIRangeSet.contains.false', 1)
+              return res
+
+          @time_method
+          def union(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the union of two RangeSets."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              try:
+                  record_metric('FFIRangeSet.union.in_len_a', len(self))
+                  record_metric('FFIRangeSet.union.in_len_b', len(other))
+              except Exception:
+                  pass
+              new_bs = self._bitset.union(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
+              try:
+                  record_metric('FFIRangeSet.union.out_len', len(res))
+              except Exception:
+                  pass
+              return res
+
+          @time_method
+          def intersection(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the intersection of two RangeSets."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              try:
+                  record_metric('FFIRangeSet.intersection.in_len_a', len(self))
+                  record_metric('FFIRangeSet.intersection.in_len_b', len(other))
+              except Exception:
+                  pass
+              new_bs = self._bitset.intersection(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
+              try:
+                  record_metric('FFIRangeSet.intersection.out_len', len(res))
+              except Exception:
+                  pass
+              return res
+
+          @time_method
+          def difference(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the set difference self \\ other."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              try:
+                  record_metric('FFIRangeSet.difference.in_len_a', len(self))
+                  record_metric('FFIRangeSet.difference.in_len_b', len(other))
+              except Exception:
+                  pass
+              new_bs = self._bitset.difference(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
+              try:
+                  record_metric('FFIRangeSet.difference.out_len', len(res))
+              except Exception:
+                  pass
+              return res
+
+          @time_method
+          def is_empty(self) -> bool:
+              res = self._bitset.is_empty()
+              record_metric('FFIRangeSet.is_empty.true' if res else 'FFIRangeSet.is_empty.false', 1)
+              return res
+
+          @time_method
+          def __len__(self) -> int:
+              v = self._bitset.len()
+              # Sum of cardinalities observed; you can divide by calls to get an average size
+              record_metric('FFIRangeSet.__len__.sum', v)
+              return v
+
+          def __repr__(self) -> str:
+              return f"FFIRangeSet.from_ranges({self.intervals!r})"
+
+          @time_method
+          def __eq__(self, other) -> bool:
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              res = self._bitset == other._bitset
+              record_metric('FFIRangeSet.__eq__.true' if res else 'FFIRangeSet.__eq__.false', 1)
+              return res
+
+          @time_method
+          def __hash__(self) -> int:
+              # The PyHybridBitset has a __hash__ method
+              h = hash(self._bitset)
+              record_metric('FFIRangeSet.__hash__', 1)
+              return h
+
+          @staticmethod
+          def _merge_unsorted(ranges: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
+              """
+              Normalizes a list of [start, end] intervals into a sorted, merged, disjoint list of pairs.
+              This can be achieved by creating a temporary FFIRangeSet.
+              """
+              # The ffi.Bitset constructor handles merging and sorting.
+              temp_rs = FFIRangeSet.from_ranges(ranges)
+              return temp_rs._bitset.to_ranges()
+
+          @staticmethod
+          @time_func('FFIRangeSet.from_ranges')
+          def from_ranges(ranges: List[List[int]]) -> 'FFIRangeSet':
+              """Creates a FFIRangeSet from a list of [start, end] lists."""
+              # return FFIRangeSet(tuple(map(tuple, ranges)))
+              self = FFIRangeSet()
+              try:
+                  record_metric('FFIRangeSet.from_ranges.in_ranges_count', len(ranges))
+              except Exception:
+                  pass
+              self._bitset = ffi.Bitset.from_ranges(ranges)
+              try:
+                  record_metric('FFIRangeSet.from_ranges.out_len', len(self))
+              except Exception:
+                  pass
+              return self
+
+          @staticmethod
+          @time_func('FFIRangeSet.from_indices')
+          def from_indices(indices: Iterable[int]) -> 'FFIRangeSet':
+              """Creates a FFIRangeSet from an iterable of individual indices."""
+              new_set = FFIRangeSet.from_ranges([])
+              # The FFI function expects a list.
+              idx_list = list(indices)
+              record_metric('FFIRangeSet.from_indices.in_len', len(idx_list))
+              new_set._bitset = ffi.Bitset.from_indices(idx_list)
+              try:
+                  record_metric('FFIRangeSet.from_indices.out_len', len(new_set))
+              except Exception:
+                  pass
+              return new_set
+
+          @staticmethod
+          @time_func('FFIRangeSet.empty')
+          def empty() -> 'FFIRangeSet':
+              """Creates an empty FFIRangeSet."""
+              record_metric('FFIRangeSet.empty.calls', 1)
+              return FFIRangeSet.from_ranges([])
+
+          @staticmethod
+          def from_json(data: List[List[int]]) -> 'FFIRangeSet':
+              return FFIRangeSet.from_ranges(tuple(map(tuple, data)))
+
+          def to_json(self) -> List[List[int]]:
+              return self.to_ranges()
+    python/aug25/range_set/py_range_set.py: |
+      from __future__ import annotations
+      from typing import Iterable, Optional, Tuple, List
+      from .range_set_abc import RangeSet
+
+      class PyRangeSet(RangeSet[int]):
+          """
+          Represents a set of integers as a sorted, disjoint list of closed intervals.
+          Implements the generic RangeSet[int] interface.
+          """
+          __slots__ = ('_intervals',)
+
+          def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
+              if intervals:
+                  self._intervals = self._normalize(intervals)
+              else:
+                  self._intervals = tuple()
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              return self._intervals
+
+          @staticmethod
+          def _normalize(intervals: Iterable[Tuple[int, int]]) -> Tuple[Tuple[int, int], ...]:
+              """
+              Normalizes a list of [start, end] intervals into a sorted, merged, disjoint tuple of pairs.
+              """
+              items = sorted(intervals)
+              if not items:
+                  return tuple()
+
+              merged: List[Tuple[int, int]] = []
+              cs, ce = items[0]
+              for ns, ne in items[1:]:
+                  if ns <= ce + 1:
+                      ce = max(ce, ne)
+                  else:
+                      merged.append((cs, ce))
+                      cs, ce = ns, ne
+              merged.append((cs, ce))
+              return tuple(merged)
+
+          @staticmethod
+          def _merge_unsorted(intervals: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
+              """
+              Same as normalize but returns a list. Used by optimizer.
+              """
+              items = sorted(intervals)
+              if not items:
+                  return []
+
+              merged: List[Tuple[int, int]] = []
+              cs, ce = items[0]
+              for ns, ne in items[1:]:
+                  if ns <= ce + 1:
+                      ce = max(ce, ne)
+                  else:
+                      merged.append((cs, ce))
+                      cs, ce = ns, ne
+              merged.append((cs, ce))
+              return merged
+
+          @staticmethod
+          def from_ranges(ranges: List[List[int]]) -> 'PyRangeSet':
+              """Creates a PyRangeSet from a list of [start, end] lists."""
+              return PyRangeSet(iter(map(tuple, ranges)))
+
+          def to_ranges(self) -> List[Tuple[int]]:
+              """Converts the PyRangeSet to a list of [start, end] lists."""
+              return [tuple(interval) for interval in self.intervals]
+
+          @staticmethod
+          def from_json(data: List[List[int]]) -> 'PyRangeSet':
+              """Creates a PyRangeSet from a list of [start, end] lists (JSON format)."""
+              return PyRangeSet(iter(map(tuple, data)))
+
+          def to_json(self) -> List[List[int]]:
+              """Converts the PyRangeSet to a list of [start, end] lists (JSON format)."""
+              return self.to_ranges()
+
+          @staticmethod
+          def from_indices(indices: Iterable[int]) -> 'PyRangeSet':
+              """Creates a PyRangeSet from an iterable of individual indices."""
+              indices_sorted = sorted(set(indices))
+              if not indices_sorted:
+                  return PyRangeSet.empty()
+              intervals: List[Tuple[int, int]] = []
+              start = indices_sorted[0]
+              prev = start
+              for i in indices_sorted[1:]:
+                  if i == prev + 1:
+                      prev = i
+                  else:
+                      intervals.append((start, prev))
+                      start = i
+                      prev = i
+              intervals.append((start, prev))
+              return PyRangeSet(intervals)
+
+          @staticmethod
+          def empty() -> 'PyRangeSet':
+              """Creates an empty PyRangeSet."""
+              return PyRangeSet()
+
+          def to_indices(self) -> List[int]:
+              """Converts the PyRangeSet to a list of individual indices."""
+              result = []
+              for start, end in self.intervals:
+                  result.extend(range(start, end + 1))
+              return result
+
+          @staticmethod
+          def from_numpy(bv) -> 'PyRangeSet':
+              """Creates a PyRangeSet from a numpy array of booleans."""
+              intervals = []
+              in_range = False
+              start = 0
+              for i in range(len(bv)):
+                  if bv[i] and not in_range:
+                      start = i
+                      in_range = True
+                  elif not bv[i] and in_range:
+                      intervals.append((start, i - 1))
+                      in_range = False
+              if in_range:
+                  intervals.append((start, len(bv) - 1))
+              return PyRangeSet(intervals)
+
+          def __eq__(self, other):
+              if isinstance(other, PyRangeSet):
+                  return self.intervals == other.intervals
+              if isinstance(other, RangeSet):
+                  # Compare by normalized intervals for any RangeSet implementation
+                  return self.intervals == other.intervals
+              return NotImplemented
+
+          def __hash__(self):
+              return hash(self.intervals)
+
+          def __repr__(self):
+              return f"PyRangeSet({self.intervals!r})"
+
+          # New utilities for set-like operations
+          def is_empty(self) -> bool:
+              """Return True if no indices are present."""
+              return not self.intervals
+
+          def __len__(self) -> int:
+              """Return the total number of elements in the set."""
+              return sum(e - s + 1 for s, e in self._intervals)
+
+          def contains(self, x: int) -> bool:
+              """Return True if x is contained in the set."""
+              for s, e in self.intervals:
+                  if s <= x <= e:
+                      return True
+                  if x < s:
+                      return False
+              return False
+
+          def union(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+              """Return the union of two RangeSets."""
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              if self.is_empty():
+                  return PyRangeSet(other.intervals)
+              if other.is_empty():
+                  return self
+              return PyRangeSet(self.intervals + other.intervals)
+
+          def intersection(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+              """Return the intersection of two RangeSets."""
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              if self.is_empty() or other.is_empty():
+                  return PyRangeSet.empty()
+              a = list(self.intervals)
+              b = list(other.intervals)
+              i = j = 0
+              res: List[Tuple[int, int]] = []
+              while i < len(a) and j < len(b):
+                  s1, e1 = a[i]
+                  s2, e2 = b[j]
+                  s = max(s1, s2)
+                  e = min(e1, e2)
+                  if s <= e:
+                      res.append((s, e))
+                  if e1 < e2:
+                      i += 1
+                  else:
+                      j += 1
+              return PyRangeSet(res)
+
+          def difference(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+              """Return the set difference self \\ other as a PyRangeSet."""
+              if self.is_empty():
+                  return PyRangeSet.empty()
+              if other.is_empty():
+                  return self
+              a = list(self.intervals)
+              b = list(other.intervals)
+              res: List[Tuple[int, int]] = []
+              j = 0
+              for s1, e1 in a:
+                  curr = s1
+                  while j < len(b) and b[j][1] < curr:
+                      j += 1
+                  k = j
+                  while k < len(b) and b[k][0] <= e1:
+                      s2, e2 = b[k]
+                      if s2 > curr:
+                          res.append((curr, s2 - 1))
+                      if e2 + 1 > curr:
+                          curr = e2 + 1
+                      if curr > e1:
+                          break
+                      k += 1
+                  if curr <= e1:
+                      res.append((curr, e1))
+              return PyRangeSet(res)
+    python/aug25/range_set/range_set_abc.py: |
+      from __future__ import annotations
+
+      from abc import ABC, abstractmethod
+      from typing import Generic, Iterable, List, Tuple, TypeVar
+
+      T = TypeVar("T")
+
+
+      class RangeSet(ABC, Generic[T]):
+          """
+          Abstract base class for range-based sets of comparable elements.
+          Implementations represent sets as normalized, sorted, disjoint closed intervals.
+          """
+
+          @property
+          @abstractmethod
+          def intervals(self) -> Tuple[Tuple[T, T], ...]:
+              """
+              The normalized, sorted, disjoint closed intervals representing the set.
+              Implementations should guarantee:
+              - intervals are sorted by start
+              - no overlaps and no gaps of size 0 (i.e., [a,b] and [b+1,c] should be merged where applicable)
+              """
+              raise NotImplementedError
+
+          @abstractmethod
+          def is_empty(self) -> bool:
+              """Return True if the set is empty."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def __len__(self) -> int:
+              """Return the total number of elements in the set."""
+              raise NotImplementedError
+
+          def __or__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.union(other)
+
+          def __ror__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.union(other)
+
+          def __and__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.intersection(other)
+
+          def __rand__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.intersection(other)
+
+          def __sub__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.difference(other)
+
+          def __rsub__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return other.difference(self)
+
+          @abstractmethod
+          def contains(self, x: T) -> bool:
+              """Return True if x is contained in the set."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def union(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the union of two RangeSets."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def intersection(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the intersection of two RangeSets."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def difference(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the set difference self \\ other."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def to_ranges(self) -> List[Tuple[T]]:
+              """Returns the intervals as a list of lists for JSON serialization."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def to_indices(self) -> List[T]:
+              """Returns the elements of the set as a list."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def from_json(cls, data: List[List[T]]) -> "RangeSet[T]":
+              """Creates a RangeSet from a list of [start, end] lists (JSON format)."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def to_json(self) -> List[List[T]]:
+              """Converts the RangeSet to a list of [start, end] lists (JSON format)."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def from_ranges(cls, ranges: List[List[T]]) -> "RangeSet[T]":
+              """Creates a RangeSet from a list of [start, end] lists."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def from_indices(cls, indices: Iterable[T]) -> "RangeSet[T]":
+              """Creates a RangeSet from an iterable of individual indices."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def empty(cls) -> "RangeSet[T]":
+              """Creates an empty RangeSet."""
+              raise NotImplementedError
+    python/aug25/range_set/rangeset_stats.py: |
+      import os
+      from typing import Callable, Any
+
+      PROFILING_ENABLED = os.environ.get('RANGESET_PROFILING', '0') == '1'
+
+      if PROFILING_ENABLED:
+          import time
+          import collections
+
+          # Wall-time per labeled operation
+          RANGESET_STATS = collections.defaultdict(float)   # label -> seconds
+          # Call counts per labeled operation
+          RANGESET_CALLS = collections.defaultdict(int)     # label -> calls
+          # Additional numeric metrics (sums/counters); keys are arbitrary metric names
+          RANGESET_METRICS = collections.defaultdict(float) # metric_name -> value
+
+          def reset_rangeset_stats() -> None:
+              RANGESET_STATS.clear()
+              RANGESET_CALLS.clear()
+              RANGESET_METRICS.clear()
+
+          def record_metric(name: str, value: float = 1.0) -> None:
+              RANGESET_METRICS[name] += float(value)
+
+          def time_method(func: Callable) -> Callable:
+              """
+              Decorator for instance methods; label includes the runtime class name.
+              """
+              def wrapper(*args, **kwargs):
+                  # Expecting instance method, so args[0] is self
+                  self = args[0] if args else None
+                  cls_name = type(self).__name__ if self is not None else "<unknown>"
+                  label = f"{cls_name}.{func.__name__}"
+                  t0 = time.time()
+                  try:
+                      return func(*args, **kwargs)
+                  finally:
+                      RANGESET_STATS[label] += time.time() - t0
+                      RANGESET_CALLS[label] += 1
+              return wrapper
+
+          def time_func(label: str) -> Callable[[Callable], Callable]:
+              """
+              Decorator for static functions or for forcing a specific label.
+              """
+              def deco(func: Callable) -> Callable:
+                  def wrapper(*args, **kwargs):
+                      t0 = time.time()
+                      try:
+                          return func(*args, **kwargs)
+                      finally:
+                          RANGESET_STATS[label] += time.time() - t0
+                          RANGESET_CALLS[label] += 1
+                  return wrapper
+              return deco
+
+          def print_rangeset_stats() -> None:
+              print("\n--- RangeSet stats ---")
+              total_time = sum(RANGESET_STATS.values())
+              # Times and calls
+              for label in sorted(RANGESET_STATS.keys()):
+                  v = RANGESET_STATS[label]
+                  calls = RANGESET_CALLS.get(label, 0)
+                  if total_time > 1e-6:
+                      print(f"t_{label:<30}: {v:8.4f}s ({v/total_time*100:5.1f}%) | calls: {calls}")
+                  else:
+                      print(f"t_{label:<30}: {v:8.4f}s | calls: {calls}")
+              # Additional metrics
+              if RANGESET_METRICS:
+                  print("\nRangeSet metrics (sums/counters):")
+                  for k in sorted(RANGESET_METRICS.keys()):
+                      v = RANGESET_METRICS[k]
+                      # print ints where applicable
+                      if abs(v - int(v)) < 1e-9:
+                          print(f"{k:<35}: {int(v)}")
+                      else:
+                          print(f"{k:<35}: {v:.4f}")
+              print("----------------------\n")
+
+      else:
+          # No-op versions for when profiling is disabled.
+          def reset_rangeset_stats() -> None:
+              pass
+
+          def record_metric(name: str, value: float = 1.0) -> None:
+              pass
+
+          def time_method(func: Callable) -> Callable:
+              return func
+
+          def time_func(label: str) -> Callable[[Callable], Callable]:
+              def deco(func: Callable) -> Callable:
+                  return func
+              return deco
+
+          def print_rangeset_stats() -> None:
+              print("\n--- RangeSet stats (profiling disabled) ---\n")
+    python/aug25/range_set/nodeopt_optimizer.py: |
+      from __future__ import annotations
+
+      from dataclasses import dataclass, field
+      from typing import Dict, Set, MutableMapping, Mapping, Union
+
+
+      @dataclass(frozen=True)
+      class UnconditionalEdge:
+          """
+          Edge that does not filter by parser state.
+          """
+          __slots__ = ()
+
+
+      @dataclass
+      class StateEdge:
+          """
+          Edge that filters by a set of parser states.
+          """
+          states: Set[int]
+
+
+      EdgeLike = Union[UnconditionalEdge, StateEdge]
+
+
+      @dataclass
+      class NodeOpt:
+          """
+          Optimizer-friendly node representation.
+          children[token][pop][dest] = Edge
+            - token: int (LLM token id)
+            - pop: int
+            - dest: int (node id)
+            - Edge: UnconditionalEdge or StateEdge(states: Set[int])
+          """
+          children: Dict[int, Dict[int, Dict[int, EdgeLike]]] = field(default_factory=dict)
+          is_end: bool = False
+
+
+      def _unconditionalize_guaranteed_transitions(
+          nodes: MutableMapping[int, NodeOpt],
+          alive: Mapping[int, Set[int]],
+      ) -> int:
+          """
+          Fast unconditionalization pass: turn StateEdge into UnconditionalEdge
+          when it's provably redundant given the current Alive set.
+
+          Safety criterion (local fast path from the spec):
+            Let S_src = Alive[src], S_edge = edge.states. If S_src ⊆ S_edge,
+            then making this edge unconditional cannot introduce any new
+            parser state on its first hop, so it’s safe immediately.
+
+          Parameters:
+            nodes: NodeOpt graph as a mapping of node_id -> NodeOpt
+            alive: mapping node_id -> set of parser states Alive at that node
+
+          Returns:
+            The number of edges converted from StateEdge to UnconditionalEdge.
+
+          Notes:
+            - This pass does not modify the Alive map because the accepted
+              transformations do not add newly reachable states at this stage.
+            - This only handles the guaranteed (trivial) unconditionalizations.
+              Non-trivial candidates (S_src \\ S_edge != ∅) require the tentative
+              propagation check described in the main algorithm.
+          """
+          changed = 0
+          # Reuse a single instance; it's immutable and fine to share.
+          UNCOND = UnconditionalEdge()
+
+          for src_id, node in nodes.items():
+              s_src = alive.get(src_id, set())
+              # If s_src is empty, upgrading is still safe under the current Alive.
+              # It can also help expose passthrough nodes for removal.
+              for token, pop_map in node.children.items():
+                  for pop, dest_map in pop_map.items():
+                      # We overwrite edge values without changing keys, so it's safe
+                      # to iterate items directly.
+                      for dest, edge in list(dest_map.items()):
+                          if isinstance(edge, StateEdge):
+                              if s_src.issubset(edge.states):
+                                  dest_map[dest] = UNCOND
+                                  changed += 1
+
+          return changed
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -1748,7 +1927,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -1850,7 +2029,7 @@ messages:
                       self._bitset[start_byte] |= mask
                   else:
                       # First byte
-                      self._bitset[start_byte] |= (0xff << start_bit)
+                      self._bitset[start_byte] |= (0xff << start_bit) & 0xff
                       # Middle bytes
                       for i in range(start_byte + 1, end_byte):
                           self._bitset[i] = 0xff
@@ -2676,17 +2855,217 @@ messages:
       ```
     metadata:
       filename: python/aug25/range_set/rangeset_stats.py
-  - user: |2-
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/models/precompute3_model_pure_python.py", line 1037, in convert
-          return BitsetRangeSet.from_ranges(rs.to_ranges())
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/range_set/bitset_range_set.py", line 188, in from_ranges
-          return cls(iter(map(tuple, ranges)))
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-        File "/Users/isaacbreen/Projects2/grammars2024/python/aug25/range_set/bitset_range_set.py", line 52, in __init__
-          self._bitset[start_byte] |= (0xff << start_bit)
-          ~~~~~~~~~~~~^^^^^^^^^^^^
-      ValueError: byte must be in range(0, 256)
+  - user: |-
+      1) Objective and constraints
+      - Goal: Turn as many state-filtered edges as possible into unconditional edges without changing which tokens can be accepted, then exploit these unconditional edges to simplify the graph (preferably cutting out whole passthrough nodes and merging consecutive pops).
+      - Constraints:
+        - Preserve semantics: No new token should become accepted at any point (i.e., no extra parser state should be able to reach an end node because of the transformation).
+        - Keep the final arena compact and efficient for get_mask:
+          - Minimize number of per-node children entries by grouping tokens with identical behavior.
+          - Prefer fewer pop layers (merge pop chains where safe).
+          - Avoid exploding the number of edges.
+        - Time-bound/stochastic: best-effort improvements within a time budget.
+
+      2) Data model to optimize (NodeOpt)
+      - Recommended NodeOpt shape (lossless, fast to repack):
+        - children: Dict[LLMToken, Dict[Pop, Dict[NodeID, Edge]]]
+          - Pop is an int.
+          - Edge ∈ {UnconditionalEdge, StateEdge(states: Set[int])}.
+        - is_end: bool
+      - Notes:
+        - If you keep the simplified variant children[token][dest] -> (pop, Edge), be aware it cannot represent multiple different pops to the same dest under the same token. Prefer the per-pop nested map to avoid lossy merges and to simplify grouping in _from_nodeopt_graph.
+
+      3) Converting back and forth
+      - To NodeOpt (_to_nodeopt_graph):
+        - For each arena node:
+          - Explode each ((pop, llm_bv), [(dest, state_bv), ...]) into per-token entries.
+          - For state_bv empty => UnconditionalEdge; else => StateEdge with the concrete set of states.
+          - Store in children[token][pop][dest] = (Edge).
+        - If you must keep children[token][dest] = (pop, Edge), document the policy when you see two different pops for the same (token, dest). A stable-but-lossy policy will change semantics; avoid it if possible.
+      - From NodeOpt (_from_nodeopt_graph) to arena:
+        - Build signatures keyed by (pop, signature_of_dest_edges) and group tokens that share that exact signature:
+          - signature_of_dest_edges: sorted tuple of (dest, ('U', ())) for unconditional or (dest, ('S', tuple(ranges))) for filtered with a canonical RangeSet/ranges tuple.
+        - Emit children as ((pop, llm_bv: RangeSet), [(dest, state_bv_rs), ...]).
+        - Performance tips:
+          - Cache conversions from frozenset(states) to a RangeSet once (avoid O(E) RangeSet allocations).
+          - Sorting and grouping should be deterministic.
+          - If using children[token][pop][dest], grouping is straightforward and minimal by construction.
+
+      4) Alive-state analysis (baseline fixpoint)
+      - Purpose: Compute, for each node n, the set Alive[n] of parser states that can be “alive” at that node under the current graph semantics.
+      - Semantics for propagation:
+        - Across edge (pop = p, Edge e) from src -> dst:
+          - S' = reverse_state_map^p(S), where S are alive states at src.
+          - If e is StateEdge(states): S'' = S' ∩ states.
+          - If e is UnconditionalEdge: S'' = S'.
+          - Add S'' to Alive[dst].
+        - Ignore LLM tokens during alive propagation; it’s a purely parser-state flow problem.
+      - Seeding:
+        - Add start_state_id to Alive[r] for every root node r.
+      - Solve to fixpoint with a standard worklist.
+      - Keep Alive for subsequent passes; you’ll incrementally update it when you accept transformations.
+
+      5) Turning state-filtered edges into unconditional edges (main pass)
+      - Candidate edges:
+        - Iterate only over StateEdge edges.
+        - Maintain a list or priority queue of candidates. Random selection is OK (stochastic approach).
+      - Local safety check (fast path):
+        - Let S_src = Alive[src], S_edge = edge.states. If S_src ⊆ S_edge: safe to make the edge unconditional immediately (no extra states can slip through).
+      - Full safety check (tentative propagation):
+        - When S_extra = S_src \ S_edge is non-empty:
+          - We simulate the impact of making this particular edge unconditional:
+            1) First hop (modified semantics only for the chosen edge):
+               - frontier0 = reverse_state_map^pop(S_extra)  // do NOT apply the edge’s state mask
+               - frontier0 = frontier0 \ Alive[dst]          // only states that are truly new at dst matter
+               - If (frontier0 is empty): safe (no change); unconditionalize and continue.
+               - If dst.is_end and frontier0 ≠ ∅: unsafe; skip this edge.
+            2) Propagate forward normally from (dst, frontier0):
+               - Use a local queue of (node_id, frontier_states).
+               - For each outgoing edge (pop2, Edge2) to node dst2:
+                 - next_states = reverse_state_map^pop2(frontier_states)
+                 - If Edge2 is StateEdge(mask): next_states = next_states ∩ mask
+                 - next_states = next_states \ Alive[dst2]   // Only newly-added states matter
+                 - If next_states is empty: continue
+                 - If dst2.is_end: unsafe; abort
+                 - Enqueue (dst2, next_states) and accumulate Delta[dst2] |= next_states
+          - If the tentative BFS finishes without reaching any end node, the transformation is safe.
+      - Accepting a safe transformation:
+        - Replace the original StateEdge with UnconditionalEdge at (src, token, pop, dest).
+        - Update Alive by applying all newly discovered states: for each node u, Alive[u] |= Delta[u].
+        - For each node u where Alive changed, re-enqueue it in the global alive worklist if you maintain one, or at least mark edges outgoing from u as higher-priority candidates (they may now satisfy the fast path).
+      - Rejecting an unsafe transformation:
+        - Discard Delta, leave the edge unchanged.
+      - Loop control:
+        - Time-box to T seconds, or stop after K consecutive failures, or when no StateEdge remains.
+        - Heuristics to try first:
+          - Smaller |S_extra| first.
+          - Edges on deeper nodes (based on max_depth) may open more wins after success.
+          - Trivial unconditionalizations (S_src ⊆ S_edge) first — they’re free.
+
+      6) Passthrough node elimination and pop merging
+      - Motivation: After many unconditionalizations, chain nodes A -> B -> C with unconditional edges can be collapsed so that A jumps directly to C with pop = pop_AB + pop_BC.
+      - Definitions:
+        - Passthrough node B: a node with
+          - is_end == False
+          - Every outgoing edge for every token is UnconditionalEdge (regardless of pop).
+      - Parent map:
+        - Build parents: Dict[node, List[(parent, token, pop, Edge, dest=that node)]]. This is needed to rewrite incoming edges when removing B.
+      - Safe removal of B:
+        - Do not remove roots unless you also update roots_map (more below).
+        - For each parent A of B and each token t where A has A->B edges:
+          - For each unconditional outgoing edge B->C under the same token t with pop pb:
+            - Compose edge A->C with:
+              - pop = pa + pb (pa is the pop on A->B)
+              - Edge = the Edge on A->B:
+                - If A->B is UnconditionalEdge, keep it UnconditionalEdge.
+                - If A->B is StateEdge(S), keep the same StateEdge(S).
+            - Insert/merge this composed edge into A’s children for token t (respecting NodeOpt’s representation):
+              - If you use the recommended per-pop nested map: insert under [t][pa+pb][C].
+              - Dedup rules:
+                - If an existing edge is UnconditionalEdge, it dominates any StateEdge for the same (t, pop, C).
+                - If both are StateEdges with same (t, pop, C), union their state sets.
+                - If (t, pop, C) already exists but with a different pop, they are different entries and both must be kept.
+          - Remove A->B edge(s) from A.
+        - After all parents have been rewritten, if B has no remaining incoming edges, remove B entirely.
+      - Roots and ends:
+        - Do not remove end nodes.
+        - Either:
+          - Do not remove nodes that appear as roots_map[state_id], OR
+          - If you remove a root node r with unconditional edges r->C under all tokens, rewrite roots_map[state_id] to point to C with the same strict semantics. Be careful: roots_map maps tokenizer states to node ids, not to pop. You must only rewrite when the composed pop for the root would be 0 across all tokens (otherwise you shift pop semantics for the entry point). In practice, easiest is to keep root nodes.
+      - Alternative “edge-minimizing” mode:
+        - If cutting B entirely is not possible, you can still add shortcuts A->C (with pop sums) while keeping B, to reduce depth. However, this increases the number of edges and may slow get_mask unless you are very careful with grouping. Prefer node removal to pure edge addition.
+
+      7) Repacking back to the arena (efficient for get_mask)
+      - Group-by strategy:
+        - For each node, build groups keyed by (pop, dest-signature).
+        - The signature must be exact and canonical so that unrelated tokens group reliably. Use:
+          - For each dest: ('U', ()) or ('S', tuple(state_bv_rs.to_ranges()))
+          - Key: (pop, tuple(sorted((dest, sig) for dest)))
+        - For each group, build llm_bv = RangeSet.from_indices(sorted(tokens)). This produces minimal ranges.
+        - The resulting children list per node consists of:
+          - ((pop, llm_bv), [(dest, state_bv_rs), ...]) entries sorted deterministically.
+      - Minimization tips:
+        - Cache RangeSet for a given frozenset(state_ids).
+        - If a group’s dest list is empty (shouldn’t happen), skip it.
+        - Try to avoid creating many tiny groups: make sure the signature function is stable and hashes large identical structures identically.
+
+      8) Maintaining max_depth
+      - After rewriting/removal:
+        - Recompute max_depth per node (longest number of edges to a sink/end) if feasible. get_mask uses depth ordering to prune earlier; stale depths can slow it down.
+        - If recomputation is too expensive, at least update affected subgraphs (nodes touched by transformations). A simple DAG-like longest-path DP with cycle handling via iterative relaxation or Kahn-like passes works; if cycles exist, any upper bound is acceptable but a tight bound is better for pruning.
+
+      9) Performance and caching notes
+      - reverse_state_map^p(S):
+        - You will call this a lot. Cache preimages per (p, frozenset(S)) cautiously or, better, precompute for small p the function f_p(s) = predecessors^p({s}) and then compute union over s ∈ S. That is often faster and much more memory friendly.
+        - If pop values are bounded (they usually are), precompute f_p for 1..p_max. Use incremental composition: f_{p+1}(s) = union_{t∈f_p(s)} reverse_state_map[t].
+      - Frontier representation:
+        - Use Python sets of ints for states; they are simple and fast enough in most cases. If needed, swap to your bitset type for states to speed intersections.
+      - Tentative propagation cutoffs:
+        - If frontier grows beyond a threshold (e.g., > 10k states cumulatively), abort and mark the edge as unlikely to succeed.
+        - Prioritize edges where |S_extra| is small.
+      - Worklist control:
+        - Track “success streak” and “failure streak”. If many consecutive failures happen, either stop or switch heuristics (e.g., try different nodes or edges).
+      - Memory:
+        - Reuse mutable sets where possible, but be careful not to alias Alive entries. Always take set differences into fresh sets.
+
+      10) Correctness invariants and safety proofs (intuition)
+      - Alive fixpoint describes states that are currently available under existing edge semantics.
+      - The only way a new unconditionalization can change accepted tokens is by enabling some state that was previously blocked by a StateEdge to reach an end node. The tentative propagation simulates exactly “what new states would be added” if we made that edge unconditional:
+        - It starts with S_extra (the states that were blocked).
+        - It pushes them forward with the normal alive propagation rules, except that the first hop across the chosen edge ignores the state filter.
+        - If we never hit an end node during this propagation, then those newly reachable states are “non-productive” (they die or get re-filtered). We can safely accept the transformation and update Alive by exactly the newly-found Delta.
+      - Accepting a transformation strictly reduces the global measure “sum over all edges of |state filters|” or reduces the number of nodes after passthrough removal. The process terminates even without a time limit; the time-bound just caps work.
+
+      11) Edge cases and pitfalls
+      - Pop = 0 edges:
+        - reverse_state_map^0(S) = S. Everything else is unchanged.
+      - Missing entries in reverse_state_map:
+        - Treat as empty predecessor sets; preimages can go to empty quickly.
+      - End nodes:
+        - Never remove them.
+        - Tentative propagation must treat “frontier reaching an end node” as immediate failure.
+      - Roots (roots_map):
+        - Either forbid removal/rewiring of root nodes, or update roots_map carefully (only safe if all composed pops are zero for all tokens and the target is unique and unconditional).
+      - Multi-pop to same dest under same token:
+        - If you keep the simplified NodeOpt children[token][dest] = (pop, Edge), you risk silently dropping edges with conflicting pops. Prefer the per-pop nesting to avoid this.
+      - Dedup during composition:
+        - For identical (token, pop, dest), merge edges:
+          - If either edge is unconditional => keep UnconditionalEdge.
+          - If both are state-filtered => union their state sets.
+
+      12) Optional modes
+      - Node-minimizing mode (default):
+        - Focus on removing as many passthrough nodes as possible.
+      - Edge-minimizing mode:
+        - Add shortcuts even if you keep intermediate nodes. Use with caution; only add when the added edges will compress significantly after grouping (e.g., identical signatures for large token sets), otherwise get_mask can slow down.
+
+      13) Quick checklist for the implementation
+      - Convert arena -> NodeOpt (losslessly, per-pop nested map).
+      - Compute Alive fixpoint once.
+      - Build candidate list of StateEdge edges.
+      - Main loop for up to T seconds:
+        - Pick candidate edge.
+        - If S_src ⊆ S_edge: unconditionalize and update Alive (no Delta; trivial).
+        - Else run tentative propagation:
+          - If hits an end node: reject.
+          - Else accept: turn to UnconditionalEdge and apply Delta to Alive.
+      - Build parent map; remove passthrough nodes:
+        - For each passthrough node (non-end, all unconditional outs):
+          - Compose parents with children; insert composed edges with merged pops and appropriate Edge kind.
+          - Remove old edges; drop the node if no incoming edges remain.
+        - Avoid touching roots (or rewrite roots_map carefully).
+      - Repack NodeOpt -> arena:
+        - Group by (pop, dest-signature), coalesce tokens into RangeSets.
+        - Cache state RangeSets.
+        - Sort deterministically.
+      - Recompute max_depth (at least for changed areas).
+      - Validate:
+        - Sanity checks: no dangling nodes; roots_map points to existing nodes; no end nodes lost.
+        - Optional: Compare get_mask results on random prefixes before/after optimization for small samples.
+
+      These notes capture the algorithm, the safety conditions, and the practical steps to keep the final graph compact and fast in get_mask. The two key ideas are (1) safe unconditionalization via state-level tentative propagation, and (2) structural compaction that only removes nodes when all their outs are unconditional, composing pops to keep traversal shallow without introducing edge blow-ups.
+    metadata:
+  - user: Implement _unconditionalize_guaranteed_transitions
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -2705,61 +3084,163 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As an AI assistant, I'm here to help you with your coding questions. Based on the traceback you provided, I've identified a bug in the `BitsetRangeSet` implementation and will provide a fix.
+      Step-by-step instructions
 
-      The `ValueError` occurs because the expression `(0xff << start_bit)` can result in an integer larger than 255, which is not a valid value for an element in a `bytearray`. The fix is to apply a bitmask to ensure the value stays within the byte range.
+      1) Add a new optimizer module containing NodeOpt types and the implementation of _unconditionalize_guaranteed_transitions
+      - Create a new file at python/aug25/range_set/nodeopt_optimizer.py.
+      - This module defines:
+        - UnconditionalEdge and StateEdge classes to represent edge kinds in the NodeOpt graph.
+        - NodeOpt dataclass with the recommended children layout: children[token][pop][dest] = Edge.
+        - The function _unconditionalize_guaranteed_transitions(nodes, alive) that performs the “fast path” unconditionalization:
+          - For each StateEdge from source node src, if Alive[src] ⊆ edge.states, convert it to UnconditionalEdge.
+          - Returns the number of edges converted.
+      - Notes:
+        - This function uses only the local safety check S_src ⊆ S_edge from your spec and does not require reverse_state_map.
+        - It is intentionally minimal and safe; it doesn’t change Alive since trivial unconditionalizations do not introduce new states under current Alive.
 
-      Here are the step-by-step instructions to fix the issue:
+      2) (Optional but convenient) Re-export the optimizer API from the package init for easier importing
+      - Update python/aug25/range_set/__init__.py to export NodeOpt, UnconditionalEdge, StateEdge, and _unconditionalize_guaranteed_transitions so you can import them directly from aug25.range_set.
+      - If you prefer to keep optimizer internals private, you can skip this step and import from aug25.range_set.nodeopt_optimizer instead.
 
-      ### Step-by-step Instructions
-
-      1.  **Open the file `python/aug25/range_set/bitset_range_set.py`**.
-
-      2.  **Locate line 52** within the `__init__` method. It currently reads:
-          ```python
-                      self._bitset[start_byte] |= (0xff << start_bit)
-          ```
-
-      3.  **Modify the line** to ensure the value is masked to a single byte before the bitwise OR operation. Change it to:
-          ```python
-                      self._bitset[start_byte] |= (0xff << start_bit) & 0xff
-          ```
-
-      This change will resolve the `ValueError` by keeping the value within the valid 0-255 range for a byte.
-
-      ### Git Diff
-
-      Here is the corresponding git diff for the change:
+      Git diff patches
 
       ```diff
-      diff --git a/python/aug25/range_set/bitset_range_set.py b/python/aug25/range_set/bitset_range_set.py
-      index 2894326..708a2a9 100644
-      --- a/python/aug25/range_set/bitset_range_set.py
-      +++ b/python/aug25/range_set/bitset_range_set.py
-      @@ -49,7 +49,7 @@
-                       self._bitset[start_byte] |= mask
-                   else:
-                       # First byte
-      -                self._bitset[start_byte] |= (0xff << start_bit)
-      +                self._bitset[start_byte] |= (0xff << start_bit) & 0xff
-                       # Middle bytes
-                       for i in range(start_byte + 1, end_byte):
-                           self._bitset[i] = 0xff
-
+      diff --git a/python/aug25/range_set/nodeopt_optimizer.py b/python/aug25/range_set/nodeopt_optimizer.py
+      new file mode 100644
+      index 0000000..0000000
+      --- /dev/null
+      +++ b/python/aug25/range_set/nodeopt_optimizer.py
+      @@ -0,0 +1,86 @@
+      +from __future__ import annotations
+      +
+      +from dataclasses import dataclass, field
+      +from typing import Dict, Set, MutableMapping, Mapping, Union
+      +
+      +
+      +@dataclass(frozen=True)
+      +class UnconditionalEdge:
+      +    """
+      +    Edge that does not filter by parser state.
+      +    """
+      +    __slots__ = ()
+      +
+      +
+      +@dataclass
+      +class StateEdge:
+      +    """
+      +    Edge that filters by a set of parser states.
+      +    """
+      +    states: Set[int]
+      +
+      +
+      +EdgeLike = Union[UnconditionalEdge, StateEdge]
+      +
+      +
+      +@dataclass
+      +class NodeOpt:
+      +    """
+      +    Optimizer-friendly node representation.
+      +    children[token][pop][dest] = Edge
+      +      - token: int (LLM token id)
+      +      - pop: int
+      +      - dest: int (node id)
+      +      - Edge: UnconditionalEdge or StateEdge(states: Set[int])
+      +    """
+      +    children: Dict[int, Dict[int, Dict[int, EdgeLike]]] = field(default_factory=dict)
+      +    is_end: bool = False
+      +
+      +
+      +def _unconditionalize_guaranteed_transitions(
+      +    nodes: MutableMapping[int, NodeOpt],
+      +    alive: Mapping[int, Set[int]],
+      +) -> int:
+      +    """
+      +    Fast unconditionalization pass: turn StateEdge into UnconditionalEdge
+      +    when it's provably redundant given the current Alive set.
+      +
+      +    Safety criterion (local fast path from the spec):
+      +      Let S_src = Alive[src], S_edge = edge.states. If S_src ⊆ S_edge,
+      +      then making this edge unconditional cannot introduce any new
+      +      parser state on its first hop, so it’s safe immediately.
+      +
+      +    Parameters:
+      +      nodes: NodeOpt graph as a mapping of node_id -> NodeOpt
+      +      alive: mapping node_id -> set of parser states Alive at that node
+      +
+      +    Returns:
+      +      The number of edges converted from StateEdge to UnconditionalEdge.
+      +
+      +    Notes:
+      +      - This pass does not modify the Alive map because the accepted
+      +        transformations do not add newly reachable states at this stage.
+      +      - This only handles the guaranteed (trivial) unconditionalizations.
+      +        Non-trivial candidates (S_src \\ S_edge != ∅) require the tentative
+      +        propagation check described in the main algorithm.
+      +    """
+      +    changed = 0
+      +    # Reuse a single instance; it's immutable and fine to share.
+      +    UNCOND = UnconditionalEdge()
+      +
+      +    for src_id, node in nodes.items():
+      +        s_src = alive.get(src_id, set())
+      +        # If s_src is empty, upgrading is still safe under the current Alive.
+      +        # It can also help expose passthrough nodes for removal.
+      +        for token, pop_map in node.children.items():
+      +            for pop, dest_map in pop_map.items():
+      +                # We overwrite edge values without changing keys, so it's safe
+      +                # to iterate items directly.
+      +                for dest, edge in list(dest_map.items()):
+      +                    if isinstance(edge, StateEdge):
+      +                        if s_src.issubset(edge.states):
+      +                            dest_map[dest] = UNCOND
+      +                            changed += 1
+      +
+      +    return changed
       ```
 
-      Applying this patch will fix the bug. Let me know if you have any other questions
+      ```diff
+      diff --git a/python/aug25/range_set/__init__.py b/python/aug25/range_set/__init__.py
+      index 4df05e1..33d1e2d 100644
+      --- a/python/aug25/range_set/__init__.py
+      +++ b/python/aug25/range_set/__init__.py
+      @@ -1,11 +1,16 @@
+       from .py_range_set import PyRangeSet
+       from .ffi_range_set import FFIRangeSet
+       from .bitset_range_set import BitsetRangeSet
+      +from .nodeopt_optimizer import (
+      +    NodeOpt,
+      +    UnconditionalEdge,
+      +    StateEdge,
+      +    _unconditionalize_guaranteed_transitions,
+      +)
+       
+       # RangeSet = PyRangeSet
+       RangeSet = FFIRangeSet
+       
+      -__all__ = ["RangeSet", "PyRangeSet", "FFIRangeSet", "BitsetRangeSet"]
+      +__all__ = ["RangeSet", "PyRangeSet", "FFIRangeSet", "BitsetRangeSet", "NodeOpt", "UnconditionalEdge", "StateEdge", "_unconditionalize_guaranteed_transitions"]
+       
+      ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/range_set/bitset_range_set.py
-      Applying patch to 'python/aug25/range_set/bitset_range_set.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/range_set/bitset_range_set.py.
+      Identified target file: python/aug25/range_set/nodeopt_optimizer.py
+      Detected new file (--- /dev/null or missing --- line).
+      Detected 'new file mode'.
+      Applying patch to 'python/aug25/range_set/nodeopt_optimizer.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/range_set/nodeopt_optimizer.py.
+      Confirmed creation of python/aug25/range_set/nodeopt_optimizer.py.
+      Added newly created file python/aug25/range_set/nodeopt_optimizer.py to attached files state.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/aug25/range_set/__init__.py
+      Applying patch to 'python/aug25/range_set/__init__.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/range_set/__init__.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Mask bit shift result to byte in
-      BitsetRangeSet"'
+  - user: 'Changes committed with message: "feat: Add nodeopt_optimizer module for
+      graph optimization"'
     metadata:
 ...
