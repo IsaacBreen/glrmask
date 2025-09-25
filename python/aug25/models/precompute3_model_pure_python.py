@@ -47,7 +47,14 @@ class PopEdge:
 @dataclass(frozen=True)
 class StateEdge:
     states: Set[State]
-Edge = Union[PopEdge, StateEdge]
+
+@dataclass(frozen=True)
+class UnconditionalEdge:
+    pass
+
+# One of pop-only, state-masked, or unconditional. For storage we keep pop
+# alongside Edge (i.e., children[token][dest] -> (pop, Edge)).
+Edge = Union[PopEdge, StateEdge, UnconditionalEdge]
 
 @dataclass
 class NodeOpt:
@@ -1101,7 +1108,7 @@ class Model(GraphProvider):
                     dest_id = int(dest_id)
                     if state_bv.is_empty():
                         # Unconditional with respect to parser state
-                        edge_obj: Edge = PopEdge(pop)
+                        edge_obj: Edge = PopEdge(pop) if pop > 0 else UnconditionalEdge()
                     else:
                         # State-masked; encode pop via negative sentinel
                         states_set: Set[int] = set(int(s) for s in state_bv.to_indices())
@@ -1143,6 +1150,8 @@ class Model(GraphProvider):
         def decode_edge(e: Edge) -> Tuple[int, Optional[Set[int]]]:
             if isinstance(e, PopEdge):
                 return int(e.n), None
+            if isinstance(e, UnconditionalEdge):
+                return 0, None
             if isinstance(e, StateEdge):
                 neg_sentinels = [x for x in e.states if x < 0]
                 pop = (-(neg_sentinels[0]) - 1) if neg_sentinels else 0
