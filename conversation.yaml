@@ -342,8 +342,8 @@ local_system:
               model._reorder_llm_tokens_for_range_minimization()
 
               # model._unconditionalize_guaranteed_transitions()
-              # graph = model._to_nodeopt()
-              # model._from_nodeopt(graph)
+              graph = model._to_nodeopt()
+              model._from_nodeopt(graph)
 
               # model._convert_to_bitset_range_set()
 
@@ -1114,8 +1114,7 @@ local_system:
 
                           edge_list: List[Edge] = []
 
-                          all_states_bv = PyRangeSet.from_indices(self.parser_table.table.keys())
-                          is_unconditional = all_states_bv.is_subset(state_bv)
+                          is_unconditional = self.all_internal_llm_tokens_bitset.is_subset(state_bv)
 
                           if is_unconditional:
                               edge_list.append(PopEdge(pop) if pop > 0 else UnconditionalEdge())
@@ -1128,51 +1127,15 @@ local_system:
 
                           # Explode the llm_bv and add the corresponding edges to the NodeOpt graph.
                           for token in llm_bv.to_indices():
-                              node_opt.children.setdefault(token, {}).setdefault(dest_id, []).extend(edge_list)
+                              token_children = node_opt.children.setdefault(token, {})
+                              dest_edges = token_children.setdefault(dest_id, [])
+                              dest_edges.extend(edge_list)
 
               return NodeOptGraph(nodes=nodes, roots_map=self.roots_map.copy())
 
 
           def _from_nodeopt(self, graph: NodeOptGraph) -> None:
-              """
-              Rebuild a straightforward Arena from a NodeOptGraph.
-              For each (node, token, dest), emit a separate child entry:
-                ((pop, {token}), [(dest, state_bv)])
-              where:
-                - pop comes from PopEdge if present, else 0.
-                - state_bv is the union of all StateEdge states.
-                - if UnconditionalEdge is present OR no StateEdge is present,
-                  state_bv is set to "all parser states".
-              """
-              nodes = graph.nodes
-
-              # Build a "universal" parser state set for unconditional edges.
-              all_states_bv = PyRangeSet.from_indices(self.parser_table.table.keys())
-
-              new_arena: Dict[NodeID, ArenaNode] = {}
-
-              for node_id, nopt in nodes.items():
-                  children_list: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = []
-
-                  for token, dest_map in nopt.children.items():
-                      token_rs = PyRangeSet.from_indices([int(token)])
-                      for dest_id in sorted(dest_map.keys()):
-                          edges = dest_map[dest_id]
-
-                          for e in edges:
-                              if isinstance(e, UnconditionalEdge):
-                                  children_list.append(((0, token_rs), [(dest_id, all_states_bv)]))
-                              elif isinstance(e, PopEdge):
-                                  children_list.append(((e.n, token_rs), [(dest_id, all_states_bv)]))
-                              elif isinstance(e, StateEdge):
-                                  children_list.append(((0, token_rs), [(dest_id, PyRangeSet.from_indices(e.states))]))
-
-                  # TODO: compute precise llm_bv_union afterwards in one sweep of graph.
-                  new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=self.all_internal_llm_tokens_bitset, clean_end=nopt.is_end)
-
-              self.arena = new_arena
-              self.roots_map = graph.roots_map.copy()
-              self.max_depth = self._recompute_max_depth_from_arena()
+              ...
 
           def _recompute_max_depth_from_arena(self) -> Dict[NodeID, int]:
               """
@@ -2150,6 +2113,13 @@ local_system:
               """
               print("Merging equivalent internal LLM tokens...", end='', flush=True)
 
+              # Universe of current internal tokens
+              universe_list = list(self.all_internal_llm_tokens_bitset.to_indices())
+              universe: Set[int] = set(int(t) for t in universe_list)
+              if len(universe) <= 1:
+                  print(" done (not enough tokens to merge).")
+                  return
+
               # 1) Collect the family of RangeSets that define token co-occurrence
               family: List[LLMTokenSet] = []
               # Arena children sets and node unions
@@ -2176,21 +2146,13 @@ local_system:
                   print(" done (no RangeSets to analyze).")
                   return
 
-              # Universe of current internal tokens is the union of all tokens in the family.
-              universe: Set[int] = set()
-              for rs in family:
-                  universe.update(rs.to_indices())
-
-              if len(universe) <= 1:
-                  print(" done (not enough tokens to merge).")
-                  return
-
               # 2) Build per-token signatures: which sets (by index) contain the token
               token_to_sets: Dict[int, List[int]] = {t: [] for t in universe}
               for si, rs in enumerate(family):
                   for tok in rs.to_indices():
                       t = int(tok)
-                      token_to_sets[t].append(si)
+                      if t in token_to_sets:
+                          token_to_sets[t].append(si)
 
               # 3) Group by signature
               signature_groups: Dict[Tuple[int, ...], List[int]] = collections.defaultdict(list)
@@ -2534,8 +2496,7 @@ local_system:
 
                           edge_list: List[Edge] = []
 
-                          all_states_bv = PyRangeSet.from_indices(self.parser_table.table.keys())
-                          is_unconditional = all_states_bv.is_subset(state_bv)
+                          is_unconditional = self.all_internal_llm_tokens_bitset.is_subset(state_bv)
 
                           if is_unconditional:
                               edge_list.append(PopEdge(pop) if pop > 0 else UnconditionalEdge())
@@ -2548,7 +2509,9 @@ local_system:
 
                           # Explode the llm_bv and add the corresponding edges to the NodeOpt graph.
                           for token in llm_bv.to_indices():
-                              node_opt.children.setdefault(token, {}).setdefault(dest_id, []).extend(edge_list)
+                              token_children = node_opt.children.setdefault(token, {})
+                              dest_edges = token_children.setdefault(dest_id, [])
+                              dest_edges.extend(edge_list)
 
               return NodeOptGraph(nodes=nodes, roots_map=self.roots_map.copy())
 
@@ -2567,28 +2530,51 @@ local_system:
               nodes = graph.nodes
 
               # Build a "universal" parser state set for unconditional edges.
-              all_states_bv = PyRangeSet.from_indices(self.parser_table.table.keys())
+              all_parser_states = list(self.parser_table.table.keys())
+              all_states_bv: StateIDSet = (
+                  PyRangeSet.from_indices(all_parser_states) if all_parser_states else PyRangeSet.empty()
+              )
 
               new_arena: Dict[NodeID, ArenaNode] = {}
 
               for node_id, nopt in nodes.items():
                   children_list: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = []
+                  llm_union: LLMTokenSet = PyRangeSet.empty()
 
-                  for token, dest_map in nopt.children.items():
+                  # Deterministic ordering: sort tokens and dests
+                  for token in sorted(nopt.children.keys()):
+                      dest_map = nopt.children[token]
                       token_rs = PyRangeSet.from_indices([int(token)])
                       for dest_id in sorted(dest_map.keys()):
                           edges = dest_map[dest_id]
 
-                          for e in edges:
-                              if isinstance(e, UnconditionalEdge):
-                                  children_list.append(((0, token_rs), [(dest_id, all_states_bv)]))
-                              elif isinstance(e, PopEdge):
-                                  children_list.append(((e.n, token_rs), [(dest_id, all_states_bv)]))
-                              elif isinstance(e, StateEdge):
-                                  children_list.append(((0, token_rs), [(dest_id, PyRangeSet.from_indices(e.states))]))
+                          pop_val = 0
+                          pop_seen = False
+                          states_union: Set[int] = set()
+                          has_state = False
+                          unconditional = False
 
-                  # TODO: compute precise llm_bv_union afterwards in one sweep of graph.
-                  new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=self.all_internal_llm_tokens_bitset, clean_end=nopt.is_end)
+                          for e in edges:
+                              if isinstance(e, PopEdge):
+                                  if not pop_seen:
+                                      pop_val = int(e.n)
+                                      pop_seen = True
+                              elif isinstance(e, StateEdge):
+                                  has_state = True
+                                  for s in e.states:
+                                      states_union.add(int(s))
+                              elif isinstance(e, UnconditionalEdge):
+                                  unconditional = True
+
+                          if unconditional or not has_state:
+                              state_bv: StateIDSet = all_states_bv
+                          else:
+                              state_bv = PyRangeSet.from_indices(sorted(states_union)) if states_union else PyRangeSet.empty()
+
+                          children_list.append(((int(pop_val), token_rs), [(int(dest_id), state_bv)]))
+                          llm_union = llm_union.union(token_rs)
+
+                  new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=llm_union, clean_end=bool(nopt.is_end))
 
               self.arena = new_arena
               self.roots_map = graph.roots_map.copy()
@@ -2852,7 +2838,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -3224,8 +3210,8 @@ messages:
               model._reorder_llm_tokens_for_range_minimization()
 
               # model._unconditionalize_guaranteed_transitions()
-              # graph = model._to_nodeopt()
-              # model._from_nodeopt(graph)
+              graph = model._to_nodeopt()
+              model._from_nodeopt(graph)
 
               # model._convert_to_bitset_range_set()
 
@@ -3996,8 +3982,7 @@ messages:
 
                           edge_list: List[Edge] = []
 
-                          all_states_bv = PyRangeSet.from_indices(self.parser_table.table.keys())
-                          is_unconditional = all_states_bv.is_subset(state_bv)
+                          is_unconditional = self.all_internal_llm_tokens_bitset.is_subset(state_bv)
 
                           if is_unconditional:
                               edge_list.append(PopEdge(pop) if pop > 0 else UnconditionalEdge())
@@ -4010,51 +3995,15 @@ messages:
 
                           # Explode the llm_bv and add the corresponding edges to the NodeOpt graph.
                           for token in llm_bv.to_indices():
-                              node_opt.children.setdefault(token, {}).setdefault(dest_id, []).extend(edge_list)
+                              token_children = node_opt.children.setdefault(token, {})
+                              dest_edges = token_children.setdefault(dest_id, [])
+                              dest_edges.extend(edge_list)
 
               return NodeOptGraph(nodes=nodes, roots_map=self.roots_map.copy())
 
 
           def _from_nodeopt(self, graph: NodeOptGraph) -> None:
-              """
-              Rebuild a straightforward Arena from a NodeOptGraph.
-              For each (node, token, dest), emit a separate child entry:
-                ((pop, {token}), [(dest, state_bv)])
-              where:
-                - pop comes from PopEdge if present, else 0.
-                - state_bv is the union of all StateEdge states.
-                - if UnconditionalEdge is present OR no StateEdge is present,
-                  state_bv is set to "all parser states".
-              """
-              nodes = graph.nodes
-
-              # Build a "universal" parser state set for unconditional edges.
-              all_states_bv = PyRangeSet.from_indices(self.parser_table.table.keys())
-
-              new_arena: Dict[NodeID, ArenaNode] = {}
-
-              for node_id, nopt in nodes.items():
-                  children_list: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = []
-
-                  for token, dest_map in nopt.children.items():
-                      token_rs = PyRangeSet.from_indices([int(token)])
-                      for dest_id in sorted(dest_map.keys()):
-                          edges = dest_map[dest_id]
-
-                          for e in edges:
-                              if isinstance(e, UnconditionalEdge):
-                                  children_list.append(((0, token_rs), [(dest_id, all_states_bv)]))
-                              elif isinstance(e, PopEdge):
-                                  children_list.append(((e.n, token_rs), [(dest_id, all_states_bv)]))
-                              elif isinstance(e, StateEdge):
-                                  children_list.append(((0, token_rs), [(dest_id, PyRangeSet.from_indices(e.states))]))
-
-                  # TODO: compute precise llm_bv_union afterwards in one sweep of graph.
-                  new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=self.all_internal_llm_tokens_bitset, clean_end=nopt.is_end)
-
-              self.arena = new_arena
-              self.roots_map = graph.roots_map.copy()
-              self.max_depth = self._recompute_max_depth_from_arena()
+              ...
 
           def _recompute_max_depth_from_arena(self) -> Dict[NodeID, int]:
               """
@@ -4308,8 +4257,10 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: '`_merge_equivalent_llm_tokens` needs to update `all_internal_llm_tokens_bitset`.
-      Does it?'
+  - user: Implement `_from_nodeopt`. Keep it very simple and very concise. Not particularly
+      concerned with how compact the resulting graph is, or if it's as compact as
+      the original graph. Just want to get something that I absoultely know is correct
+      down and then I can fix it later.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4328,71 +4279,110 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. You've pointed out a very subtle but important detail.
+      Step-by-step instructions
 
-      The method `_merge_equivalent_llm_tokens` does indeed call `_remap_llm_tokens_many_to_one`, which in turn updates `self.all_internal_llm_tokens_bitset`. However, the original logic for determining which tokens to merge was flawed. It only considered tokens that were initially present in `all_internal_llm_tokens_bitset`, potentially ignoring other internal tokens that might exist in arena edges or the `possible_matches_cache`. This could lead to an incomplete merge, and therefore an incorrect final state for `all_internal_llm_tokens_bitset`.
+      1) Open the file:
+      - python/aug25/models/precompute3_model_pure_python.py
 
-      Here are the steps to fix this by ensuring all internal tokens from across the entire model are considered for merging.
+      2) Implement Model._from_nodeopt:
+      - Search for the method definition:
+        def _from_nodeopt(self, graph: NodeOptGraph) -> None:
+            ...
+      - Replace the body ("...") with a simple, correct reconstruction:
 
-      ### Step-by-step Instructions
+      What the new implementation does:
+      - For each node in the NodeOptGraph, it rebuilds an ArenaNode.
+      - For each (token, dest) pair, it creates a separate child entry:
+        - llm_bv = a set with just that token.
+        - pop = taken from the first PopEdge present (default 0).
+        - state_bv = union of all StateEdge states; if UnconditionalEdge is present or no StateEdge exists, use “all parser states” (constructed from parser_table.table keys).
+      - llm_bv_union is built as the union of all tokens present in that node.
+      - Roots map is copied from the NodeOptGraph.
+      - max_depth is recomputed with _recompute_max_depth_from_arena for correctness.
 
-      In the file `python/aug25/models/precompute3_model_pure_python.py`, you will modify the `_merge_equivalent_llm_tokens` method.
+      3) Save the file.
 
-      1.  **Locate the method**: Find the `_merge_equivalent_llm_tokens` method within the `Model` class.
+      4) No other files need changes.
 
-      2.  **Change Universe Calculation**: The "universe" of tokens to be considered for merging should be built from *all* `LLMTokenSet` instances in the model, not just from the initial `all_internal_llm_tokens_bitset`.
-          -   Delete the initial block of code that defines `universe_list` and `universe`.
-          -   After the `family` list has been populated with all relevant `LLMTokenSet`s, insert new code to build the `universe` set by iterating through every set in the `family`.
-
-      3.  **Simplify Signature Building**: Since the `universe` will now correctly contain every token, the check `if t in token_to_sets:` inside the signature-building loop is redundant and can be removed.
-
-      Here is the git diff reflecting these changes.
-
-      ### Git Diff
+      Diff patch
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      index 9d2c2af..0000000 100644
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -1016,17 +1016,6 @@
+      @@ -679,7 +679,62 @@ class Model(GraphProvider):
+               return NodeOptGraph(nodes=nodes, roots_map=self.roots_map.copy())
+       
+       
+           def _from_nodeopt(self, graph: NodeOptGraph) -> None:
+      -        ...
+      +        """
+      +        Rebuild a straightforward Arena from a NodeOptGraph.
+      +        For each (node, token, dest), emit a separate child entry:
+      +          ((pop, {token}), [(dest, state_bv)])
+      +        where:
+      +          - pop comes from PopEdge if present, else 0.
+      +          - state_bv is the union of all StateEdge states.
+      +          - if UnconditionalEdge is present OR no StateEdge is present,
+      +            state_bv is set to "all parser states".
+      +        """
+      +        nodes = graph.nodes
+      +
+      +        # Build a "universal" parser state set for unconditional edges.
+      +        all_parser_states = list(self.parser_table.table.keys())
+      +        all_states_bv: StateIDSet = (
+      +            PyRangeSet.from_indices(all_parser_states) if all_parser_states else PyRangeSet.empty()
+      +        )
+      +
+      +        new_arena: Dict[NodeID, ArenaNode] = {}
+      +
+      +        for node_id, nopt in nodes.items():
+      +            children_list: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = []
+      +            llm_union: LLMTokenSet = PyRangeSet.empty()
+      +
+      +            # Deterministic ordering: sort tokens and dests
+      +            for token in sorted(nopt.children.keys()):
+      +                dest_map = nopt.children[token]
+      +                token_rs = PyRangeSet.from_indices([int(token)])
+      +                for dest_id in sorted(dest_map.keys()):
+      +                    edges = dest_map[dest_id]
+      +
+      +                    pop_val = 0
+      +                    pop_seen = False
+      +                    states_union: Set[int] = set()
+      +                    has_state = False
+      +                    unconditional = False
+      +
+      +                    for e in edges:
+      +                        if isinstance(e, PopEdge):
+      +                            if not pop_seen:
+      +                                pop_val = int(e.n)
+      +                                pop_seen = True
+      +                        elif isinstance(e, StateEdge):
+      +                            has_state = True
+      +                            for s in e.states:
+      +                                states_union.add(int(s))
+      +                        elif isinstance(e, UnconditionalEdge):
+      +                            unconditional = True
+      +
+      +                    if unconditional or not has_state:
+      +                        state_bv: StateIDSet = all_states_bv
+      +                    else:
+      +                        state_bv = PyRangeSet.from_indices(sorted(states_union)) if states_union else PyRangeSet.empty()
+      +
+      +                    children_list.append(((int(pop_val), token_rs), [(int(dest_id), state_bv)]))
+      +                    llm_union = llm_union.union(token_rs)
+      +
+      +            new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=llm_union, clean_end=bool(nopt.is_end))
+      +
+      +        self.arena = new_arena
+      +        self.roots_map = graph.roots_map.copy()
+      +        self.max_depth = self._recompute_max_depth_from_arena()
+       
+           def _recompute_max_depth_from_arena(self) -> Dict[NodeID, int]:
                """
-               print("Merging equivalent internal LLM tokens...", end='', flush=True)
-       
-      -        # Universe of current internal tokens
-      -        universe_list = list(self.all_internal_llm_tokens_bitset.to_indices())
-      -        universe: Set[int] = set(int(t) for t in universe_list)
-      -        if len(universe) <= 1:
-      -            print(" done (not enough tokens to merge).")
-      -            return
-      -
-               # 1) Collect the family of RangeSets that define token co-occurrence
-               family: List[LLMTokenSet] = []
-               # Arena children sets and node unions
-      @@ -1053,15 +1042,21 @@
-                   print(" done (no RangeSets to analyze).")
-                   return
-       
-      +        # Universe of current internal tokens is the union of all tokens in the family.
-      +        universe: Set[int] = set()
-      +        for rs in family:
-      +            universe.update(rs.to_indices())
-      +
-      +        if len(universe) <= 1:
-      +            print(" done (not enough tokens to merge).")
-      +            return
-      +
-               # 2) Build per-token signatures: which sets (by index) contain the token
-               token_to_sets: Dict[int, List[int]] = {t: [] for t in universe}
-               for si, rs in enumerate(family):
-                   for tok in rs.to_indices():
-                       t = int(tok)
-      -                if t in token_to_sets:
-      -                    token_to_sets[t].append(si)
-      +                token_to_sets[t].append(si)
-       
-               # 3) Group by signature
-               signature_groups: Dict[Tuple[int, ...], List[int]] = collections.defaultdict(list)
-
+               Compute a simple upper bound on max depth (longest distance to sink/end),
       ```
     metadata:
   - user: |
@@ -4404,7 +4394,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Improve LLM token merging logic
-      and enable nodeopt graph conversion."'
+  - user: 'Changes committed with message: "feat: Implement _from_nodeopt to reconstruct
+      Arena from NodeOptGraph"'
     metadata:
 ...

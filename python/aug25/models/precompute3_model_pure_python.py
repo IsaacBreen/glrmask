@@ -724,6 +724,13 @@ class Model(GraphProvider):
         """
         print("Merging equivalent internal LLM tokens...", end='', flush=True)
 
+        # Universe of current internal tokens
+        universe_list = list(self.all_internal_llm_tokens_bitset.to_indices())
+        universe: Set[int] = set(int(t) for t in universe_list)
+        if len(universe) <= 1:
+            print(" done (not enough tokens to merge).")
+            return
+
         # 1) Collect the family of RangeSets that define token co-occurrence
         family: List[LLMTokenSet] = []
         # Arena children sets and node unions
@@ -750,21 +757,13 @@ class Model(GraphProvider):
             print(" done (no RangeSets to analyze).")
             return
 
-        # Universe of current internal tokens is the union of all tokens in the family.
-        universe: Set[int] = set()
-        for rs in family:
-            universe.update(rs.to_indices())
-
-        if len(universe) <= 1:
-            print(" done (not enough tokens to merge).")
-            return
-
         # 2) Build per-token signatures: which sets (by index) contain the token
         token_to_sets: Dict[int, List[int]] = {t: [] for t in universe}
         for si, rs in enumerate(family):
             for tok in rs.to_indices():
                 t = int(tok)
-                token_to_sets[t].append(si)
+                if t in token_to_sets:
+                    token_to_sets[t].append(si)
 
         # 3) Group by signature
         signature_groups: Dict[Tuple[int, ...], List[int]] = collections.defaultdict(list)
