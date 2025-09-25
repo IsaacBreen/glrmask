@@ -1123,7 +1123,6 @@ class Model(GraphProvider):
                         # If the state set resolves to empty, this transition is impossible.
                         if not states:
                             continue
-
                         if pop > 0:
                             edge_list.append(PopEdge(pop))
                         edge_list.append(StateEdge(states))
