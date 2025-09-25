@@ -310,9 +310,9 @@ class Model(GraphProvider):
             state=state,
         )
 
-        model._unconditionalize_guaranteed_transitions()
         model._merge_equivalent_llm_tokens()
         model._reorder_llm_tokens_for_range_minimization()
+        model._unconditionalize_guaranteed_transitions()
 
         return model
 
@@ -680,7 +680,7 @@ class Model(GraphProvider):
         nodeopts: Dict[int, NodeOpt] = {}
         arena = self.arena
 
-        for uid, node in arena.items():
+        for uid, node in tqdm(arena.items(), desc="Converting to NodeOpt"):
             uid_int = int(uid)
             children_by_token: Dict[int, Dict[int, Tuple[int, Edge]]] = {}
 
