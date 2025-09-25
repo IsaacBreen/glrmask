@@ -792,7 +792,7 @@ impl GrammarConstraint {
     }
 
     pub fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
-        HybridBitset::max_ones()
+        HybridBitset::ones(self.llm_vocab.internal_max_llm_token + 1)
     }
 
     fn compute_possible_matches_for_vocab_node(
