@@ -1098,6 +1098,8 @@ class Model(GraphProvider):
         for node_id in self.arena.keys():
             nodes[node_id] = NodeOpt(is_end=self.is_end(node_id))
 
+        node_id_counter = max(nodes.keys(), default=0) + 1
+
         # Populate the children by iterating through the packed arena representation.
         for node_id, arena_node in self.arena.items():
             node_opt = nodes[node_id]
@@ -1119,9 +1121,21 @@ class Model(GraphProvider):
                                 edge_list.append(PopEdge(pop))
                             edge_list.append(StateEdge(states))
 
-                    # Explode the llm_bv and add the corresponding edges to the NodeOpt graph.
-                    for token in llm_bv.to_indices():
-                        node_opt.children.setdefault(token, {}).setdefault(dest_id, []).extend(edge_list)
+                    if len(edge_list) == 0:
+                        pass
+                    elif len(edge_list) == 1:
+                        for token in llm_bv.to_indices():
+                            node_opt.children.setdefault(token, {}).setdefault(dest_id, []).append(edge_list[0])
+                    elif len(edge_list) == 2:
+                        intermediate_node_id = node_id_counter
+                        nodes[intermediate_node_id] = NodeOpt(is_end=False)
+                        node_id_counter += 1
+                        for token in llm_bv.to_indices():
+                            node_opt.children.setdefault(token, {}).setdefault(intermediate_node_id, []).append(edge_list[0])
+                            nodes[intermediate_node_id].children.setdefault(token, {}).setdefault(dest_id, []).append(edge_list[1])
+                    else:
+                        raise Exception("Unreachable")
+
 
         return NodeOptGraph(nodes=nodes, roots_map=self.roots_map.copy())
 
