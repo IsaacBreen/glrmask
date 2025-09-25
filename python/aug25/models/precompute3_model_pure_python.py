@@ -1121,9 +1121,7 @@ class Model(GraphProvider):
 
                     # Explode the llm_bv and add the corresponding edges to the NodeOpt graph.
                     for token in llm_bv.to_indices():
-                        token_children = node_opt.children.setdefault(token, {})
-                        dest_edges = token_children.setdefault(dest_id, [])
-                        dest_edges.extend(edge_list)
+                        node_opt.children.setdefault(token, {}).setdefault(dest_id, []).extend(edge_list)
 
         return NodeOptGraph(nodes=nodes, roots_map=self.roots_map.copy())
 
