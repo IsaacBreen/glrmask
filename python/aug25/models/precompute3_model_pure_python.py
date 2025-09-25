@@ -56,13 +56,6 @@ class UnconditionalEdge:
 # alongside Edge (i.e., children[token][dest] -> (pop, Edge)).
 Edge = Union[PopEdge, StateEdge, UnconditionalEdge]
 
-@dataclass
-class NodeOpt:
-    # children[token][dest] = (pop, Edge)
-    children: Dict[LLMToken, Dict[int, Tuple[int, Edge]]]
-    is_end: bool
-
-
 @dataclass(frozen=True)
 class Reduce:
     nonterminal_id: int
@@ -848,7 +841,7 @@ class Model(GraphProvider):
           * Each node's llm_bv_union contributes a small-weight group.
           * Each possible_matches_cache entry contributes a medium-weight group.
         - Greedily construct an ordering that keeps overlapping groups contiguous.
-        - Apply a permutation remapping of internal tokens to this order, then repack arena via NodeOpt.
+        - Apply a permutation remapping of internal tokens to this order.
         """
         print("Reordering LLM tokens for range minimization...", end='', flush=True)
         ranges_before = self._count_total_ranges()
@@ -1067,7 +1060,7 @@ class Model(GraphProvider):
         - internal_to_original_map (permutation)
         - possible_matches_cache
         - all_internal_llm_tokens_bitset
-        - arena (via NodeOpt remap + repack)
+        - arena (by regrouping tokens)
         """
         # Ensure mapping is bijection over the current universe
         domain = set(old_to_new_map.keys())
