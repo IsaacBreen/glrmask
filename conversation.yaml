@@ -1834,17 +1834,8 @@ local_system:
     python/aug25/range_set/nodeopt_optimizer.py: |
       from __future__ import annotations
 
-      import time
       from dataclasses import dataclass, field
       from typing import Dict, Set, MutableMapping, Mapping, Union
-
-      # Optional profiling hook – harmless if profiling is disabled.
-      try:
-          from .rangeset_stats import record_metric
-      except Exception:  # pragma: no cover
-          # Fallback no‑op stub so the module can be imported without the profiling package.
-          def record_metric(name: str, value: float = 1.0) -> None:  # type: ignore
-              pass
 
 
       @dataclass(frozen=True)
@@ -1907,42 +1898,23 @@ local_system:
               Non-trivial candidates (S_src \\ S_edge != ∅) require the tentative
               propagation check described in the main algorithm.
           """
-          # Statistics
-          total_state_edges = 0   # how many StateEdge objects we inspected
-          changed = 0             # how many we turned into UnconditionalEdge
-
-          # Reuse a single immutable UnconditionalEdge instance.
+          changed = 0
+          # Reuse a single instance; it's immutable and fine to share.
           UNCOND = UnconditionalEdge()
-
-          start_time = time.time()
 
           for src_id, node in nodes.items():
               s_src = alive.get(src_id, set())
+              # If s_src is empty, upgrading is still safe under the current Alive.
+              # It can also help expose passthrough nodes for removal.
               for token, pop_map in node.children.items():
                   for pop, dest_map in pop_map.items():
-                      # Iterate over a static list to safely mutate the dict while looping.
+                      # We overwrite edge values without changing keys, so it's safe
+                      # to iterate items directly.
                       for dest, edge in list(dest_map.items()):
                           if isinstance(edge, StateEdge):
-                              total_state_edges += 1
                               if s_src.issubset(edge.states):
                                   dest_map[dest] = UNCOND
                                   changed += 1
-
-          elapsed = time.time() - start_time
-
-          # Human‑readable summary (always printed)
-          print(
-              f\"[NodeOpt] unconditionalize: {changed}/{total_state_edges} StateEdge(s) "
-              f\"converted in {elapsed:.4f}s\"
-          )
-
-          # Optional profiling record (no‑op if profiling disabled)
-          try:
-              record_metric('NodeOpt.unconditionalize.changed', changed)
-              record_metric('NodeOpt.unconditionalize.total_state_edges', total_state_edges)
-              record_metric('NodeOpt.unconditionalize.time_sec', elapsed)
-          except Exception:  # pragma: no cover
-              pass
 
           return changed
   diffs_applied_this_send: true
@@ -1955,7 +1927,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-oss-120b
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -3349,182 +3321,5 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Add nodeopt_optimizer module and
       export its components"'
-    metadata:
-  - user: |-
-      Diff of python/aug25/range_set/__init__.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/range_set/bitset_range_set.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/range_set/ffi_range_set.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/range_set/py_range_set.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/range_set/range_set_abc.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/range_set/rangeset_stats.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/range_set/nodeopt_optimizer.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: No, I mean print useful stats at the end of _unconditionalize_guaranteed_transitions
-    metadata:
-  - assistant: |-
-      **Step‑by‑step edits**
-
-      1. **Open the optimizer module**  
-         `python/aug25/range_set/nodeopt_optimizer.py`
-
-      2. **Add the needed imports** – bring in `time` (for duration) and `record_metric` (so the metric can be collected by the existing profiling infrastructure).
-
-      3. **Instrument the function `_unconditionalize_guaranteed_transitions`**  
-
-         * Initialise counters `total_state_edges` and `changed` (the number of edges actually converted).  
-         * Record the start time.  
-         * While iterating over the edges, increment `total_state_edges` for every `StateEdge` examined and increment `changed` when a conversion happens.  
-         * After the loop, compute the elapsed time.  
-         * Print a concise human‑readable summary line.  
-         * If profiling is enabled, also call `record_metric` so the data appears in `rangeset_stats.print_rangeset_stats()`.
-
-      4. **Save the file** – the diff below shows the exact changes.
-
-      ---
-
-      **Git diff**
-
-      ```diff
-      diff --git a/python/aug25/range_set/nodeopt_optimizer.py b/python/aug25/range_set/nodeopt_optimizer.py
-      index 0000000..0000000 100644
-      --- a/python/aug25/range_set/nodeopt_optimizer.py
-      +++ b/python/aug25/range_set/nodeopt_optimizer.py
-      @@
-      -from __future__ import annotations
-      -
-      -from dataclasses import dataclass, field
-      -from typing import Dict, Set, MutableMapping, Mapping, Union
-      +from __future__ import annotations
-      +
-      +import time
-      +from dataclasses import dataclass, field
-      +from typing import Dict, Set, MutableMapping, Mapping, Union
-      +
-      +# Optional profiling hook – harmless if profiling is disabled.
-      +try:
-      +    from .rangeset_stats import record_metric
-      +except Exception:  # pragma: no cover
-      +    # Fallback no‑op stub so the module can be imported without the profiling package.
-      +    def record_metric(name: str, value: float = 1.0) -> None:  # type: ignore
-      +        pass
-       
-       
-       @dataclass(frozen=True)
-       class UnconditionalEdge:
-      @@
-      -def _unconditionalize_guaranteed_transitions(
-      -    nodes: MutableMapping[int, NodeOpt],
-      -    alive: Mapping[int, Set[int]],
-      -) -> int:
-      +def _unconditionalize_guaranteed_transitions(
-      +    nodes: MutableMapping[int, NodeOpt],
-      +    alive: Mapping[int, Set[int]],
-      +) -> int:
-      @@
-      -    changed = 0
-      -    # Reuse a single instance; it's immutable and fine to share.
-      -    # It can also help expose passthrough nodes for removal.
-      -    # It can also help expose passthrough nodes for removal.
-      -    UNCOND = UnconditionalEdge()
-      -
-      -    for src_id, node in nodes.items():
-      -        s_src = alive.get(src_id, set())
-      -        # If s_src is empty, upgrading is still safe under the current Alive.
-      -        # It can also help expose passthrough nodes for removal.
-      -        # It can also help expose passthrough nodes for removal.
-      -        for token, pop_map in node.children.items():
-      -            for pop, dest_map in pop_map.items():
-      -                # We overwrite edge values without changing keys, so it's safe
-      -                # to iterate items directly.
-      -                for dest, edge in list(dest_map.items()):
-      -                    if isinstance(edge, StateEdge):
-      -                        if s_src.issubset(edge.states):
-      -                            dest_map[dest] = UNCOND
-      -                            changed += 1
-      -
-      -    return changed
-      +    # Statistics
-      +    total_state_edges = 0   # how many StateEdge objects we inspected
-      +    changed = 0             # how many we turned into UnconditionalEdge
-      +
-      +    # Reuse a single immutable UnconditionalEdge instance.
-      +    UNCOND = UnconditionalEdge()
-      +
-      +    start_time = time.time()
-      +
-      +    for src_id, node in nodes.items():
-      +        s_src = alive.get(src_id, set())
-      +        for token, pop_map in node.children.items():
-      +            for pop, dest_map in pop_map.items():
-      +                # Iterate over a static list to safely mutate the dict while looping.
-      +                for dest, edge in list(dest_map.items()):
-      +                    if isinstance(edge, StateEdge):
-      +                        total_state_edges += 1
-      +                        if s_src.issubset(edge.states):
-      +                            dest_map[dest] = UNCOND
-      +                            changed += 1
-      +
-      +    elapsed = time.time() - start_time
-      +
-      +    # Human‑readable summary (always printed)
-      +    print(
-      +        f\"[NodeOpt] unconditionalize: {changed}/{total_state_edges} StateEdge(s) "
-      +        f\"converted in {elapsed:.4f}s\"
-      +    )
-      +
-      +    # Optional profiling record (no‑op if profiling disabled)
-      +    try:
-      +        record_metric('NodeOpt.unconditionalize.changed', changed)
-      +        record_metric('NodeOpt.unconditionalize.total_state_edges', total_state_edges)
-      +        record_metric('NodeOpt.unconditionalize.time_sec', elapsed)
-      +    except Exception:  # pragma: no cover
-      +        pass
-      +
-      +    return changed
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/range_set/nodeopt_optimizer.py
-      Applying patch to 'python/aug25/range_set/nodeopt_optimizer.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/range_set/nodeopt_optimizer.py.
-    metadata:
-  - user: 'Changes committed with message: "feat: Add stats and reporting to _unconditionalize_guaranteed_transitions"'
     metadata:
 ...
