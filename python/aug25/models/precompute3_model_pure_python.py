@@ -1100,7 +1100,7 @@ class Model(GraphProvider):
                     mp = parents.setdefault(int(tok), {})
                     for d in dests.keys():
                         mp.setdefault(int(d), set()).add(int(p_id))
-            return parents+
+            return parents
 
         # Merge pop chains: src --Pop(a)--> v --Pop(b)--> w
         def merge_pop_chains_once() -> bool:
