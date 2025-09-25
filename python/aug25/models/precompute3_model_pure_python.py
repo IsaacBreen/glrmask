@@ -1023,10 +1023,10 @@ class Model(GraphProvider):
     ) -> None:
         print("Unconditionalizing guaranteed transitions...", end='', flush=True)
         t_start = time.perf_counter()
-        # Time budget in seconds (best‑effort). Keep modest to avoid long init times.
+        # Time budget in seconds (best-effort). Keep modest to avoid long init times.
         time_budget_sec = 2.0
 
-        # 1) Convert arena → NodeOpt and compute Alive fixpoint (baseline semantics).
+        # 1) Convert arena -> NodeOpt and compute Alive fixpoint (baseline semantics).
         nodeopts: Dict[int, NodeOpt] = self._to_nodeopt_graph()
         alive: Dict[int, Set[int]] = self._compute_alive_states(nodeopts)
 
@@ -1061,7 +1061,7 @@ class Model(GraphProvider):
             if p <= 0:
                 return set(S)
             out: Set[int] = set()
-            # Union of per‑state preimages; cached per (p,state)
+            # Union of per-state preimages; cached per (p,state)
             for s in S:
                 out.update(preimage_single(p, int(s)))
             return out
@@ -1080,7 +1080,7 @@ class Model(GraphProvider):
                             dest_map[int(dest_id)] = (int(pop), UnconditionalEdge())
                             trivial_changes += 1
 
-        # 3) Main pass: tentative unconditionalization via forward simulation (time‑bounded).
+        # 3) Main pass: tentative unconditionalization via forward simulation (time-bounded).
         # Build candidate list of remaining StateEdge edges with heuristic ordering.
         candidates: List[Tuple[int, int, int, int, StateEdge, int]] = []
         for src_id, nopt in nodeopts.items():
@@ -1109,13 +1109,8 @@ class Model(GraphProvider):
         # Forward tentative propagation limits
         frontier_limit_total = 10000  # cap on newly discovered states across entire tentative BFS
 
-        def attempt_unconditionalize(
-            src_id: int,
-            tok: int,
-            dest_id: int,
-            pop: int,
-            edge: StateEdge,
-        ) -> Tuple[bool, Dict[int, Set[int]]]:
+        def attempt_unconditionalize(src_id: int, tok: int, dest_id: int, pop: int, edge: StateEdge
+                                     ) -> Tuple[bool, Dict[int, Set[int]]]:
             # Fast fail if no alive states at source
             S_src = alive.get(int(src_id), set())
             if not S_src:
@@ -1131,7 +1126,7 @@ class Model(GraphProvider):
             if not frontier0:
                 return True, {}
 
-            # Only newly‑added states at dest matter
+            # Only newly-added states at dest matter
             dest_alive_now = alive.get(int(dest_id), set())
             frontier0 = frontier0 - dest_alive_now
             if not frontier0:
@@ -1157,7 +1152,7 @@ class Model(GraphProvider):
                 if (time.perf_counter() - t_start) > time_budget_sec:
                     return False, {}
 
-                node, _ = q.popleft()
+                node = int(q.popleft()[0])
                 states_here = visited[node]
                 if not states_here:
                     continue
@@ -1179,7 +1174,7 @@ class Model(GraphProvider):
                             if not nxt_states:
                                 continue
 
-                        # Only newly‑added w.r.t. existing Alive
+                        # Only newly-added w.r.t. existing Alive
                         nxt_states = nxt_states - alive.get(int(next_id), set())
                         if not nxt_states:
                             continue
@@ -1296,7 +1291,6 @@ class Model(GraphProvider):
                         all_parents_rewrote = False
                         continue
                     # Parent's children under tok
-                    p_children_tok = nodeopt
                     p_children_tok = nodeopts[int(pid)].children.get(int(tok))
                     if p_children_tok is None:
                         nodeopts[int(pid)].children[int(tok)] = {}
@@ -1314,7 +1308,7 @@ class Model(GraphProvider):
                             elif isinstance(edge_ab, StateEdge):
                                 p_children_tok[int(cid)] = (int(composed_pop), StateEdge(states=set(edge_ab.states)))
                             else:
-                                # Shouldn't happen; treat as state‑filtered with empty set (no‑op)
+                                # Shouldn't happen; treat as state-filtered with empty set (no-op)
                                 p_children_tok[int(cid)] = (int(composed_pop), StateEdge(states=set()))
                         else:
                             ex_pop, ex_edge = existing
@@ -1327,7 +1321,7 @@ class Model(GraphProvider):
                                     merged_states.update(getattr(edge_ab, 'states', set()))
                                     p_children_tok[int(cid)] = (int(ex_pop), StateEdge(states=merged_states))
                             else:
-                                # Our NodeOpt cannot store two pops for same (token,dest); conflict => cannot remove A->B safely
+                                # Our NodeOpt cannot hold two pops for same (token,dest); conflict => cannot remove A->B safely
                                 conflict = True
                                 break
                     if conflict:
@@ -1834,4 +1828,3 @@ class Model(GraphProvider):
                     new_internal_to_original_map[rep] = set()
                 new_internal_to_original_map[rep].update(orig_set)
             self.internal_to_original_map = new_internal_to_original_map
-
