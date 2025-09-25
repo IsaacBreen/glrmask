@@ -61,15 +61,15 @@ class NodeOpt:
     """
     Working optimization graph for a single-token analysis pass.
     children:
-        token_id -> { dest_node_id -> Edge }
+        token_id -> { dest_node_id -> [ (pop, Edge), ... ] }
       Edge is exactly one of:
-        - PopEdge(n)
-        - StateEdge(states)
-        - UnconditionalEdge()
+        - PopEdge(n)           # treated as unconditional for (from_nodeopt)
+        - StateEdge(states)    # set of parser states that are allowed
+        - UnconditionalEdge()  # applies to all parser states
     is_end:
         True if this node corresponds to an arena node with clean_end=True.
     """
-    children: Dict[LLMToken, Dict[NodeID, Edge]] = field(default_factory=dict)
+    children: Dict[LLMToken, Dict[NodeID, List[Tuple[int, Edge]]]] = field(default_factory=dict)
     is_end: bool = False
 
 @dataclass
@@ -1081,10 +1081,110 @@ class Model(GraphProvider):
     # Arena <-> NodeOpt conversions
     # ==============================
     def _to_nodeopt(self) -> NodeOptGraph:
-        ...
+        nodes: Dict[NodeID, NodeOpt] = {}
+        for nid, node in self.arena.items():
+            node_id: int = int(nid)
+            is_end: bool = bool((node.get("value") or {}).get("clean_end", False))
+            nopt = NodeOpt(is_end=is_end)
+
+            # children_map: token -> dest_id -> list[(pop, Edge)]
+            children_map: Dict[int, Dict[int, List[Tuple[int, Edge]]]] = collections.defaultdict(lambda: collections.defaultdict(list))
+
+            for (pop, llm_bv), dests in node.get("children") or []:
+                pop_i = int(pop)
+                tokens = [int(t) for t in llm_bv.to_indices()]
+                for dest_id, state_bv in dests:
+                    did = int(dest_id)
+                    if state_bv.is_empty():
+                        edge: Edge = UnconditionalEdge()
+                    else:
+                        states: Set[int] = set()
+                        for a, b in state_bv.to_ranges():
+                            sa, sb = int(a), int(b)
+                            if sb >= sa:
+                                # Inclusive ranges
+                                for s in range(sa, sb + 1):
+                                    states.add(s)
+                        edge = StateEdge(states=states)
+                    for tok in tokens:
+                        children_map[int(tok)][did].append((pop_i, edge))
+
+            # Freeze nested dicts/lists into plain structures
+            nopt.children = {
+                int(tok): {int(did): list(edges) for did, edges in dest_map.items()}
+                for tok, dest_map in children_map.items()
+            }
+            nodes[node_id] = nopt
+
+        return NodeOptGraph(nodes=nodes, roots_map=dict(self.roots_map))
 
     def _from_nodeopt(self, graph: NodeOptGraph) -> None:
-        ...
+        new_arena: Dict[NodeID, ArenaNode] = {}
+
+        for node_id, nopt in graph.nodes.items():
+            # Group tokens by identical (pop, dest_id, state_signature)
+            # state_signature: None -> unconditional; else tuple(sorted(states))
+            groups: Dict[Tuple[int, int, Optional[Tuple[int, ...]]], Set[int]] = collections.defaultdict(set)
+
+            for tok, dest_map in (nopt.children or {}).items():
+                tok_i = int(tok)
+                for dest_id, pedges in dest_map.items():
+                    did = int(dest_id)
+                    for pop, edge in pedges:
+                        pop_i = int(pop)
+                        if isinstance(edge, StateEdge):
+                            state_sig: Optional[Tuple[int, ...]] = tuple(sorted(int(s) for s in edge.states))
+                        else:
+                            # Treat PopEdge and UnconditionalEdge as unconditional
+                            state_sig = None
+                        groups[(pop_i, did, state_sig)].add(tok_i)
+
+            children_list: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = []
+            llm_union: LLMTokenSet = PyRangeSet.empty()
+
+            for (pop_i, did, state_sig), toks in groups.items():
+                if not toks:
+                    continue
+                llm_bv = PyRangeSet.from_indices(sorted(toks))
+                llm_union = llm_union.union(llm_bv)
+                if state_sig is None:
+                    state_bv: StateIDSet = PyRangeSet.empty()
+                else:
+                    state_bv = PyRangeSet.from_indices(list(state_sig))
+                dests = [(did, state_bv)]
+                children_list.append(((pop_i, llm_bv), dests))
+
+            # Deterministic ordering to keep output stable
+            def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+                try:
+                    return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+                except Exception:
+                    return ()
+
+            children_list.sort(
+                key=lambda item: (
+                    int(item[0][0]),  # pop
+                    _ranges_key(item[0][1]),  # token ranges
+                    tuple(sorted(int(did) for (did, _sbv) in item[1])),  # dest ids
+                )
+            )
+
+            value: ArenaValue = {}
+            if nopt.is_end:
+                value["clean_end"] = True
+
+            new_arena[int(node_id)] = {
+                "max_depth": 0,  # will be recomputed
+                "children": children_list,
+                "llm_bv_union": llm_union,
+                "value": value,
+            }
+
+        # Install new structures
+        self.arena = new_arena
+        self.roots_map = dict(graph.roots_map)
+        # Recompute depth upper bounds for the new wiring
+        self.max_depth = self._recompute_max_depth_from_arena()
 
     def _recompute_max_depth_from_arena(self) -> Dict[NodeID, int]:
         """
