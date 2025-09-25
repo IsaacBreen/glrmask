@@ -1148,42 +1148,22 @@ class Model(GraphProvider):
 
         for node_id, nopt in nodes.items():
             children_list: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = []
-            llm_union: LLMTokenSet = PyRangeSet.empty()
 
-            # Deterministic ordering: sort tokens and dests
-            for token in sorted(nopt.children.keys()):
-                dest_map = nopt.children[token]
+            for token, dest_map in nopt.children.items():
                 token_rs = PyRangeSet.from_indices([int(token)])
                 for dest_id in sorted(dest_map.keys()):
                     edges = dest_map[dest_id]
 
-                    pop_val = 0
-                    pop_seen = False
-                    states_union: Set[int] = set()
-                    has_state = False
-                    unconditional = False
-
                     for e in edges:
-                        if isinstance(e, PopEdge):
-                            if not pop_seen:
-                                pop_val = int(e.n)
-                                pop_seen = True
+                        if isinstance(e, UnconditionalEdge):
+                            children_list.append(((0, token_rs), [(dest_id, all_states_bv)]))
+                        elif isinstance(e, PopEdge):
+                            children_list.append(((e.n, token_rs), [(dest_id, all_states_bv)]))
                         elif isinstance(e, StateEdge):
-                            has_state = True
-                            for s in e.states:
-                                states_union.add(int(s))
-                        elif isinstance(e, UnconditionalEdge):
-                            unconditional = True
+                            children_list.append(((0, token_rs), [(dest_id, PyRangeSet.from_indices(e.states))]))
 
-                    if unconditional or not has_state:
-                        state_bv: StateIDSet = all_states_bv
-                    else:
-                        state_bv = PyRangeSet.from_indices(sorted(states_union)) if states_union else PyRangeSet.empty()
-
-                    children_list.append(((int(pop_val), token_rs), [(int(dest_id), state_bv)]))
-                    llm_union = llm_union.union(token_rs)
-
-            new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=llm_union, clean_end=bool(nopt.is_end))
+            # TODO: compute precise llm_bv_union afterwards in one sweep of graph.
+            new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=self.all_internal_llm_tokens_bitset, clean_end=nopt.is_end)
 
         self.arena = new_arena
         self.roots_map = graph.roots_map.copy()
