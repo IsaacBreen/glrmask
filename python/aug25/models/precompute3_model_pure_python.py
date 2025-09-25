@@ -111,13 +111,12 @@ class ArenaValue(TypedDict, total=False):
     clean_end: bool
 
 
-class ArenaNode(TypedDict, total=False):
-    max_depth: int
-    children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]]
-    llm_bv_union: LLMTokenSet
-    value: ArenaValue
-
-
+@dataclass
+class ArenaNode:
+    children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = field(default_factory=list)
+    llm_bv_union: LLMTokenSet = field(default_factory=PyRangeSet.empty)
+    value: ArenaValue = field(default_factory=dict)
+    
 @dataclass(frozen=True, eq=False)
 class PyAcc:
     terminals_union: Dict[int, TerminalIdSet]
@@ -190,7 +189,7 @@ class Model(GraphProvider):
         roots_map_raw = data["precomputed3"]
         arena_json = data["trie3_god"]
         arena_values = arena_json.get("values", [])
-        arena = {int(k): v for k, v in arena_values}
+        arena_dict = {int(k): v for k, v in arena_values}
  
         roots_map = {int(s): int(r) for s, r in roots_map_raw}
         max_depth: Dict[NodeID, int] = {}
@@ -198,7 +197,7 @@ class Model(GraphProvider):
         bs_from_json = ffi.Bitset.from_json_string
 
         # Normalize arena children bitsets and cache max_depth
-        for uid, node in arena.items():
+        for uid, node in arena_dict.items():
             uid_int = int(uid)
             max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
 
@@ -225,6 +224,14 @@ class Model(GraphProvider):
             node["children"] = new_children
             node["llm_bv_union"] = llm_bv_union
 
+        arena: Dict[NodeID, ArenaNode] = {
+            uid: ArenaNode(
+                children=node_data.get("children", []),
+                llm_bv_union=node_data.get("llm_bv_union", PyRangeSet.empty()),
+                value=node_data.get("value", {}),
+            )
+            for uid, node_data in arena_dict.items()
+        }
         # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
         tokenizer = constraint.tokenizer()
@@ -377,13 +384,17 @@ class Model(GraphProvider):
         return self.roots_map[int(state_id)]
 
     def is_end(self, node: NodeID) -> bool:
-        return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
+        a_node = self.arena.get(node)
+        if not a_node:
+            return False
+        return bool((a_node.value or {}).get("clean_end", False))
 
     def iter_edges(self, node: NodeID, token: int):
         """
         Explode packed transitions into (pop, state_id or None, dest_idx).
         """
-        children = self.arena.get(node, {}).get("children") or []
+        a_node = self.arena.get(node)
+        children = a_node.children if a_node else []
         for (pop, llm_bv), dests in children:
             if llm_bv.contains(token):
                 for dest_idx, state_bv in dests:
@@ -589,7 +600,8 @@ class Model(GraphProvider):
                     final_mask = final_mask.union(reduced_acc.llm_mask)
 
             # Zombie traversal avoidance
-            node_llm_bv_union: LLMTokenSet = arena.get(node, {}).get("llm_bv_union", BitsetRangeSet.empty())
+            a_node = arena.get(node)
+            node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else BitsetRangeSet.empty()
             potential_new_tokens = node_llm_bv_union.difference(final_mask)
             if potential_new_tokens.is_empty():
                 continue
@@ -599,7 +611,8 @@ class Model(GraphProvider):
                 continue
 
             # Traverse edges and propagate masks
-            edges = arena.get(node, {}).get("children") or []
+            a_node = arena.get(node)
+            edges = a_node.children if a_node else []
             for (pop, llm_bv), dests in edges:
                 llm_bv = llm_bv.difference(final_mask)
                 if llm_bv.is_empty():
@@ -702,9 +715,9 @@ class Model(GraphProvider):
     def _count_total_ranges(self) -> int:
         count = 0
         for node in self.arena.values():
-            for _, llm_bv in (c[0] for c in node.get("children", [])):
+            for _, llm_bv in (c[0] for c in node.children):
                 count += len(llm_bv.to_ranges())
-            union_bv = node.get("llm_bv_union", PyRangeSet.empty())
+            union_bv = node.llm_bv_union
             count += len(union_bv.to_ranges())
         if self.possible_matches_cache:
             for inner in self.possible_matches_cache.values():
@@ -740,11 +753,11 @@ class Model(GraphProvider):
         family: List[LLMTokenSet] = []
         # Arena children sets and node unions
         for node in self.arena.values():
-            children = node.get("children") or []
+            children = node.children
             for (pop, llm_bv), _dests in children:
                 if not llm_bv.is_empty():
                     family.append(llm_bv)
-            union_bv: LLMTokenSet = node.get("llm_bv_union") or PyRangeSet.empty()
+            union_bv: LLMTokenSet = node.llm_bv_union
             if not union_bv.is_empty():
                 family.append(union_bv)
         # possible_matches_cache sets
@@ -825,13 +838,13 @@ class Model(GraphProvider):
         # 1. Convert arena
         for node in self.arena.values():
             new_children = []
-            for (pop, llm_bv), dests in node.get("children", []):
+            for (pop, llm_bv), dests in node.children:
                 new_dests = []
                 for dest_idx, state_bv in dests:
                     new_dests.append((dest_idx, convert(state_bv)))
                 new_children.append(((pop, convert(llm_bv)), new_dests))
-            node["children"] = new_children
-            node["llm_bv_union"] = convert(node.get("llm_bv_union", PyRangeSet.empty()))
+            node.children = new_children
+            node.llm_bv_union = convert(node.llm_bv_union)
 
         # 2. Convert possible_matches_cache
         if self.possible_matches_cache:
@@ -890,14 +903,14 @@ class Model(GraphProvider):
 
         # Arena children groups
         for node in self.arena.values():
-            children = node.get("children") or []
+            children = node.children
             if children:
                 for (pop, llm_bv), _dests in children:
                     idxs = [int(x) for x in llm_bv.to_indices() if int(x) in all_tokens]
                     if len(idxs) > 1:
                         groups_counter[tuple(idxs)] += edge_weight
             # Node union (optional)
-            union_bv: LLMTokenSet = node.get("llm_bv_union") or PyRangeSet.empty()
+            union_bv: LLMTokenSet = node.llm_bv_union
             if not union_bv.is_empty():
                 idxs = [int(x) for x in union_bv.to_indices() if int(x) in all_tokens]
                 if len(idxs) > 1:
@@ -1107,7 +1120,7 @@ class Model(GraphProvider):
         for nid, a_node in self.arena.items():
             nid_int = int(nid)
             nopt = NodeOpt()
-            nopt.is_end = bool((a_node.get("value") or {}).get("clean_end", False))
+            nopt.is_end = bool((a_node.value or {}).get("clean_end", False))
             nodes[nid_int] = nopt
 
         # Populate edges
@@ -1115,7 +1128,7 @@ class Model(GraphProvider):
             nid_int = int(nid)
             nopt = nodes[nid_int]
 
-            for (pop, llm_bv), dests in a_node.get("children", []) or []:
+            for (pop, llm_bv), dests in a_node.children:
                 tokens = [int(t) for t in llm_bv.to_indices()]
                 if not tokens:
                     continue
@@ -1234,11 +1247,11 @@ class Model(GraphProvider):
             if nopt.is_end:
                 node_value["clean_end"] = True
 
-            new_arena[nid_int] = {
-                "children": children_list,
-                "llm_bv_union": llm_union,
-                "value": node_value,
-            }
+            new_arena[nid_int] = ArenaNode(
+                children=children_list,
+                llm_bv_union=llm_union,
+                value=node_value,
+            )
 
         # Install reconstructed arena and metadata
         self.arena = new_arena
@@ -1260,8 +1273,8 @@ class Model(GraphProvider):
         is_end_map: Dict[NodeID, bool] = {}
         for nid, node in arena.items():
             nid = int(nid)
-            is_end_map[nid] = bool((node.get("value") or {}).get("clean_end", False))
-            for (pop, llm_bv), dests in node.get("children") or []:
+            is_end_map[nid] = bool((node.value or {}).get("clean_end", False))
+            for (pop, llm_bv), dests in node.children:
                 for dest_id, _state_bv in dests:
                     adj[nid].add(int(dest_id))
 
@@ -1324,7 +1337,7 @@ class Model(GraphProvider):
 
         # Remap arena directly by regrouping tokens
         for node in self.arena.values():
-            children = node.get("children", [])
+            children = node.children
             if not children:
                 continue
 
@@ -1371,8 +1384,8 @@ class Model(GraphProvider):
                 )
             )
 
-            node["children"] = new_children
-            node["llm_bv_union"] = llm_union
+            node.children = new_children
+            node.llm_bv_union = llm_union
 
         # Remap internal_to_original_map (pure permutation)
         if self.internal_to_original_map:
@@ -1418,11 +1431,11 @@ class Model(GraphProvider):
 
         # Remap arena by grouping tokens with identical (pop, dests) signatures
         for node in self.arena.values():
-            children = node.get("children", [])
+            children = node.children
             if not children:
                 # Still ensure union is remapped (it may be non-empty)
-                union_bv = node.get("llm_bv_union") or PyRangeSet.empty()
-                node["llm_bv_union"] = remap_llm_token_set(union_bv)
+                union_bv = node.llm_bv_union
+                node.llm_bv_union = remap_llm_token_set(union_bv)
                 continue
 
             # signature: (pop, ((dest_id, ((start,end),...)), ...))
@@ -1478,8 +1491,8 @@ class Model(GraphProvider):
                 )
             )
 
-            node["children"] = new_children
-            node["llm_bv_union"] = llm_union
+            node.children = new_children
+            node.llm_bv_union = llm_union
 
         # Remap the universe
         self.all_internal_llm_tokens_bitset = remap_llm_token_set(self.all_internal_llm_tokens_bitset)
