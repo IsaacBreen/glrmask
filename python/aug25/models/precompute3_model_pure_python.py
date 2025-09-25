@@ -908,6 +908,19 @@ class Model(GraphProvider):
             new_max_depth[int(nid)] = int(node.get("max_depth", 0) or 0)
         self.max_depth = new_max_depth
 
+    def _count_total_ranges(self) -> int:
+        count = 0
+        for node in self.arena.values():
+            for _, llm_bv in (c[0] for c in node.get("children", [])):
+                count += len(llm_bv.to_ranges())
+            union_bv = node.get("llm_bv_union", LLMTokenSet.empty())
+            count += len(union_bv.to_ranges())
+        if self.possible_matches_cache:
+            for inner in self.possible_matches_cache.values():
+                for llm_bv in inner.values():
+                    count += len(llm_bv.to_ranges())
+        return count
+
     def _merge_equivalent_llm_tokens(self) -> None:
         """
         Finds sets of LLM tokens that are equivalent (always appear together in LLMTokenSets)
@@ -928,6 +941,7 @@ class Model(GraphProvider):
 
         # 2. Use a DSU structure to find equivalence classes of tokens
         all_tokens = list(self.all_internal_llm_tokens_bitset.to_indices())
+        num_before = len(all_tokens)
         parent = {i: i for i in all_tokens}
 
         def find(i):
@@ -953,6 +967,7 @@ class Model(GraphProvider):
         classes = collections.defaultdict(set)
         for i in all_tokens:
             classes[find(i)].add(i)
+        num_after = len(classes)
 
         old_to_new_map: Dict[int, int] = {}
         new_internal_to_original_map: Dict[int, Set[int]] = {}
@@ -1023,7 +1038,7 @@ class Model(GraphProvider):
             node["children"] = new_children
             node["llm_bv_union"] = llm_union
 
-        print(" done.")
+        print(f" done. Merged {num_before} tokens into {num_after} ({num_before - num_after} merged).")
 
     def _unconditionalize_guaranteed_transitions(
         self,
@@ -1048,10 +1063,12 @@ class Model(GraphProvider):
         - Apply a permutation remapping of internal tokens to this order, then repack arena via NodeOpt.
         """
         print("Reordering LLM tokens for range minimization...", end='', flush=True)
+        ranges_before = self._count_total_ranges()
         # Collect universe of current internal tokens
         all_tokens_list = list(self.all_internal_llm_tokens_bitset.to_indices())
         if len(all_tokens_list) <= 1:
-            return  # Nothing to do
+            print(" done (not enough tokens to reorder).")
+            return
 
         all_tokens: Set[int] = set(int(t) for t in all_tokens_list)
 
@@ -1252,7 +1269,8 @@ class Model(GraphProvider):
         old_to_new: Dict[int, int] = {old: new for new, old in enumerate(order)}
         self._remap_llm_tokens_permutation(old_to_new)
 
-        print(" done.", flush=True)
+        ranges_after = self._count_total_ranges()
+        print(f" done. Ranges reduced from {ranges_before} to {ranges_after} ({ranges_before - ranges_after} fewer).", flush=True)
 
     def _remap_llm_tokens_permutation(self, old_to_new_map: Dict[int, int]) -> None:
         """
