@@ -1107,7 +1107,7 @@ class Model(GraphProvider):
             changed = False
             parents = build_parents()
             # Iterate over tokens to respect per-token condition "v has no other role for t"
-            for t in sorted(all_tokens):
+            for t in tqdm(sorted(all_tokens), desc="Merging pop chains"):
                 for src in list(nodes.keys()):
                     edges = nodes[src].children.get(int(t), {})
                     # Iterate over a snapshot since we may mutate
@@ -1140,7 +1140,7 @@ class Model(GraphProvider):
         def remove_passthroughs_once() -> bool:
             changed = False
             parents = build_parents()
-            for B in list(nodes.keys()):
+            for B in tqdm(sorted(nodes.keys()), desc="Removing passthroughs"):
                 if B in roots_set:
                     continue
                 nB = nodes[B]
