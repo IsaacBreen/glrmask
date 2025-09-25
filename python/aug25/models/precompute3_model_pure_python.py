@@ -332,7 +332,7 @@ class Model(GraphProvider):
         )
 
         model._merge_equivalent_llm_tokens()
-        model._reorder_llm_tokens_for_range_minimization()
+        # model._reorder_llm_tokens_for_range_minimization()
 
         # model._unconditionalize_guaranteed_transitions()
         graph = model._to_nodeopt()
@@ -525,7 +525,7 @@ class Model(GraphProvider):
         """
         state_map: Dict[int, GSS] = self.state
 
-        all_ones: Optional[LLMTokenSet] = self.all_internal_llm_tokens_bitset
+        all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
         final_mask: LLMTokenSet = BitsetRangeSet.empty()
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
@@ -557,7 +557,7 @@ class Model(GraphProvider):
                             terminals_to_llm[terminal_id]
                         )
 
-            allowed_mask = (all_ones if all_ones is not None else BitsetRangeSet.empty()).difference(disallowed_llm_mask)
+            allowed_mask = all_ones.difference(disallowed_llm_mask)
             return PyAcc(
                 terminals_union={},  # consume
                 llm_mask=allowed_mask,
