@@ -1080,13 +1080,13 @@ class Model(GraphProvider):
         Convert the current Arena into a NodeOptGraph, keeping the representation
         simple and faithful for get_mask.
 
-        Encoding rules (per token -> dest -> List[Edge]):
+        Encoding rules:
         - If state_bv is unconditional (represented as an empty set in the arena format):
-          * pop > 0 -> [PopEdge(pop)]
-          * pop == 0 -> [UnconditionalEdge()]
+          * pop > 0: src -> PopEdge(pop) -> dst
+          * pop == 0: src -> UnconditionalEdge() -> dst
         - If state_bv is masked (i.e., not empty):
-          * pop > 0 -> [PopEdge(pop), StateEdge(states)]
-          * pop == 0 -> [StateEdge(states)]
+          * pop > 0: src -> PopEdge(pop) -> intermediate node -> StateEdge(states) -> dst
+          * pop == 0: src -> StateEdge(states) -> dst
 
         This conversion assumes that for any given (source, token, dest) triple,
         the arena does not define multiple, conflicting transitions (e.g., with
