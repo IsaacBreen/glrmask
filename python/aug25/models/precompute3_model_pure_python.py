@@ -868,12 +868,14 @@ class Model(GraphProvider):
                 return
             # Both StateEdge -> union
             if isinstance(existing, StateEdge) and isinstance(edge, StateEdge):
-        new_states = set(existing.states)
-        new_states.update(edge.states)
-        child_map[int(dest)] = StateEdge(states=new_states)
-        return
-    # Conflict: different kinds or pop with different n.
-    # Split via helper node so (token, dest) remains unique.
+                new_states = set(existing.states)
+                new_states.update(edge.states)
+                child_map[int(dest)] = StateEdge(states=new_states)
+                return
+            # Both PopEdge with same n -> keep one
+            if isinstance(existing, PopEdge) and isinstance(edge, PopEdge) and int(existing.n) == int(edge.n):
+                # same semantics, keep existing
+                return
             # Conflict: different kinds or pop with different n.
             # Split via helper node so (token, dest) remains unique.
             helper = new_node(is_end=False)
