@@ -872,6 +872,10 @@ class Model(GraphProvider):
                 new_states.update(edge.states)
                 child_map[int(dest)] = StateEdge(states=new_states)
                 return
+            # Both PopEdge with same n -> keep one
+            if isinstance(existing, PopEdge) and isinstance(edge, PopEdge) and int(existing.n) == int(edge.n):
+                # same semantics, keep existing
+                return
             # Conflict: different kinds or pop with different n.
             # Split via helper node so (token, dest) remains unique.
             helper = new_node(is_end=False)
@@ -1095,7 +1099,7 @@ class Model(GraphProvider):
                     for d in dests.keys():
                         mp.setdefault(int(d), set()).add(int(p_id))
             return parents
-
+            
         # Merge pop chains: src --Pop(a)--> v --Pop(b)--> w
         def merge_pop_chains_once() -> bool:
             changed = False
@@ -1344,7 +1348,6 @@ class Model(GraphProvider):
         self.max_depth = compute_max_depth_arena(self.arena)
         # Keep roots_map unchanged (we avoided bypassing roots during compaction)
         # self.roots_map = self.roots_map
-
     def _convert_to_bitset_range_set(self) -> None:
         """
         Converts all PyRangeSet instances (which are py_range_set.PyRangeSet during
@@ -1820,3 +1823,4 @@ class Model(GraphProvider):
                     new_internal_to_original_map[rep] = set()
                 new_internal_to_original_map[rep].update(orig_set)
             self.internal_to_original_map = new_internal_to_original_map
+
