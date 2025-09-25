@@ -1114,18 +1114,13 @@ class Model(GraphProvider):
                     is_unconditional = self.all_internal_llm_tokens_bitset.is_subset(state_bv)
 
                     if is_unconditional:
-                        if pop > 0:
-                            edge_list.append(PopEdge(pop))
-                        else:  # pop == 0
-                            edge_list.append(UnconditionalEdge())
+                        edge_list.append(PopEdge(pop) if pop > 0 else UnconditionalEdge())
                     else:  # State-masked transition
                         states = set(state_bv.to_indices())
-                        # If the state set resolves to empty, this transition is impossible.
-                        if not states:
-                            continue
-                        if pop > 0:
-                            edge_list.append(PopEdge(pop))
-                        edge_list.append(StateEdge(states))
+                        if states:  # Only add edges if state set is non-empty
+                            if pop > 0:
+                                edge_list.append(PopEdge(pop))
+                            edge_list.append(StateEdge(states))
 
                     # Explode the llm_bv and add the corresponding edges to the NodeOpt graph.
                     for token in llm_bv.to_indices():
