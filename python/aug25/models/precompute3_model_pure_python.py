@@ -1022,7 +1022,341 @@ class Model(GraphProvider):
         # etc
     ) -> None:
         print("Unconditionalizing guaranteed transitions...", end='', flush=True)
-        ...
+        t_start = time.perf_counter()
+        # Time budget in seconds (best‑effort). Keep modest to avoid long init times.
+        time_budget_sec = 2.0
+
+        # 1) Convert arena → NodeOpt and compute Alive fixpoint (baseline semantics).
+        nodeopts: Dict[int, NodeOpt] = self._to_nodeopt_graph()
+        alive: Dict[int, Set[int]] = self._compute_alive_states(nodeopts)
+
+        # Helpers: cached preimage computation reverse_state_map^pop(S)
+        reverse_map: Dict[int, Set[int]] = self.reverse_state_map or {}
+        preimage_single_cache: Dict[Tuple[int, int], Set[int]] = {}
+
+        def preimage_single(p: int, s: int) -> Set[int]:
+            key = (int(p), int(s))
+            if key in preimage_single_cache:
+                return preimage_single_cache[key]
+            if p <= 0:
+                res = {int(s)}
+                preimage_single_cache[key] = res
+                return res
+            # Iteratively compute f_p(s)
+            current: Set[int] = {int(s)}
+            for _ in range(p):
+                if not current:
+                    current = set()
+                    break
+                nxt: Set[int] = set()
+                for t in current:
+                    preds = reverse_map.get(int(t))
+                    if preds:
+                        nxt.update(preds)
+                current = nxt
+            preimage_single_cache[key] = current
+            return current
+
+        def preimage_set(p: int, S: Set[int]) -> Set[int]:
+            if p <= 0:
+                return set(S)
+            out: Set[int] = set()
+            # Union of per‑state preimages; cached per (p,state)
+            for s in S:
+                out.update(preimage_single(p, int(s)))
+            return out
+
+        # 2) Trivial unconditionalization pass: if Alive[src] ⊆ edge.states, we can drop the filter.
+        trivial_changes = 0
+        for src_id, nopt in nodeopts.items():
+            S_src = alive.get(int(src_id), set())
+            if not S_src:
+                continue
+            for tok, dest_map in nopt.children.items():
+                for dest_id, (pop, edge) in list(dest_map.items()):
+                    if isinstance(edge, StateEdge):
+                        # If all alive states at src are already allowed by the edge, it's safe.
+                        if S_src.issubset(edge.states):
+                            dest_map[int(dest_id)] = (int(pop), UnconditionalEdge())
+                            trivial_changes += 1
+
+        # 3) Main pass: tentative unconditionalization via forward simulation (time‑bounded).
+        # Build candidate list of remaining StateEdge edges with heuristic ordering.
+        candidates: List[Tuple[int, int, int, int, StateEdge, int]] = []
+        for src_id, nopt in nodeopts.items():
+            S_src = alive.get(int(src_id), set())
+            if not S_src:
+                continue
+            for tok, dest_map in nopt.children.items():
+                for dest_id, (pop, edge) in dest_map.items():
+                    if isinstance(edge, StateEdge):
+                        # S_extra = S_src \ edge.states
+                        s_extra_size = len(S_src - edge.states)
+                        if s_extra_size == 0:
+                            continue  # already handled by trivial pass
+                        depth = int(self.max_depth.get(int(src_id), 0) or 0)
+                        candidates.append((int(src_id), int(tok), int(dest_id), int(pop), edge, depth))
+
+        # Sort: prefer smaller |S_extra| first; for tie, deeper nodes first.
+        def candidate_key(item: Tuple[int, int, int, int, StateEdge, int]) -> Tuple[int, int, int, int, int]:
+            src_id, tok, dest_id, pop, edge, depth = item
+            S_src = alive.get(int(src_id), set())
+            s_extra = len(S_src - edge.states)
+            return (int(s_extra), -int(depth), int(src_id), int(tok), int(dest_id))
+
+        candidates.sort(key=candidate_key)
+
+        # Forward tentative propagation limits
+        frontier_limit_total = 10000  # cap on newly discovered states across entire tentative BFS
+
+        def attempt_unconditionalize(
+            src_id: int,
+            tok: int,
+            dest_id: int,
+            pop: int,
+            edge: StateEdge,
+        ) -> Tuple[bool, Dict[int, Set[int]]]:
+            # Fast fail if no alive states at source
+            S_src = alive.get(int(src_id), set())
+            if not S_src:
+                return True, {}
+
+            S_edge = edge.states
+            S_extra = S_src - S_edge
+            if not S_extra:
+                return True, {}
+
+            # First hop: ignore state filter on this edge; only apply pop
+            frontier0 = preimage_set(int(pop), S_extra)
+            if not frontier0:
+                return True, {}
+
+            # Only newly‑added states at dest matter
+            dest_alive_now = alive.get(int(dest_id), set())
+            frontier0 = frontier0 - dest_alive_now
+            if not frontier0:
+                return True, {}
+
+            # If immediate destination is an end node and new states arrive, unsafe
+            nopt_dest = nodeopts.get(int(dest_id))
+            if nopt_dest and nopt_dest.is_end:
+                return False, {}
+
+            # Tentative BFS forward
+            delta: Dict[int, Set[int]] = collections.defaultdict(set)
+            visited: Dict[int, Set[int]] = collections.defaultdict(set)
+            q = collections.deque()
+            q.append((int(dest_id), set(frontier0)))
+            visited[int(dest_id)].update(frontier0)
+            delta[int(dest_id)].update(frontier0)
+
+            total_new = len(frontier0)
+
+            while q:
+                # Time cutoff check
+                if (time.perf_counter() - t_start) > time_budget_sec:
+                    return False, {}
+
+                node, _ = q.popleft()
+                states_here = visited[node]
+                if not states_here:
+                    continue
+
+                nopt_here = nodeopts.get(node)
+                if not nopt_here:
+                    continue
+
+                # Propagate to all outgoing edges (ignore tokens semantically)
+                for _t, dest_map in nopt_here.children.items():
+                    for next_id, (pop2, edge2) in dest_map.items():
+                        # Preimage across pop2
+                        nxt_states = preimage_set(int(pop2), states_here)
+                        if not nxt_states:
+                            continue
+                        # Apply state filter if present
+                        if isinstance(edge2, StateEdge):
+                            nxt_states = nxt_states.intersection(edge2.states)
+                            if not nxt_states:
+                                continue
+
+                        # Only newly‑added w.r.t. existing Alive
+                        nxt_states = nxt_states - alive.get(int(next_id), set())
+                        if not nxt_states:
+                            continue
+
+                        # Unsafe if reaches any end node
+                        nopt_next = nodeopts.get(int(next_id))
+                        if nopt_next and nopt_next.is_end:
+                            return False, {}
+
+                        # Avoid reprocessing exact states at same node
+                        not_visited = nxt_states - visited[int(next_id)]
+                        if not not_visited:
+                            continue
+
+                        visited[int(next_id)].update(not_visited)
+                        delta[int(next_id)].update(not_visited)
+                        total_new += len(not_visited)
+                        if total_new > frontier_limit_total:
+                            # Frontier exploded; give up for this candidate
+                            return False, {}
+                        q.append((int(next_id), not_visited))
+
+            return True, delta
+
+        successes = 0
+        failures = 0
+        for src_id, tok, dest_id, pop, edge, _depth in candidates:
+            if (time.perf_counter() - t_start) > time_budget_sec:
+                break
+            # Edge may already have been unconditionalized in a prior step
+            cur_edge = nodeopts.get(int(src_id), NodeOpt(children={}, is_end=False)).children.get(int(tok), {}).get(int(dest_id))
+            if not cur_edge:
+                continue
+            cur_pop, cur_e = cur_edge
+            if not isinstance(cur_e, StateEdge):
+                continue
+            # Recompute S_extra in current Alive
+            S_src_now = alive.get(int(src_id), set())
+            if not S_src_now:
+                # No states to gain, treat as success
+                nodeopts[int(src_id)].children[int(tok)][int(dest_id)] = (int(cur_pop), UnconditionalEdge())
+                successes += 1
+                continue
+            S_extra_now = S_src_now - cur_e.states
+            if not S_extra_now:
+                nodeopts[int(src_id)].children[int(tok)][int(dest_id)] = (int(cur_pop), UnconditionalEdge())
+                successes += 1
+                continue
+
+            safe, delta = attempt_unconditionalize(int(src_id), int(tok), int(dest_id), int(cur_pop), cur_e)
+            if safe:
+                # Accept: replace edge and update Alive with Delta
+                nodeopts[int(src_id)].children[int(tok)][int(dest_id)] = (int(cur_pop), UnconditionalEdge())
+                for nid, stset in delta.items():
+                    if stset:
+                        if nid not in alive:
+                            alive[nid] = set()
+                        alive[nid].update(stset)
+                successes += 1
+            else:
+                failures += 1
+                # Optional early stop if many failures and budget low
+                if failures > 128 and (time.perf_counter() - t_start) > (time_budget_sec * 0.6):
+                    break
+
+        # 4) Passthrough node elimination and pop merging (conservative).
+        roots: Set[int] = set(int(n) for n in self.roots_map.values())
+
+        def build_parents() -> Dict[int, List[Tuple[int, int, int, Edge]]]:
+            parents: Dict[int, List[Tuple[int, int, int, Edge]]] = collections.defaultdict(list)
+            for pid, pnopt in nodeopts.items():
+                for t, dmap in pnopt.children.items():
+                    for did, (ppop, pedge) in dmap.items():
+                        parents[int(did)].append((int(pid), int(t), int(ppop), pedge))
+            return parents
+
+        def is_passthrough(nid: int) -> bool:
+            nopt = nodeopts.get(int(nid))
+            if not nopt:
+                return False
+            if nopt.is_end:
+                return False
+            if not nopt.children:
+                return False
+            for _t, dmap in nopt.children.items():
+                for _did, (_p, e) in dmap.items():
+                    if not isinstance(e, UnconditionalEdge):
+                        return False
+            return True
+
+        # Eliminate while time allows
+        iter_count = 0
+        while (time.perf_counter() - t_start) <= time_budget_sec and iter_count < 2:
+            parents_map = build_parents()
+            changed_any = False
+            to_maybe_remove: List[int] = []
+            for nid, nopt in list(nodeopts.items()):
+                if (time.perf_counter() - t_start) > time_budget_sec:
+                    break
+                if int(nid) in roots:
+                    continue
+                if not is_passthrough(int(nid)):
+                    continue
+                plist = list(parents_map.get(int(nid), []))
+                if not plist:
+                    # Unreachable passthrough; ignore here
+                    continue
+                # Try to rewrite each (parent, token) edge that points to nid
+                all_parents_rewrote = True
+                for (pid, tok, pa, edge_ab) in plist:
+                    # B's outs under the same token
+                    b_outs_token = nopt.children.get(int(tok))
+                    if not b_outs_token:
+                        all_parents_rewrote = False
+                        continue
+                    # Parent's children under tok
+                    p_children_tok = nodeopt
+                    p_children_tok = nodeopts[int(pid)].children.get(int(tok))
+                    if p_children_tok is None:
+                        nodeopts[int(pid)].children[int(tok)] = {}
+                        p_children_tok = nodeopts[int(pid)].children[int(tok)]
+                    conflict = False
+                    # Compose A->C via B under same token
+                    for cid, (pb, edge_bc) in b_outs_token.items():
+                        # edge_bc is guaranteed UnconditionalEdge by passthrough condition
+                        composed_pop = int(pa) + int(pb)
+                        existing = p_children_tok.get(int(cid))
+                        if existing is None:
+                            # Insert composed edge using the edge kind from A->B
+                            if isinstance(edge_ab, UnconditionalEdge):
+                                p_children_tok[int(cid)] = (int(composed_pop), UnconditionalEdge())
+                            elif isinstance(edge_ab, StateEdge):
+                                p_children_tok[int(cid)] = (int(composed_pop), StateEdge(states=set(edge_ab.states)))
+                            else:
+                                # Shouldn't happen; treat as state‑filtered with empty set (no‑op)
+                                p_children_tok[int(cid)] = (int(composed_pop), StateEdge(states=set()))
+                        else:
+                            ex_pop, ex_edge = existing
+                            if int(ex_pop) == int(composed_pop):
+                                # Merge edges: unconditional dominates; state edges union
+                                if isinstance(ex_edge, UnconditionalEdge) or isinstance(edge_ab, UnconditionalEdge):
+                                    p_children_tok[int(cid)] = (int(ex_pop), UnconditionalEdge())
+                                else:
+                                    merged_states = set(getattr(ex_edge, 'states', set()))
+                                    merged_states.update(getattr(edge_ab, 'states', set()))
+                                    p_children_tok[int(cid)] = (int(ex_pop), StateEdge(states=merged_states))
+                            else:
+                                # Our NodeOpt cannot store two pops for same (token,dest); conflict => cannot remove A->B safely
+                                conflict = True
+                                break
+                    if conflict:
+                        all_parents_rewrote = False
+                        continue
+                    else:
+                        # Remove parent A -> B for this token
+                        if int(nid) in nodeopts[int(pid)].children.get(int(tok), {}):
+                            del nodeopts[int(pid)].children[int(tok)][int(nid)]
+                            changed_any = True
+                if all_parents_rewrote:
+                    to_maybe_remove.append(int(nid))
+            # Remove nodes that no longer have incoming edges
+            if to_maybe_remove:
+                parents_after = build_parents()
+                for nid in to_maybe_remove:
+                    if int(nid) in roots:
+                        continue
+                    if not parents_after.get(int(nid)):
+                        # No more incoming edges; remove node entirely
+                        if int(nid) in nodeopts:
+                            del nodeopts[int(nid)]
+                            changed_any = True
+            if not changed_any:
+                break
+            iter_count += 1
+
+        # 5) Repack back into arena
+        self._from_nodeopt_graph(nodeopts)
         print(" done.")
 
     def _convert_to_bitset_range_set(self) -> None:
