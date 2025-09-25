@@ -1086,7 +1086,7 @@ class Model(GraphProvider):
         simple and faithful for get_mask.
 
         Encoding rules (per token -> dest -> List[Edge]):
-        - If state_bv is unconditional (empty, or contains all parser states):
+        - If state_bv is unconditional (contains all parser states):
           * pop > 0 -> [PopEdge(pop)]
           * pop == 0 -> [UnconditionalEdge()]
         - If state_bv is masked (not unconditional):
@@ -1097,20 +1097,11 @@ class Model(GraphProvider):
         somehow occurs, we keep the first instance we encountered.
         """
         nodes: Dict[NodeID, NodeOpt] = {}
-        all_states: Set[int] = set(int(s) for s in self.parser_table.table.keys())
+        all_states = PyRangeSet.from_indices(int(s) for s in self.parser_table.table.keys())
 
         def is_unconditional_state_bv(bv: StateIDSet) -> bool:
-            # Arena convention: empty = unconditional.
-            if bv.is_empty():
-                return True
-            # Also treat "contains all parser states" as unconditional.
-            try:
-                s = set(int(x) for x in bv.to_indices())
-            except Exception:
-                # Be conservative: if we can't enumerate, assume masked.
-                return False
             # If bv includes all parser states, treat as unconditional.
-            return all_states.issubset(s)
+            return all_states.is_subset(bv)
 
         # Create NodeOpt nodes
         for nid, a_node in self.arena.items():
@@ -1170,6 +1161,7 @@ class Model(GraphProvider):
           This keeps reconstruction simple and preserves semantics.
         """
         new_arena: Dict[NodeID, ArenaNode] = {}
+        all_states = PyRangeSet.from_indices(int(s) for s in self.parser_table.table.keys())
 
         def ranges_key(rs: RangeSetABC) -> Tuple[Tuple[int, int], ...]:
             try:
@@ -1223,7 +1215,7 @@ class Model(GraphProvider):
                 llm_bv = PyRangeSet.from_indices(sorted(tok_set))
                 llm_union = llm_union.union(llm_bv)
                 if mask_key is None:
-                    state_bv = PyRangeSet.empty()
+                    state_bv = all_states
                 else:
                     state_bv = PyRangeSet.from_indices(list(mask_key))
                 children_list.append(((int(pop_val), llm_bv), [(int(dest_val), state_bv)]))
