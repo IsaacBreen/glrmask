@@ -1133,14 +1133,14 @@ class Model(GraphProvider):
         grouping tokens with identical transition behavior into single arena edges.
         """
         new_arena: Dict[NodeID, ArenaNode] = {}
-        unconditional_bv = PyRangeSet.from_indices(list(self.parser_table.table.keys()))
+        unconditional_bv: StateIDSet = PyRangeSet.from_indices(list(self.parser_table.table.keys()))
 
         for node_id, node_opt in graph.nodes.items():
             # Group tokens by their transition signature: (pop, canonical_dests_tuple)
-            sig_to_tokens = collections.defaultdict(list)
+            sig_to_tokens: Dict[Tuple, List[LLMToken]] = collections.defaultdict(list)
             for token, dests_map in node_opt.children.items():
                 # A token's fan-out has one pop value. Find it from any edge.
-                pop = next((e.n for el in dests_map.values() for e in el if isinstance(e, PopEdge)), 0)
+                pop: int = next((e.n for el in dests_map.values() for e in el if isinstance(e, PopEdge)), 0)
 
                 # Create a canonical, hashable signature for the destinations.
                 dests_sig = tuple(sorted(
@@ -1153,12 +1153,12 @@ class Model(GraphProvider):
                 sig_to_tokens[(pop, dests_sig)].append(token)
 
             # Build the ArenaNode's children from the grouped tokens.
-            new_children = []
-            llm_union = PyRangeSet.empty()
+            new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = []
+            llm_union: LLMTokenSet = PyRangeSet.empty()
             for (pop, dests_sig), tokens in sig_to_tokens.items():
-                llm_bv = PyRangeSet.from_indices(sorted(tokens))
+                llm_bv: LLMTokenSet = PyRangeSet.from_indices(sorted(tokens))
                 llm_union = llm_union.union(llm_bv)
-                dests = [(dest_id, PyRangeSet.from_ranges(list(ranges))) for dest_id, ranges in dests_sig]
+                dests: List[Tuple[NodeID, StateIDSet]] = [(dest_id, PyRangeSet.from_ranges(list(ranges))) for dest_id, ranges in dests_sig]
                 new_children.append(((pop, llm_bv), dests))
 
             # Sort for deterministic output and create the new ArenaNode.
