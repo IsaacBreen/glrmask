@@ -1092,50 +1092,32 @@ class Model(GraphProvider):
         the arena does not define multiple, conflicting transitions (e.g., with
         different pop values).
         """
-        nodes: Dict[NodeID, NodeOpt] = {}
+        nodes = {nid: NodeOpt(is_end=self.is_end(nid)) for nid in self.arena}
+        next_id = (max(nodes) if nodes else 0) + 1
+        all_states = PyRangeSet.from_indices(self.parser_table.table.keys())
 
-        # Initialize NodeOpt for every node in the arena to ensure sinks are included.
-        for node_id in self.arena.keys():
-            nodes[node_id] = NodeOpt(is_end=self.is_end(node_id))
-
-        node_id_counter = max(nodes.keys(), default=0) + 1
-
-        # Populate the children by iterating through the packed arena representation.
-        for node_id, arena_node in self.arena.items():
-            node_opt = nodes[node_id]
-
-            for (pop, llm_bv), destinations in arena_node.children:
-                for dest_id, state_bv in destinations:
-
-                    edge_list: List[Edge] = []
-
-                    all_states_bv = PyRangeSet.from_indices(self.parser_table.table.keys())
-                    is_unconditional = all_states_bv.is_subset(state_bv)
-
-                    if is_unconditional:
-                        edge_list.append(PopEdge(pop) if pop > 0 else UnconditionalEdge())
-                    else:  # State-masked transition
-                        states = set(state_bv.to_indices())
-                        if states:  # Only add edges if state set is non-empty
-                            if pop > 0:
-                                edge_list.append(PopEdge(pop))
-                            edge_list.append(StateEdge(states))
-
-                    if len(edge_list) == 0:
-                        pass
-                    elif len(edge_list) == 1:
-                        for token in llm_bv.to_indices():
-                            node_opt.children.setdefault(token, {}).setdefault(dest_id, []).append(edge_list[0])
-                    elif len(edge_list) == 2:
-                        intermediate_node_id = node_id_counter
-                        nodes[intermediate_node_id] = NodeOpt(is_end=False)
-                        node_id_counter += 1
-                        for token in llm_bv.to_indices():
-                            node_opt.children.setdefault(token, {}).setdefault(intermediate_node_id, []).append(edge_list[0])
-                            nodes[intermediate_node_id].children.setdefault(token, {}).setdefault(dest_id, []).append(edge_list[1])
+        for src, a in self.arena.items():
+            node_opt = nodes[src]
+            for (pop, llm_bv), dests in a.children:
+                tokens = list(llm_bv.to_indices())
+                for dst, state_bv in dests:
+                    if all_states.is_subset(state_bv):
+                        edges = [PopEdge(pop)] if pop else [UnconditionalEdge()]
                     else:
-                        raise Exception("Unreachable")
-
+                        states = set(state_bv.to_indices())
+                        if not states:
+                            continue
+                        edges = ([PopEdge(pop)] if pop else []) + [StateEdge(states)]
+                    if len(edges) == 1:
+                        e = edges[0]
+                        for t in tokens:
+                            node_opt.children.setdefault(t, {}).setdefault(dst, []).append(e)
+                    else:
+                        mid = next_id; nodes[mid] = NodeOpt(is_end=False); next_id += 1
+                        e1, e2 = edges
+                        for t in tokens:
+                            node_opt.children.setdefault(t, {}).setdefault(mid, []).append(e1)
+                            nodes[mid].children.setdefault(t, {}).setdefault(dst, []).append(e2)
         return NodeOptGraph(nodes=nodes, roots_map=self.roots_map.copy())
 
     def _from_nodeopt(self, graph: NodeOptGraph) -> None:
