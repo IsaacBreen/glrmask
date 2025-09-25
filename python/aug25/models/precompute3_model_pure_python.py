@@ -794,8 +794,6 @@ class Model(GraphProvider):
         get_mask acceptance; then compact the graph. Per-token analysis, deepest-first decisions,
         and a single-sweep application.
         """
-        print("Unconditionalizing guaranteed transitions...", end='', flush=True)
-
         # -----------------------------
         # Helpers: NodeOpt construction
         # -----------------------------
@@ -889,7 +887,7 @@ class Model(GraphProvider):
             return
 
         # Convert arena to NodeOpt, exploding per-token edges and splitting pop/state combinations
-        for src_id, ndata in arena.items():
+        for src_id, ndata in tqdm(arena.items(), desc="[Opt] Arena -> NodeOpt"):
             src = int(src_id)
             ensure_node(src)
             children = (ndata.get("children") or [])
@@ -1042,7 +1040,7 @@ class Model(GraphProvider):
         # ---------------------------------------------
         # Unconditionalization: per token, deepest-first
         # ---------------------------------------------
-        for t in sorted(all_tokens):
+        for t in tqdm(sorted(all_tokens), desc="[Opt] Unconditionalize"):
             alive0_t = compute_alive0_for_token(int(t))
             depths_t = compute_depths_for_token(int(t))
 
@@ -1101,13 +1099,13 @@ class Model(GraphProvider):
                     for d in dests.keys():
                         mp.setdefault(int(d), set()).add(int(p_id))
             return parents
-
+            
         # Merge pop chains: src --Pop(a)--> v --Pop(b)--> w
         def merge_pop_chains_once() -> bool:
             changed = False
             parents = build_parents()
             # Iterate over tokens to respect per-token condition "v has no other role for t"
-            for t in tqdm(sorted(all_tokens), desc="Merging pop chains"):
+            for t in sorted(all_tokens):
                 for src in list(nodes.keys()):
                     edges = nodes[src].children.get(int(t), {})
                     # Iterate over a snapshot since we may mutate
@@ -1140,7 +1138,7 @@ class Model(GraphProvider):
         def remove_passthroughs_once() -> bool:
             changed = False
             parents = build_parents()
-            for B in tqdm(sorted(nodes.keys()), desc="Removing passthroughs"):
+            for B in list(nodes.keys()):
                 if B in roots_set:
                     continue
                 nB = nodes[B]
@@ -1184,7 +1182,7 @@ class Model(GraphProvider):
             return changed
 
         # Iterate compaction steps to a fixpoint (bounded passes)
-        for _ in range(5):
+        for _ in tqdm(range(5), desc="[Opt] Compaction"):
             changed1 = merge_pop_chains_once()
             changed2 = remove_passthroughs_once()
             if not (changed1 or changed2):
@@ -1296,7 +1294,7 @@ class Model(GraphProvider):
             return packed_children
 
         new_arena: Dict[int, ArenaNode] = {}
-        for nid, nopt in nodes.items():
+        for nid, nopt in tqdm(nodes.items(), desc="[Opt] NodeOpt -> Arena"):
             children = pack_node_to_arena_children(int(nid))
             # Recompute llm_bv_union
             llm_union: LLMTokenSet = PyRangeSet.empty()
@@ -1350,9 +1348,6 @@ class Model(GraphProvider):
         self.max_depth = compute_max_depth_arena(self.arena)
         # Keep roots_map unchanged (we avoided bypassing roots during compaction)
         # self.roots_map = self.roots_map
-
-        print(" done.")
-
     def _convert_to_bitset_range_set(self) -> None:
         """
         Converts all PyRangeSet instances (which are py_range_set.PyRangeSet during
