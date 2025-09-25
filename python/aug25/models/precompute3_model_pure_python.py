@@ -61,7 +61,7 @@ class NodeOpt:
     """
     Working optimization graph for a single-token analysis pass.
     children:
-        token_id -> { dest_node_id -> Edge }
+        token_id -> { dest_node_id -> List[(pop, Edge)] }
       Edge is exactly one of:
         - PopEdge(n)
         - StateEdge(states)
@@ -69,7 +69,7 @@ class NodeOpt:
     is_end:
         True if this node corresponds to an arena node with clean_end=True.
     """
-    children: Dict[LLMToken, Dict[NodeID, Edge]] = field(default_factory=dict)
+    children: Dict[LLMToken, Dict[NodeID, List[Tuple[int, Edge]]]] = field(default_factory=dict)
     is_end: bool = False
 
 @dataclass
@@ -1081,10 +1081,171 @@ class Model(GraphProvider):
     # Arena <-> NodeOpt conversions
     # ==============================
     def _to_nodeopt(self) -> NodeOptGraph:
-        ...
+        """
+        Convert the compact arena representation into a NodeOptGraph.
+        Semantics:
+        - For each node, explode ((pop, llm_bv), dests) into per-token edges.
+        - For each token, collect edges as: token -> dest -> list[(pop, Edge)].
+          Edge is either UnconditionalEdge() or StateEdge(states).
+        - Deduplicate identical (pop, gating) entries per token/dest.
+        """
+        nodes: Dict[NodeID, NodeOpt] = {}
+
+        for nid_key, a_node in self.arena.items():
+            nid = int(nid_key)
+            is_end = bool((a_node.get("value") or {}).get("clean_end", False))
+            opt = NodeOpt(is_end=is_end)
+
+            # token -> dest -> list[(pop, Edge)]
+            token_children: Dict[int, Dict[int, List[Tuple[int, Edge]]]] = {}
+            # For dedup: token -> dest -> set of canonical keys
+            dedup_seen: Dict[int, Dict[int, Set[Tuple]]] = {}
+
+            for (pop, llm_bv), dests in a_node.get("children") or []:
+                p = int(pop)
+                tokens = [int(t) for t in llm_bv.to_indices()]
+
+                for dest_id_raw, state_bv in dests:
+                    dest_id = int(dest_id_raw)
+                    if state_bv.is_empty():
+                        edge_obj: Edge = UnconditionalEdge()
+                        key_tag = ('U',)
+                    else:
+                        states: Set[int] = set()
+                        for a, b in state_bv.to_ranges():
+                            aa = int(a); bb = int(b)
+                            for s in range(aa, bb + 1):
+                                states.add(s)
+                        edge_obj = StateEdge(states=states)
+                        key_tag = ('S', tuple(sorted(states)))
+
+                    for tok in tokens:
+                        dest_map = token_children.setdefault(tok, {})
+                        lst = dest_map.setdefault(dest_id, [])
+                        seen_set = dedup_seen.setdefault(tok, {}).setdefault(dest_id, set())
+                        dedup_key = (p, key_tag)
+                        if dedup_key in seen_set:
+                            continue
+                        lst.append((p, edge_obj))
+                        seen_set.add(dedup_key)
+
+            opt.children = token_children
+            nodes[nid] = opt
+
+        return NodeOptGraph(nodes=nodes, roots_map=dict(self.roots_map))
 
     def _from_nodeopt(self, graph: NodeOptGraph) -> None:
-        ...
+        """
+        Convert a NodeOptGraph back into an arena.
+        Strategy:
+        - For each node:
+          * Build per-token, per-pop canonical lists of (dest_id, gating) entries.
+          * Group tokens by identical signature: (pop, sorted canonical entries).
+          * Emit one arena edge ((pop, llm_bv), dests) per signature, where llm_bv
+            includes all tokens with that signature.
+        - Preserve 'clean_end'.
+        - Recompute max_depth from the rebuilt arena.
+        """
+        new_arena: Dict[NodeID, ArenaNode] = {}
+
+        for nid_key, opt in graph.nodes.items():
+            nid = int(nid_key)
+
+            # token -> pop -> List[canonical_entry]
+            # canonical_entry := (dest_id, tag, states_tuple)
+            token_pop_entries: Dict[int, Dict[int, List[Tuple[int, str, Tuple[int, ...]]]]] = {}
+            # dedup tracker to avoid duplicate entries per token/pop
+            dedup_seen: Dict[int, Dict[int, Set[Tuple[int, str, Tuple[int, ...]]]]] = {}
+
+            for tok_key, dest_map in (opt.children or {}).items():
+                tok = int(tok_key)
+                for dest_id_key, edges_list in dest_map.items():
+                    dest_id = int(dest_id_key)
+                    for pop_val, edge in edges_list:
+                        p = int(pop_val)
+                        # Determine gating canonical representation
+                        if isinstance(edge, UnconditionalEdge):
+                            tag = 'U'
+                            states_tuple: Tuple[int, ...] = ()
+                        elif isinstance(edge, StateEdge):
+                            # Ensure deterministic ordering
+                            states_tuple = tuple(sorted(int(s) for s in edge.states))
+                            tag = 'S'
+                        elif isinstance(edge, PopEdge):
+                            # PopEdge present inside Edge union; treat as unconditional gating.
+                            tag = 'U'
+                            states_tuple = ()
+                        else:
+                            # Fallback: treat as unconditional
+                            tag = 'U'
+                            states_tuple = ()
+
+                        entry = (dest_id, tag, states_tuple)
+                        lst = token_pop_entries.setdefault(tok, {}).setdefault(p, [])
+                        seen = dedup_seen.setdefault(tok, {}).setdefault(p, set())
+                        if entry not in seen:
+                            lst.append(entry)
+                            seen.add(entry)
+
+            # Group tokens by identical (pop, entries) signature
+            groups: Dict[Tuple[int, Tuple[Tuple[int, str, Tuple[int, ...]], ...]], Set[int]] = collections.defaultdict(set)
+            for tok, pop_map in token_pop_entries.items():
+                for p, entries in pop_map.items():
+                    # Canonical sort to build deterministic signature; keep duplicates if any
+                    entries_sorted = sorted(entries, key=lambda e: (int(e[0]), e[1], tuple(e[2])))
+                    sig = (int(p), tuple(entries_sorted))
+                    groups[sig].add(int(tok))
+
+            # Rebuild arena node children
+            children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+            llm_union: LLMTokenSet = PyRangeSet.empty()
+
+            for (p, entries_tuple), tokens_set in groups.items():
+                if not tokens_set:
+                    continue
+
+                llm_bv = PyRangeSet.from_indices(sorted(tokens_set))
+                llm_union = llm_union.union(llm_bv)
+
+                dests: List[Tuple[int, StateIDSet]] = []
+                for dest_id, tag, states_tuple in entries_tuple:
+                    if tag == 'U':
+                        state_bv = PyRangeSet.empty()
+                    else:
+                        state_bv = PyRangeSet.from_indices(list(states_tuple))
+                    dests.append((int(dest_id), state_bv))
+
+                children.append(((int(p), llm_bv), dests))
+
+            # Deterministic sort of children for stable output
+            def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+                try:
+                    return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+                except Exception:
+                    return ()
+
+            children.sort(
+                key=lambda item: (
+                    int(item[0][0]),
+                    _ranges_key(item[0][1]),
+                    tuple(sorted(int(d[0]) for d in item[1])),
+                )
+            )
+
+            node_obj: ArenaNode = {
+                "children": children,
+                "llm_bv_union": llm_union,
+            }
+            if opt.is_end:
+                node_obj["value"] = {"clean_end": True}
+
+            new_arena[nid] = node_obj
+
+        self.arena = new_arena
+        # Preserve/propagate roots_map from the NodeOptGraph
+        self.roots_map = dict(graph.roots_map)
+        # Recompute max depth for the updated arena
+        self.max_depth = self._recompute_max_depth_from_arena()
 
     def _recompute_max_depth_from_arena(self) -> Dict[NodeID, int]:
         """
