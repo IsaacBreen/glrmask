@@ -1107,7 +1107,8 @@ class Model(GraphProvider):
 
                     edge_list: List[Edge] = []
 
-                    is_unconditional = self.all_internal_llm_tokens_bitset.is_subset(state_bv)
+                    all_states_bv = PyRangeSet.from_indices(self.parser_table.table.keys())
+                    is_unconditional = all_states_bv.is_subset(state_bv)
 
                     if is_unconditional:
                         edge_list.append(PopEdge(pop) if pop > 0 else UnconditionalEdge())
@@ -1141,10 +1142,7 @@ class Model(GraphProvider):
         nodes = graph.nodes
 
         # Build a "universal" parser state set for unconditional edges.
-        all_parser_states = list(self.parser_table.table.keys())
-        all_states_bv: StateIDSet = (
-            PyRangeSet.from_indices(all_parser_states) if all_parser_states else PyRangeSet.empty()
-        )
+        all_states_bv = PyRangeSet.from_indices(self.parser_table.table.keys())
 
         new_arena: Dict[NodeID, ArenaNode] = {}
 
