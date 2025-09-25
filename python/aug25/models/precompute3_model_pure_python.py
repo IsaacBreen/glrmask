@@ -1246,27 +1246,28 @@ class Model(GraphProvider):
                         n_pop = int(e1.n)
                         # Look for second-step edges under the same token
                         second_map = per_node_token_children.get(dest1, {}).get(tok, {})
-                        if second_map:
-                            emitted_any = False
+
+                        # We can fold if dest1 is a helper that only leads to StateEdge or UnconditionalEdge.
+                        # If any outbound edge is not one of these, we can't fold and must preserve dest1.
+                        can_fold = True
+                        if not second_map:
+                            can_fold = False
+                        else:
+                            for e2 in second_map.values():
+                                if not isinstance(e2, (UnconditionalEdge, StateEdge)):
+                                    can_fold = False
+                                    break
+
+                        if can_fold:
+                            # Fold all second-step edges
                             for dest2, e2 in second_map.items():
                                 dest2 = int(dest2)
                                 if isinstance(e2, UnconditionalEdge):
                                     pop_to_dests[n_pop].append((dest2, None))
-                                    emitted_any = True
                                 elif isinstance(e2, StateEdge):
                                     pop_to_dests[n_pop].append((dest2, states_to_spec(set(e2.states))))
-                                    emitted_any = True
-                                else:
-                                    # Pop followed by Pop or other (unlikely from initial conversion).
-                                    # Keep helper structure by emitting pop-only to dest1.
-                                    # Note: This case should not occur in the simple conversion cycle,
-                                    # but we keep it for robustness.
-                                    pass
-                            # If no second-step edge, emit pop-only to dest1
-                            if not emitted_any:
-                                pop_to_dests[n_pop].append((dest1, None))
                         else:
-                            # No second-step edges under this token, emit pop-only
+                            # Cannot fold, so emit pop-only to the helper node dest1
                             pop_to_dests[n_pop].append((dest1, None))
                     else:
                         # Unknown edge type (shouldn't happen)
