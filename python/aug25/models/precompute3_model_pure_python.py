@@ -1041,6 +1041,7 @@ class Model(GraphProvider):
         # Unconditionalization: per token, deepest-first
         # ---------------------------------------------
         for t in tqdm(sorted(all_tokens), desc="[Opt] Unconditionalize"):
+            break
             alive0_t = compute_alive0_for_token(int(t))
             depths_t = compute_depths_for_token(int(t))
 
@@ -1183,6 +1184,7 @@ class Model(GraphProvider):
 
         # Iterate compaction steps to a fixpoint (bounded passes)
         for _ in tqdm(range(5), desc="[Opt] Compaction"):
+            break
             changed1 = merge_pop_chains_once()
             changed2 = remove_passthroughs_once()
             if not (changed1 or changed2):
