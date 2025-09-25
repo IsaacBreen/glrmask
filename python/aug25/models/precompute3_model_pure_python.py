@@ -1207,7 +1207,8 @@ class Model(GraphProvider):
 
             # Build children list for this node
             children_list: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-            llm_union: LLMTokenSet = PyRangeSet.empty()
+            # llm_union: LLMTokenSet = PyRangeSet.empty()
+            llm_union: LLMTokenSet = PyRangeSet.from_ranges([(0, self.tokenizer_max_llm_token_id + 1)])
 
             for (pop_val, dest_val, mask_key), tok_set in groups.items():
                 if not tok_set:
