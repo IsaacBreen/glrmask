@@ -13,7 +13,7 @@ from tqdm import tqdm
 from ..common_interface import GraphProvider
 from ..range_set.range_set_abc import RangeSet as RangeSetABC
 from ..range_set.bitset_range_set import BitsetRangeSet
-from ..range_set.py_range_set import RangeSet
+from ..range_set.py_range_set import PyRangeSet
 import _sep1 as ffi
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
@@ -21,7 +21,7 @@ from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 
 NodeID = int
 
-# Type aliases for different uses of RangeSet to improve clarity.
+# Type aliases for different uses of PyRangeSet to improve clarity.
 LLMTokenSet = RangeSetABC
 StateIDSet = RangeSetABC
 TerminalIdSet = RangeSetABC
@@ -190,21 +190,21 @@ class Model(GraphProvider):
             children = node.get("children") or []
             if not children:
                 node["children"] = []
-                node["llm_bv_union"] = RangeSet.empty()
+                node["llm_bv_union"] = PyRangeSet.empty()
                 continue
 
             new_children = []
-            llm_bv_union: LLMTokenSet = RangeSet.empty()
+            llm_bv_union: LLMTokenSet = PyRangeSet.empty()
             for edge_key, dest_map in children:
                 pop, llm_bv_json = edge_key
                 llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
-                # Convert to RangeSet for ffi-free operations in commit/get_mask
-                llm_bv: LLMTokenSet = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
+                # Convert to PyRangeSet for ffi-free operations in commit/get_mask
+                llm_bv: LLMTokenSet = PyRangeSet.from_ranges(llm_bv_bitset.to_ranges())
                 llm_bv_union = llm_bv_union.union(llm_bv)
                 new_dest_map = []
                 for dest_idx, state_bv_json in dest_map:
                     state_bv_bitset = bs_from_json(dumps(state_bv_json))
-                    state_bv: StateIDSet = RangeSet.from_ranges(state_bv_bitset.to_ranges())
+                    state_bv: StateIDSet = PyRangeSet.from_ranges(state_bv_bitset.to_ranges())
                     new_dest_map.append((int(dest_idx), state_bv))
                 new_children.append(((int(pop), llm_bv), new_dest_map))
             node["children"] = new_children
@@ -270,29 +270,29 @@ class Model(GraphProvider):
             all_terminals.update(row.actions.keys())
         if ignore_terminal_id is not None:
             all_terminals.add(ignore_terminal_id)
-        all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
+        all_terminals_bitset = PyRangeSet.from_indices(list(all_terminals))
 
-        initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
+        initial_acc = PyAcc(terminals_union={}, llm_mask=PyRangeSet.empty())
         initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
         state = {tokenizer_initial_state: initial_gss}
 
         id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-        # Convert possible_matches_cache to RangeSet
+        # Convert possible_matches_cache to PyRangeSet
         pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
         pmc_rs: Dict[int, Dict[int, LLMTokenSet]] = {}
         for tsid, inner in pmc_ffi.items():
             mapped: Dict[int, LLMTokenSet] = {}
             for term_id, bit in inner.items():
-                mapped[int(term_id)] = RangeSet.from_ranges(bit.to_ranges())
+                mapped[int(term_id)] = PyRangeSet.from_ranges(bit.to_ranges())
             pmc_rs[int(tsid)] = mapped
         possible_matches_cache = pmc_rs
         internal_to_original_map_raw = constraint.internal_to_original_map()
         internal_to_original_map = {
             k: {v} for k, v in internal_to_original_map_raw.items()
         }
-        # Convert universe LLM tokens bitset to RangeSet
+        # Convert universe LLM tokens bitset to PyRangeSet
         all_internal = constraint.all_internal_llm_tokens_bitset()
-        all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
+        all_internal_llm_tokens_bitset = PyRangeSet.from_ranges(all_internal.to_ranges())
 
         model = Model(
             arena=arena,
@@ -700,7 +700,7 @@ class Model(GraphProvider):
                     if state_bv.is_empty():
                         edge: Edge = UnconditionalEdge()
                     else:
-                        # Convert RangeSet -> concrete set of ints (state IDs)
+                        # Convert PyRangeSet -> concrete set of ints (state IDs)
                         states: Set[int] = set()
                         for start, end in state_bv.to_ranges():
                             for sid in range(start, end + 1):
@@ -845,14 +845,14 @@ class Model(GraphProvider):
                         edge = dest_edge_map[dest_id]
                         if isinstance(edge, UnconditionalEdge):
                             sig = ('U', ())
-                            state_bv = RangeSet.empty()
+                            state_bv = PyRangeSet.empty()
                         elif isinstance(edge, StateEdge):
-                            # Convert to a compact RangeSet for storage and signature
+                            # Convert to a compact PyRangeSet for storage and signature
                             # (We assume no empty-state StateEdge is present; if it were, it would be unreachable.)
                             if not edge.states:
                                 # Skip unreachable edges; they have no effect.
                                 continue
-                            state_rs = RangeSet.from_indices(sorted(int(s) for s in edge.states))
+                            state_rs = PyRangeSet.from_indices(sorted(int(s) for s in edge.states))
                             sig = ('S', tuple(state_rs.to_ranges()))
                             state_bv = state_rs
                         else:
@@ -870,11 +870,11 @@ class Model(GraphProvider):
 
             # Emit children from groups
             children_list: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-            llm_union: LLMTokenSet = RangeSet.empty()
+            llm_union: LLMTokenSet = PyRangeSet.empty()
 
             for (pop, _sig), acc in groups.items():
                 tokens_sorted = sorted(acc['tokens'])
-                llm_bv = RangeSet.from_indices(tokens_sorted)
+                llm_bv = PyRangeSet.from_indices(tokens_sorted)
                 llm_union = llm_union.union(llm_bv)
                 dests = acc['dests']
                 children_list.append(((int(pop), llm_bv), dests))
@@ -918,7 +918,7 @@ class Model(GraphProvider):
         for node in self.arena.values():
             for _, llm_bv in (c[0] for c in node.get("children", [])):
                 count += len(llm_bv.to_ranges())
-            union_bv = node.get("llm_bv_union", RangeSet.empty())
+            union_bv = node.get("llm_bv_union", PyRangeSet.empty())
             count += len(union_bv.to_ranges())
         if self.possible_matches_cache:
             for inner in self.possible_matches_cache.values():
@@ -929,11 +929,11 @@ class Model(GraphProvider):
     def _merge_equivalent_llm_tokens(self) -> None:
         """
         Merge internal LLM tokens that are indistinguishable across the entire model:
-        two tokens are "equivalent" if they occur together in every RangeSet occurrence
+        two tokens are "equivalent" if they occur together in every PyRangeSet occurrence
         the model uses (arena edge llm_bv, node llm_bv_union, and possible_matches_cache).
 
         Implementation:
-        - Build a family of all RangeSet occurrences that reference internal tokens.
+        - Build a family of all PyRangeSet occurrences that reference internal tokens.
         - For each internal token, build a signature: the ordered list of set indices in
           which it appears.
         - Group tokens by identical signatures; each group is merged into its smallest-id
@@ -958,7 +958,7 @@ class Model(GraphProvider):
             for (pop, llm_bv), _dests in children:
                 if not llm_bv.is_empty():
                     family.append(llm_bv)
-            union_bv: LLMTokenSet = node.get("llm_bv_union") or RangeSet.empty()
+            union_bv: LLMTokenSet = node.get("llm_bv_union") or PyRangeSet.empty()
             if not union_bv.is_empty():
                 family.append(union_bv)
         # possible_matches_cache sets
@@ -1026,10 +1026,10 @@ class Model(GraphProvider):
 
     def _convert_to_bitset_range_set(self) -> None:
         """
-        Converts all RangeSet instances (which are py_range_set.RangeSet during
+        Converts all PyRangeSet instances (which are py_range_set.PyRangeSet during
         optimization) to bitset_range_set.BitsetRangeSet for runtime efficiency.
         """
-        print("Converting RangeSet implementations to BitsetRangeSet...", end='', flush=True)
+        print("Converting PyRangeSet implementations to BitsetRangeSet...", end='', flush=True)
 
         def convert(rs: RangeSetABC) -> BitsetRangeSet:
             if isinstance(rs, BitsetRangeSet):
@@ -1045,7 +1045,7 @@ class Model(GraphProvider):
                     new_dests.append((dest_idx, convert(state_bv)))
                 new_children.append(((pop, convert(llm_bv)), new_dests))
             node["children"] = new_children
-            node["llm_bv_union"] = convert(node.get("llm_bv_union", RangeSet.empty()))
+            node["llm_bv_union"] = convert(node.get("llm_bv_union", PyRangeSet.empty()))
 
         # 2. Convert possible_matches_cache
         if self.possible_matches_cache:
@@ -1070,7 +1070,7 @@ class Model(GraphProvider):
     def _reorder_llm_tokens_for_range_minimization(self) -> None:
         """
         Permute internal LLM token IDs to reduce the number of ranges present in
-        all RangeSet occurrences across the model (arena edges, unions, and possible_matches_cache).
+        all PyRangeSet occurrences across the model (arena edges, unions, and possible_matches_cache).
         External token IDs remain unchanged; we only adjust internal indices used in RangeSets.
 
         Heuristic:
@@ -1111,7 +1111,7 @@ class Model(GraphProvider):
                     if len(idxs) > 1:
                         groups_counter[tuple(idxs)] += edge_weight
             # Node union (optional)
-            union_bv: LLMTokenSet = node.get("llm_bv_union") or RangeSet.empty()
+            union_bv: LLMTokenSet = node.get("llm_bv_union") or PyRangeSet.empty()
             if not union_bv.is_empty():
                 idxs = [int(x) for x in union_bv.to_indices() if int(x) in all_tokens]
                 if len(idxs) > 1:
@@ -1312,8 +1312,8 @@ class Model(GraphProvider):
                 return s
             new_indices = [old_to_new_map[i] for i in s.to_indices() if i in old_to_new_map]
             if not new_indices:
-                return RangeSet.empty()
-            return RangeSet.from_indices(sorted(new_indices))
+                return PyRangeSet.empty()
+            return PyRangeSet.from_indices(sorted(new_indices))
 
         # Remap possible_matches_cache
         if self.possible_matches_cache:
@@ -1338,7 +1338,7 @@ class Model(GraphProvider):
             groups: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = collections.defaultdict(set)
             for (pop, llm_bv), dests in children:
                 # Sort dests for a canonical signature. Each dest is (dest_id, state_bv).
-                # state_bv is a RangeSet, so we use its ranges for the signature.
+                # state_bv is a PyRangeSet, so we use its ranges for the signature.
                 dests_sig = tuple(sorted(
                     (dest_id, tuple(state_bv.to_ranges())) for dest_id, state_bv in dests
                 ))
@@ -1347,17 +1347,17 @@ class Model(GraphProvider):
 
             # Rebuild children with remapped tokens
             new_children = []
-            llm_union = RangeSet.empty()
+            llm_union = PyRangeSet.empty()
             for (pop, dests_sig), old_tokens in groups.items():
                 new_tokens = {old_to_new_map[t] for t in old_tokens if t in old_to_new_map}
                 if not new_tokens:
                     continue
 
-                new_llm_bv = RangeSet.from_indices(sorted(list(new_tokens)))
+                new_llm_bv = PyRangeSet.from_indices(sorted(list(new_tokens)))
                 llm_union = llm_union.union(new_llm_bv)
                 # Convert dests_sig back to list of (int, StateIDSet)
                 dests_list = [
-                    (dest_id, RangeSet.from_ranges(list(ranges)))
+                    (dest_id, PyRangeSet.from_ranges(list(ranges)))
                     for dest_id, ranges in dests_sig
                 ]
                 new_children.append(((pop, new_llm_bv), dests_list))
@@ -1409,8 +1409,8 @@ class Model(GraphProvider):
                 ii = int(i)
                 mapped.add(old_to_new_map.get(ii, ii))
             if not mapped:
-                return RangeSet.empty()
-            return RangeSet.from_indices(sorted(mapped))
+                return PyRangeSet.empty()
+            return PyRangeSet.from_indices(sorted(mapped))
 
         # Remap possible_matches_cache
         if self.possible_matches_cache:
@@ -1427,7 +1427,7 @@ class Model(GraphProvider):
             children = node.get("children", [])
             if not children:
                 # Still ensure union is remapped (it may be non-empty)
-                union_bv = node.get("llm_bv_union") or RangeSet.empty()
+                union_bv = node.get("llm_bv_union") or PyRangeSet.empty()
                 node["llm_bv_union"] = remap_llm_token_set(union_bv)
                 continue
 
@@ -1456,17 +1456,17 @@ class Model(GraphProvider):
 
             # Rebuild children and union
             new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-            llm_union: LLMTokenSet = RangeSet.empty()
+            llm_union: LLMTokenSet = PyRangeSet.empty()
 
             for (pop, dests_sig), tokens_set in groups.items():
                 if not tokens_set:
                     continue
-                llm_bv_new = RangeSet.from_indices(sorted(tokens_set))
+                llm_bv_new = PyRangeSet.from_indices(sorted(tokens_set))
                 llm_union = llm_union.union(llm_bv_new)
 
                 dests_list: List[Tuple[int, StateIDSet]] = []
                 for dest_id, ranges in dests_sig:
-                    dests_list.append((int(dest_id), RangeSet.from_ranges(list(ranges))))
+                    dests_list.append((int(dest_id), PyRangeSet.from_ranges(list(ranges))))
                 new_children.append(((int(pop), llm_bv_new), dests_list))
 
             # Deterministic sort
