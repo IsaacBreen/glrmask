@@ -140,35 +140,49 @@ class Model(GraphProvider):
     """
     Precomputed trie model (third-generation), simplified and concise.
     """
-    roots_map_raw: List[Tuple[int, NodeID]]
-    arena: Dict[NodeID, ArenaNode]  # This is Dict[int, ArenaNode] after __post_init__
+    # Core data structures
+    arena: Dict[NodeID, ArenaNode]
+    roots_map: Dict[int, NodeID]
+    max_depth: Dict[NodeID, int]
 
-    roots_map: Dict[int, NodeID] = field(init=False)
-    id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
-    max_depth: Dict[NodeID, int] = field(init=False, default_factory=dict)
-    possible_matches_cache: Optional[Dict[int, Dict[int, LLMTokenSet]]] = field(init=False, default=None)
-    tokenizer: Optional[ffi.Regex] = field(init=False, default=None)
-    glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
-    ignore_terminal_id: Optional[int] = field(init=False, default=None)
+    # Parser-related fields
     parser_table: Optional[ParserTable] = field(init=False, default=None)
+    glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
     reverse_state_map: Dict[int, Set[int]] = field(init=False, default_factory=dict)
-    state: Dict[int, GSS] = field(init=False, default_factory=dict)
-    internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
-    all_internal_llm_tokens_bitset: Optional[LLMTokenSet] = field(init=False, default=None)
+
+    # Tokenizer-related fields
+    tokenizer: Optional[ffi.Regex] = field(init=False, default=None)
     tokenizer_initial_state: Optional[int] = field(init=False, default=None)
     tokenizer_max_state: Optional[int] = field(init=False, default=None)
+    possible_matches_cache: Optional[Dict[int, Dict[int, LLMTokenSet]]] = field(init=False, default=None)
+
+    # Token/Terminal mapping fields
+    id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
+    internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
+    all_internal_llm_tokens_bitset: Optional[LLMTokenSet] = field(init=False, default=None)
     all_terminals_bitset: Optional[TerminalIdSet] = field(init=False, default=None)
+    ignore_terminal_id: Optional[int] = field(init=False, default=None)
 
-    def __post_init__(self):
-        self.roots_map = {int(s): int(r) for s, r in self.roots_map_raw}
+    # State
+    state: Dict[int, GSS] = field(init=False, default_factory=dict)
 
+    @staticmethod
+    def from_json_string(s: str) -> 'Model':
+        data = json.loads(s)
+        roots_map_raw = data["precomputed3"]
+        arena_json = data["trie3_god"]
+        arena_values = arena_json.get("values", [])
+        arena = {int(k): v for k, v in arena_values}
+
+        roots_map = {int(s): int(r) for s, r in roots_map_raw}
+        max_depth: Dict[NodeID, int] = {}
         dumps = json.dumps
         bs_from_json = ffi.Bitset.from_json_string
 
         # Normalize arena children bitsets and cache max_depth
-        for uid, node in self.arena.items():
+        for uid, node in arena.items():
             uid_int = int(uid)
-            self.max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
+            max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
 
             children = node.get("children") or []
             if not children:
@@ -193,14 +207,7 @@ class Model(GraphProvider):
             node["children"] = new_children
             node["llm_bv_union"] = llm_bv_union
 
-    @staticmethod
-    def from_json_string(s: str) -> 'Model':
-        data = json.loads(s)
-        roots_map = data["precomputed3"]
-        arena_json = data["trie3_god"]
-        arena_values = arena_json.get("values", [])
-        arena = {int(k): v for k, v in arena_values}
-        model = Model(roots_map, arena)
+        model = Model(arena=arena, roots_map=roots_map, max_depth=max_depth)
 
         # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
