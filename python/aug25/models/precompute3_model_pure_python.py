@@ -1128,51 +1128,7 @@ class Model(GraphProvider):
 
 
     def _from_nodeopt(self, graph: NodeOptGraph) -> None:
-        """
-        Converts an optimized NodeOptGraph back into the packed arena format by
-        grouping tokens with identical transition behavior into single arena edges.
-        """
-        new_arena: Dict[NodeID, ArenaNode] = {}
-        unconditional_bv: StateIDSet = PyRangeSet.from_indices(list(self.parser_table.table.keys()))
-
-        for node_id, node_opt in graph.nodes.items():
-            # Group tokens by their transition signature: (pop, canonical_dests_tuple)
-            sig_to_tokens: Dict[Tuple, List[LLMToken]] = collections.defaultdict(list)
-            for token, dests_map in node_opt.children.items():
-                # A token's fan-out has one pop value. Find it from any edge.
-                pop: int = next((e.n for el in dests_map.values() for e in el if isinstance(e, PopEdge)), 0)
-
-                # Create a canonical, hashable signature for the destinations.
-                dests_sig = tuple(sorted(
-                    (dest_id, tuple(
-                        (PyRangeSet.from_indices(list(s.states)) if (s := next((e for e in edges if isinstance(e, StateEdge)), None))
-                         else unconditional_bv).to_ranges()
-                    ))
-                    for dest_id, edges in dests_map.items()
-                ))
-                sig_to_tokens[(pop, dests_sig)].append(token)
-
-            # Build the ArenaNode's children from the grouped tokens.
-            new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = []
-            llm_union: LLMTokenSet = PyRangeSet.empty()
-            for (pop, dests_sig), tokens in sig_to_tokens.items():
-                llm_bv: LLMTokenSet = PyRangeSet.from_indices(sorted(tokens))
-                llm_union = llm_union.union(llm_bv)
-                dests: List[Tuple[NodeID, StateIDSet]] = [(dest_id, PyRangeSet.from_ranges(list(ranges))) for dest_id, ranges in dests_sig]
-                new_children.append(((pop, llm_bv), dests))
-
-            # Sort for deterministic output and create the new ArenaNode.
-            new_children.sort(key=lambda item: (
-                item[0][0],
-                tuple(item[0][1].to_ranges()),
-                tuple(sorted(d[0] for d in item[1]))
-            ))
-            new_arena[node_id] = ArenaNode(children=new_children, llm_bv_union=llm_union, clean_end=node_opt.is_end)
-
-        # Update the model state.
-        self.arena = new_arena
-        self.roots_map = graph.roots_map.copy()
-        self.max_depth = self._recompute_max_depth_from_arena()
+        ...
 
     def _recompute_max_depth_from_arena(self) -> Dict[NodeID, int]:
         """
