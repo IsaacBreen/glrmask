@@ -1263,30 +1263,15 @@ class Model(GraphProvider):
             # For each token, generate packed entries
             for tok, dest_map in (n.children or {}).items():
                 tok = int(tok)
-                # Build pop -> { dest -> Optional[Set[int]] }
-                # Optional[Set[int]]: None means unconditional (dominates any state sets).
-                pop_to_dests_map: Dict[int, Dict[int, Optional[Set[int]]]] = collections.defaultdict(dict)
-
-                def merge_dest(dmap: Dict[int, Optional[Set[int]]], dest: int, states_opt: Optional[Set[int]]) -> None:
-                    if dest in dmap:
-                        if dmap[dest] is None:
-                            # Already unconditional
-                            return
-                        if states_opt is None:
-                            # Unconditional dominates
-                            dmap[dest] = None
-                        else:
-                            # Union state sets
-                            dmap[dest].update(states_opt)
-                    else:
-                        dmap[dest] = None if states_opt is None else set(states_opt)
+                # Build pop->list[(dest, state_spec)]
+                pop_to_dests: Dict[int, List[Tuple[int, Optional[Tuple[int, ...]]]]] = collections.defaultdict(list)
 
                 for dest1, e1 in dest_map.items():
                     dest1 = int(dest1)
                     if isinstance(e1, UnconditionalEdge):
-                        merge_dest(pop_to_dests_map[0], dest1, None)
+                        pop_to_dests[0].append((dest1, None))
                     elif isinstance(e1, StateEdge):
-                        merge_dest(pop_to_dests_map[0], dest1, set(e1.states))
+                        pop_to_dests[0].append((dest1, states_to_spec(set(e1.states))))
                     elif isinstance(e1, PopEdge):
                         n_pop = int(e1.n)
                         # Look for second-step edges under the same token
@@ -1296,10 +1281,10 @@ class Model(GraphProvider):
                             for dest2, e2 in second_map.items():
                                 dest2 = int(dest2)
                                 if isinstance(e2, UnconditionalEdge):
-                                    merge_dest(pop_to_dests_map[n_pop], dest2, None)
+                                    pop_to_dests[n_pop].append((dest2, None))
                                     emitted_any = True
                                 elif isinstance(e2, StateEdge):
-                                    merge_dest(pop_to_dests_map[n_pop], dest2, set(e2.states))
+                                    pop_to_dests[n_pop].append((dest2, states_to_spec(set(e2.states))))
                                     emitted_any = True
                                 else:
                                     # Pop followed by Pop or other (unlikely from initial conversion).
@@ -1309,23 +1294,19 @@ class Model(GraphProvider):
                                     pass
                             # If no second-step edge, emit pop-only to dest1
                             if not emitted_any:
-                                merge_dest(pop_to_dests_map[n_pop], dest1, None)
+                                pop_to_dests[n_pop].append((dest1, None))
                         else:
                             # No second-step edges under this token, emit pop-only
-                            merge_dest(pop_to_dests_map[n_pop], dest1, None)
+                            pop_to_dests[n_pop].append((dest1, None))
                     else:
                         # Unknown edge type (shouldn't happen)
                         continue
 
                 # For each pop value, normalize and create a signature, then collect tokens
-                for pop_val, dests_map in pop_to_dests_map.items():
-                    # Convert dedup map to a deterministic, normalized list:
-                    # (dest, state_spec) with state_spec None (unconditional) or a sorted tuple of states.
-                    dests_list: List[Tuple[int, Optional[Tuple[int, ...]]]] = []
-                    for did, states_opt in dests_map.items():
-                        spec = None if states_opt is None else tuple(sorted(int(s) for s in states_opt))
-                        dests_list.append((int(did), spec))
-                    # Sort deterministically
+                for pop_val, dests_list in pop_to_dests.items():
+                    # Sort dests deterministically; multiple entries to the same dest are allowed,
+                    # but we will normalize by combining same (dest, state_spec) pairs later if needed.
+                    # Here we will keep duplicates as-is, assuming initial graph kept uniqueness well.
                     dests_list_sorted = sorted(dests_list, key=lambda x: (int(x[0]), (x[1] or ())))
                     # Build signature: (pop, ((dest, state_spec_tuple_or_None), ...))
                     signature = (int(pop_val), tuple((int(did), spec) for (did, spec) in dests_list_sorted))
