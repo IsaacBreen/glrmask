@@ -1081,10 +1081,206 @@ class Model(GraphProvider):
     # Arena <-> NodeOpt conversions
     # ==============================
     def _to_nodeopt(self) -> NodeOptGraph:
-        ...
+        """
+        Convert the current Arena into a NodeOptGraph.
+        Encoding rules:
+        - For unconditional edges (state_bv empty):
+          * pop > 0 -> PopEdge(pop)
+          * pop == 0 -> UnconditionalEdge()
+        - For state-masked edges (state_bv non-empty):
+          * Use StateEdge with allowed states as a Python set of ints.
+          * Encode pop with a negative sentinel: add -(pop + 1) into the set.
+            Absence of a negative sentinel implies pop == 0.
+        We do not attempt to create new merges; if a duplicate token+dest pair
+        somehow occurs, we keep the first instance.
+        """
+        nodes: Dict[NodeID, NodeOpt] = {}
+
+        for nid, node in self.arena.items():
+            nid_int = int(nid)
+            is_end = bool((node.get("value") or {}).get("clean_end", False))
+            children_map: Dict[int, Dict[int, Edge]] = collections.defaultdict(dict)
+
+            for (pop, llm_bv), dests in node.get("children") or []:
+                pop = int(pop)
+                tokens = list(llm_bv.to_indices())
+                for dest_id, state_bv in dests:
+                    dest_id = int(dest_id)
+                    if state_bv.is_empty():
+                        # Unconditional with respect to parser state
+                        edge_obj: Edge = PopEdge(pop) if pop > 0 else UnconditionalEdge()
+                    else:
+                        # State-masked; encode pop via negative sentinel
+                        states_set: Set[int] = set(int(s) for s in state_bv.to_indices())
+                        if pop > 0:
+                            states_set.add(-(pop + 1))
+                        edge_obj = StateEdge(states_set)
+
+                    for t in tokens:
+                        t_int = int(t)
+                        inner = children_map[t_int]
+                        if dest_id in inner:
+                            # Duplicate token+dest; avoid inventing merges. Keep the first.
+                            # If identical, nothing to do; otherwise, keep existing.
+                            prev = inner[dest_id]
+                            if prev == edge_obj:
+                                continue
+                            else:
+                                continue
+                        inner[dest_id] = edge_obj
+
+            nodes[nid_int] = NodeOpt(children=dict(children_map), is_end=is_end)
+
+        return NodeOptGraph(nodes=nodes, roots_map=dict(self.roots_map))
 
     def _from_nodeopt(self, graph: NodeOptGraph) -> None:
-        ...
+        """
+        Convert a NodeOptGraph back into the Arena representation.
+        Decoding rules (inverse of _to_nodeopt encoding):
+        - PopEdge(pop) -> ((pop, llm_bv), [(dest, empty_state_bv), ...])
+        - UnconditionalEdge() -> ((0, llm_bv), [(dest, empty_state_bv), ...])
+        - StateEdge(states):
+            * pop = -(neg + 1) if a negative sentinel is present; else pop = 0
+            * allowed_states = non-negative elements of 'states'
+            -> ((pop, llm_bv), [(dest, allowed_states_bv), ...])
+        Tokens that share identical (pop, dests signature) are grouped into a single llm_bv.
+        """
+        # Helper to decode a NodeOpt edge into (pop, allowed_states_set_or_None)
+        # None means unconditional with respect to state (empty state_bv in Arena).
+        def decode_edge(e: Edge) -> Tuple[int, Optional[Set[int]]]:
+            if isinstance(e, PopEdge):
+                return int(e.n), None
+            if isinstance(e, UnconditionalEdge):
+                return 0, None
+            if isinstance(e, StateEdge):
+                neg_sentinels = [x for x in e.states if x < 0]
+                pop = (-(neg_sentinels[0]) - 1) if neg_sentinels else 0
+                allowed = {int(x) for x in e.states if x >= 0}
+                # If the allowed set is empty, the edge is effectively unreachable.
+                if not allowed:
+                    return pop, set()
+                return pop, allowed
+            # Fallback (shouldn't happen)
+            return 0, None
+
+        new_arena: Dict[NodeID, ArenaNode] = {}
+
+        # If the provided graph is empty, keep the arena unchanged but refresh depths.
+        if not graph.nodes:
+            self.max_depth = self._recompute_max_depth_from_arena()
+            return
+
+        for nid, opt in graph.nodes.items():
+            nid_int = int(nid)
+            # For grouping: signature -> (pop, canonical_dests_sig) maps to set(tokens)
+            # signature key:
+            #   (pop,
+            #    ((dest_id, ((a,b), ...ranges...)), ...sorted by dest_id...))
+            sig_to_tokens: Dict[
+                Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]],
+                Set[int]
+            ] = collections.defaultdict(set)
+
+            # Also remember the canonical dests (with actual RangeSets) for each signature
+            sig_to_dests_rs: Dict[
+                Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]],
+                List[Tuple[int, StateIDSet]]
+            ] = {}
+
+            # Build per-token groups by pop and dest signatures
+            for token, dest_map in opt.children.items():
+                # pop -> list of (dest_id, state_ranges as tuples or empty for unconditional)
+                per_pop_dests: Dict[int, List[Tuple[int, Optional[List[Tuple[int, int]]]]]] = collections.defaultdict(list)
+                # Also keep the actual RangeSets so we can rebuild later
+                per_pop_dests_rs: Dict[int, List[Tuple[int, StateIDSet]]] = collections.defaultdict(list)
+
+                for dest_id, edge in dest_map.items():
+                    pop, allowed_states = decode_edge(edge)
+
+                    if allowed_states is None:
+                        # Unconditional
+                        per_pop_dests[pop].append((int(dest_id), None))
+                        per_pop_dests_rs[pop].append((int(dest_id), PyRangeSet.empty()))
+                    else:
+                        if not allowed_states:
+                            # Unreachable masked edge; skip
+                            continue
+                        rs = PyRangeSet.from_indices(sorted(allowed_states))
+                        per_pop_dests[pop].append((int(dest_id), list(rs.to_ranges())))
+                        per_pop_dests_rs[pop].append((int(dest_id), rs))
+
+                # Create signatures for this token and register it
+                for pop, dest_entries in per_pop_dests.items():
+                    # Canonicalize signature: sort by dest_id, ranges sorted already
+                    sig_dests_sorted: List[Tuple[int, Tuple[Tuple[int, int], ...]]] = []
+                    for did, ranges in dest_entries:
+                        if ranges is None:
+                            sig_dests_sorted.append((int(did), tuple()))
+                        else:
+                            sig_dests_sorted.append((int(did), tuple((int(a), int(b)) for (a, b) in ranges)))
+                    sig_dests_sorted.sort(key=lambda x: int(x[0]))
+
+                    sig_key = (int(pop), tuple(sig_dests_sorted))
+                    sig_to_tokens[sig_key].add(int(token))
+
+                    # Store canonical RS list once per signature
+                    if sig_key not in sig_to_dests_rs:
+                        # We must align per_pop_dests_rs entries with sig_dests_sorted order
+                        # Build map for quick lookup
+                        rs_map = {int(did): rs for did, rs in per_pop_dests_rs[pop]}
+                        dests_rs_ordered: List[Tuple[int, StateIDSet]] = []
+                        for did, _ranges in sig_dests_sorted:
+                            rs = rs_map.get(int(did), PyRangeSet.empty())
+                            dests_rs_ordered.append((int(did), rs))
+                        sig_to_dests_rs[sig_key] = dests_rs_ordered
+
+            # Rebuild children: group tokens with same signature into a single llm_bv
+            new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+            llm_union: LLMTokenSet = PyRangeSet.empty()
+
+            # Deterministic order over signatures: by pop, then dest ids, then ranges
+            def sig_sort_key(sig_key):
+                pop, dests_sig = sig_key
+                return (
+                    int(pop),
+                    tuple(int(did) for did, _r in dests_sig),
+                    tuple(r for _did, r in dests_sig),
+                )
+
+            for sig_key in sorted(sig_to_tokens.keys(), key=sig_sort_key):
+                pop, _sig_dests = sig_key
+                tokens = sorted(sig_to_tokens[sig_key])
+                llm_bv = PyRangeSet.from_indices(tokens)
+                llm_union = llm_union.union(llm_bv)
+                dests_list = sig_to_dests_rs[sig_key]
+                new_children.append(((int(pop), llm_bv), dests_list))
+
+            # Deterministic sort of children (similar to other helpers)
+            def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+                try:
+                    return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+                except Exception:
+                    return ()
+
+            new_children.sort(
+                key=lambda item: (
+                    int(item[0][0]),
+                    _ranges_key(item[0][1]),
+                    tuple(sorted(int(d[0]) for d in item[1])),
+                )
+            )
+
+            new_arena[nid_int] = {
+                "max_depth": 0,  # Will be recomputed
+                "children": new_children,
+                "llm_bv_union": llm_union,
+                "value": {"clean_end": bool(opt.is_end)},
+            }
+
+        # Install new arena and roots, and recompute max_depth
+        self.arena = new_arena
+        self.roots_map = dict(graph.roots_map or self.roots_map)
+        self.max_depth = self._recompute_max_depth_from_arena()
 
     def _recompute_max_depth_from_arena(self) -> Dict[NodeID, int]:
         """
