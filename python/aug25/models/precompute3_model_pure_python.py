@@ -922,7 +922,94 @@ class Model(GraphProvider):
         return count
 
     def _merge_equivalent_llm_tokens(self) -> None:
-        ...
+        """
+        Merge internal LLM tokens that are indistinguishable across the entire model:
+        two tokens are "equivalent" if they occur together in every RangeSet occurrence
+        the model uses (arena edge llm_bv, node llm_bv_union, and possible_matches_cache).
+
+        Implementation:
+        - Build a family of all RangeSet occurrences that reference internal tokens.
+        - For each internal token, build a signature: the ordered list of set indices in
+          which it appears.
+        - Group tokens by identical signatures; each group is merged into its smallest-id
+          representative.
+        - Apply a many-to-one remapping to Arena, possible_matches_cache, the internal
+          token universe, and internal_to_original_map.
+        """
+        print("Merging equivalent internal LLM tokens...", end='', flush=True)
+
+        # Universe of current internal tokens
+        universe_list = list(self.all_internal_llm_tokens_bitset.to_indices())
+        universe: Set[int] = set(int(t) for t in universe_list)
+        if len(universe) <= 1:
+            print(" done (not enough tokens to merge).")
+            return
+
+        # 1) Collect the family of RangeSets that define token co-occurrence
+        family: List[LLMTokenSet] = []
+        # Arena children sets and node unions
+        for node in self.arena.values():
+            children = node.get("children") or []
+            for (pop, llm_bv), _dests in children:
+                if not llm_bv.is_empty():
+                    family.append(llm_bv)
+            union_bv: LLMTokenSet = node.get("llm_bv_union") or LLMTokenSet.empty()
+            if not union_bv.is_empty():
+                family.append(union_bv)
+        # possible_matches_cache sets
+        if self.possible_matches_cache:
+            for _tsid, inner in self.possible_matches_cache.items():
+                for _term_id, llm_bv in inner.items():
+                    if not llm_bv.is_empty():
+                        family.append(llm_bv)
+        # Include the "universe" as one set so tokens that appear nowhere else
+        # still get grouped meaningfully.
+        if not self.all_internal_llm_tokens_bitset.is_empty():
+            family.append(self.all_internal_llm_tokens_bitset)
+
+        if not family:
+            print(" done (no RangeSets to analyze).")
+            return
+
+        # 2) Build per-token signatures: which sets (by index) contain the token
+        token_to_sets: Dict[int, List[int]] = {t: [] for t in universe}
+        for si, rs in enumerate(family):
+            for tok in rs.to_indices():
+                t = int(tok)
+                if t in token_to_sets:
+                    token_to_sets[t].append(si)
+
+        # 3) Group by signature
+        signature_groups: Dict[Tuple[int, ...], List[int]] = collections.defaultdict(list)
+        for t in sorted(universe):
+            sig = tuple(token_to_sets.get(t, []))
+            signature_groups[sig].append(t)
+
+        # 4) Build many-to-one mapping old->representative
+        old_to_new_map: Dict[int, int] = {}
+        merges = 0
+        for _sig, toks in signature_groups.items():
+            if len(toks) <= 1:
+                continue
+            rep = int(min(toks))
+            for tok in toks:
+                old_to_new_map[int(tok)] = rep
+            merges += (len(toks) - 1)
+
+        if merges == 0:
+            print(" done (no equivalent tokens found).")
+            return
+
+        # Fill identity for tokens not being merged (keeps remapper robust)
+        for t in universe:
+            if t not in old_to_new_map:
+                old_to_new_map[t] = t
+
+        # 5) Apply mapping
+        before_cnt = len(universe)
+        self._remap_llm_tokens_many_to_one(old_to_new_map)
+        after_cnt = len(list(self.all_internal_llm_tokens_bitset.to_indices()))
+        print(f" done. Tokens reduced from {before_cnt} to {after_cnt} ({merges} merged).", flush=True)
 
     def _unconditionalize_guaranteed_transitions(
         self,
@@ -1251,5 +1338,117 @@ class Model(GraphProvider):
             for old_tok, orig_set in self.internal_to_original_map.items():
                 if old_tok in old_to_new_map:
                     new_internal_to_original_map[old_to_new_map[old_tok]] = set(orig_set)
+            self.internal_to_original_map = new_internal_to_original_map
+
+
+    def _remap_llm_tokens_many_to_one(self, old_to_new_map: Dict[int, int]) -> None:
+        """
+        Apply a many-to-one mapping old_token_id -> new_token_id to all model RangeSets.
+        This merges internal tokens that are equivalent, and updates:
+        - internal_to_original_map (merge original IDs into representatives)
+        - possible_matches_cache
+        - all_internal_llm_tokens_bitset
+        - arena children and llm_bv_union (by regrouping tokens per identical transition signature)
+        """
+        if not old_to_new_map:
+            return
+
+        def remap_llm_token_set(s: LLMTokenSet) -> LLMTokenSet:
+            if s.is_empty():
+                return s
+            mapped: Set[int] = set()
+            for i in s.to_indices():
+                ii = int(i)
+                mapped.add(old_to_new_map.get(ii, ii))
+            if not mapped:
+                return LLMTokenSet.empty()
+            return LLMTokenSet.from_indices(sorted(mapped))
+
+        # Remap possible_matches_cache
+        if self.possible_matches_cache:
+            new_pmc: Dict[int, Dict[int, LLMTokenSet]] = {}
+            for tsid, inner in self.possible_matches_cache.items():
+                new_inner: Dict[int, LLMTokenSet] = {}
+                for term_id, llm_bv in inner.items():
+                    new_inner[int(term_id)] = remap_llm_token_set(llm_bv)
+                new_pmc[int(tsid)] = new_inner
+            self.possible_matches_cache = new_pmc
+
+        # Remap arena by grouping tokens with identical (pop, dests) signatures
+        for node in self.arena.values():
+            children = node.get("children", [])
+            if not children:
+                # Still ensure union is remapped (it may be non-empty)
+                union_bv = node.get("llm_bv_union") or LLMTokenSet.empty()
+                node["llm_bv_union"] = remap_llm_token_set(union_bv)
+                continue
+
+            # signature: (pop, ((dest_id, ((start,end),...)), ...))
+            groups: Dict[
+                Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]],
+                Set[int]
+            ] = collections.defaultdict(set)
+
+            for (pop, llm_bv), dests in children:
+                # Stable signature based on dests state ranges
+                dests_sig = tuple(sorted(
+                    (int(dest_id), tuple((int(a), int(b)) for (a, b) in state_bv.to_ranges()))
+                    for dest_id, state_bv in dests
+                ))
+                signature = (int(pop), dests_sig)
+
+                # Map each token in llm_bv to its representative
+                mapped_tokens: Set[int] = set()
+                for t in llm_bv.to_indices():
+                    ti = int(t)
+                    mapped_tokens.add(old_to_new_map.get(ti, ti))
+
+                if mapped_tokens:
+                    groups[signature].update(mapped_tokens)
+
+            # Rebuild children and union
+            new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+            llm_union: LLMTokenSet = LLMTokenSet.empty()
+
+            for (pop, dests_sig), tokens_set in groups.items():
+                if not tokens_set:
+                    continue
+                llm_bv_new = LLMTokenSet.from_indices(sorted(tokens_set))
+                llm_union = llm_union.union(llm_bv_new)
+
+                dests_list: List[Tuple[int, StateIDSet]] = []
+                for dest_id, ranges in dests_sig:
+                    dests_list.append((int(dest_id), StateIDSet.from_ranges(list(ranges))))
+                new_children.append(((int(pop), llm_bv_new), dests_list))
+
+            # Deterministic sort
+            def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+                try:
+                    return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+                except Exception:
+                    return ()
+
+            new_children.sort(
+                key=lambda item: (
+                    int(item[0][0]),
+                    _ranges_key(item[0][1]),
+                    tuple(sorted(int(d[0]) for d in item[1])),
+                )
+            )
+
+            node["children"] = new_children
+            node["llm_bv_union"] = llm_union
+
+        # Remap the universe
+        self.all_internal_llm_tokens_bitset = remap_llm_token_set(self.all_internal_llm_tokens_bitset)
+
+        # Merge internal_to_original_map entries into representatives
+        if self.internal_to_original_map:
+            new_internal_to_original_map: Dict[int, Set[int]] = {}
+            for old_tok, orig_set in self.internal_to_original_map.items():
+                rep = old_to_new_map.get(int(old_tok), int(old_tok))
+                if rep not in new_internal_to_original_map:
+                    new_internal_to_original_map[rep] = set()
+                new_internal_to_original_map[rep].update(orig_set)
             self.internal_to_original_map = new_internal_to_original_map
 
