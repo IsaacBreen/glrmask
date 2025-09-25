@@ -158,7 +158,7 @@ class Model(GraphProvider):
 
     # Token/Terminal mapping fields
     id_to_token: Dict[int, bytes]
-    internal_to_original_map: Dict[int, int]
+    internal_to_original_map: Dict[int, Set[int]]
     all_internal_llm_tokens_bitset: LLMTokenSet
     all_terminals_bitset: TerminalIdSet
     ignore_terminal_id: Optional[int]
@@ -283,7 +283,10 @@ class Model(GraphProvider):
                 mapped[int(term_id)] = LLMTokenSet.from_ranges(bit.to_ranges())
             pmc_rs[int(tsid)] = mapped
         possible_matches_cache = pmc_rs
-        internal_to_original_map = constraint.internal_to_original_map()
+        internal_to_original_map_raw = constraint.internal_to_original_map()
+        internal_to_original_map = {
+            k: {v} for k, v in internal_to_original_map_raw.items()
+        }
         # Convert universe LLM tokens bitset to RangeSet
         all_internal = constraint.all_internal_llm_tokens_bitset()
         all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
@@ -308,6 +311,7 @@ class Model(GraphProvider):
         )
 
         model._unconditionalize_guaranteed_transitions()
+        model._merge_equivalent_llm_tokens()
 
         return model
 
@@ -644,7 +648,7 @@ class Model(GraphProvider):
         original_indices: List[int] = []
         for i in final_mask.to_indices():
             if i in self.internal_to_original_map:
-                original_indices.append(self.internal_to_original_map[i])
+                original_indices.extend(list(self.internal_to_original_map[i]))
 
 
         return LLMTokenSet.from_indices(original_indices)
@@ -902,6 +906,104 @@ class Model(GraphProvider):
         for nid, node in self.arena.items():
             new_max_depth[int(nid)] = int(node.get("max_depth", 0) or 0)
         self.max_depth = new_max_depth
+
+    def _merge_equivalent_llm_tokens(self) -> None:
+        """
+        Finds sets of LLM tokens that are equivalent (always appear together in LLMTokenSets)
+        and merges them into a single internal token to reduce complexity.
+        """
+        # 1. Collect all unique LLMTokenSet instances from the model
+        all_sets: Set[LLMTokenSet] = set()
+        for node in self.arena.values():
+            for _pop, llm_bv in (c[0] for c in node.get("children", [])):
+                if not llm_bv.is_empty():
+                    all_sets.add(llm_bv)
+
+        for inner_map in self.possible_matches_cache.values():
+            for llm_bv in inner_map.values():
+                if not llm_bv.is_empty():
+                    all_sets.add(llm_bv)
+
+        # 2. Use a DSU structure to find equivalence classes of tokens
+        all_tokens = list(self.all_internal_llm_tokens_bitset.to_indices())
+        parent = {i: i for i in all_tokens}
+
+        def find(i):
+            if parent[i] == i:
+                return i
+            parent[i] = find(parent[i])
+            return parent[i]
+
+        def union(i, j):
+            root_i = find(i)
+            root_j = find(j)
+            if root_i != root_j:
+                parent[root_j] = root_i
+
+        for s in all_sets:
+            indices = s.to_indices()
+            if len(indices) > 1:
+                first = indices[0]
+                for i in range(1, len(indices)):
+                    union(first, indices[i])
+
+        # 3. Create mappings from old tokens to new, merged tokens
+        classes = collections.defaultdict(set)
+        for i in all_tokens:
+            classes[find(i)].add(i)
+
+        old_to_new_map: Dict[int, int] = {}
+        new_internal_to_original_map: Dict[int, Set[int]] = {}
+        # Use representatives as the new token IDs to keep them somewhat stable
+        representatives = sorted(classes.keys())
+        rep_to_new_id = {rep: i for i, rep in enumerate(representatives)}
+
+        for rep, old_tokens in classes.items():
+            new_id = rep_to_new_id[rep]
+            original_ids: Set[int] = set()
+            for old_token in old_tokens:
+                old_to_new_map[old_token] = new_id
+                if old_token in self.internal_to_original_map:
+                    original_ids.update(self.internal_to_original_map[old_token])
+            if original_ids:
+                new_internal_to_original_map[new_id] = original_ids
+
+        # 4. Update model's token maps
+        self.internal_to_original_map = new_internal_to_original_map
+
+        def remap_llm_token_set(s: LLMTokenSet) -> LLMTokenSet:
+            new_indices = {old_to_new_map[i] for i in s.to_indices() if i in old_to_new_map}
+            return LLMTokenSet.from_indices(list(new_indices))
+
+        # 5. Update data structures with new token IDs
+        new_pmc: Dict[int, Dict[int, LLMTokenSet]] = {}
+        for tsid, inner in self.possible_matches_cache.items():
+            new_inner = {
+                term_id: remap_llm_token_set(llm_bv)
+                for term_id, llm_bv in inner.items()
+            }
+            new_pmc[tsid] = new_inner
+        self.possible_matches_cache = new_pmc
+
+        self.all_internal_llm_tokens_bitset = remap_llm_token_set(self.all_internal_llm_tokens_bitset)
+
+        # 6. Remap arena using the NodeOpt intermediate representation
+        nodeopts = self._to_nodeopt_graph()
+        new_nodeopts: Dict[NodeID, NodeOpt] = {}
+        for nid, nopt in nodeopts.items():
+            new_children: Dict[LLMToken, Dict[int, Tuple[int, Edge]]] = {}
+            for old_tok, dest_map in nopt.children.items():
+                if old_tok not in old_to_new_map:
+                    continue
+                new_tok = old_to_new_map[old_tok]
+                if new_tok not in new_children:
+                    new_children[new_tok] = dest_map
+                else:
+                    # This assertion verifies that all tokens in an equivalence class
+                    # have identical transitions.
+                    assert new_children[new_tok] == dest_map
+            new_nodeopts[nid] = NodeOpt(children=new_children, is_end=nopt.is_end)
+        self._from_nodeopt_graph(new_nodeopts)
 
     def _unconditionalize_guaranteed_transitions(
         self,
