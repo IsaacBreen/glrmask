@@ -1081,6 +1081,19 @@ class Model(GraphProvider):
     # Arena <-> NodeOpt conversions
     # ==============================
     def _to_nodeopt(self) -> NodeOptGraph:
+        """
+        Convert the current Arena into a NodeOptGraph.
+        Encoding rules:
+        - For unconditional edges (state_bv all ones):
+          * pop > 0 -> PopEdge(pop)
+          * pop == 0 -> UnconditionalEdge()
+        - For state-masked edges (state_bv not all ones):
+          * [roughly: create two edges and one intermediate node. First edge is pop, second is states. Clean up this part of the comments]
+        We do not attempt to create new merges; if a duplicate token+dest pair
+        somehow occurs, we keep the first instance.
+        """
+        nodes: Dict[NodeID, NodeOpt] = {}
+        all_states: Set[int] = set(self.parser_table.table.keys())
         ...
 
     def _from_nodeopt(self, graph: NodeOptGraph) -> None:
