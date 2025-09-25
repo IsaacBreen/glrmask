@@ -1094,10 +1094,168 @@ class Model(GraphProvider):
         """
         nodes: Dict[NodeID, NodeOpt] = {}
         all_states: Set[int] = set(self.parser_table.table.keys())
-        ...
+        # Initialize NodeOpt nodes for all existing arena nodes
+        for nid in self.arena.keys():
+            nid_int = int(nid)
+            nodes[nid_int] = NodeOpt(children={}, is_end=self.is_end(nid_int))
+
+        # Fresh IDs for intermediate nodes introduced during conversion
+        next_id = (max(nodes.keys()) if nodes else 0) + 1
+
+        def fresh_id() -> int:
+            nonlocal next_id
+            nid_local = next_id
+            next_id += 1
+            return nid_local
+
+        # Helper: check if a state_bv is "all ones" (contains all parser states)
+        def is_all_states(state_bv: StateIDSet) -> bool:
+            if not all_states:
+                return False
+            # True if every parser state is present
+            for s in all_states:
+                if not state_bv.contains(s):
+                    return False
+            return True
+
+        # Populate edges
+        for src_id, node in self.arena.items():
+            src = int(src_id)
+            nodeopt = nodes[src]
+            children = node.get("children") or []
+            for (pop, llm_bv), dests in children:
+                pop = int(pop)
+                tokens: List[int] = [int(t) for t in llm_bv.to_indices()]
+
+                for dest_idx, state_bv in dests:
+                    dest = int(dest_idx)
+                    unconditional = state_bv.is_empty() or is_all_states(state_bv)
+
+                    if unconditional:
+                        # Unconditional edge
+                        for tok in tokens:
+                            tok_map = nodeopt.children.setdefault(tok, {})
+                            if dest in tok_map:
+                                # Keep first instance
+                                continue
+                            if pop > 0:
+                                tok_map[dest] = PopEdge(pop)
+                            else:
+                                tok_map[dest] = UnconditionalEdge()
+                    else:
+                        # State-masked edge
+                        states_set: Set[int] = set(int(s) for s in state_bv.to_indices())
+                        if pop == 0:
+                            # Direct state-masked edge
+                            for tok in tokens:
+                                tok_map = nodeopt.children.setdefault(tok, {})
+                                if dest in tok_map:
+                                    continue
+                                tok_map[dest] = StateEdge(states_set)
+                        else:
+                            # pop > 0 with state mask: split into two edges via an intermediate node
+                            for tok in tokens:
+                                mid = fresh_id()
+                                # src --(tok, PopEdge(pop))--> mid
+                                src_tok_map = nodeopt.children.setdefault(tok, {})
+                                if mid not in src_tok_map:
+                                    src_tok_map[mid] = PopEdge(pop)
+                                # mid node
+                                if mid not in nodes:
+                                    nodes[mid] = NodeOpt(children={}, is_end=False)
+                                # mid --(tok, StateEdge(states))--> dest
+                                mid_tok_map = nodes[mid].children.setdefault(tok, {})
+                                if dest not in mid_tok_map:
+                                    mid_tok_map[dest] = StateEdge(states_set)
+
+        return NodeOptGraph(nodes=nodes, roots_map=dict(self.roots_map))
 
     def _from_nodeopt(self, graph: NodeOptGraph) -> None:
-        ...
+        # Build quick lookup: node -> token -> {dest: Edge}
+        out_edges: Dict[int, Dict[int, Dict[int, Edge]]] = {}
+        for nid, nopt in graph.nodes.items():
+            src = int(nid)
+            token_map: Dict[int, Dict[int, Edge]] = {}
+            for tok, dest_map in nopt.children.items():
+                token_map[int(tok)] = dict(dest_map)
+            out_edges[src] = token_map
+
+        # Identify original nodes to detect intermediates introduced by _to_nodeopt
+        original_node_ids: Set[int] = set(int(x) for x in self.arena.keys())
+
+        new_arena: Dict[NodeID, ArenaNode] = {}
+
+        for src, tok_map in out_edges.items():
+            # groups[(pop, token)] -> {dest_id: StateIDSet}
+            groups: Dict[Tuple[int, int], Dict[int, StateIDSet]] = {}
+            tokens_present: Set[int] = set()
+
+            def add_group(pop: int, token: int, dest: int, state_bv: StateIDSet):
+                key = (int(pop), int(token))
+                dests_map = groups.setdefault(key, {})
+                prev = dests_map.get(int(dest))
+                if prev is None:
+                    dests_map[int(dest)] = state_bv
+                else:
+                    dests_map[int(dest)] = prev.union(state_bv)
+
+            for tok, dest_map in tok_map.items():
+                tokens_present.add(int(tok))
+                for dest, edge in dest_map.items():
+                    dest_int = int(dest)
+                    if isinstance(edge, PopEdge):
+                        p = int(edge.n)
+                        # If dest is an intermediate (not in original arena), flatten one step
+                        if dest_int not in original_node_ids:
+                            next_map = out_edges.get(dest_int, {}).get(int(tok), {})
+                            if next_map:
+                                for d2, e2 in next_map.items():
+                                    d2_int = int(d2)
+                                    if isinstance(e2, PopEdge):
+                                        # Pop followed by Pop => sum pops, unconditional
+                                        add_group(p + int(e2.n), int(tok), d2_int, PyRangeSet.empty())
+                                    elif isinstance(e2, StateEdge):
+                                        # Pop followed by State => pop p, with mask
+                                        st_bv = PyRangeSet.from_indices(sorted(int(s) for s in e2.states))
+                                        add_group(p, int(tok), d2_int, st_bv)
+                                    elif isinstance(e2, UnconditionalEdge):
+                                        # Pop followed by unconditional => pop p, unconditional
+                                        add_group(p, int(tok), d2_int, PyRangeSet.empty())
+                            else:
+                                # No second step: treat as unconditional to the intermediate (best effort)
+                                add_group(p, int(tok), dest_int, PyRangeSet.empty())
+                        else:
+                            # Pop directly to an original node: unconditional
+                            add_group(p, int(tok), dest_int, PyRangeSet.empty())
+                    elif isinstance(edge, StateEdge):
+                        st_bv = PyRangeSet.from_indices(sorted(int(s) for s in edge.states))
+                        add_group(0, int(tok), dest_int, st_bv)
+                    elif isinstance(edge, UnconditionalEdge):
+                        add_group(0, int(tok), dest_int, PyRangeSet.empty())
+
+            # Build arena node
+            children_list: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = []
+            # Deterministic ordering by (pop, token)
+            for (pop, token) in sorted(groups.keys(), key=lambda x: (int(x[0]), int(x[1]))):
+                dests_map = groups[(pop, token)]
+                llm_bv = PyRangeSet.from_indices([int(token)])
+                # Deterministic dest ordering
+                dests_list = [(int(did), dests_map[did]) for did in sorted(dests_map.keys())]
+                children_list.append(((int(pop), llm_bv), dests_list))
+
+            llm_union = PyRangeSet.from_indices(sorted(int(t) for t in tokens_present)) if tokens_present else PyRangeSet.empty()
+            node_dict: ArenaNode = {
+                "children": children_list,
+                "llm_bv_union": llm_union,
+            }
+            if graph.nodes[src].is_end:
+                node_dict["value"] = {"clean_end": True}
+            new_arena[int(src)] = node_dict
+
+        # Install rebuilt arena and metadata
+        self.arena = new_arena
+        self.roots_map = dict(graph.roots_map)
+        self.max_depth = self._recompute_max_depth_from_arena()
 
     def _recompute_max_depth_from_arena(self) -> Dict[NodeID, int]:
         """
