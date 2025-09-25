@@ -49,7 +49,7 @@ class BitsetRangeSet(RangeSet[int]):
                 self._bitset[start_byte] |= mask
             else:
                 # First byte
-                self._bitset[start_byte] |= (0xff << start_bit)
+                self._bitset[start_byte] |= (0xff << start_bit) & 0xff
                 # Middle bytes
                 for i in range(start_byte + 1, end_byte):
                     self._bitset[i] = 0xff
