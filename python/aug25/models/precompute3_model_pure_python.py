@@ -1082,22 +1082,175 @@ class Model(GraphProvider):
     # ==============================
     def _to_nodeopt(self) -> NodeOptGraph:
         """
-        Convert the current Arena into a NodeOptGraph.
-        Encoding rules:
-        - For unconditional edges (state_bv all ones):
-          * pop > 0 -> PopEdge(pop)
-          * pop == 0 -> UnconditionalEdge()
-        - For state-masked edges (state_bv not all ones):
-          * [roughly: create two edges and one intermediate node. First edge is pop, second is states. Clean up this part of the comments]
+        Convert the current Arena into a NodeOptGraph, keeping the representation
+        simple and faithful for get_mask.
+
+        Encoding rules (per token -> dest -> List[Edge]):
+        - If state_bv is unconditional (empty, or contains all parser states):
+          * pop > 0 -> [PopEdge(pop)]
+          * pop == 0 -> [UnconditionalEdge()]
+        - If state_bv is masked (not unconditional):
+          * pop > 0 -> [PopEdge(pop), StateEdge(states)]
+          * pop == 0 -> [StateEdge(states)]
+
         We do not attempt to create new merges; if a duplicate token+dest pair
-        somehow occurs, we keep the first instance.
+        somehow occurs, we keep the first instance we encountered.
         """
         nodes: Dict[NodeID, NodeOpt] = {}
-        all_states: Set[int] = set(self.parser_table.table.keys())
-        ...
+        all_states: Set[int] = set(int(s) for s in self.parser_table.table.keys())
+
+        def is_unconditional_state_bv(bv: StateIDSet) -> bool:
+            # Arena convention: empty = unconditional.
+            if bv.is_empty():
+                return True
+            # Also treat "contains all parser states" as unconditional.
+            try:
+                s = set(int(x) for x in bv.to_indices())
+            except Exception:
+                # Be conservative: if we can't enumerate, assume masked.
+                return False
+            # If bv includes all parser states, treat as unconditional.
+            return all_states.issubset(s)
+
+        # Create NodeOpt nodes
+        for nid, a_node in self.arena.items():
+            nid_int = int(nid)
+            nopt = NodeOpt()
+            nopt.is_end = bool((a_node.get("value") or {}).get("clean_end", False))
+            nodes[nid_int] = nopt
+
+        # Populate edges
+        for nid, a_node in self.arena.items():
+            nid_int = int(nid)
+            nopt = nodes[nid_int]
+
+            for (pop, llm_bv), dests in a_node.get("children", []) or []:
+                tokens = [int(t) for t in llm_bv.to_indices()]
+                if not tokens:
+                    continue
+                pop_int = int(pop)
+                for dest_id, state_bv in dests:
+                    dest_int = int(dest_id)
+                    unconditional = is_unconditional_state_bv(state_bv)
+                    if not unconditional:
+                        # Masked: encode states into StateEdge
+                        states: Set[int] = set(int(s) for s in state_bv.to_indices())
+                        seq: List[Edge] = []
+                        if pop_int > 0:
+                            seq.append(PopEdge(pop_int))
+                        seq.append(StateEdge(states=states))
+                    else:
+                        # Unconditional
+                        if pop_int > 0:
+                            seq = [PopEdge(pop_int)]
+                        else:
+                            seq = [UnconditionalEdge()]
+
+                    # Assign per token; keep first instance if duplicate (token, dest)
+                    for tok in tokens:
+                        if tok not in nopt.children:
+                            nopt.children[tok] = {}
+                        dest_map = nopt.children[tok]
+                        if dest_int in dest_map:
+                            # Keep the first encountered edge sequence.
+                            continue
+                        dest_map[dest_int] = list(seq)
+
+        return NodeOptGraph(nodes=nodes, roots_map=dict(self.roots_map))
 
     def _from_nodeopt(self, graph: NodeOptGraph) -> None:
-        ...
+        """
+        Rebuild Arena from a NodeOptGraph. We emit simple, correct edges that
+        preserve get_mask behavior:
+        - For each node, for each (token -> dest -> edge-seq), we derive a signature:
+          (pop_total, dest, mask), where mask is None for unconditional or a tuple
+          of allowed states. We then group tokens by signature and emit one arena
+          child entry per signature: ((pop, llm_bv), [(dest, state_bv)]).
+        - We don't attempt to merge multiple dests under the same ((pop, llm_bv), dests).
+          This keeps reconstruction simple and preserves semantics.
+        """
+        new_arena: Dict[NodeID, ArenaNode] = {}
+
+        def ranges_key(rs: RangeSetABC) -> Tuple[Tuple[int, int], ...]:
+            try:
+                return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+            except Exception:
+                return ()
+
+        for nid, nopt in graph.nodes.items():
+            nid_int = int(nid)
+
+            # Group tokens by (pop, dest, mask)
+            # mask is None for unconditional; otherwise a sorted tuple of states.
+            groups: Dict[Tuple[int, int, Optional[Tuple[int, ...]]], Set[int]] = collections.defaultdict(set)
+
+            for tok, dest_map in (nopt.children or {}).items():
+                tok_int = int(tok)
+                for dest_id, seq in dest_map.items():
+                    dest_int = int(dest_id)
+                    pop_total = 0
+                    mask_states: Optional[Set[int]] = None
+                    unconditional = False
+
+                    # Interpret the sequence
+                    for e in seq or []:
+                        if isinstance(e, PopEdge):
+                            pop_total += int(e.n)
+                        elif isinstance(e, StateEdge):
+                            # Last one wins if multiple present (shouldn't happen in our encoding)
+                            mask_states = set(int(s) for s in e.states)
+                            unconditional = False
+                        elif isinstance(e, UnconditionalEdge):
+                            unconditional = True
+                            mask_states = None
+
+                    mask_key: Optional[Tuple[int, ...]]
+                    if unconditional or mask_states is None:
+                        mask_key = None
+                    else:
+                        mask_key = tuple(sorted(mask_states))
+
+                    sig = (int(pop_total), dest_int, mask_key)
+                    groups[sig].add(tok_int)
+
+            # Build children list for this node
+            children_list: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+            llm_union: LLMTokenSet = PyRangeSet.empty()
+
+            for (pop_val, dest_val, mask_key), tok_set in groups.items():
+                if not tok_set:
+                    continue
+                llm_bv = PyRangeSet.from_indices(sorted(tok_set))
+                llm_union = llm_union.union(llm_bv)
+                if mask_key is None:
+                    state_bv = PyRangeSet.empty()
+                else:
+                    state_bv = PyRangeSet.from_indices(list(mask_key))
+                children_list.append(((int(pop_val), llm_bv), [(int(dest_val), state_bv)]))
+
+            # Deterministic sort for stability
+            children_list.sort(
+                key=lambda item: (
+                    int(item[0][0]),
+                    ranges_key(item[0][1]),
+                    tuple(sorted(int(d[0]) for d in item[1])),
+                )
+            )
+
+            node_value: ArenaValue = {}
+            if nopt.is_end:
+                node_value["clean_end"] = True
+
+            new_arena[nid_int] = {
+                "children": children_list,
+                "llm_bv_union": llm_union,
+                "value": node_value,
+            }
+
+        # Install reconstructed arena and metadata
+        self.arena = new_arena
+        self.roots_map = dict(graph.roots_map)
+        self.max_depth = self._recompute_max_depth_from_arena()
 
     def _recompute_max_depth_from_arena(self) -> Dict[NodeID, int]:
         """
