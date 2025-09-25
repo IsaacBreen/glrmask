@@ -1,7 +1,16 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Dict, Set, MutableMapping, Mapping, Union
+
+# Optional profiling hook – harmless if profiling is disabled.
+try:
+    from .rangeset_stats import record_metric
+except Exception:  # pragma: no cover
+    # Fallback no‑op stub so the module can be imported without the profiling package.
+    def record_metric(name: str, value: float = 1.0) -> None:  # type: ignore
+        pass
 
 
 @dataclass(frozen=True)
@@ -64,22 +73,41 @@ def _unconditionalize_guaranteed_transitions(
         Non-trivial candidates (S_src \\ S_edge != ∅) require the tentative
         propagation check described in the main algorithm.
     """
-    changed = 0
-    # Reuse a single instance; it's immutable and fine to share.
+    # Statistics
+    total_state_edges = 0   # how many StateEdge objects we inspected
+    changed = 0             # how many we turned into UnconditionalEdge
+
+    # Reuse a single immutable UnconditionalEdge instance.
     UNCOND = UnconditionalEdge()
+
+    start_time = time.time()
 
     for src_id, node in nodes.items():
         s_src = alive.get(src_id, set())
-        # If s_src is empty, upgrading is still safe under the current Alive.
-        # It can also help expose passthrough nodes for removal.
         for token, pop_map in node.children.items():
             for pop, dest_map in pop_map.items():
-                # We overwrite edge values without changing keys, so it's safe
-                # to iterate items directly.
+                # Iterate over a static list to safely mutate the dict while looping.
                 for dest, edge in list(dest_map.items()):
                     if isinstance(edge, StateEdge):
+                        total_state_edges += 1
                         if s_src.issubset(edge.states):
                             dest_map[dest] = UNCOND
                             changed += 1
+
+    elapsed = time.time() - start_time
+
+    # Human‑readable summary (always printed)
+    print(
+        f\"[NodeOpt] unconditionalize: {changed}/{total_state_edges} StateEdge(s) "
+        f\"converted in {elapsed:.4f}s\"
+    )
+
+    # Optional profiling record (no‑op if profiling disabled)
+    try:
+        record_metric('NodeOpt.unconditionalize.changed', changed)
+        record_metric('NodeOpt.unconditionalize.total_state_edges', total_state_edges)
+        record_metric('NodeOpt.unconditionalize.time_sec', elapsed)
+    except Exception:  # pragma: no cover
+        pass
 
     return changed
