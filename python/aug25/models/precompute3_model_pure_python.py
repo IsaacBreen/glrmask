@@ -1154,11 +1154,8 @@ class Model(GraphProvider):
                         elif isinstance(e, StateEdge):
                             children_list.append(((0, token_rs), [(dest_id, PyRangeSet.from_indices(e.states))]))
 
-            llm_bv_union: LLMTokenSet = PyRangeSet.empty()
-            for (_pop, llm_bv), _dests in children_list:
-                llm_bv_union = llm_bv_union.union(llm_bv)
-
-            new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=llm_bv_union, clean_end=nopt.is_end)
+            # TODO: compute precise llm_bv_union afterwards in one sweep of graph.
+            new_arena[int(node_id)] = ArenaNode(children=children_list, llm_bv_union=self.all_internal_llm_tokens_bitset, clean_end=nopt.is_end)
 
         self.arena = new_arena
         self.roots_map = graph.roots_map.copy()
