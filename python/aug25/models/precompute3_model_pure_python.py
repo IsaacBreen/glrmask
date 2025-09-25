@@ -743,12 +743,12 @@ class Model(GraphProvider):
 
         return nodeopts
 
-    def _compute_alive_states(self, nodeopts: Dict[NodeID, NodeOpt]) -> Dict[NodeID, Set[int]]:
+    def _compute_alive_states(self, nodeopts: Dict[NodeID, NodeOpt], llm_token: int) -> Dict[NodeID, Set[int]]:
         """
-        Compute per-node 'alive' parser state sets at fixpoint.
+        Compute per-node 'alive' parser state sets at fixpoint for a single LLM token.
         Seed with {start_state_id} at all root nodes.
         Propagation rules:
-        - Across each edge (pop, Edge):
+        - Across each edge for the given token (pop, Edge):
             S' = reverse_state_map^pop(S)
             If StateEdge(states): S'' = S' ∩ states
             If UnconditionalEdge: S'' = S'
@@ -777,27 +777,30 @@ class Model(GraphProvider):
             if nopt is None:
                 continue
 
-            for _tok, dest_map in nopt.children.items():
-                for dest_id, (pop, edge) in dest_map.items():
-                    # Preimage under 'pop' reverse transitions
-                    pre = self._nodeopt_pop_preimage(states_here, int(pop))
+            dest_map = nopt.children.get(llm_token)
+            if not dest_map:
+                continue
+
+            for dest_id, (pop, edge) in dest_map.items():
+                # Preimage under 'pop' reverse transitions
+                pre = self._nodeopt_pop_preimage(states_here, int(pop))
+                if not pre:
+                    continue
+                if isinstance(edge, StateEdge):
+                    pre = pre.intersection(edge.states)
                     if not pre:
                         continue
-                    if isinstance(edge, StateEdge):
-                        pre = pre.intersection(edge.states)
-                        if not pre:
-                            continue
-                    # UnconditionalEdge keeps 'pre' as-is
-                    dest_int = int(dest_id)
-                    dest_alive = alive.get(dest_int)
-                    if dest_alive is None:
-                        alive[dest_int] = set(pre)
+                # UnconditionalEdge keeps 'pre' as-is
+                dest_int = int(dest_id)
+                dest_alive = alive.get(dest_int)
+                if dest_alive is None:
+                    alive[dest_int] = set(pre)
+                    worklist.append(dest_int)
+                else:
+                    diff = pre - dest_alive
+                    if diff:
+                        dest_alive.update(diff)
                         worklist.append(dest_int)
-                    else:
-                        diff = pre - dest_alive
-                        if diff:
-                            dest_alive.update(diff)
-                            worklist.append(dest_int)
 
         # Ensure only nodes present in nodeopts are returned, with concrete sets
         return {int(k): set(v) for k, v in alive.items() if k in nodeopts}
