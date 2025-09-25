@@ -1244,6 +1244,13 @@ class Model(GraphProvider):
                         pop_to_dests[0].append((dest1, states_to_spec(set(e1.states))))
                     elif isinstance(e1, PopEdge):
                         n_pop = int(e1.n)
+
+                        # We can only fold through dest1 if it's not a meaningful state itself (i.e., an end node).
+                        # If it is, we must preserve it as the destination.
+                        if nodes[dest1].is_end:
+                            pop_to_dests[n_pop].append((dest1, None))
+                            continue
+
                         # Look for second-step edges under the same token
                         second_map = per_node_token_children.get(dest1, {}).get(tok, {})
 
