@@ -146,25 +146,25 @@ class Model(GraphProvider):
     max_depth: Dict[NodeID, int]
 
     # Parser-related fields
-    parser_table: Optional[ParserTable] = field(init=False, default=None)
-    glr_parser: Optional[ffi.GLRParser] = field(init=False, default=None)
-    reverse_state_map: Dict[int, Set[int]] = field(init=False, default_factory=dict)
+    parser_table: ParserTable
+    glr_parser: ffi.GLRParser
+    reverse_state_map: Dict[int, Set[int]]
 
     # Tokenizer-related fields
-    tokenizer: Optional[ffi.Regex] = field(init=False, default=None)
-    tokenizer_initial_state: Optional[int] = field(init=False, default=None)
-    tokenizer_max_state: Optional[int] = field(init=False, default=None)
-    possible_matches_cache: Optional[Dict[int, Dict[int, LLMTokenSet]]] = field(init=False, default=None)
+    tokenizer: ffi.Regex
+    tokenizer_initial_state: int
+    tokenizer_max_state: int
+    possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
 
     # Token/Terminal mapping fields
-    id_to_token: Dict[int, bytes] = field(init=False, default_factory=dict)
-    internal_to_original_map: Dict[int, int] = field(init=False, default_factory=dict)
-    all_internal_llm_tokens_bitset: Optional[LLMTokenSet] = field(init=False, default=None)
-    all_terminals_bitset: Optional[TerminalIdSet] = field(init=False, default=None)
-    ignore_terminal_id: Optional[int] = field(init=False, default=None)
+    id_to_token: Dict[int, bytes]
+    internal_to_original_map: Dict[int, int]
+    all_internal_llm_tokens_bitset: LLMTokenSet
+    all_terminals_bitset: TerminalIdSet
+    ignore_terminal_id: Optional[int]
 
     # State
-    state: Dict[int, GSS] = field(init=False, default_factory=dict)
+    state: Dict[int, GSS]
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -207,15 +207,13 @@ class Model(GraphProvider):
             node["children"] = new_children
             node["llm_bv_union"] = llm_bv_union
 
-        model = Model(arena=arena, roots_map=roots_map, max_depth=max_depth)
-
         # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
-        model.tokenizer = constraint.tokenizer()
-        model.tokenizer_max_state = model.tokenizer.max_state()
-        model.glr_parser = constraint.glr_parser()
-        model.ignore_terminal_id = model.glr_parser.ignore_terminal_id
-        model.tokenizer_initial_state = model.tokenizer.initial_state_id()
+        tokenizer = constraint.tokenizer()
+        tokenizer_max_state = tokenizer.max_state()
+        glr_parser = constraint.glr_parser()
+        ignore_terminal_id = glr_parser.ignore_terminal_id
+        tokenizer_initial_state = tokenizer.initial_state_id()
 
         parser_data = data['parser']
         table_data = parser_data['stage_7_table']
@@ -248,10 +246,10 @@ class Model(GraphProvider):
                 if goto_data['state_id'] is not None:
                     py_row.gotos[nt_id] = goto_data['state_id']
             py_table[state_id] = py_row
-        model.parser_table = ParserTable(start_state_id, py_table)
+        parser_table = ParserTable(start_state_id, py_table)
 
         reverse_map: Dict[int, Set[int]] = collections.defaultdict(set)
-        for from_state, row in model.parser_table.table.items():
+        for from_state, row in parser_table.table.items():
             # Handle shifts
             for action in row.actions.values():
                 if isinstance(action, int): # Shift
@@ -262,20 +260,20 @@ class Model(GraphProvider):
             # Handle gotos
             for to_state in row.gotos.values():
                 reverse_map[to_state].add(from_state)
-        model.reverse_state_map = dict(reverse_map)
+        reverse_state_map = dict(reverse_map)
 
         all_terminals = set()
-        for row in model.parser_table.table.values():
+        for row in parser_table.table.values():
             all_terminals.update(row.actions.keys())
-        if model.ignore_terminal_id is not None:
-            all_terminals.add(model.ignore_terminal_id)
-        model.all_terminals_bitset = TerminalIdSet.from_indices(list(all_terminals))
+        if ignore_terminal_id is not None:
+            all_terminals.add(ignore_terminal_id)
+        all_terminals_bitset = TerminalIdSet.from_indices(list(all_terminals))
 
         initial_acc = PyAcc(terminals_union={}, llm_mask=LLMTokenSet.empty())
-        initial_gss = GSS.from_stacks([([], initial_acc)]).push(model.parser_table.start_state_id)
-        model.state = {model.tokenizer_initial_state: initial_gss}
+        initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
+        state = {tokenizer_initial_state: initial_gss}
 
-        model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+        id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         # Convert possible_matches_cache to RangeSet
         pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
         pmc_rs: Dict[int, Dict[int, LLMTokenSet]] = {}
@@ -284,11 +282,30 @@ class Model(GraphProvider):
             for term_id, bit in inner.items():
                 mapped[int(term_id)] = LLMTokenSet.from_ranges(bit.to_ranges())
             pmc_rs[int(tsid)] = mapped
-        model.possible_matches_cache = pmc_rs
-        model.internal_to_original_map = constraint.internal_to_original_map()
+        possible_matches_cache = pmc_rs
+        internal_to_original_map = constraint.internal_to_original_map()
         # Convert universe LLM tokens bitset to RangeSet
         all_internal = constraint.all_internal_llm_tokens_bitset()
-        model.all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
+        all_internal_llm_tokens_bitset = LLMTokenSet.from_ranges(all_internal.to_ranges())
+
+        model = Model(
+            arena=arena,
+            roots_map=roots_map,
+            max_depth=max_depth,
+            parser_table=parser_table,
+            glr_parser=glr_parser,
+            reverse_state_map=reverse_state_map,
+            tokenizer=tokenizer,
+            tokenizer_initial_state=tokenizer_initial_state,
+            tokenizer_max_state=tokenizer_max_state,
+            possible_matches_cache=possible_matches_cache,
+            id_to_token=id_to_token,
+            internal_to_original_map=internal_to_original_map,
+            all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
+            all_terminals_bitset=all_terminals_bitset,
+            ignore_terminal_id=ignore_terminal_id,
+            state=state,
+        )
 
         model._unconditionalize_guaranteed_transitions()
 
