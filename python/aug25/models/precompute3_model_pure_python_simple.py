@@ -466,6 +466,10 @@ class Model(GraphProvider):
         - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
+        print("states in get_mask:")
+        for k, v in self.state.items():
+            print(f"state {k}: {v.to_reference_impl()}")
+
         state_map: Dict[int, GSS] = self.state
 
         all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
