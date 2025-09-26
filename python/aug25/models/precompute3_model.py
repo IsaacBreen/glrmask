@@ -75,6 +75,7 @@ class Model(GraphProvider):
         model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         model.possible_matches_cache = model.constraint.possible_matches()
+        print("model.possible_matches_cache", model.possible_matches_cache)
         return model
 
     def get_root(self, state_id: int) -> int:
