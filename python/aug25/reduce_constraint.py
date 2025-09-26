@@ -494,6 +494,127 @@ def ddmin_dests(
     return values_dict
 
 
+def remove_token_from_ranges(ranges: List[List[int]], token: int) -> List[List[int]]:
+    """
+    Given a list of [start, end] integer ranges, remove a single token.
+    This may result in a range being split. Ranges are not merged.
+    """
+    new_ranges = []
+    for start, end in ranges:
+        if token < start or token > end:
+            new_ranges.append([start, end])
+        else:  # token is within [start, end]
+            if start < token:
+                new_ranges.append([start, token - 1])
+            if token < end:
+                new_ranges.append([token + 1, end])
+    return new_ranges
+
+
+def ddmin_llm_tokens(
+    original: Dict[str, Any],
+    values_dict: Dict[int, Dict[str, Any]],
+    repo_root: Path,
+    tmpdir: Path,
+    code_file: Path,
+    baseline_model: Path,
+    candidate_model: Path,
+    time_budget_deadline: float,
+) -> Dict[int, Dict[str, Any]]:
+    """
+    For each child edge, try to remove individual tokens from the LLM token bitvector.
+    Accept a deletion if mismatch persists.
+    """
+    # This reduction does not change graph reachability, so no pruning needed inside.
+
+    node_ids = list(values_dict.keys())
+    random.shuffle(node_ids)
+
+    improved = True
+    pass_num = 0
+    while improved and time.time() < time_budget_deadline:
+        improved = False
+        pass_num += 1
+        print(f"  [Pass {pass_num}] Starting LLM token reduction.")
+
+        tokens_checked_in_pass = 0
+        tokens_removed_in_pass = 0
+
+        for nid in node_ids:
+            if time.time() >= time_budget_deadline:
+                break
+            node = values_dict.get(nid)
+            if not node:
+                continue
+
+            children = node.get("children") or []
+            for ci in range(len(children)):
+                if time.time() >= time_budget_deadline:
+                    break
+
+                # Get all tokens for this child's llm_bv
+                edge_key, _ = children[ci]
+                _pop, llm_bv_json = edge_key
+
+                tokens_in_bv = []
+                for start, end in llm_bv_json:
+                    tokens_in_bv.extend(range(start, end + 1))
+
+                if not tokens_in_bv:
+                    continue
+
+                random.shuffle(tokens_in_bv)
+
+                # Try removing each token
+                for token_to_remove in tokens_in_bv:
+                    if time.time() >= time_budget_deadline:
+                        break
+
+                    tokens_checked_in_pass += 1
+                    print(f"    - Checks: {tokens_checked_in_pass}, Reductions: {tokens_removed_in_pass}", end='\r')
+
+                    # Get current llm_bv_json from the current values_dict, as it might have changed
+                    current_node = values_dict[nid]
+                    current_children = current_node.get("children", [])
+                    if ci >= len(current_children):
+                        break
+                    _current_pop, current_llm_bv_json = current_children[ci][0]
+
+                    # Check if token is still present
+                    is_present = any(start <= token_to_remove <= end for start, end in current_llm_bv_json)
+                    if not is_present:
+                        continue
+
+                    trial_values = {k: dict(v) for k, v in values_dict.items()}
+                    trial_children = list((trial_values[nid].get("children") or []))
+
+                    trial_edge_key, trial_dests = trial_children[ci]
+                    trial_pop, trial_llm_bv_json = trial_edge_key
+
+                    new_llm_bv_json = remove_token_from_ranges(trial_llm_bv_json, token_to_remove)
+
+                    trial_children[ci] = [[trial_pop, new_llm_bv_json], trial_dests]
+                    trial_values[nid]["children"] = trial_children
+
+                    cand_path = write_candidate_constraint(tmpdir, original, trial_values)
+                    ok, _, _ = run_benchmarks_and_has_mismatch(
+                        repo_root, cand_path, code_file, baseline_model, candidate_model
+                    )
+                    if ok:
+                        # Accept deletion
+                        values_dict = trial_values
+                        improved = True
+                        tokens_removed_in_pass += 1
+
+        print()  # Newline for the \r progress
+        if tokens_removed_in_pass > 0:
+            print(f"  [Pass {pass_num}] Finished. Removed {tokens_removed_in_pass} LLM tokens.")
+        else:
+            print(f"  [Pass {pass_num}] Finished. No reductions found.")
+
+    return values_dict
+
+
 def main():
     ap = argparse.ArgumentParser(description="Stochastic reducer for constraint trie while preserving a mask mismatch.")
     ap.add_argument("--constraint-in", required=True, help="Path to the source .json.gz constraint file.")
@@ -586,6 +707,17 @@ def main():
             )
             n3, c3, d3 = count_nodes_children_dests(values_dict)
             print(f"--- Phase 3 finished. Size: {n3} nodes, {c3} children, {d3} dests. Took {time.time()-start:.1f}s ---")
+
+        # Phase 4: Delete LLM tokens from edges (delta-debug)
+        if time.time() < time_budget_deadline:
+            print("\n--- Phase 4: Reducing LLM tokens in edges ---")
+            start = time.time()
+            values_dict = ddmin_llm_tokens(
+                original, values_dict, repo_root, tmpdir, code_file,
+                baseline_model, candidate_model, time_budget_deadline
+            )
+            n4, c4, d4 = count_nodes_children_dests(values_dict)
+            print(f"--- Phase 4 finished. Size: {n4} nodes, {c4} children, {d4} dests. Took {time.time()-start:.1f}s ---")
 
         # Final write
         final_candidate_path = write_candidate_constraint(tmpdir, original, values_dict)
