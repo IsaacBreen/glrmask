@@ -58,19 +58,6 @@ def collect_adjacency(values_dict: Dict[int, Dict[str, Any]]) -> Dict[int, Set[i
     return adj
 
 
-def collect_reverse_adjacency(values_dict: Dict[int, Dict[str, Any]]) -> Dict[int, Set[int]]:
-    """
-    Build reverse adjacency: dest_node_id -> set(source_node_ids).
-    """
-    rev_adj: Dict[int, Set[int]] = {nid: set() for nid in values_dict.keys()}
-    for nid, node in values_dict.items():
-        for edge in node.get("children") or []:
-            _edge_key, dests = edge
-            for dest_id, _state_bv_json in dests:
-                rev_adj.setdefault(int(dest_id), set()).add(int(nid))
-    return rev_adj
-
-
 def compute_roots(precomputed3: List[Tuple[int, int]]) -> List[int]:
     """
     Extract all root node ids from precomputed3 mapping (tokenizer_state_id -> root_node_id).
@@ -101,33 +88,6 @@ def bfs_reachable(values_dict: Dict[int, Dict[str, Any]], roots: List[int], dept
             if v not in seen and v in values_dict:
                 seen.add(v)
                 q.append((v, d + 1))
-    return seen
-
-
-def bfs_reachable_from_ends(values_dict: Dict[int, Dict[str, Any]]) -> Set[int]:
-    """
-    BFS backwards from all clean_end nodes.
-    Returns the set of node ids that can reach an end node.
-    """
-    end_nodes = {int(nid) for nid, node in values_dict.items() if node.get("clean_end")}
-    if not end_nodes:
-        return set()
-    
-    rev_adj = collect_reverse_adjacency(values_dict)
-    
-    seen: Set[int] = set()
-    q: List[int] = []
-    for nid in end_nodes:
-        if nid in values_dict:
-            seen.add(nid)
-            q.append(nid)
-            
-    while q:
-        u = q.pop(0)
-        for v_parent in rev_adj.get(u, set()):
-            if v_parent not in seen and v_parent in values_dict:
-                seen.add(v_parent)
-                q.append(v_parent)
     return seen
 
 
@@ -732,25 +692,6 @@ def main():
     # Initial sizes
     n0, c0, d0 = count_nodes_children_dests(values_dict)
     print(f"Initial trie size: {n0} nodes, {c0} children, {d0} dests")
-
-    print("\n--- Statically pruning unreachable/dead-end nodes ---")
-    roots = compute_roots(original.get("precomputed3") or [])
-    reachable_fwd = bfs_reachable(values_dict, roots, None)
-    print(f"  - Found {len(reachable_fwd)} nodes reachable from roots.")
-    
-    reachable_bwd = bfs_reachable_from_ends(values_dict)
-    print(f"  - Found {len(reachable_bwd)} nodes that can reach a clean_end.")
-    
-    live_nodes = reachable_fwd.intersection(reachable_bwd)
-    print(f"  - {len(live_nodes)} nodes are live (in intersection).")
-    
-    if len(live_nodes) < len(values_dict):
-        values_dict = prune_values_by_reachability(values_dict, live_nodes)
-        n_new, c_new, d_new = count_nodes_children_dests(values_dict)
-        print(f"  - Pruned graph. New size: {n_new} nodes, {c_new} children, {d_new} dests.")
-    else:
-        print("  - No dead nodes found to prune.")
-    print("--- Static pruning finished ---\n")
 
     time_budget_deadline = time.time() + int(args.time_budget_seconds)
 
