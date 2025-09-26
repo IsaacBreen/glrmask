@@ -24,21 +24,24 @@ def save_json_gz(path: str, data: Dict[str, Any]) -> None:
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
 
 
-def values_to_dict(values: Any) -> Dict[int, Dict[str, Any]]:
+def values_list_to_dict(values_list: List[Tuple[int, Dict[str, Any]]]) -> Dict[int, Dict[str, Any]]:
     """
-    Convert trie3_god['values'] (list of [node_id, node] OR dict) to dict[node_id] = node.
+    Convert trie3_god['values'] (list of [node_id, node]) to dict[node_id] = node.
     Node ids are normalized to int keys.
     """
     out: Dict[int, Dict[str, Any]] = {}
-    if isinstance(values, list):
-        # Handle original format: [["id", node], ...]
-        for k, v in values:
-            out[int(k)] = v
-    elif isinstance(values, dict):
-        # Handle map format: {"id": node, ...}
-        for k, v in values.items():
-            out[int(k)] = v
+    for k, v in values_list:
+        out[int(k)] = v
     return out
+
+
+def dict_to_values_list(values_dict: Dict[int, Dict[str, Any]]) -> List[Tuple[int, Dict[str, Any]]]:
+    """
+    Convert dict[node_id] back to list format that loader expects: [[node_id, node], ...].
+    Use sorted order for determinism.
+    """
+    items = sorted(values_dict.items(), key=lambda kv: int(kv[0]))
+    return [[int(k), v] for k, v in items]
 
 
 def collect_adjacency(values_dict: Dict[int, Dict[str, Any]]) -> Dict[int, Set[int]]:
@@ -128,27 +131,11 @@ def count_nodes_children_dests(values_dict: Dict[int, Dict[str, Any]]) -> Tuple[
 def write_candidate_constraint(tmp_dir: Path, original: Dict[str, Any], values_dict: Dict[int, Dict[str, Any]]) -> Path:
     """
     Build a candidate constraint JSON by replacing trie3_god['values'] and write to a temp .json.gz.
-    Ensures that all root nodes referenced by 'precomputed3' exist, adding blank ones if needed.
     Returns the file path.
     """
     data = dict(original)  # shallow copy top-level; nested parts reused
-    final_values = dict(values_dict)
-
-    # Ensure all root nodes from precomputed3 exist in the values dict.
-    # If a root was pruned, add a blank node back to prevent panics on load.
-    root_ids = compute_roots(original.get("precomputed3") or [])
-    for root_id in root_ids:
-        if root_id not in final_values:
-            # This root was pruned. Add a blank node to satisfy the loader.
-            final_values[root_id] = {
-                "clean_end": False,
-                "children": [],
-                "llm_bv_union": []
-            }
-
     trie = dict(data.get("trie3_god") or {})
-    # Serialize as a map/object. json.dump will convert int keys to strings.
-    trie["values"] = final_values
+    trie["values"] = dict_to_values_list(values_dict)
     data["trie3_god"] = trie
     candidate_path = tmp_dir / "candidate_constraint.json.gz"
     save_json_gz(str(candidate_path), data)
@@ -683,8 +670,8 @@ def main():
 
     original = load_json_gz(str(constraint_in))
     trie = original.get("trie3_god") or {}
-    values_data = trie.get("values") or {}
-    values_dict = values_to_dict(values_data)
+    values_list = trie.get("values") or []
+    values_dict = values_list_to_dict(values_list)
 
     # Initial sizes
     n0, c0, d0 = count_nodes_children_dests(values_dict)
