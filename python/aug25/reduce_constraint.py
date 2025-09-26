@@ -24,25 +24,21 @@ def save_json_gz(path: str, data: Dict[str, Any]) -> None:
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
 
 
-def values_list_to_dict(values_list: List[Tuple[str, Dict[str, Any]]]) -> Dict[int, Dict[str, Any]]:
+def values_to_dict(values: Any) -> Dict[int, Dict[str, Any]]:
     """
-    Convert trie3_god['values'] (list of [node_id, node]) to dict[node_id] = node.
+    Convert trie3_god['values'] (list of [node_id, node] OR dict) to dict[node_id] = node.
     Node ids are normalized to int keys.
     """
     out: Dict[int, Dict[str, Any]] = {}
-    for k, v in values_list:
-        out[int(k)] = v
+    if isinstance(values, list):
+        # Handle original format: [["id", node], ...]
+        for k, v in values:
+            out[int(k)] = v
+    elif isinstance(values, dict):
+        # Handle map format: {"id": node, ...}
+        for k, v in values.items():
+            out[int(k)] = v
     return out
-
-
-def dict_to_values_list(values_dict: Dict[int, Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
-    """
-    Convert dict[node_id] back to list format that loader expects: [["node_id", node], ...].
-    Use sorted order for determinism.
-    """
-    items = sorted(values_dict.items(), key=lambda kv: int(kv[0]))
-    # The loader expects string keys for node IDs in this list format.
-    return [[str(k), v] for k, v in items]
 
 
 def collect_adjacency(values_dict: Dict[int, Dict[str, Any]]) -> Dict[int, Set[int]]:
@@ -151,7 +147,8 @@ def write_candidate_constraint(tmp_dir: Path, original: Dict[str, Any], values_d
             }
 
     trie = dict(data.get("trie3_god") or {})
-    trie["values"] = dict_to_values_list(final_values)
+    # Serialize as a map/object. json.dump will convert int keys to strings.
+    trie["values"] = final_values
     data["trie3_god"] = trie
     candidate_path = tmp_dir / "candidate_constraint.json.gz"
     save_json_gz(str(candidate_path), data)
@@ -686,8 +683,8 @@ def main():
 
     original = load_json_gz(str(constraint_in))
     trie = original.get("trie3_god") or {}
-    values_list = trie.get("values") or []
-    values_dict = values_list_to_dict(values_list)
+    values_data = trie.get("values") or {}
+    values_dict = values_to_dict(values_data)
 
     # Initial sizes
     n0, c0, d0 = count_nodes_children_dests(values_dict)
