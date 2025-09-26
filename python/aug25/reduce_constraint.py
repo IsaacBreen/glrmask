@@ -11,6 +11,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Set, Any, Optional
+from copy import deepcopy
 
 
 def load_json_gz(path: str) -> Dict[str, Any]:
@@ -126,6 +127,38 @@ def count_nodes_children_dests(values_dict: Dict[int, Dict[str, Any]]) -> Tuple[
         for _, ds in ch:
             dests += len(ds)
     return nodes, children, dests
+
+
+def ranges_to_token_set(ranges: List[List[int]]) -> Set[int]:
+    """
+    Convert a list of [start, end] ranges (inclusive) into a set of token ints.
+    """
+    out: Set[int] = set()
+    for start, end in ranges:
+        if start > end:
+            continue
+        out.update(range(int(start), int(end) + 1))
+    return out
+
+
+def token_set_to_ranges(tokens: Set[int]) -> List[List[int]]:
+    """
+    Convert a set of token ints to a minimal sorted list of [start, end] ranges (inclusive).
+    """
+    if not tokens:
+        return []
+    vals = sorted(int(t) for t in tokens)
+    ranges: List[List[int]] = []
+    rs = vals[0]
+    re_ = vals[0]
+    for v in vals[1:]:
+        if v == re_ + 1:
+            re_ = v
+        else:
+            ranges.append([rs, re_])
+            rs = re_ = v
+    ranges.append([rs, re_])
+    return ranges
 
 
 def write_candidate_constraint(tmp_dir: Path, original: Dict[str, Any], values_dict: Dict[int, Dict[str, Any]]) -> Path:
@@ -626,6 +659,155 @@ def ddmin_llm_tokens(
 
 
 def main():
+    """
+    Deterministic, single-sweep pruning of LLM tokens on edges based on:
+      - forward token reachability from roots, and
+      - backward token reachability to end nodes.
+
+    For each edge (node -> dests) with llm_bv E:
+      pruned_llm = E ∩ forward_tokens[node] ∩ (⋃_d backward_tokens[d])
+
+    If pruned_llm is empty, the edge is removed.
+    After pruning edges, prune unreachable nodes via BFS reachability.
+
+    Returns (new_values_dict, stats).
+    """
+    # Helper: sum total tokens across all edges
+    def total_llm_tokens(values: Dict[int, Dict[str, Any]]) -> int:
+        tot = 0
+        for node in values.values():
+            for edge in node.get("children") or []:
+                edge_key, _dests = edge
+                _pop, llm_bv_json = edge_key
+                tot += len(ranges_to_token_set(llm_bv_json))
+        return tot
+
+    # Build token universe from all edges
+    universe: Set[int] = set()
+    for node in values_dict.values():
+        for edge in node.get("children") or []:
+            edge_key, _dests = edge
+            _pop, llm_bv_json = edge_key
+            universe |= ranges_to_token_set(llm_bv_json)
+
+    if not universe:
+        # Nothing to prune
+        return values_dict, {"tokens_removed": 0, "edges_removed": 0}
+
+    # Precompute edges for faster fixed-point passes (avoid repeated conversions).
+    # edges_map[node_id] = list of (edge_llm_tokens_set, [dest_ids...])
+    edges_map: Dict[int, List[Tuple[Set[int], List[int]]]] = {}
+    for nid, node in values_dict.items():
+        edges_list: List[Tuple[Set[int], List[int]]] = []
+        for edge in node.get("children") or []:
+            edge_key, dests = edge
+            _pop, llm_bv_json = edge_key
+            e_tokens = ranges_to_token_set(llm_bv_json)
+            dest_ids = [int(did) for did, _state_bv_json in dests]
+            edges_list.append((e_tokens, dest_ids))
+        edges_map[int(nid)] = edges_list
+
+    # Forward token reachability: from roots, tokens that can reach each node.
+    forward_tokens: Dict[int, Set[int]] = {}
+    roots = compute_roots(original.get("precomputed3") or [])
+    for r in roots:
+        if r in values_dict:
+            forward_tokens[int(r)] = set(universe)  # Initially, all tokens possible at roots
+
+    changed = True
+    while changed:
+        changed = False
+        for nid, edge_entries in edges_map.items():
+            parent_tokens = forward_tokens.get(nid)
+            if not parent_tokens:
+                continue
+            for e_tokens, dest_ids in edge_entries:
+                through = parent_tokens & e_tokens
+                if not through:
+                    continue
+                for did in dest_ids:
+                    dest_set = forward_tokens.setdefault(did, set())
+                    new = through - dest_set
+                    if new:
+                        dest_set.update(new)
+                        changed = True
+
+    # Backward token reachability: tokens that can reach an end node from each node.
+    backward_tokens: Dict[int, Set[int]] = {}
+    # Initialize end nodes to universe
+    for nid, node in values_dict.items():
+        value = node.get("value") or {}
+        if bool(value.get("clean_end", False)):
+            backward_tokens[int(nid)] = set(universe)
+
+    changed = True
+    while changed:
+        changed = False
+        for nid, edge_entries in edges_map.items():
+            # Aggregate tokens across all outgoing edges considering their dests
+            agg: Set[int] = set()
+            for e_tokens, dest_ids in edge_entries:
+                # Union of backward tokens over all dests for this edge
+                union_dest_back = set()
+                for did in dest_ids:
+                    union_dest_back |= backward_tokens.get(did, set())
+                if union_dest_back:
+                    agg |= (e_tokens & union_dest_back)
+            curr = backward_tokens.get(nid, set())
+            new = agg - curr
+            if new:
+                if curr:
+                    curr.update(new)
+                else:
+                    backward_tokens[nid] = agg
+                changed = True
+
+    # Prune edges based on forward/backward tokens
+    tokens_before = total_llm_tokens(values_dict)
+    edges_removed = 0
+    for nid, node in list(values_dict.items()):
+        parent_toks = forward_tokens.get(nid, set())
+        children = list(node.get("children") or [])
+        new_children = []
+        for edge in children:
+            edge_key, dests = edge
+            pop, llm_bv_json = edge_key
+            e_tokens = ranges_to_token_set(llm_bv_json)
+            if not e_tokens:
+                # Skip empty token edge (shouldn't happen at this stage)
+                continue
+            union_dest_back = set()
+            for did, _state_bv_json in dests:
+                union_dest_back |= backward_tokens.get(int(did), set())
+            pruned = e_tokens & parent_toks & union_dest_back
+            if pruned:
+                new_llm_bv_json = token_set_to_ranges(pruned)
+                new_children.append([[int(pop), new_llm_bv_json], dests])
+            else:
+                edges_removed += 1
+                # Drop this edge entirely
+        node["children"] = new_children
+
+    # After edge pruning, prune unreachable nodes and empty dests
+    roots = compute_roots(original.get("precomputed3") or [])
+    kept = bfs_reachable(values_dict, roots, None)
+    values_dict = prune_values_by_reachability(values_dict, kept)
+
+    tokens_after = 0
+    for node in values_dict.values():
+        for edge in node.get("children") or []:
+            edge_key, _dests = edge
+            _pop, llm_bv_json = edge_key
+            tokens_after += len(ranges_to_token_set(llm_bv_json))
+
+    stats = {
+        "tokens_removed": max(0, tokens_before - tokens_after),
+        "edges_removed": edges_removed,
+    }
+    return values_dict, stats
+
+
+def main():
     ap = argparse.ArgumentParser(description="Stochastic reducer for constraint trie while preserving a mask mismatch.")
     ap.add_argument("--constraint-in", required=True, help="Path to the source .json.gz constraint file.")
     ap.add_argument("--code", required=True, help="Path to the input code file used in benchmarks.")
@@ -728,6 +910,20 @@ def main():
             )
             n4, c4, d4 = count_nodes_children_dests(values_dict)
             print(f"--- Phase 4 finished. Size: {n4} nodes, {c4} children, {d4} dests. Took {time.time()-start:.1f}s ---")
+
+        # Phase 5: Deterministic single-sweep pruning by token reachability
+        if time.time() < time_budget_deadline:
+            print("\n--- Phase 5: Sweeping unreachable tokens (forward/backward reachability) ---")
+            start = time.time()
+            n_before, c_before, d_before = count_nodes_children_dests(values_dict)
+            values_dict, sweep_stats = sweep_prune_llm_tokens(original, values_dict)
+            n_after, c_after, d_after = count_nodes_children_dests(values_dict)
+            took = time.time() - start
+            print(f"--- Phase 5 finished. "
+                  f"Tokens removed: {sweep_stats.get('tokens_removed', 0)}, "
+                  f"Edges removed: {sweep_stats.get('edges_removed', 0)}. "
+                  f"Size: {n_after} nodes, {c_after} children, {d_after} dests. "
+                  f"Took {took:.1f}s ---")
 
         # Final write
         final_candidate_path = write_candidate_constraint(tmpdir, original, values_dict)
