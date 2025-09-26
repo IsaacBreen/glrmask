@@ -162,6 +162,7 @@ def run_benchmarks_and_has_mismatch(
     env["CONSTRAINT_FILE"] = str(constraint_path)
     env["CODE_FILE"] = str(code_file)
     env["SKIP_CPP_BUILD"] = "1"
+    env["DISABLE_TQDM"] = "1"
     if env_extra:
         env.update(env_extra)
 
@@ -333,15 +334,21 @@ def ddmin_children(
     Accept a deletion if mismatch persists. Prune unreachable nodes after each accepted deletion.
     """
     precomp = original.get("precomputed3") or []
-    roots = compute_roots(precomp)
 
     # Work through nodes in deterministic random order
     node_ids = list(values_dict.keys())
     random.shuffle(node_ids)
 
     improved = True
+    pass_num = 0
     while improved and time.time() < time_budget_deadline:
         improved = False
+        pass_num += 1
+        n_before, c_before, _ = count_nodes_children_dests(values_dict)
+        print(f"  [Pass {pass_num}] Starting child reduction. Nodes={n_before}, Children={c_before}")
+
+        children_checked_in_pass = 0
+        children_removed_in_pass = 0
         for nid in node_ids:
             if time.time() >= time_budget_deadline:
                 break
@@ -351,18 +358,21 @@ def ddmin_children(
             children = node.get("children") or []
             i = 0
             while i < len(children) and time.time() < time_budget_deadline:
+                children_checked_in_pass += 1
+                print(f"    - Checks: {children_checked_in_pass}, Reductions: {children_removed_in_pass}", end='\r')
                 # Try removing the ith child
                 trial_values = {k: dict(v) for k, v in values_dict.items()}
                 trial_children = list((trial_values[nid].get("children") or []))
-                removed = trial_children.pop(i)
+                trial_children.pop(i)
                 trial_values[nid]["children"] = trial_children
 
                 # Prune unreachable nodes
+                roots = compute_roots(original.get("precomputed3") or [])
                 kept = bfs_reachable(trial_values, roots, None)
                 pruned_values = prune_values_by_reachability(trial_values, kept)
 
                 cand_path = write_candidate_constraint(tmpdir, original, pruned_values)
-                ok, _idx, _out = run_benchmarks_and_has_mismatch(
+                ok, _, _ = run_benchmarks_and_has_mismatch(
                     repo_root, cand_path, code_file, baseline_model, candidate_model
                 )
                 if ok:
@@ -371,11 +381,20 @@ def ddmin_children(
                     node = values_dict.get(nid)  # may be gone; refresh
                     children = (node.get("children") or []) if node else []
                     improved = True
+                    children_removed_in_pass += 1
                     # No increment: keep same index i (new element at i after pop)
                     continue
                 else:
                     # Revert: increment i
                     i += 1
+        
+        print() # Newline for the \r progress
+        if children_removed_in_pass > 0:
+            n_after, c_after, _ = count_nodes_children_dests(values_dict)
+            print(f"  [Pass {pass_num}] Finished. Removed {children_removed_in_pass} children. New total: {c_after}")
+        else:
+            print(f"  [Pass {pass_num}] Finished. No reductions found.")
+
     return values_dict
 
 
@@ -394,14 +413,21 @@ def ddmin_dests(
     Accept a deletion if mismatch persists. Prune unreachable nodes after accept.
     """
     precomp = original.get("precomputed3") or []
-    roots = compute_roots(precomp)
 
     node_ids = list(values_dict.keys())
     random.shuffle(node_ids)
 
     improved = True
+    pass_num = 0
     while improved and time.time() < time_budget_deadline:
         improved = False
+        pass_num += 1
+        n_before, _, d_before = count_nodes_children_dests(values_dict)
+        print(f"  [Pass {pass_num}] Starting dest reduction. Nodes={n_before}, Dests={d_before}")
+        
+        dests_checked_in_pass = 0
+        dests_removed_in_pass = 0
+
         for nid in node_ids:
             if time.time() >= time_budget_deadline:
                 break
@@ -417,11 +443,13 @@ def ddmin_dests(
                 di = 0
                 # Try removing each destination
                 while di < len(dests) and time.time() < time_budget_deadline:
+                    dests_checked_in_pass += 1
+                    print(f"    - Checks: {dests_checked_in_pass}, Reductions: {dests_removed_in_pass}", end='\r')
                     trial_values = {k: dict(v) for k, v in values_dict.items()}
                     trial_children = list((trial_values[nid].get("children") or []))
                     ekey, dlist = trial_children[ci]
                     new_dlist = list(dlist)
-                    removed = new_dlist.pop(di)
+                    new_dlist.pop(di)
                     if not new_dlist:
                         # If removing this dest empties the child, drop the whole child
                         trial_children.pop(ci)
@@ -429,11 +457,12 @@ def ddmin_dests(
                         trial_children[ci] = [ekey, new_dlist]
                     trial_values[nid]["children"] = trial_children
 
+                    roots = compute_roots(original.get("precomputed3") or [])
                     kept = bfs_reachable(trial_values, roots, None)
                     pruned_values = prune_values_by_reachability(trial_values, kept)
 
                     cand_path = write_candidate_constraint(tmpdir, original, pruned_values)
-                    ok, _idx, _out = run_benchmarks_and_has_mismatch(
+                    ok, _, _ = run_benchmarks_and_has_mismatch(
                         repo_root, cand_path, code_file, baseline_model, candidate_model
                     )
                     if ok:
@@ -441,6 +470,7 @@ def ddmin_dests(
                         values_dict = pruned_values
                         node = values_dict.get(nid)  # may be gone; refresh
                         improved = True
+                        dests_removed_in_pass += 1
                         # Keep same di (next element shifted into this position)
                         # Also refresh children reference
                         if not node:
@@ -453,6 +483,14 @@ def ddmin_dests(
                         continue
                     else:
                         di += 1
+        
+        print() # Newline for the \r progress
+        if dests_removed_in_pass > 0:
+            n_after, _, d_after = count_nodes_children_dests(values_dict)
+            print(f"  [Pass {pass_num}] Finished. Removed {dests_removed_in_pass} dests. New total: {d_after}")
+        else:
+            print(f"  [Pass {pass_num}] Finished. No reductions found.")
+
     return values_dict
 
 
@@ -529,23 +567,25 @@ def main():
 
         # Phase 2: Delete child edges per node (delta-debug)
         if time.time() < time_budget_deadline:
+            print("\n--- Phase 2: Reducing child edges ---")
             start = time.time()
             values_dict = ddmin_children(
                 original, values_dict, repo_root, tmpdir, code_file,
                 baseline_model, candidate_model, time_budget_deadline
             )
             n2, c2, d2 = count_nodes_children_dests(values_dict)
-            print(f"[Children] After child-edge DD: {n2} nodes, {c2} children, {d2} dests. Took {time.time()-start:.1f}s")
+            print(f"--- Phase 2 finished. Size: {n2} nodes, {c2} children, {d2} dests. Took {time.time()-start:.1f}s ---")
 
         # Phase 3: Delete dests within child edges (delta-debug)
         if time.time() < time_budget_deadline:
+            print("\n--- Phase 3: Reducing destinations ---")
             start = time.time()
             values_dict = ddmin_dests(
                 original, values_dict, repo_root, tmpdir, code_file,
                 baseline_model, candidate_model, time_budget_deadline
             )
             n3, c3, d3 = count_nodes_children_dests(values_dict)
-            print(f"[Dests] After dest-level DD: {n3} nodes, {c3} children, {d3} dests. Took {time.time()-start:.1f}s")
+            print(f"--- Phase 3 finished. Size: {n3} nodes, {c3} children, {d3} dests. Took {time.time()-start:.1f}s ---")
 
         # Final write
         final_candidate_path = write_candidate_constraint(tmpdir, original, values_dict)
