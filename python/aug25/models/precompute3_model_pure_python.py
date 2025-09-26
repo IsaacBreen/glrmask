@@ -472,7 +472,7 @@ class Model(GraphProvider):
         - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
-        state_map: Dict[int, GSS] = self.state
+        state_map: Dict[int, GSS] = self.state.copy()
 
         all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
         final_mask: LLMTokenSet = RangeSet.empty()
@@ -512,13 +512,14 @@ class Model(GraphProvider):
                 llm_mask=allowed_mask,
             )
 
+        state_map = {sid: gss.apply(initialize_acc) for sid, gss in state_map.items()}
+
         for sid, gss in state_map.items():
             r: NodeID = roots_map[int(sid)]
-            gss_initialized: GSS = gss.apply(initialize_acc)
             if r in values:
-                values[r] = values[r].merge(gss_initialized)
+                values[r] = values[r].merge(gss)
             else:
-                values[r] = gss_initialized
+                values[r] = gss
 
             d: int = max_depth[r]
             if r not in enqueued_nodes:
