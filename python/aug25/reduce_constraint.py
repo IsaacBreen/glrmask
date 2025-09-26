@@ -171,11 +171,26 @@ def count_nodes_children_dests(values_dict: Dict[int, Dict[str, Any]]) -> Tuple[
 def write_candidate_constraint(tmp_dir: Path, original: Dict[str, Any], values_dict: Dict[int, Dict[str, Any]]) -> Path:
     """
     Build a candidate constraint JSON by replacing trie3_god['values'] and write to a temp .json.gz.
+    Ensures that all root nodes referenced by 'precomputed3' exist, adding blank ones if needed.
     Returns the file path.
     """
     data = dict(original)  # shallow copy top-level; nested parts reused
+    final_values = dict(values_dict)
+
+    # Ensure all root nodes from precomputed3 exist in the values dict.
+    # If a root was pruned, add a blank node back to prevent panics on load.
+    root_ids = compute_roots(original.get("precomputed3") or [])
+    for root_id in root_ids:
+        if root_id not in final_values:
+            # This root was pruned. Add a blank node to satisfy the loader.
+            final_values[root_id] = {
+                "clean_end": False,
+                "children": [],
+                "llm_bv_union": []
+            }
+
     trie = dict(data.get("trie3_god") or {})
-    trie["values"] = dict_to_values_list(values_dict)
+    trie["values"] = dict_to_values_list(final_values)
     data["trie3_god"] = trie
     candidate_path = tmp_dir / "candidate_constraint.json.gz"
     save_json_gz(str(candidate_path), data)
