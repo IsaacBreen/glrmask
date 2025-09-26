@@ -212,6 +212,8 @@ class Model(GraphProvider):
                     continue
                 gss_node, llm_mask = item
                 # printf"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
+                print(f"  - Processing Node {node_idx}: gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}, mask={llm_mask.to_ranges()}")
+                print(f"    - Disallowed terminals for this GSS: {gss_node.disallowed_terminals()}")
 
                 # End-node handling
                 if is_end(node_idx):
@@ -291,6 +293,7 @@ class Model(GraphProvider):
 
                         # Merge matched parent GSS nodes
                         child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+                        print(f"        - Created child_gss_node: ptr={child_gss_node.ptr()}, disallowed_terminals={child_gss_node.disallowed_terminals()}")
 
                         # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
@@ -300,11 +303,16 @@ class Model(GraphProvider):
                         existing = values.get(d)
                         if existing is not None:
                             existing_gss, existing_mask = existing
+                            print(f"        - Merging into existing node {d}:")
+                            print(f"          - Existing GSS: ptr={existing_gss.ptr()}, disallowed={existing_gss.disallowed_terminals()}")
+                            print(f"          - Child GSS:    ptr={child_gss_node.ptr()}, disallowed={child_gss_node.disallowed_terminals()}")
                             merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+                            print(f"          - Merged GSS:   ptr={merged_gss.ptr()}, disallowed={merged_gss.disallowed_terminals()}")
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (merged_gss, combined_mask)
                             # printf"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
                         else:
+                            print(f"        - Creating new entry for node {d} with child GSS.")
                             values[d] = (child_gss_node, child_llm_mask)
                             # printf"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
 

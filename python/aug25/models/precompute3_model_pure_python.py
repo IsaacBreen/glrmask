@@ -571,6 +571,8 @@ class Model(GraphProvider):
             neg_depth, node = hpop(depth_heap)
             gss_node: GSS = values.pop(node)
             enqueued_nodes.remove(node)
+            print(f"\n>>> Processing Node {node} (depth={-neg_depth})")
+            print(f"  - GSS: {gss_node!r}")
 
             # End-node handling: just union the allowed LLM tokens
             if is_end(node):
@@ -597,6 +599,7 @@ class Model(GraphProvider):
             a_node = arena.get(node)
             edges = a_node.children if a_node else []
             for (pop, llm_bv), dests in edges:
+                print(f"  - Traversing edge from node {node}: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                 llm_bv = llm_bv.difference(final_mask)
                 if llm_bv.is_empty():
                     continue
@@ -604,6 +607,7 @@ class Model(GraphProvider):
                 popped: GSS = gss_node.popn(pop)
                 if popped.is_empty():
                     continue
+                print(f"    - Popped GSS (pop={pop}): {popped!r}")
 
                 peeked = popped.peek()
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
@@ -633,6 +637,7 @@ class Model(GraphProvider):
 
                 for dest_idx, state_bv in dests:
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                    print(f"    - Considering destination {dest_idx} with states {state_bv.to_ranges()} (matched {len(values_to_keep)} heads)")
 
                     if not values_to_keep:
                         continue
@@ -640,6 +645,7 @@ class Model(GraphProvider):
                     child_gss = popped.isolate_many(values_to_keep)
                     if child_gss.is_empty():
                         continue
+                    print(f"      - Child GSS for dest {dest_idx}: {child_gss!r}")
 
                     reduced_child = child_gss.reduce_acc()
                     if not reduced_child or reduced_child.is_empty():
@@ -647,8 +653,11 @@ class Model(GraphProvider):
 
                     d: NodeID = int(dest_idx)
                     if d in values:
+                        print(f"      - Merging child GSS into existing values for node {d}")
                         values[d] = values[d].merge(child_gss)
+                        print(f"      - Merged GSS for node {d}: {values[d]!r}")
                     else:
+                        print(f"      - Creating new entry for node {d} with child GSS")
                         values[d] = child_gss
                     enqueue(max_depth[d], d)
 
