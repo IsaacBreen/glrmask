@@ -286,6 +286,7 @@ class Model(GraphProvider):
 
         model._merge_equivalent_llm_tokens()
         model._reorder_llm_tokens_for_range_minimization()
+        model._optimize_graph()
 
         return model
 
@@ -956,6 +957,170 @@ class Model(GraphProvider):
 
         ranges_after = self._count_total_ranges()
         print(f" done. Ranges reduced from {ranges_before} to {ranges_after} ({ranges_before - ranges_after} fewer).", flush=True)
+
+    def _optimize_graph(self) -> None:
+        """
+        Optimizes the graph by making state masks unconditional and removing redundant nodes.
+        This is done to reduce the number of edges and improve performance.
+        """
+        print("Optimizing graph...", end='', flush=True)
+
+        if not self.arena:
+            print(" done (empty arena).")
+            return
+
+        all_lr_states_indices = list(self._compute_universe_lr_states())
+        if not all_lr_states_indices:
+            print(" done (no LR states).")
+            return
+
+        max_lr_state = max(all_lr_states_indices) if all_lr_states_indices else -1
+        all_lr_states = RangeSet.from_ranges([(0, max_lr_state)])
+
+        # Helper for forward expansion (propagating terminal states backwards up the stack)
+        forward_state_map: Dict[int, Set[int]] = collections.defaultdict(set)
+        for to_state, from_states in self.reverse_state_map.items():
+            for from_state in from_states:
+                forward_state_map[int(from_state)].add(int(to_state))
+
+        memo_forward_expand = {}
+        def forward_expand_n(base: StateIDSet, n: int) -> StateIDSet:
+            if base.is_empty() or n <= 0:
+                return base
+
+            key = (tuple(base.to_ranges()), n)
+            if key in memo_forward_expand:
+                return memo_forward_expand[key]
+
+            cur = set(base.to_indices())
+            for _ in range(n):
+                nxt: Set[int] = set()
+                for s in cur:
+                    nxt.update(forward_state_map.get(s, set()))
+                if not nxt:
+                    cur = set()
+                    break
+                cur = nxt
+
+            result = RangeSet.from_indices(list(cur))
+            memo_forward_expand[key] = result
+            return result
+
+        # 1. Compute terminal states T(u) for all nodes u
+        terminal_states: Dict[NodeID, StateIDSet] = collections.defaultdict(RangeSet.empty)
+        for nid, node in self.arena.items():
+            if node.clean_end:
+                terminal_states[nid] = all_lr_states
+
+        sorted_nodes = sorted(self.arena.keys(), key=lambda nid: self.max_depth.get(nid, 0))
+
+        for _ in range(len(self.arena) + 1): # Iterate to fixed point
+            changed = False
+            for u in sorted_nodes:
+                for (_pop, _llm_bv), dests in self.arena[u].children:
+                    for v_id, state_bv in dests:
+                        terminal_at_v = terminal_states.get(v_id, RangeSet.empty())
+                        terminal_after_mask = state_bv.intersection(terminal_at_v)
+                        if not terminal_after_mask.is_empty():
+                            newly_terminal_at_u = forward_expand_n(terminal_after_mask, _pop)
+                            old_T_u = terminal_states[u]
+                            new_T_u = old_T_u.union(newly_terminal_at_u)
+                            if old_T_u != new_T_u:
+                                terminal_states[u] = new_T_u
+                                changed = True
+            if not changed:
+                break
+
+        # 2. Unconditionalize state masks where possible
+        for u_node in self.arena.values():
+            new_children = []
+            for (pop, llm_bv), dests in u_node.children:
+                new_dests = []
+                for v_id, state_bv in dests:
+                    if terminal_states.get(v_id, RangeSet.empty()).issubset(state_bv):
+                        new_dests.append((v_id, all_lr_states))
+                    else:
+                        new_dests.append((v_id, state_bv))
+                new_children.append(((pop, llm_bv), new_dests))
+            u_node.children = new_children
+
+        # 3. Iteratively find and remove nodes
+        nodes_before = len(self.arena)
+        
+        while True:
+            in_edges: Dict[NodeID, List[Dict]] = collections.defaultdict(list)
+            for u, u_node in self.arena.items():
+                for (pop, llm_bv), dests in u_node.children:
+                    for v_id, state_bv in dests:
+                        in_edges[v_id].append({'from': u, 'pop': pop, 'llm': llm_bv, 'state': state_bv})
+
+            nodes_to_process = sorted(self.arena.keys(), key=lambda nid: self.max_depth.get(nid, 0))
+            nodes_to_remove: Set[NodeID] = set()
+            shortcuts_to_add: Dict[NodeID, List] = collections.defaultdict(list)
+
+            for b in nodes_to_process:
+                if b in nodes_to_remove or self.arena[b].clean_end:
+                    continue
+
+                incoming = in_edges.get(b, [])
+                if not incoming or not all(edge['state'] == all_lr_states for edge in incoming):
+                    continue
+                
+                nodes_to_remove.add(b)
+                
+                outgoing = self.arena[b].children
+                for in_edge in incoming:
+                    a = in_edge['from']
+                    if a in nodes_to_remove: continue
+                    pop_a, llm_a = in_edge['pop'], in_edge['llm']
+                    for (pop_b, llm_b), dests_b in outgoing:
+                        new_pop, new_llm = pop_a + pop_b, llm_a.intersection(llm_b)
+                        if not new_llm.is_empty():
+                            shortcuts_to_add[a].append(((new_pop, new_llm), dests_b))
+            
+            if not nodes_to_remove:
+                break
+
+            new_arena: Dict[NodeID, ArenaNode] = {
+                u: node for u, node in self.arena.items() if u not in nodes_to_remove
+            }
+            for u, u_node in new_arena.items():
+                new_children_u = []
+                for (pop, llm_bv), dests in u_node.children:
+                    new_dests = [(v_id, state_bv) for v_id, state_bv in dests if v_id not in nodes_to_remove]
+                    if new_dests:
+                        new_children_u.append(((pop, llm_bv), new_dests))
+                u_node.children = new_children_u
+            self.arena = new_arena
+
+            for u, new_children in shortcuts_to_add.items():
+                if u in self.arena:
+                    self.arena[u].children.extend(new_children)
+
+        # 4. Merge edges and recompute unions and max_depth
+        for u_node in self.arena.values():
+            if not u_node.children:
+                continue
+            
+            groups: Dict[Tuple, List] = collections.defaultdict(list)
+            for (pop, llm_bv), dests in u_node.children:
+                dests_sig = tuple(sorted((v_id, tuple(state_bv.to_ranges())) for v_id, state_bv in dests))
+                key = (pop, dests_sig)
+                groups[key].append(llm_bv)
+                
+            new_children = []
+            for (pop, dests_sig), llms in groups.items():
+                merged_llm = RangeSet.union_many(llms)
+                if not merged_llm.is_empty():
+                    dests_list = [(v_id, RangeSet.from_ranges(list(ranges))) for v_id, ranges in dests_sig]
+                    new_children.append(((pop, merged_llm), dests_list))
+            u_node.children = new_children
+
+        self._recompute_llm_bv_unions()
+        self.max_depth = self._recompute_max_depth_from_arena()
+        
+        nodes_after = len(self.arena)
+        print(f" done. Nodes reduced from {nodes_before} to {nodes_after} ({nodes_before - nodes_after} removed).", flush=True)
 
     def _recompute_llm_bv_unions(self) -> None:
         """
