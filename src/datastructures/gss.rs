@@ -2321,6 +2321,7 @@ pub fn print_gss_forest(
                 terminal_map,
                 config.original_internal_bimap,
                 config.llm_token_map,
+                config,
             );
             if config.verbose {
                 if acc_child.is_empty() {
@@ -2384,6 +2385,7 @@ pub fn print_gss_forest(
             terminal_map,
             config.original_internal_bimap,
             config.llm_token_map,
+            config,
         );
         let root_label = config.labels.map_or_else(|| format!("Root {}", i), |l| l[i].clone());
 
@@ -2440,10 +2442,16 @@ pub(crate) fn format_acc(
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
     original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+    config: &GSSPrintConfig,
 ) -> String {
     let _ = (original_internal_bimap, llm_token_map);
 
     let acc = node.acc();
+
+    if config.verbose {
+        // In verbose mode, print the full debug representation of the Acc.
+        return format!("[acc: {:?}]", acc);
+    }
 
     let summarize_llm = |bv: &HybridBitset, label: &str| -> Option<String> {
         if *bv == HybridBitset::max_ones() {
