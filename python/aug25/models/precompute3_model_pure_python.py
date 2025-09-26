@@ -1438,6 +1438,7 @@ class Model(GraphProvider):
 
         changed_any = True
         while changed_any:
+            print(".", end='', flush=True)
             changed_any = False
             # Use current depths (may change after removals); default to 0 if missing
             depths = self.max_depth or {}
