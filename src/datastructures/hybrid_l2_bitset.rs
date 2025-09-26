@@ -775,4 +775,25 @@ mod tests {
         assert_eq!(diff, expected_diff);
         assert_eq!(diff_with_complement, expected_diff);
     }
+
+    #[test]
+    fn test_intersection_with_all_and_complex_set() {
+        // This test is based on a debug output from a real-world scenario.
+        // set1 is equivalent to HybridL2Bitset::all() with the single element (11, 1) removed.
+        // This creates a complex structure with multiple ranges.
+        let mut set1 = HybridL2Bitset::all();
+        set1.remove(11, 1);
+
+        // set2 is HybridL2Bitset::all()
+        let set2 = HybridL2Bitset::all();
+
+        // The intersection of a set with "all" should be the set itself.
+        let intersection = &set1 & &set2;
+
+        assert_eq!(intersection, set1);
+
+        // Also test the other way around.
+        let intersection2 = &set2 & &set1;
+        assert_eq!(intersection2, set1);
+    }
 }
