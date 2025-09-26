@@ -287,8 +287,7 @@ class Model(GraphProvider):
         def predicate(acc: PyAcc) -> bool:
             disallowed_terminals_map = acc.terminals_union
             for state_id, matched_bv in terminals_map.items():
-                disallowed_for_state = disallowed_terminals_map.get(state_id, RangeSet.empty())
-                if not matched_bv.intersection(disallowed_for_state).is_empty():
+                if state_id in disallowed_terminals_map and not not matched_bv.intersection(disallowed_terminals_map[state_id]).is_empty():
                     return False
             return True
         return gss.prune(predicate)
