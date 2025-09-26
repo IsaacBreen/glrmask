@@ -286,8 +286,9 @@ class Model(GraphProvider):
     def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, TerminalIdSet]) -> GSS:
         def predicate(acc: PyAcc) -> bool:
             disallowed_terminals_map = acc.terminals_union
-            for state_id, matched_bv in terminals_map.items():
-                if state_id in disallowed_terminals_map and not not matched_bv.intersection(disallowed_terminals_map[state_id]).is_empty():
+            common_state_ids = set(terminals_map.keys()).intersection(set(disallowed_terminals_map.keys()))
+            for state_id in common_state_ids:
+                if not terminals_map[state_id].intersection(disallowed_terminals_map[state_id]).is_empty():
                     return False
             return True
         return gss.prune(predicate)
