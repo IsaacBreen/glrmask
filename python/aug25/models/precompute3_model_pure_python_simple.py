@@ -198,13 +198,14 @@ class Model(GraphProvider):
                 print("  - children:")
                 for (pop, llm_bv), dests in node.children:
                     llm_bv_str = str(llm_bv)
-                    if len(llm_bv_str) > 60:
-                        llm_bv_str = llm_bv_str[:57] + "..."
+                    MAX_STR_LEN = 200
+                    if len(llm_bv_str) > MAX_STR_LEN:
+                        llm_bv_str = llm_bv_str[:MAX_STR_LEN-3] + "..."
                     print(f"    - Edge (pop={pop}, llm_bv={llm_bv_str}):")
                     for dest_idx, state_bv in dests:
                         state_bv_str = str(state_bv)
-                        if len(state_bv_str) > 60:
-                            state_bv_str = state_bv_str[:57] + "..."
+                        if len(state_bv_str) > MAX_STR_LEN:
+                            state_bv_str = state_bv_str[:MAX_STR_LEN-3] + "..."
                         print(f"      -> Dest Node {dest_idx} with states {state_bv_str}")
         print("--- End Precomputed Graph ---")
         # Load tokenizer and parser table from the full constraint JSON
@@ -539,13 +540,14 @@ class Model(GraphProvider):
                 llm_mask=allowed_mask,
             )
 
+        state_map = {sid: gss.apply(initialize_acc) for sid, gss in state_map.items()}
+
         for sid, gss in state_map.items():
             r: NodeID = roots_map[int(sid)]
-            gss_initialized: GSS = gss.apply(initialize_acc)
             if r in values:
-                values[r] = values[r].merge(gss_initialized)
+                values[r] = values[r].merge(gss)
             else:
-                values[r] = gss_initialized
+                values[r] = gss
 
             d: int = max_depth.get(r, 0)
             if r not in enqueued_nodes:
@@ -638,6 +640,8 @@ class Model(GraphProvider):
                         values[d] = child_gss
                     enqueue(max_depth.get(d, 0), d)
 
+
+        print("final internal mask:", final_mask)
 
         # Convert internal mask back to original IDs
         original_indices: List[int] = []
