@@ -561,7 +561,8 @@ class Model(GraphProvider):
                 hp(depth_heap, (-d, r))
 
         print("--- After Seeding ---")
-        for node_idx, gss in values.items():
+        for node_idx in sorted(values.keys()):
+            gss = values[node_idx]
             print(f"Node {node_idx}: {gss.to_reference_impl()}")
 
         def enqueue(d: int, n: NodeID) -> None:
@@ -570,10 +571,14 @@ class Model(GraphProvider):
                 hp(depth_heap, (-d, n))
 
         # Main loop
+        iter_count = 0
         while depth_heap:
+            iter_count += 1
             neg_depth, node = hpop(depth_heap)
             gss_node: GSS = values.pop(node)
             enqueued_nodes.remove(node)
+            print(f"\n[{iter_count}] Processing depth={-neg_depth}, node={node}")
+            print(f"  - Popped GSS: {gss_node.to_reference_impl()}")
 
             # End-node handling: just union the allowed LLM tokens
             if is_end(node):
@@ -600,13 +605,18 @@ class Model(GraphProvider):
             a_node = arena.get(node)
             edges = a_node.children if a_node else []
             for (pop, llm_bv), dests in edges:
-                llm_bv = llm_bv.difference(final_mask)
-                if llm_bv.is_empty():
+                print(f"    - Edge: pop={pop}, llm_bv={llm_bv}")
+                llm_bv_eff = llm_bv.difference(final_mask)
+                if llm_bv_eff.is_empty():
+                    print(f"      - SKIPPING edge (llm_bv empty after diff with final_mask)")
                     continue
+                print(f"      - Effective llm_bv: {llm_bv_eff}")
 
                 popped: GSS = gss_node.popn(pop)
                 if popped.is_empty():
+                    print(f"      - SKIPPING edge (GSS empty after popn({pop}))")
                     continue
+                print(f"      - GSS after popn({pop}): {popped.to_reference_impl()}")
 
                 peeked = popped.peek()
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
@@ -615,7 +625,7 @@ class Model(GraphProvider):
                 def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                     if acc in acc_memo:
                         return acc_memo[acc]
-                    new_mask = acc.llm_mask.intersection(llm_bv)
+                    new_mask = acc.llm_mask.intersection(llm_bv_eff)
                     if new_mask.is_empty():
                         result = None
                     else:
@@ -626,9 +636,12 @@ class Model(GraphProvider):
                     acc_memo[acc] = result
                     return result
 
-                popped = popped.apply_and_prune(intersect_and_prune)
-                if popped.is_empty():
+                popped_after_prune = popped.apply_and_prune(intersect_and_prune)
+                if popped_after_prune.is_empty():
+                    print(f"      - SKIPPING edge (GSS empty after intersecting with edge mask)")
                     continue
+                print(f"      - GSS after mask intersection: {popped_after_prune.to_reference_impl()}")
+                popped = popped_after_prune
 
                 reduced = popped.reduce_acc()
                 if not reduced or reduced.is_empty():
@@ -636,6 +649,7 @@ class Model(GraphProvider):
 
                 for dest_idx, state_bv in dests:
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                    print(f"      - Dest: node={dest_idx}, states={state_bv}, valid peeks={values_to_keep}")
 
                     if not values_to_keep:
                         continue
@@ -643,6 +657,7 @@ class Model(GraphProvider):
                     child_gss = popped.isolate_many(values_to_keep)
                     if child_gss.is_empty():
                         continue
+                    print(f"        - Child GSS for dest {dest_idx}: {child_gss.to_reference_impl()}")
 
                     reduced_child = child_gss.reduce_acc()
                     if not reduced_child or reduced_child.is_empty():
@@ -650,7 +665,10 @@ class Model(GraphProvider):
 
                     d: NodeID = int(dest_idx)
                     if d in values:
+                        print(f"        - MERGING into node {d}")
+                        print(f"          - Existing GSS: {values[d].to_reference_impl()}")
                         values[d] = values[d].merge(child_gss)
+                        print(f"          - Merged GSS: {values[d].to_reference_impl()}")
                     else:
                         values[d] = child_gss
                     enqueue(max_depth.get(d, 0), d)
