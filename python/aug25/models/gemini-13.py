@@ -471,7 +471,7 @@ class Model(GraphProvider):
                         for stack, mask in intersected_state.items():
                             if stack and state_bv.contains(stack[-1]):
                                 current_mask = dest_node_state.get(stack, RangeSet.empty())
-                                if not mask.is_subset(current_mask):
+                                if not mask.issubset(current_mask):
                                     dest_node_state[stack] = current_mask.union(mask)
                                     updated = True
                         
