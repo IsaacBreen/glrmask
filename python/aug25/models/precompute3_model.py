@@ -111,23 +111,20 @@ class Model(GraphProvider):
         # print"\n--- get_mask START ---")
         # print"GSS at start of get_mask:")
 
-        state_map_ffi: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
-        state_map: Dict[int, GSS] = {
-            sid: GSS.from_stacks(gss.flatten()) for sid, gss in state_map_ffi.items()
-        }
+        state_map: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
         all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
 
         print("states in get_mask:")
         for k, v in state_map.items():
-            print(f"state {k}: gss={v}")
+            print(f"state {k}: gss_ptr={v.ptr()} flat={GSS.from_stacks(v.flatten())}")
 
 
         t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
 
-        # node_idx -> (GSS, Bitset)
-        values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
+        # node_idx -> (GSSNode, Bitset)
+        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
 
         stopped: set[int] = set()  # nodes that stopped (no gss parents)
         todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
@@ -152,7 +149,7 @@ class Model(GraphProvider):
             existing = values.get(root_idx)
             if existing is not None:
                 existing_gss, existing_mask = existing
-                merged_gss = GSS.merge_many([existing_gss, gss])
+                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
                 values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
                 values[root_idx] = (gss, new_mask)
@@ -167,7 +164,7 @@ class Model(GraphProvider):
 
         print("--- After Seeding ---")
         for node_idx, (gss, mask) in values.items():
-            print(f"Node {node_idx}: gss={gss}, mask={mask.to_ranges()}")
+            print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}, mask={mask.to_ranges()}")
 
 
         # Main scheduler
@@ -219,18 +216,14 @@ class Model(GraphProvider):
                 # End-node handling
                 if is_end(node_idx):
                     print(f"--- End Node {node_idx} ---")
-                    print(f"GSS that reached end node: {gss_node}")
+                    print(f"GSS that reached end node: gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}")
                     print(f"Propagated mask: {llm_mask.to_ranges()}")
-
-                    single_path_gss_nodes = [s for s in gss_node.stacks.values() if s]
-                    if not single_path_gss_nodes:
-                        continue
-
-                    merged_ffi_gss = ffi.gss_merge_many_with_depth(single_path_gss_nodes, 1)
+                    # printf"    - END NODE found. Updating final_mask.")
+                    # printf"      - final_mask before: {final_mask.to_ranges()}")
 
                     # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
                     forbidden_llm_tokens = ffi.Bitset.zeros()
-                    disallowed_terminals_l2 = merged_ffi_gss.disallowed_terminals()
+                    disallowed_terminals_l2 = gss_node.disallowed_terminals()
                     print(f"Disallowed Terminals L2 from GSS: {disallowed_terminals_l2}")
                     possible_matches = self.possible_matches_cache
 
@@ -248,15 +241,20 @@ class Model(GraphProvider):
                                 if disallowed_bv.contains(terminal_id):
                                     forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
-                    glr_active_tokens = merged_ffi_gss.allowed_llm_tokens()
+                    glr_active_tokens = gss_node.allowed_llm_tokens()
                     glr_active_tokens = llm_mask.intersection(glr_active_tokens)
                     print(f"Allowed LLM tokens from GSS heads (after llm_mask intersection): {glr_active_tokens.to_ranges()}")
                     final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
                     tokens_to_add = final_allowed_tokens
 
-                    final_mask = final_mask.union(tokens_to_add)
+                    # printf"      - llm_mask (propagated): {llm_mask.to_ranges()}")
+                    # printf"      - gss_active_tokens (from GSS): {gss_active_tokens.to_ranges()}")
+                    # printf"      - tokens_to_add (intersection): {tokens_to_add.to_ranges()}")
 
-                if gss_node.is_empty():
+                    final_mask = final_mask.union(tokens_to_add)
+                    # printf"      - final_mask after:  {final_mask.to_ranges()}")
+
+                if not gss_node.is_alive():
                     stopped.add(node_idx)
                     # printf"    - STOPPING node {node_idx} (GSS not alive)")
                     continue
@@ -269,8 +267,9 @@ class Model(GraphProvider):
                 for (pop, llm_bv), dests in children:
                     # printf"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                     # Collect all pops from GSS parents
-                    popped_gss = gss_node.popn(pop)
-                    if popped_gss.is_empty():
+                    peeks = gss_node.popn_fast(pop)
+                    # printf"      - Found {len(peeks)} peeks from GSS set")
+                    if not peeks:
                         continue
 
                     llm_empty = llm_bv.is_empty()
@@ -278,17 +277,18 @@ class Model(GraphProvider):
                     for dest_idx, state_bv in dests:
                         # printf"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
                         # Filter peeks by destination state bitset
-                        if state_bv.is_empty():
+                        matched = []
+                        if not state_bv.is_empty():
+                            contains = state_bv.contains
+                            for sid_val, parent_node in peeks:
+                                if contains(sid_val):
+                                    matched.append(parent_node)
+                        # printf"        - Matched {len(matched)} parent GSS nodes")
+                        if not matched:
                             continue
 
-                        # Filter GSS based on which heads match the state bitvector
-                        matching_sids = [sid for sid in popped_gss.peek() if state_bv.contains(sid)]
-                        if not matching_sids:
-                            continue
-
-                        child_gss_node = popped_gss.isolate_many(matching_sids)
-                        if child_gss_node.is_empty():
-                            continue
+                        # Merge matched parent GSS nodes
+                        child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
 
                         # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
@@ -298,7 +298,7 @@ class Model(GraphProvider):
                         existing = values.get(d)
                         if existing is not None:
                             existing_gss, existing_mask = existing
-                            merged_gss = GSS.merge_many([existing_gss, child_gss_node])
+                            merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (merged_gss, combined_mask)
                             # printf"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
