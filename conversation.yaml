@@ -1,9 +1,325 @@
 local_system:
   attached_files:
+    - python/aug25/models/precompute3_model.py
     - python/aug25/models/precompute3_model_pure_python.py
   conversation_file:
   compile_command:
   initial_file_contents:
+    python/aug25/models/precompute3_model.py: |
+      import json
+      import time
+      import heapq
+      import collections
+      from typing import Dict, List, Tuple, Optional
+
+      from ..common_interface import GraphProvider, RangeSet
+      import _sep1 as ffi  # the compiled module
+      from tqdm.auto import tqdm
+
+      from python.gss_tester.implementations.reference_impl import ReferenceGSS as GSS
+
+
+      class Model(GraphProvider):
+          """
+          Precomputed trie model (third-generation).
+          Normalizes input arena by converting JSON bitsets into ffi.Bitset instances
+          and provides graph traversal and mask computation interfaces.
+          """
+
+          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+              # Map tokenizer state -> trie root node
+              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
+              self.arena: Dict[int, dict] = arena
+              self.constraint: Optional[ffi.GrammarConstraint] = None
+              self.constraint_state: Optional[ffi.GrammarConstraintState] = None
+              self.id_to_token: Dict[int, bytes] = {}
+              self.max_depth: Dict[int, int] = {}
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
+
+              # Normalize arena children bitsets and cache max_depth
+              dumps = json.dumps
+              bs_from_json = ffi.Bitset.from_json_string
+
+              for uid, node in tqdm(
+                  self.arena.items(),
+                  desc="Normalizing precompute3 BVs",
+                  total=len(self.arena),
+              ):
+                  uid_int = int(uid)
+                  try:
+                      md = node.get("max_depth", 0)
+                      self.max_depth[uid_int] = int(md)
+                  except Exception:
+                      self.max_depth[uid_int] = 0
+
+                  children = node.get("children") or []
+                  if not children:
+                      node["children"] = []
+                      continue
+
+                  new_children = []
+                  for edge_key, dest_map in children:
+                      pop, llm_bv_json = edge_key
+                      llm_bv = bs_from_json(dumps(llm_bv_json))
+
+                      new_dest_map = []
+                      for dest_idx, state_bv_json in dest_map:
+                          state_bv = bs_from_json(dumps(state_bv_json))
+                          new_dest_map.append((int(dest_idx), state_bv))
+
+                      new_children.append(((int(pop), llm_bv), new_dest_map))
+                  node["children"] = new_children
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              data = json.loads(s)
+              roots_map = data["precomputed3"]
+              arena_json = data["trie3_god"]
+              arena_values = arena_json.get("values", [])
+              arena = {int(k): v for k, v in arena_values}
+              model = Model(roots_map, arena)
+              model.constraint = ffi.GrammarConstraint.from_json_string(s)
+              print(model.constraint.dump_precomputed3())
+              model.constraint_state = ffi.GrammarConstraintState(model.constraint)
+              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+              model.possible_matches_cache = model.constraint.possible_matches()
+              print("model.possible_matches_cache", model.possible_matches_cache)
+              return model
+
+          def get_root(self, state_id: int) -> int:
+              return self.roots_map[int(state_id)]
+
+          def is_end(self, node: int) -> bool:
+              return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
+
+          def iter_edges(self, node: int, token: int):
+              """
+              Explode packed transitions into (pop, state_id or None, dest_idx).
+              Only used by equivalence checking; not performance-critical.
+              """
+              children = self.arena.get(node, {}).get("children") or []
+              for (pop, llm_bv), dests in children:
+                  if llm_bv.contains(token):
+                      for dest_idx, state_bv in dests:
+                          if state_bv.is_empty():  # Epsilon on GSS stack
+                              yield (int(pop), None, int(dest_idx))
+                          else:
+                              for start, end in state_bv.to_ranges():
+                                  for sid in range(start, end + 1):
+                                      yield (int(pop), sid, int(dest_idx))
+
+          def commit(self, token_id: int):
+              self.constraint_state.commit(token_id)
+
+          def get_mask(self) -> RangeSet:
+              """
+              Compute the final LLM token mask given a mapping from tokenizer state to
+              GSS nodes. This is the performance-critical routine.
+              """
+              # print"\n--- get_mask START ---")
+              # print"GSS at start of get_mask:")
+
+              state_map: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
+              all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
+
+              print("states in get_mask:")
+              for k, v in state_map.items():
+                  print(f"state {k}: gss_ptr={v.ptr()} flat={GSS.from_stacks(v.flatten())}")
+
+
+              t0 = time.time()
+
+              final_mask = ffi.Bitset.zeros()
+
+              # node_idx -> (GSSNode, Bitset)
+              values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+
+              stopped: set[int] = set()  # nodes that stopped (no gss parents)
+              todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
+              depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
+
+
+              # Seed: map tokenizer states and their filtered GSS to trie roots
+              heappush = heapq.heappush
+              roots_map = self.roots_map
+              max_depth = self.max_depth
+
+              # print"\n--- Seeding work queue ---")
+              for sid, gss in state_map.items():
+                  new_mask = all_ones_mask
+                  root_idx = roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  root_idx = int(root_idx)
+                  
+                  # printf"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
+
+                  existing = values.get(root_idx)
+                  if existing is not None:
+                      existing_gss, existing_mask = existing
+                      merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
+                      values[root_idx] = (merged_gss, existing_mask.union(new_mask))
+                  else:
+                      values[root_idx] = (gss, new_mask)
+
+                  depth = max_depth[root_idx]
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {root_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(root_idx)
+
+              print("--- After Seeding ---")
+              for node_idx, (gss, mask) in values.items():
+                  print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}, mask={mask.to_ranges()}")
+
+
+              # Main scheduler
+
+              # Helper to enqueue a node at a given depth
+              def enqueue(depth: int, node_idx: int) -> None:
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {node_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(node_idx)
+
+              heappop = heapq.heappop
+              arena = self.arena
+              is_end = self.is_end
+
+              # print"\n--- Main loop ---")
+              iter_count = 0
+              while True:
+                  iter_count += 1
+                  # Pop the smallest depth bucket (skip stale heap entries)
+                  node_indices: Optional[set[int]] = None
+                  current_depth = -1
+                  while depth_heap:
+                      current_depth = heappop(depth_heap)
+                      node_indices = todo.pop(current_depth, None)
+                      if node_indices:
+                          break
+                  if not node_indices:
+                      # printf"[{iter_count}] Loop finished: no more nodes to process.")
+                      break  # nothing left to process
+
+                  # printf"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
+
+                  # Process all nodes in this depth bucket
+                  for node_idx in node_indices:
+                      if node_idx in stopped:
+                          # printf"  - Node {node_idx}: SKIPPING (already stopped)")
+                          continue
+
+                      item = values.pop(node_idx, None)
+                      if item is None:
+                          # printf"  - Node {node_idx}: SKIPPING (no value)")
+                          continue
+                      gss_node, llm_mask = item
+                      # printf"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
+
+                      # End-node handling
+                      if is_end(node_idx):
+                          print(f"--- End Node {node_idx} ---")
+                          print(f"GSS that reached end node: gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}")
+                          print(f"Propagated mask: {llm_mask.to_ranges()}")
+                          # printf"    - END NODE found. Updating final_mask.")
+                          # printf"      - final_mask before: {final_mask.to_ranges()}")
+
+                          # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
+                          forbidden_llm_tokens = ffi.Bitset.zeros()
+                          disallowed_terminals_l2 = gss_node.disallowed_terminals()
+                          print(f"Disallowed Terminals L2 from GSS: {disallowed_terminals_l2}")
+                          possible_matches = self.possible_matches_cache
+
+                          for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
+                              if disallowed_bv.is_empty():
+                                  continue
+
+                              for tsid in range(start, end + 1):
+                                  possible_matches_for_state = possible_matches.get(tsid)
+                                  if not possible_matches_for_state:
+                                      continue
+
+                                  for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
+                                      terminal_id = int(terminal_id_str)
+                                      if disallowed_bv.contains(terminal_id):
+                                          forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
+
+                          glr_active_tokens = gss_node.allowed_llm_tokens()
+                          glr_active_tokens = llm_mask.intersection(glr_active_tokens)
+                          print(f"Allowed LLM tokens from GSS heads (after llm_mask intersection): {glr_active_tokens.to_ranges()}")
+                          final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
+                          tokens_to_add = final_allowed_tokens
+
+                          # printf"      - llm_mask (propagated): {llm_mask.to_ranges()}")
+                          # printf"      - gss_active_tokens (from GSS): {gss_active_tokens.to_ranges()}")
+                          # printf"      - tokens_to_add (intersection): {tokens_to_add.to_ranges()}")
+
+                          final_mask = final_mask.union(tokens_to_add)
+                          # printf"      - final_mask after:  {final_mask.to_ranges()}")
+
+                      if not gss_node.is_alive():
+                          stopped.add(node_idx)
+                          # printf"    - STOPPING node {node_idx} (GSS not alive)")
+                          continue
+
+                      # Transitions grouped by (pop, llm_bv)
+                      node_data = arena.get(node_idx, {})
+                      children = node_data.get("children") or []
+                      # if not children:
+                      #     # printf"    - No children for node {node_idx}")
+                      for (pop, llm_bv), dests in children:
+                          # printf"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
+                          # Collect all pops from GSS parents
+                          peeks = gss_node.popn_fast(pop)
+                          # printf"      - Found {len(peeks)} peeks from GSS set")
+                          if not peeks:
+                              continue
+
+                          llm_empty = llm_bv.is_empty()
+
+                          for dest_idx, state_bv in dests:
+                              # printf"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
+                              # Filter peeks by destination state bitset
+                              matched = []
+                              if not state_bv.is_empty():
+                                  contains = state_bv.contains
+                                  for sid_val, parent_node in peeks:
+                                      if contains(sid_val):
+                                          matched.append(parent_node)
+                              # printf"        - Matched {len(matched)} parent GSS nodes")
+                              if not matched:
+                                  continue
+
+                              # Merge matched parent GSS nodes
+                              child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+
+                              # Compute child mask (intersection with llm_bv when present)
+                              child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+                              # printf"        - Child mask: {child_llm_mask.to_ranges()}")
+
+                              d = int(dest_idx)
+                              existing = values.get(d)
+                              if existing is not None:
+                                  existing_gss, existing_mask = existing
+                                  merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+                                  combined_mask = existing_mask.union(child_llm_mask)
+                                  values[d] = (merged_gss, combined_mask)
+                                  # printf"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
+                              else:
+                                  values[d] = (child_gss_node, child_llm_mask)
+                                  # printf"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
+
+                              enqueue(max_depth[d], d)
+
+              print("final internal mask:", final_mask)
+
+              original_mask = self.constraint.internal_bv_to_original(final_mask)
+              return RangeSet.from_ranges(original_mask.to_ranges())
     python/aug25/models/precompute3_model_pure_python.py: |+
       from __future__ import annotations
 
@@ -13,8 +329,6 @@ local_system:
       import time
       from typing import Dict, List, Tuple, Optional, Union, Any, Set
       from dataclasses import dataclass, field
-
-      from tqdm import tqdm
 
       from ..common_interface import GraphProvider
       from ..range_set.py_range_set import PyRangeSet as RangeSet
@@ -295,9 +609,6 @@ local_system:
 
               model._merge_equivalent_llm_tokens()
               model._reorder_llm_tokens_for_range_minimization()
-              # After LLM token reordering, optimize state masks and collapse edges
-              model._optimize_state_masks_and_edges()
-
               return model
 
           @profile
@@ -1230,367 +1541,322 @@ local_system:
                       new_internal_to_original_map[rep].update(orig_set)
                   self.internal_to_original_map = new_internal_to_original_map
 
-          def _compute_universe_lr_states(self) -> Set[int]:
-              return set(self.parser_table.table.keys())
-
-          def _reverse_expand_n(self, base: Set[int], n: int) -> Set[int]:
-              """
-              Apply the reverse_state_map n times to a set of states.
-              """
-              if not base or n <= 0:
-                  return set(base)
-              cur = set(base)
-              for _ in range(n):
-                  nxt: Set[int] = set()
-                  for s in cur:
-                      nxt.update(self.reverse_state_map.get(int(s), set()))
-                  if not nxt:
-                      return set()
-                  cur = nxt
-              return cur
-
-          # ===========================
-          # Graph optimization (Alt 6 + edge reduction Alt 2)
-          # ===========================
-          def _rs_equals(self, a: RangeSet, b: RangeSet) -> bool:
-              # Robust equality via mutual subset checks
-              return a.difference(b).is_empty() and b.difference(a).is_empty()
-
-          def _universe_lr_states_set(self) -> Set[int]:
-              return set(self._compute_universe_lr_states())
-
-          def _universe_lr_states_rangeset(self) -> StateIDSet:
-              return RangeSet.from_indices(sorted(self._compute_universe_lr_states()))
-
-          def _normalize_children_for_node(self, node: ArenaNode) -> None:
-              """
-              Merge child edges with identical (pop, dests) signature by uniting their llm_bv.
-              """
-              children = node.children
-              if not children:
-                  node.llm_bv_union = RangeSet.empty()
-                  return
-
-              # signature: (pop, ((dest_id, ((start,end),...)), ...))
-              groups: Dict[
-                  Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]],
-                  LLMTokenSet
-              ] = {}
-
-              for (pop, llm_bv), dests in children:
-                  dests_sig = tuple(sorted(
-                      (int(dest_id), tuple((int(a), int(b)) for (a, b) in state_bv.to_ranges()))
-                      for dest_id, state_bv in dests
-                  ))
-                  key = (int(pop), dests_sig)
-                  if key in groups:
-                      groups[key] = groups[key].union(llm_bv)
-                  else:
-                      groups[key] = llm_bv
-
-              new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-              llm_union = RangeSet.empty()
-              for (pop, dests_sig), llm_bv in groups.items():
-                  if llm_bv.is_empty():
-                      continue
-                  llm_union = llm_union.union(llm_bv)
-                  dests_list: List[Tuple[int, StateIDSet]] = []
-                  for dest_id, ranges in dests_sig:
-                      dests_list.append((int(dest_id), RangeSet.from_ranges(list(ranges))))
-                  new_children.append(((int(pop), llm_bv), dests_list))
-
-              # Deterministic sort
-              def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
-                  try:
-                      return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
-                  except Exception:
-                      return ()
-
-              new_children.sort(
-                  key=lambda item: (
-                      int(item[0][0]),
-                      _ranges_key(item[0][1]),
-                      tuple(sorted(int(d[0]) for d in item[1])),
-                  )
-              )
-
-              node.children = new_children
-              node.llm_bv_union = llm_union
-
-          def _normalize_all_children(self) -> None:
-              for node in self.arena.values():
-                  self._normalize_children_for_node(node)
-
-          def _compute_terminal_states_by_node(self) -> Dict[NodeID, Set[int]]:
-              """
-              Compute, for each node, the set of LR states that are 'terminal' (can eventually
-              reach an end node) ignoring LLM tokens. Uses a fixpoint over the product graph.
-              """
-              arena = self.arena
-              if not arena:
-                  return {}
-
-              universe: Set[int] = self._universe_lr_states_set()
-
-              # Initialize terminal sets
-              terminal_by_node: Dict[NodeID, Set[int]] = {}
-              for nid, node in arena.items():
-                  if node.clean_end:
-                      terminal_by_node[int(nid)] = set(universe)
-                  else:
-                      terminal_by_node[int(nid)] = set()
-
-              # Build edges ignoring LLM tokens: (u) -> [(pop, v, mask_set), ...]
-              edges_by_node: Dict[NodeID, List[Tuple[int, NodeID, Set[int]]]] = {}
-              for u, node in arena.items():
-                  u = int(u)
-                  lst: List[Tuple[int, NodeID, Set[int]]] = []
-                  for (pop, _llm_bv), dests in node.children:
-                      for dest_id, state_bv in dests:
-                          mask_set = set(int(i) for i in state_bv.to_indices())
-                          lst.append((int(pop), int(dest_id), mask_set))
-                  edges_by_node[u] = lst
-
-              # Fixpoint iteration
-              changed = True
-              while changed:
-                  changed = False
-                  for u, lst in edges_by_node.items():
-                      if not lst:
-                          continue
-                      base = terminal_by_node[u]
-                      accum = set(base)
-                      for pop, v, mask_set in lst:
-                          tv = terminal_by_node.get(int(v), set())
-                          if not tv:
-                              continue
-                          intersect = mask_set.intersection(tv)
-                          if not intersect:
-                              continue
-                          pre = self._reverse_expand_n(intersect, int(pop))
-                          if pre:
-                              before = len(accum)
-                              accum.update(pre)
-                              if len(accum) > before:
-                                  # mark that u grew
-                                  pass
-                      if len(accum) > len(base):
-                          terminal_by_node[u] = accum
-                          changed = True
-              return terminal_by_node
-
-          def _optimize_state_masks_and_edges(self) -> None:
-              """
-              1) Expand state masks: For each edge to dest D, union in all NonTerminal(D) states.
-                 This pushes masks towards the full universe where safe (Alt 6).
-              2) Collapse chains A->B->C conservatively (Replacement 1) only when:
-                 - B is not an end node
-                 - B has exactly one unique destination C across all children
-                 - All incoming edges to B have full (universe) masks to B
-                 - The collapse strictly reduces edge count: (incoming_count == 1) or (outgoing_group_count == 1)
-                 LLM tokens are preserved by intersecting A->B.llm_bv and B->C.llm_bv for the new A->C edge.
-              """
-              print("Optimizing state masks and collapsing edges...", end='', flush=True)
-
-              if not self.arena:
-                  print(" done (empty arena).")
-                  return
-
-              # Universe and terminal sets
-              universe_rs: StateIDSet = self._universe_lr_states_rangeset()
-              universe_set: Set[int] = set(universe_rs.to_indices())
-              terminal_by_node: Dict[NodeID, Set[int]] = self._compute_terminal_states_by_node()
-              terminal_rs_by_node: Dict[NodeID, StateIDSet] = {
-                  nid: RangeSet.from_indices(sorted(list(s)))
-                  for nid, s in terminal_by_node.items()
-              }
-
-              # Step 1: Expand state masks by adding NonTerminal(D) for destination D
-              for nid, node in list(self.arena.items()):
-                  if not node.children:
-                      continue
-                  new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-                  for (pop, llm_bv), dests in node.children:
-                      new_dests: List[Tuple[int, StateIDSet]] = []
-                      for dest_id, state_bv in dests:
-                          term_rs = terminal_rs_by_node.get(int(dest_id), universe_rs)
-                          nonterm_rs = universe_rs.difference(term_rs)
-                          expanded_bv = state_bv.union(nonterm_rs)
-                          new_dests.append((int(dest_id), expanded_bv))
-                      new_children.append(((int(pop), llm_bv), new_dests))
-                  node.children = new_children
-
-              # Normalize after mask expansions
-              self._normalize_all_children()
-              self._recompute_llm_bv_unions()
-
-              # Step 2: Bottom-up collapses with Replacement 1 where beneficial
-              roots_set: Set[int] = set(int(v) for v in self.roots_map.values())
-
-              def collect_incoming_edges(target_nid: int) -> List[Tuple[int, int, int]]:
-                  """
-                  Return list of (A_node_id, child_idx, dest_idx) such that A.children[child_idx]
-                  has a dest entry at dest_idx pointing to target_nid. Computed on the fly.
-                  """
-                  incoming: List[Tuple[int, int, int]] = []
-                  for aid, anode in self.arena.items():
-                      aid_int = int(aid)
-                      for ci, child in enumerate(anode.children):
-                          _sig, dests = child
-                          for di, (dest_id, _bv) in enumerate(dests):
-                              if int(dest_id) == int(target_nid):
-                                  incoming.append((aid_int, int(ci), int(di)))
-                  return incoming
-
-              def rs_is_universe(rs: RangeSet) -> bool:
-                  return self._rs_equals(rs, universe_rs)
-
-              changed_any = True
-              while changed_any:
-                  changed_any = False
-                  # Use current depths (may change after removals); default to 0 if missing
-                  depths = self.max_depth or {}
-                  node_order = sorted(self.arena.keys(), key=lambda x: int(depths.get(int(x), 0)))
-                  for b in tqdm(node_order, desc=" Collapsing"):
-                      b = int(b)
-                      if b not in self.arena:
-                          continue
-                      bnode = self.arena[b]
-                      if bnode.clean_end:
-                          continue
-                      # Determine unique destination across all children
-                      dest_nodes: Set[int] = set()
-                      for (_sig, dests) in bnode.children:
-                          for (did, _bv) in dests:
-                              dest_nodes.add(int(did))
-                      if not dest_nodes:
-                          # Orphan node (no outgoing edges). If not root and no incoming, remove it.
-                          incoming = collect_incoming_edges(b)
-                          if not incoming and (b not in roots_set):
-                              # Remove b
-                              del self.arena[b]
-                              if b in self.max_depth:
-                                  del self.max_depth[b]
-                              changed_any = True
-                          continue
-                      if len(dest_nodes) != 1:
-                          continue
-                      c = next(iter(dest_nodes))
-                      if c == b:
-                          # self-loop; skip
-                          continue
-
-                      # Collect B->C groups (must be only destination for each child)
-                      bc_groups: List[Tuple[int, LLMTokenSet, StateIDSet]] = []
-                      valid_bc = True
-                      for (pop_m, llm_bv_bc), dests in bnode.children:
-                          # All dests must be exactly to c
-                          if len(dests) != 1 or int(dests[0][0]) != int(c):
-                              valid_bc = False
-                              break
-                          y_bv = dests[0][1]
-                          bc_groups.append((int(pop_m), llm_bv_bc, y_bv))
-                      if not valid_bc:
-                          continue
-                      k_bc = len(bc_groups)
-                      incoming = collect_incoming_edges(b)
-                      in_count = len(incoming)
-
-                      if in_count == 0:
-                          # If B has no incoming edges and is not a root, we can safely remove it and its outgoing edges.
-                          if b not in roots_set:
-                              bnode.children = []
-                              del self.arena[b]
-                              if b in self.max_depth:
-                                  del self.max_depth[b]
-                              changed_any = True
-                          continue
-
-                      # Check all incoming A->B masks are universe
-                      all_in_masks_universe = True
-                      for (aid, ci, di) in incoming:
-                          anode = self.arena.get(aid)
-                          if anode is None:
-                              all_in_masks_universe = False
-                              break
-                          _sig, dests = anode.children[ci]
-                          _did, x_bv = dests[di]
-                          if not rs_is_universe(x_bv):
-                              all_in_masks_universe = False
-                              break
-                      if not all_in_masks_universe:
-                          continue
-
-                      # Ensure net edge reduction: in_count == 1 or k_bc == 1
-                      if not (in_count == 1 or k_bc == 1):
-                          continue
-
-                      # Perform collapse: for each incoming A->B, create A->C edges based on llm_bv intersections
-                      nodes_to_normalize: Set[int] = set()
-                      for (aid, ci, di) in incoming:
-                          anode = self.arena.get(aid)
-                          if anode is None:
-                              continue
-                          (pop_n, llm_bv_ab), dests = anode.children[ci]
-                          # For each B->C group, intersect tokens and add A->C edge
-                          for (pop_m, llm_bv_bc, y_bv) in bc_groups:
-                              inter_llm = llm_bv_ab.intersection(llm_bv_bc)
-                              if inter_llm.is_empty():
-                                  continue
-                              new_pop = int(pop_n) + int(pop_m)
-                              # Append new edge ((new_pop, inter_llm), [(c, y_bv)])
-                              anode.children.append(((new_pop, inter_llm), [(int(c), y_bv)]))
-                              nodes_to_normalize.add(aid)
-
-                      # Remove all incoming A->B dest entries
-                      for (aid, ci, di) in incoming:
-                          if aid not in self.arena:
-                              continue
-                          anode = self.arena[aid]
-                          if ci >= len(anode.children):
-                              continue
-                          (pop_n, llm_bv_ab), dests = anode.children[ci]
-                          # Filter out the B entry
-                          new_dests = [(did, bv) for (did, bv) in dests if int(did) != int(b)]
-                          if not new_dests:
-                              # Remove the entire child edge group if no destinations left
-                              # Guard against index shifts: rebuild children without index 'ci'
-                              new_children = []
-                              for idx, item in enumerate(anode.children):
-                                  if idx != ci:
-                                      new_children.append(item)
-                              anode.children = new_children
-                          else:
-                              anode.children[ci] = ((pop_n, llm_bv_ab), new_dests)
-                          nodes_to_normalize.add(aid)
-
-                      # Remove B->C edges and possibly node B (if not a root)
-                      if b in self.arena:
-                          self.arena[b].children = []
-                      # If B is not a root and there are no remaining incoming edges, remove B
-                      incoming_after = collect_incoming_edges(b)
-                      if (b not in roots_set) and (not incoming_after):
-                          if b in self.arena:
-                              del self.arena[b]
-                          if b in self.max_depth:
-                              del self.max_depth[b]
-
-                      # Normalize changed nodes and recompute unions
-                      for aid in nodes_to_normalize:
-                          if aid in self.arena:
-                              self._normalize_children_for_node(self.arena[aid])
-                      self._recompute_llm_bv_unions()
-                      # Recompute depths since graph changed
-                      self.max_depth = self._recompute_max_depth_from_arena()
-                      changed_any = True
-
-              # Final normalization and metrics recompute
-              self._normalize_all_children()
-              self._recompute_llm_bv_unions()
-              self.max_depth = self._recompute_max_depth_from_arena()
-              print(" done.", flush=True)
-
   prev_file_contents:
+    python/aug25/models/precompute3_model.py: |
+      import json
+      import time
+      import heapq
+      import collections
+      from typing import Dict, List, Tuple, Optional
+
+      from ..common_interface import GraphProvider, RangeSet
+      import _sep1 as ffi  # the compiled module
+      from tqdm.auto import tqdm
+
+      from python.gss_tester.implementations.reference_impl import ReferenceGSS as GSS
+
+
+      class Model(GraphProvider):
+          """
+          Precomputed trie model (third-generation).
+          Normalizes input arena by converting JSON bitsets into ffi.Bitset instances
+          and provides graph traversal and mask computation interfaces.
+          """
+
+          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+              # Map tokenizer state -> trie root node
+              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
+              self.arena: Dict[int, dict] = arena
+              self.constraint: Optional[ffi.GrammarConstraint] = None
+              self.constraint_state: Optional[ffi.GrammarConstraintState] = None
+              self.id_to_token: Dict[int, bytes] = {}
+              self.max_depth: Dict[int, int] = {}
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
+
+              # Normalize arena children bitsets and cache max_depth
+              dumps = json.dumps
+              bs_from_json = ffi.Bitset.from_json_string
+
+              for uid, node in tqdm(
+                  self.arena.items(),
+                  desc="Normalizing precompute3 BVs",
+                  total=len(self.arena),
+              ):
+                  uid_int = int(uid)
+                  try:
+                      md = node.get("max_depth", 0)
+                      self.max_depth[uid_int] = int(md)
+                  except Exception:
+                      self.max_depth[uid_int] = 0
+
+                  children = node.get("children") or []
+                  if not children:
+                      node["children"] = []
+                      continue
+
+                  new_children = []
+                  for edge_key, dest_map in children:
+                      pop, llm_bv_json = edge_key
+                      llm_bv = bs_from_json(dumps(llm_bv_json))
+
+                      new_dest_map = []
+                      for dest_idx, state_bv_json in dest_map:
+                          state_bv = bs_from_json(dumps(state_bv_json))
+                          new_dest_map.append((int(dest_idx), state_bv))
+
+                      new_children.append(((int(pop), llm_bv), new_dest_map))
+                  node["children"] = new_children
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              data = json.loads(s)
+              roots_map = data["precomputed3"]
+              arena_json = data["trie3_god"]
+              arena_values = arena_json.get("values", [])
+              arena = {int(k): v for k, v in arena_values}
+              model = Model(roots_map, arena)
+              model.constraint = ffi.GrammarConstraint.from_json_string(s)
+              print(model.constraint.dump_precomputed3())
+              model.constraint_state = ffi.GrammarConstraintState(model.constraint)
+              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+              model.possible_matches_cache = model.constraint.possible_matches()
+              print("model.possible_matches_cache", model.possible_matches_cache)
+              return model
+
+          def get_root(self, state_id: int) -> int:
+              return self.roots_map[int(state_id)]
+
+          def is_end(self, node: int) -> bool:
+              return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
+
+          def iter_edges(self, node: int, token: int):
+              """
+              Explode packed transitions into (pop, state_id or None, dest_idx).
+              Only used by equivalence checking; not performance-critical.
+              """
+              children = self.arena.get(node, {}).get("children") or []
+              for (pop, llm_bv), dests in children:
+                  if llm_bv.contains(token):
+                      for dest_idx, state_bv in dests:
+                          if state_bv.is_empty():  # Epsilon on GSS stack
+                              yield (int(pop), None, int(dest_idx))
+                          else:
+                              for start, end in state_bv.to_ranges():
+                                  for sid in range(start, end + 1):
+                                      yield (int(pop), sid, int(dest_idx))
+
+          def commit(self, token_id: int):
+              self.constraint_state.commit(token_id)
+
+          def get_mask(self) -> RangeSet:
+              """
+              Compute the final LLM token mask given a mapping from tokenizer state to
+              GSS nodes. This is the performance-critical routine.
+              """
+              # print"\n--- get_mask START ---")
+              # print"GSS at start of get_mask:")
+
+              state_map_ffi: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
+              state_map: Dict[int, GSS] = {
+                  sid: GSS.from_stacks(gss.flatten()) for sid, gss in state_map_ffi.items()
+              }
+              all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
+
+              print("states in get_mask:")
+              for k, v in state_map.items():
+                  print(f"state {k}: gss={v}")
+
+
+              t0 = time.time()
+
+              final_mask = ffi.Bitset.zeros()
+
+              # node_idx -> (GSS, Bitset)
+              values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
+
+              stopped: set[int] = set()  # nodes that stopped (no gss parents)
+              todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
+              depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
+
+
+              # Seed: map tokenizer states and their filtered GSS to trie roots
+              heappush = heapq.heappush
+              roots_map = self.roots_map
+              max_depth = self.max_depth
+
+              # print"\n--- Seeding work queue ---")
+              for sid, gss in state_map.items():
+                  new_mask = all_ones_mask
+                  root_idx = roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  root_idx = int(root_idx)
+                  
+                  # printf"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
+
+                  existing = values.get(root_idx)
+                  if existing is not None:
+                      existing_gss, existing_mask = existing
+                      merged_gss = GSS.merge_many([existing_gss, gss])
+                      values[root_idx] = (merged_gss, existing_mask.union(new_mask))
+                  else:
+                      values[root_idx] = (gss, new_mask)
+
+                  depth = max_depth[root_idx]
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {root_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(root_idx)
+
+              print("--- After Seeding ---")
+              for node_idx, (gss, mask) in values.items():
+                  print(f"Node {node_idx}: gss={gss}, mask={mask.to_ranges()}")
+
+
+              # Main scheduler
+
+              # Helper to enqueue a node at a given depth
+              def enqueue(depth: int, node_idx: int) -> None:
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {node_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(node_idx)
+
+              heappop = heapq.heappop
+              arena = self.arena
+              is_end = self.is_end
+
+              # print"\n--- Main loop ---")
+              iter_count = 0
+              while True:
+                  iter_count += 1
+                  # Pop the smallest depth bucket (skip stale heap entries)
+                  node_indices: Optional[set[int]] = None
+                  current_depth = -1
+                  while depth_heap:
+                      current_depth = heappop(depth_heap)
+                      node_indices = todo.pop(current_depth, None)
+                      if node_indices:
+                          break
+                  if not node_indices:
+                      # printf"[{iter_count}] Loop finished: no more nodes to process.")
+                      break  # nothing left to process
+
+                  # printf"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
+
+                  # Process all nodes in this depth bucket
+                  for node_idx in node_indices:
+                      if node_idx in stopped:
+                          # printf"  - Node {node_idx}: SKIPPING (already stopped)")
+                          continue
+
+                      item = values.pop(node_idx, None)
+                      if item is None:
+                          # printf"  - Node {node_idx}: SKIPPING (no value)")
+                          continue
+                      gss_node, llm_mask = item
+                      # printf"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
+
+                      # End-node handling
+                      if is_end(node_idx):
+                          print(f"--- End Node {node_idx} ---")
+                          print(f"GSS that reached end node: {gss_node}")
+                          print(f"Propagated mask: {llm_mask.to_ranges()}")
+
+                          single_path_gss_nodes = [s for s in gss_node.stacks.values() if s]
+                          if not single_path_gss_nodes:
+                              continue
+
+                          merged_ffi_gss = ffi.gss_merge_many_with_depth(single_path_gss_nodes, 1)
+
+                          # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
+                          forbidden_llm_tokens = ffi.Bitset.zeros()
+                          disallowed_terminals_l2 = merged_ffi_gss.disallowed_terminals()
+                          print(f"Disallowed Terminals L2 from GSS: {disallowed_terminals_l2}")
+                          possible_matches = self.possible_matches_cache
+
+                          for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
+                              if disallowed_bv.is_empty():
+                                  continue
+
+                              for tsid in range(start, end + 1):
+                                  possible_matches_for_state = possible_matches.get(tsid)
+                                  if not possible_matches_for_state:
+                                      continue
+
+                                  for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
+                                      terminal_id = int(terminal_id_str)
+                                      if disallowed_bv.contains(terminal_id):
+                                          forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
+
+                          glr_active_tokens = merged_ffi_gss.allowed_llm_tokens()
+                          glr_active_tokens = llm_mask.intersection(glr_active_tokens)
+                          print(f"Allowed LLM tokens from GSS heads (after llm_mask intersection): {glr_active_tokens.to_ranges()}")
+                          final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
+                          tokens_to_add = final_allowed_tokens
+
+                          final_mask = final_mask.union(tokens_to_add)
+
+                      if gss_node.is_empty():
+                          stopped.add(node_idx)
+                          # printf"    - STOPPING node {node_idx} (GSS not alive)")
+                          continue
+
+                      # Transitions grouped by (pop, llm_bv)
+                      node_data = arena.get(node_idx, {})
+                      children = node_data.get("children") or []
+                      # if not children:
+                      #     # printf"    - No children for node {node_idx}")
+                      for (pop, llm_bv), dests in children:
+                          # printf"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
+                          # Collect all pops from GSS parents
+                          popped_gss = gss_node.popn(pop)
+                          if popped_gss.is_empty():
+                              continue
+
+                          llm_empty = llm_bv.is_empty()
+
+                          for dest_idx, state_bv in dests:
+                              # printf"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
+                              # Filter peeks by destination state bitset
+                              if state_bv.is_empty():
+                                  continue
+
+                              # Filter GSS based on which heads match the state bitvector
+                              matching_sids = [sid for sid in popped_gss.peek() if state_bv.contains(sid)]
+                              if not matching_sids:
+                                  continue
+
+                              child_gss_node = popped_gss.isolate_many(matching_sids)
+                              if child_gss_node.is_empty():
+                                  continue
+
+                              # Compute child mask (intersection with llm_bv when present)
+                              child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+                              # printf"        - Child mask: {child_llm_mask.to_ranges()}")
+
+                              d = int(dest_idx)
+                              existing = values.get(d)
+                              if existing is not None:
+                                  existing_gss, existing_mask = existing
+                                  merged_gss = GSS.merge_many([existing_gss, child_gss_node])
+                                  combined_mask = existing_mask.union(child_llm_mask)
+                                  values[d] = (merged_gss, combined_mask)
+                                  # printf"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
+                              else:
+                                  values[d] = (child_gss_node, child_llm_mask)
+                                  # printf"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
+
+                              enqueue(max_depth[d], d)
+
+              print("final internal mask:", final_mask)
+
+              original_mask = self.constraint.internal_bv_to_original(final_mask)
+              return RangeSet.from_ranges(original_mask.to_ranges())
     python/aug25/models/precompute3_model_pure_python.py: |+
       from __future__ import annotations
 
@@ -2856,6 +3122,326 @@ messages:
       role: developer
       ephemeral: false
   - user: |-
+      ```python 'python/aug25/models/precompute3_model.py'
+      import json
+      import time
+      import heapq
+      import collections
+      from typing import Dict, List, Tuple, Optional
+
+      from ..common_interface import GraphProvider, RangeSet
+      import _sep1 as ffi  # the compiled module
+      from tqdm.auto import tqdm
+
+      from python.gss_tester.implementations.reference_impl import ReferenceGSS as GSS
+
+
+      class Model(GraphProvider):
+          """
+          Precomputed trie model (third-generation).
+          Normalizes input arena by converting JSON bitsets into ffi.Bitset instances
+          and provides graph traversal and mask computation interfaces.
+          """
+
+          def __init__(self, roots_map: List[Tuple[int, int]], arena: Dict[int, dict]):
+              # Map tokenizer state -> trie root node
+              self.roots_map: Dict[int, int] = {int(s): int(r) for s, r in roots_map}
+              self.arena: Dict[int, dict] = arena
+              self.constraint: Optional[ffi.GrammarConstraint] = None
+              self.constraint_state: Optional[ffi.GrammarConstraintState] = None
+              self.id_to_token: Dict[int, bytes] = {}
+              self.max_depth: Dict[int, int] = {}
+              self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
+
+              # Normalize arena children bitsets and cache max_depth
+              dumps = json.dumps
+              bs_from_json = ffi.Bitset.from_json_string
+
+              for uid, node in tqdm(
+                  self.arena.items(),
+                  desc="Normalizing precompute3 BVs",
+                  total=len(self.arena),
+              ):
+                  uid_int = int(uid)
+                  try:
+                      md = node.get("max_depth", 0)
+                      self.max_depth[uid_int] = int(md)
+                  except Exception:
+                      self.max_depth[uid_int] = 0
+
+                  children = node.get("children") or []
+                  if not children:
+                      node["children"] = []
+                      continue
+
+                  new_children = []
+                  for edge_key, dest_map in children:
+                      pop, llm_bv_json = edge_key
+                      llm_bv = bs_from_json(dumps(llm_bv_json))
+
+                      new_dest_map = []
+                      for dest_idx, state_bv_json in dest_map:
+                          state_bv = bs_from_json(dumps(state_bv_json))
+                          new_dest_map.append((int(dest_idx), state_bv))
+
+                      new_children.append(((int(pop), llm_bv), new_dest_map))
+                  node["children"] = new_children
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              data = json.loads(s)
+              roots_map = data["precomputed3"]
+              arena_json = data["trie3_god"]
+              arena_values = arena_json.get("values", [])
+              arena = {int(k): v for k, v in arena_values}
+              model = Model(roots_map, arena)
+              model.constraint = ffi.GrammarConstraint.from_json_string(s)
+              print(model.constraint.dump_precomputed3())
+              model.constraint_state = ffi.GrammarConstraintState(model.constraint)
+              model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+              model.possible_matches_cache = model.constraint.possible_matches()
+              print("model.possible_matches_cache", model.possible_matches_cache)
+              return model
+
+          def get_root(self, state_id: int) -> int:
+              return self.roots_map[int(state_id)]
+
+          def is_end(self, node: int) -> bool:
+              return bool((self.arena.get(node, {}).get("value") or {}).get("clean_end", False))
+
+          def iter_edges(self, node: int, token: int):
+              """
+              Explode packed transitions into (pop, state_id or None, dest_idx).
+              Only used by equivalence checking; not performance-critical.
+              """
+              children = self.arena.get(node, {}).get("children") or []
+              for (pop, llm_bv), dests in children:
+                  if llm_bv.contains(token):
+                      for dest_idx, state_bv in dests:
+                          if state_bv.is_empty():  # Epsilon on GSS stack
+                              yield (int(pop), None, int(dest_idx))
+                          else:
+                              for start, end in state_bv.to_ranges():
+                                  for sid in range(start, end + 1):
+                                      yield (int(pop), sid, int(dest_idx))
+
+          def commit(self, token_id: int):
+              self.constraint_state.commit(token_id)
+
+          def get_mask(self) -> RangeSet:
+              """
+              Compute the final LLM token mask given a mapping from tokenizer state to
+              GSS nodes. This is the performance-critical routine.
+              """
+              # print"\n--- get_mask START ---")
+              # print"GSS at start of get_mask:")
+
+              state_map: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
+              all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
+
+              print("states in get_mask:")
+              for k, v in state_map.items():
+                  print(f"state {k}: gss_ptr={v.ptr()} flat={GSS.from_stacks(v.flatten())}")
+
+
+              t0 = time.time()
+
+              final_mask = ffi.Bitset.zeros()
+
+              # node_idx -> (GSSNode, Bitset)
+              values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+
+              stopped: set[int] = set()  # nodes that stopped (no gss parents)
+              todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
+              depth_heap: List[int] = []  # min-heap of depths (may contain duplicates)
+
+
+              # Seed: map tokenizer states and their filtered GSS to trie roots
+              heappush = heapq.heappush
+              roots_map = self.roots_map
+              max_depth = self.max_depth
+
+              # print"\n--- Seeding work queue ---")
+              for sid, gss in state_map.items():
+                  new_mask = all_ones_mask
+                  root_idx = roots_map.get(int(sid))
+                  if root_idx is None:
+                      continue
+                  root_idx = int(root_idx)
+                  
+                  # printf"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
+
+                  existing = values.get(root_idx)
+                  if existing is not None:
+                      existing_gss, existing_mask = existing
+                      merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
+                      values[root_idx] = (merged_gss, existing_mask.union(new_mask))
+                  else:
+                      values[root_idx] = (gss, new_mask)
+
+                  depth = max_depth[root_idx]
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {root_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(root_idx)
+
+              print("--- After Seeding ---")
+              for node_idx, (gss, mask) in values.items():
+                  print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}, mask={mask.to_ranges()}")
+
+
+              # Main scheduler
+
+              # Helper to enqueue a node at a given depth
+              def enqueue(depth: int, node_idx: int) -> None:
+                  bucket = todo.get(depth)
+                  if bucket is None:
+                      todo[depth] = {node_idx}
+                      heappush(depth_heap, depth)
+                  else:
+                      bucket.add(node_idx)
+
+              heappop = heapq.heappop
+              arena = self.arena
+              is_end = self.is_end
+
+              # print"\n--- Main loop ---")
+              iter_count = 0
+              while True:
+                  iter_count += 1
+                  # Pop the smallest depth bucket (skip stale heap entries)
+                  node_indices: Optional[set[int]] = None
+                  current_depth = -1
+                  while depth_heap:
+                      current_depth = heappop(depth_heap)
+                      node_indices = todo.pop(current_depth, None)
+                      if node_indices:
+                          break
+                  if not node_indices:
+                      # printf"[{iter_count}] Loop finished: no more nodes to process.")
+                      break  # nothing left to process
+
+                  # printf"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
+
+                  # Process all nodes in this depth bucket
+                  for node_idx in node_indices:
+                      if node_idx in stopped:
+                          # printf"  - Node {node_idx}: SKIPPING (already stopped)")
+                          continue
+
+                      item = values.pop(node_idx, None)
+                      if item is None:
+                          # printf"  - Node {node_idx}: SKIPPING (no value)")
+                          continue
+                      gss_node, llm_mask = item
+                      # printf"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()}, mask={llm_mask.to_ranges()}")
+
+                      # End-node handling
+                      if is_end(node_idx):
+                          print(f"--- End Node {node_idx} ---")
+                          print(f"GSS that reached end node: gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}")
+                          print(f"Propagated mask: {llm_mask.to_ranges()}")
+                          # printf"    - END NODE found. Updating final_mask.")
+                          # printf"      - final_mask before: {final_mask.to_ranges()}")
+
+                          # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
+                          forbidden_llm_tokens = ffi.Bitset.zeros()
+                          disallowed_terminals_l2 = gss_node.disallowed_terminals()
+                          print(f"Disallowed Terminals L2 from GSS: {disallowed_terminals_l2}")
+                          possible_matches = self.possible_matches_cache
+
+                          for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
+                              if disallowed_bv.is_empty():
+                                  continue
+
+                              for tsid in range(start, end + 1):
+                                  possible_matches_for_state = possible_matches.get(tsid)
+                                  if not possible_matches_for_state:
+                                      continue
+
+                                  for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
+                                      terminal_id = int(terminal_id_str)
+                                      if disallowed_bv.contains(terminal_id):
+                                          forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
+
+                          glr_active_tokens = gss_node.allowed_llm_tokens()
+                          glr_active_tokens = llm_mask.intersection(glr_active_tokens)
+                          print(f"Allowed LLM tokens from GSS heads (after llm_mask intersection): {glr_active_tokens.to_ranges()}")
+                          final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
+                          tokens_to_add = final_allowed_tokens
+
+                          # printf"      - llm_mask (propagated): {llm_mask.to_ranges()}")
+                          # printf"      - gss_active_tokens (from GSS): {gss_active_tokens.to_ranges()}")
+                          # printf"      - tokens_to_add (intersection): {tokens_to_add.to_ranges()}")
+
+                          final_mask = final_mask.union(tokens_to_add)
+                          # printf"      - final_mask after:  {final_mask.to_ranges()}")
+
+                      if not gss_node.is_alive():
+                          stopped.add(node_idx)
+                          # printf"    - STOPPING node {node_idx} (GSS not alive)")
+                          continue
+
+                      # Transitions grouped by (pop, llm_bv)
+                      node_data = arena.get(node_idx, {})
+                      children = node_data.get("children") or []
+                      # if not children:
+                      #     # printf"    - No children for node {node_idx}")
+                      for (pop, llm_bv), dests in children:
+                          # printf"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
+                          # Collect all pops from GSS parents
+                          peeks = gss_node.popn_fast(pop)
+                          # printf"      - Found {len(peeks)} peeks from GSS set")
+                          if not peeks:
+                              continue
+
+                          llm_empty = llm_bv.is_empty()
+
+                          for dest_idx, state_bv in dests:
+                              # printf"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
+                              # Filter peeks by destination state bitset
+                              matched = []
+                              if not state_bv.is_empty():
+                                  contains = state_bv.contains
+                                  for sid_val, parent_node in peeks:
+                                      if contains(sid_val):
+                                          matched.append(parent_node)
+                              # printf"        - Matched {len(matched)} parent GSS nodes")
+                              if not matched:
+                                  continue
+
+                              # Merge matched parent GSS nodes
+                              child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+
+                              # Compute child mask (intersection with llm_bv when present)
+                              child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+                              # printf"        - Child mask: {child_llm_mask.to_ranges()}")
+
+                              d = int(dest_idx)
+                              existing = values.get(d)
+                              if existing is not None:
+                                  existing_gss, existing_mask = existing
+                                  merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+                                  combined_mask = existing_mask.union(child_llm_mask)
+                                  values[d] = (merged_gss, combined_mask)
+                                  # printf"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
+                              else:
+                                  values[d] = (child_gss_node, child_llm_mask)
+                                  # printf"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
+
+                              enqueue(max_depth[d], d)
+
+              print("final internal mask:", final_mask)
+
+              original_mask = self.constraint.internal_bv_to_original(final_mask)
+              return RangeSet.from_ranges(original_mask.to_ranges())
+
+      ```
+    metadata:
+      filename: python/aug25/models/precompute3_model.py
+  - user: |-
       ```python 'python/aug25/models/precompute3_model_pure_python.py'
       from __future__ import annotations
 
@@ -2865,8 +3451,6 @@ messages:
       import time
       from typing import Dict, List, Tuple, Optional, Union, Any, Set
       from dataclasses import dataclass, field
-
-      from tqdm import tqdm
 
       from ..common_interface import GraphProvider
       from ..range_set.py_range_set import PyRangeSet as RangeSet
@@ -3147,9 +3731,6 @@ messages:
 
               model._merge_equivalent_llm_tokens()
               model._reorder_llm_tokens_for_range_minimization()
-              # After LLM token reordering, optimize state masks and collapse edges
-              model._optimize_state_masks_and_edges()
-
               return model
 
           @profile
@@ -4082,371 +4663,13 @@ messages:
                       new_internal_to_original_map[rep].update(orig_set)
                   self.internal_to_original_map = new_internal_to_original_map
 
-          def _compute_universe_lr_states(self) -> Set[int]:
-              return set(self.parser_table.table.keys())
-
-          def _reverse_expand_n(self, base: Set[int], n: int) -> Set[int]:
-              """
-              Apply the reverse_state_map n times to a set of states.
-              """
-              if not base or n <= 0:
-                  return set(base)
-              cur = set(base)
-              for _ in range(n):
-                  nxt: Set[int] = set()
-                  for s in cur:
-                      nxt.update(self.reverse_state_map.get(int(s), set()))
-                  if not nxt:
-                      return set()
-                  cur = nxt
-              return cur
-
-          # ===========================
-          # Graph optimization (Alt 6 + edge reduction Alt 2)
-          # ===========================
-          def _rs_equals(self, a: RangeSet, b: RangeSet) -> bool:
-              # Robust equality via mutual subset checks
-              return a.difference(b).is_empty() and b.difference(a).is_empty()
-
-          def _universe_lr_states_set(self) -> Set[int]:
-              return set(self._compute_universe_lr_states())
-
-          def _universe_lr_states_rangeset(self) -> StateIDSet:
-              return RangeSet.from_indices(sorted(self._compute_universe_lr_states()))
-
-          def _normalize_children_for_node(self, node: ArenaNode) -> None:
-              """
-              Merge child edges with identical (pop, dests) signature by uniting their llm_bv.
-              """
-              children = node.children
-              if not children:
-                  node.llm_bv_union = RangeSet.empty()
-                  return
-
-              # signature: (pop, ((dest_id, ((start,end),...)), ...))
-              groups: Dict[
-                  Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]],
-                  LLMTokenSet
-              ] = {}
-
-              for (pop, llm_bv), dests in children:
-                  dests_sig = tuple(sorted(
-                      (int(dest_id), tuple((int(a), int(b)) for (a, b) in state_bv.to_ranges()))
-                      for dest_id, state_bv in dests
-                  ))
-                  key = (int(pop), dests_sig)
-                  if key in groups:
-                      groups[key] = groups[key].union(llm_bv)
-                  else:
-                      groups[key] = llm_bv
-
-              new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-              llm_union = RangeSet.empty()
-              for (pop, dests_sig), llm_bv in groups.items():
-                  if llm_bv.is_empty():
-                      continue
-                  llm_union = llm_union.union(llm_bv)
-                  dests_list: List[Tuple[int, StateIDSet]] = []
-                  for dest_id, ranges in dests_sig:
-                      dests_list.append((int(dest_id), RangeSet.from_ranges(list(ranges))))
-                  new_children.append(((int(pop), llm_bv), dests_list))
-
-              # Deterministic sort
-              def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
-                  try:
-                      return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
-                  except Exception:
-                      return ()
-
-              new_children.sort(
-                  key=lambda item: (
-                      int(item[0][0]),
-                      _ranges_key(item[0][1]),
-                      tuple(sorted(int(d[0]) for d in item[1])),
-                  )
-              )
-
-              node.children = new_children
-              node.llm_bv_union = llm_union
-
-          def _normalize_all_children(self) -> None:
-              for node in self.arena.values():
-                  self._normalize_children_for_node(node)
-
-          def _compute_terminal_states_by_node(self) -> Dict[NodeID, Set[int]]:
-              """
-              Compute, for each node, the set of LR states that are 'terminal' (can eventually
-              reach an end node) ignoring LLM tokens. Uses a fixpoint over the product graph.
-              """
-              arena = self.arena
-              if not arena:
-                  return {}
-
-              universe: Set[int] = self._universe_lr_states_set()
-
-              # Initialize terminal sets
-              terminal_by_node: Dict[NodeID, Set[int]] = {}
-              for nid, node in arena.items():
-                  if node.clean_end:
-                      terminal_by_node[int(nid)] = set(universe)
-                  else:
-                      terminal_by_node[int(nid)] = set()
-
-              # Build edges ignoring LLM tokens: (u) -> [(pop, v, mask_set), ...]
-              edges_by_node: Dict[NodeID, List[Tuple[int, NodeID, Set[int]]]] = {}
-              for u, node in arena.items():
-                  u = int(u)
-                  lst: List[Tuple[int, NodeID, Set[int]]] = []
-                  for (pop, _llm_bv), dests in node.children:
-                      for dest_id, state_bv in dests:
-                          mask_set = set(int(i) for i in state_bv.to_indices())
-                          lst.append((int(pop), int(dest_id), mask_set))
-                  edges_by_node[u] = lst
-
-              # Fixpoint iteration
-              changed = True
-              while changed:
-                  changed = False
-                  for u, lst in edges_by_node.items():
-                      if not lst:
-                          continue
-                      base = terminal_by_node[u]
-                      accum = set(base)
-                      for pop, v, mask_set in lst:
-                          tv = terminal_by_node.get(int(v), set())
-                          if not tv:
-                              continue
-                          intersect = mask_set.intersection(tv)
-                          if not intersect:
-                              continue
-                          pre = self._reverse_expand_n(intersect, int(pop))
-                          if pre:
-                              before = len(accum)
-                              accum.update(pre)
-                              if len(accum) > before:
-                                  # mark that u grew
-                                  pass
-                      if len(accum) > len(base):
-                          terminal_by_node[u] = accum
-                          changed = True
-              return terminal_by_node
-
-          def _optimize_state_masks_and_edges(self) -> None:
-              """
-              1) Expand state masks: For each edge to dest D, union in all NonTerminal(D) states.
-                 This pushes masks towards the full universe where safe (Alt 6).
-              2) Collapse chains A->B->C conservatively (Replacement 1) only when:
-                 - B is not an end node
-                 - B has exactly one unique destination C across all children
-                 - All incoming edges to B have full (universe) masks to B
-                 - The collapse strictly reduces edge count: (incoming_count == 1) or (outgoing_group_count == 1)
-                 LLM tokens are preserved by intersecting A->B.llm_bv and B->C.llm_bv for the new A->C edge.
-              """
-              print("Optimizing state masks and collapsing edges...", end='', flush=True)
-
-              if not self.arena:
-                  print(" done (empty arena).")
-                  return
-
-              # Universe and terminal sets
-              universe_rs: StateIDSet = self._universe_lr_states_rangeset()
-              universe_set: Set[int] = set(universe_rs.to_indices())
-              terminal_by_node: Dict[NodeID, Set[int]] = self._compute_terminal_states_by_node()
-              terminal_rs_by_node: Dict[NodeID, StateIDSet] = {
-                  nid: RangeSet.from_indices(sorted(list(s)))
-                  for nid, s in terminal_by_node.items()
-              }
-
-              # Step 1: Expand state masks by adding NonTerminal(D) for destination D
-              for nid, node in list(self.arena.items()):
-                  if not node.children:
-                      continue
-                  new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-                  for (pop, llm_bv), dests in node.children:
-                      new_dests: List[Tuple[int, StateIDSet]] = []
-                      for dest_id, state_bv in dests:
-                          term_rs = terminal_rs_by_node.get(int(dest_id), universe_rs)
-                          nonterm_rs = universe_rs.difference(term_rs)
-                          expanded_bv = state_bv.union(nonterm_rs)
-                          new_dests.append((int(dest_id), expanded_bv))
-                      new_children.append(((int(pop), llm_bv), new_dests))
-                  node.children = new_children
-
-              # Normalize after mask expansions
-              self._normalize_all_children()
-              self._recompute_llm_bv_unions()
-
-              # Step 2: Bottom-up collapses with Replacement 1 where beneficial
-              roots_set: Set[int] = set(int(v) for v in self.roots_map.values())
-
-              def collect_incoming_edges(target_nid: int) -> List[Tuple[int, int, int]]:
-                  """
-                  Return list of (A_node_id, child_idx, dest_idx) such that A.children[child_idx]
-                  has a dest entry at dest_idx pointing to target_nid. Computed on the fly.
-                  """
-                  incoming: List[Tuple[int, int, int]] = []
-                  for aid, anode in self.arena.items():
-                      aid_int = int(aid)
-                      for ci, child in enumerate(anode.children):
-                          _sig, dests = child
-                          for di, (dest_id, _bv) in enumerate(dests):
-                              if int(dest_id) == int(target_nid):
-                                  incoming.append((aid_int, int(ci), int(di)))
-                  return incoming
-
-              def rs_is_universe(rs: RangeSet) -> bool:
-                  return self._rs_equals(rs, universe_rs)
-
-              changed_any = True
-              while changed_any:
-                  changed_any = False
-                  # Use current depths (may change after removals); default to 0 if missing
-                  depths = self.max_depth or {}
-                  node_order = sorted(self.arena.keys(), key=lambda x: int(depths.get(int(x), 0)))
-                  for b in tqdm(node_order, desc=" Collapsing"):
-                      b = int(b)
-                      if b not in self.arena:
-                          continue
-                      bnode = self.arena[b]
-                      if bnode.clean_end:
-                          continue
-                      # Determine unique destination across all children
-                      dest_nodes: Set[int] = set()
-                      for (_sig, dests) in bnode.children:
-                          for (did, _bv) in dests:
-                              dest_nodes.add(int(did))
-                      if not dest_nodes:
-                          # Orphan node (no outgoing edges). If not root and no incoming, remove it.
-                          incoming = collect_incoming_edges(b)
-                          if not incoming and (b not in roots_set):
-                              # Remove b
-                              del self.arena[b]
-                              if b in self.max_depth:
-                                  del self.max_depth[b]
-                              changed_any = True
-                          continue
-                      if len(dest_nodes) != 1:
-                          continue
-                      c = next(iter(dest_nodes))
-                      if c == b:
-                          # self-loop; skip
-                          continue
-
-                      # Collect B->C groups (must be only destination for each child)
-                      bc_groups: List[Tuple[int, LLMTokenSet, StateIDSet]] = []
-                      valid_bc = True
-                      for (pop_m, llm_bv_bc), dests in bnode.children:
-                          # All dests must be exactly to c
-                          if len(dests) != 1 or int(dests[0][0]) != int(c):
-                              valid_bc = False
-                              break
-                          y_bv = dests[0][1]
-                          bc_groups.append((int(pop_m), llm_bv_bc, y_bv))
-                      if not valid_bc:
-                          continue
-                      k_bc = len(bc_groups)
-                      incoming = collect_incoming_edges(b)
-                      in_count = len(incoming)
-
-                      if in_count == 0:
-                          # If B has no incoming edges and is not a root, we can safely remove it and its outgoing edges.
-                          if b not in roots_set:
-                              bnode.children = []
-                              del self.arena[b]
-                              if b in self.max_depth:
-                                  del self.max_depth[b]
-                              changed_any = True
-                          continue
-
-                      # Check all incoming A->B masks are universe
-                      all_in_masks_universe = True
-                      for (aid, ci, di) in incoming:
-                          anode = self.arena.get(aid)
-                          if anode is None:
-                              all_in_masks_universe = False
-                              break
-                          _sig, dests = anode.children[ci]
-                          _did, x_bv = dests[di]
-                          if not rs_is_universe(x_bv):
-                              all_in_masks_universe = False
-                              break
-                      if not all_in_masks_universe:
-                          continue
-
-                      # Ensure net edge reduction: in_count == 1 or k_bc == 1
-                      if not (in_count == 1 or k_bc == 1):
-                          continue
-
-                      # Perform collapse: for each incoming A->B, create A->C edges based on llm_bv intersections
-                      nodes_to_normalize: Set[int] = set()
-                      for (aid, ci, di) in incoming:
-                          anode = self.arena.get(aid)
-                          if anode is None:
-                              continue
-                          (pop_n, llm_bv_ab), dests = anode.children[ci]
-                          # For each B->C group, intersect tokens and add A->C edge
-                          for (pop_m, llm_bv_bc, y_bv) in bc_groups:
-                              inter_llm = llm_bv_ab.intersection(llm_bv_bc)
-                              if inter_llm.is_empty():
-                                  continue
-                              new_pop = int(pop_n) + int(pop_m)
-                              # Append new edge ((new_pop, inter_llm), [(c, y_bv)])
-                              anode.children.append(((new_pop, inter_llm), [(int(c), y_bv)]))
-                              nodes_to_normalize.add(aid)
-
-                      # Remove all incoming A->B dest entries
-                      for (aid, ci, di) in incoming:
-                          if aid not in self.arena:
-                              continue
-                          anode = self.arena[aid]
-                          if ci >= len(anode.children):
-                              continue
-                          (pop_n, llm_bv_ab), dests = anode.children[ci]
-                          # Filter out the B entry
-                          new_dests = [(did, bv) for (did, bv) in dests if int(did) != int(b)]
-                          if not new_dests:
-                              # Remove the entire child edge group if no destinations left
-                              # Guard against index shifts: rebuild children without index 'ci'
-                              new_children = []
-                              for idx, item in enumerate(anode.children):
-                                  if idx != ci:
-                                      new_children.append(item)
-                              anode.children = new_children
-                          else:
-                              anode.children[ci] = ((pop_n, llm_bv_ab), new_dests)
-                          nodes_to_normalize.add(aid)
-
-                      # Remove B->C edges and possibly node B (if not a root)
-                      if b in self.arena:
-                          self.arena[b].children = []
-                      # If B is not a root and there are no remaining incoming edges, remove B
-                      incoming_after = collect_incoming_edges(b)
-                      if (b not in roots_set) and (not incoming_after):
-                          if b in self.arena:
-                              del self.arena[b]
-                          if b in self.max_depth:
-                              del self.max_depth[b]
-
-                      # Normalize changed nodes and recompute unions
-                      for aid in nodes_to_normalize:
-                          if aid in self.arena:
-                              self._normalize_children_for_node(self.arena[aid])
-                      self._recompute_llm_bv_unions()
-                      # Recompute depths since graph changed
-                      self.max_depth = self._recompute_max_depth_from_arena()
-                      changed_any = True
-
-              # Final normalization and metrics recompute
-              self._normalize_all_children()
-              self._recompute_llm_bv_unions()
-              self.max_depth = self._recompute_max_depth_from_arena()
-              print(" done.", flush=True)
-
 
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: Remove `_optimize_state_masks_and_edges` and all the stuff related to it.
+  - user: Modify precompute3_model.py to use ReferenceGSS in get_mask instead of `ffi.GSSNode`.
+      You can convert from `ffi.GSSNode` to `ReferenceGSS` using `ffi.GSSNode.flatten`
+      and feeding that into `ReferenceGSS.from_stacks` at the top of get_mask.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4465,407 +4688,267 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to remove `_optimize_state_masks_and_edges` and its related components, followed by the git diff.
+      Of course. Here are the step-by-step instructions to modify `precompute3_model.py` to use `ReferenceGSS`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Edit `python/aug25/models/precompute3_model_pure_python.py`**
-          *   On line 11, delete the line `from tqdm import tqdm`.
-          *   In the `from_json_string` method, find and delete lines 347-349, which contain the call to `model._optimize_state_masks_and_edges()` and its preceding comment.
-          *   At the end of the `Model` class, delete the methods `_compute_universe_lr_states`, `_reverse_expand_n`, and the entire block of code starting from the comment `# =========================== # Graph optimization (Alt 6 + edge reduction Alt 2) # ===========================` to the end of the file. This includes the methods `_rs_equals`, `_universe_lr_states_set`, `_universe_lr_states_rangeset`, `_normalize_children_for_node`, `_normalize_all_children`, `_compute_terminal_states_by_node`, and `_optimize_state_masks_and_edges`.
+      1.  **Open the file `python/aug25/models/precompute3_model.py`**.
+
+      2.  **Navigate to the `get_mask` method.**
+
+      3.  **Convert `ffi.GSSNode` to `ReferenceGSS` at the start:**
+          -   Find the line:
+              ```python
+              state_map: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
+              ```
+          -   Replace it with:
+              ```python
+              state_map_ffi: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
+              state_map: Dict[int, GSS] = {
+                  sid: GSS.from_stacks(gss.flatten()) for sid, gss in state_map_ffi.items()
+              }
+              ```
+          -   Update the subsequent debug print statement. Change:
+              ```python
+              print(f"state {k}: gss_ptr={v.ptr()} flat={GSS.from_stacks(v.flatten())}")
+              ```
+              to:
+              ```python
+              print(f"state {k}: gss={v}")
+              ```
+
+      4.  **Update the `values` dictionary type hint:**
+          -   Change:
+              ```python
+              values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+              ```
+              to:
+              ```python
+              values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
+              ```
+
+      5.  **Modify the seeding loop:**
+          -   Find the line for merging GSS nodes:
+              ```python
+              merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
+              ```
+          -   Replace it with:
+              ```python
+              merged_gss = GSS.merge_many([existing_gss, gss])
+              ```
+          -   Update the debug print after the seeding loop. Change:
+              ```python
+              print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}, mask={mask.to_ranges()}")
+              ```
+              to:
+              ```python
+              print(f"Node {node_idx}: gss={gss}, mask={mask.to_ranges()}")
+              ```
+
+      6.  **Update the main processing loop:**
+          -   **End-node handling:** Replace the entire `if is_end(node_idx):` block with new logic that reconstructs an `ffi.GSSNode` from the `ReferenceGSS` accumulators to query terminal information.
+          -   **Liveness check:** Change `if not gss_node.is_alive():` to `if gss_node.is_empty():`.
+          -   **Edge traversal:** Replace the `gss_node.popn_fast(pop)` call and the subsequent filtering logic with a more direct approach using `gss_node.popn(pop)`, `popped_gss.peek()`, and `popped_gss.isolate_many()`.
+          -   **Child node merging:** In the section that updates the `values` dictionary, change the merge call from `ffi.gss_merge_many_with_depth` to `GSS.merge_many`.
+
+      After applying these changes, the `get_mask` method will perform its traversal using the pure Python `ReferenceGSS` implementation while still relying on the FFI for initial state and terminal calculations at end nodes.
 
       ### Git Diff
 
+      Here is the git diff for the changes:
+
       ```diff
-      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      index 4070a91..07f0d04 100644
-      --- a/python/aug25/models/precompute3_model_pure_python.py
-      +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -8,8 +8,6 @@
-       from typing import Dict, List, Tuple, Optional, Union, Any, Set
-       from dataclasses import dataclass, field
+      diff --git a/python/aug25/models/precompute3_model.py b/python/aug25/models/precompute3_model.py
+      --- a/python/aug25/models/precompute3_model.py
+      +++ b/python/aug25/models/precompute3_model.py
+      @@ -124,19 +124,22 @@
+               # print"\n--- get_mask START ---")
+               # print"GSS at start of get_mask:")
        
-      -from tqdm import tqdm
-      -
-       from ..common_interface import GraphProvider
-       from ..range_set.py_range_set import PyRangeSet as RangeSet
-       import _sep1 as ffi
-      @@ -346,10 +344,7 @@
+      -        state_map: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
+      +        state_map_ffi: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
+      +        state_map: Dict[int, GSS] = {
+      +            sid: GSS.from_stacks(gss.flatten()) for sid, gss in state_map_ffi.items()
+      +        }
+               all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
        
-               model._merge_equivalent_llm_tokens()
-               model._reorder_llm_tokens_for_range_minimization()
-      -        # After LLM token reordering, optimize state masks and collapse edges
-      -        model._optimize_state_masks_and_edges()
-      -
-               return model
+               print("states in get_mask:")
+               for k, v in state_map.items():
+      -            print(f"state {k}: gss_ptr={v.ptr()} flat={GSS.from_stacks(v.flatten())}")
+      +            print(f"state {k}: gss={v}")
        
-           @profile
-      @@ -1108,369 +1103,3 @@
-                           new_internal_to_original_map[rep] = set()
-                       new_internal_to_original_map[rep].update(orig_set)
-                   self.internal_to_original_map = new_internal_to_original_map
+       
+               t0 = time.time()
+       
+               final_mask = ffi.Bitset.zeros()
+       
+      -        # node_idx -> (GSSNode, Bitset)
+      -        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+      +        # node_idx -> (GSS, Bitset)
+      +        values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
+       
+               stopped: set[int] = set()  # nodes that stopped (no gss parents)
+               todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
+      @@ -160,7 +163,7 @@
+                   existing = values.get(root_idx)
+                   if existing is not None:
+                       existing_gss, existing_mask = existing
+      -                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
+      +                merged_gss = GSS.merge_many([existing_gss, gss])
+                       values[root_idx] = (merged_gss, existing_mask.union(new_mask))
+                   else:
+                       values[root_idx] = (gss, new_mask)
+      @@ -174,7 +177,7 @@
+       
+               print("--- After Seeding ---")
+               for node_idx, (gss, mask) in values.items():
+      -            print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}, mask={mask.to_ranges()}")
+      +            print(f"Node {node_idx}: gss={gss}, mask={mask.to_ranges()}")
+       
+       
+               # Main scheduler
+      @@ -222,60 +225,58 @@
+       
+                       # End-node handling
+                       if is_end(node_idx):
+      -                    print(f"--- End Node {node_idx} ---")
+      -                    print(f"GSS that reached end node: gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}")
+      -                    print(f"Propagated mask: {llm_mask.to_ranges()}")
+      -                    # printf"    - END NODE found. Updating final_mask.")
+      -                    # printf"      - final_mask before: {final_mask.to_ranges()}")
       -
-      -    def _compute_universe_lr_states(self) -> Set[int]:
-      -        return set(self.parser_table.table.keys())
+      -                    # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
+      -                    forbidden_llm_tokens = ffi.Bitset.zeros()
+      -                    disallowed_terminals_l2 = gss_node.disallowed_terminals()
+      -                    print(f"Disallowed Terminals L2 from GSS: {disallowed_terminals_l2}")
+      -                    possible_matches = self.possible_matches_cache
       -
-      -    def _reverse_expand_n(self, base: Set[int], n: int) -> Set[int]:
-      -        """
-      -        Apply the reverse_state_map n times to a set of states.
-      -        """
-      -        if not base or n <= 0:
-      -            return set(base)
-      -        cur = set(base)
-      -        for _ in range(n):
-      -            nxt: Set[int] = set()
-      -            for s in cur:
-      -                nxt.update(self.reverse_state_map.get(int(s), set()))
-      -            if not nxt:
-      -                return set()
-      -            cur = nxt
-      -        return cur
-      -
-      -    # ===========================
-      -    # Graph optimization (Alt 6 + edge reduction Alt 2)
-      -    # ===========================
-      -    def _rs_equals(self, a: RangeSet, b: RangeSet) -> bool:
-      -        # Robust equality via mutual subset checks
-      -        return a.difference(b).is_empty() and b.difference(a).is_empty()
-      -
-      -    def _universe_lr_states_set(self) -> Set[int]:
-      -        return set(self._compute_universe_lr_states())
-      -
-      -    def _universe_lr_states_rangeset(self) -> StateIDSet:
-      -        return RangeSet.from_indices(sorted(self._compute_universe_lr_states()))
-      -
-      -    def _normalize_children_for_node(self, node: ArenaNode) -> None:
-      -        """
-      -        Merge child edges with identical (pop, dests) signature by uniting their llm_bv.
-      -        """
-      -        children = node.children
-      -        if not children:
-      -            node.llm_bv_union = RangeSet.empty()
-      -            return
-      -
-      -        # signature: (pop, ((dest_id, ((start,end),...)), ...))
-      -        groups: Dict[
-      -            Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]],
-      -            LLMTokenSet
-      -        ] = {}
-      -
-      -        for (pop, llm_bv), dests in children:
-      -            dests_sig = tuple(sorted(
-      -                (int(dest_id), tuple((int(a), int(b)) for (a, b) in state_bv.to_ranges()))
-      -                for dest_id, state_bv in dests
-      -            ))
-      -            key = (int(pop), dests_sig)
-      -            if key in groups:
-      -                groups[key] = groups[key].union(llm_bv)
-      -            else:
-      -                groups[key] = llm_bv
-      -
-      -        new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-      -        llm_union = RangeSet.empty()
-      -        for (pop, dests_sig), llm_bv in groups.items():
-      -            if llm_bv.is_empty():
-      -                continue
-      -            llm_union = llm_union.union(llm_bv)
-      -            dests_list: List[Tuple[int, StateIDSet]] = []
-      -            for dest_id, ranges in dests_sig:
-      -                dests_list.append((int(dest_id), RangeSet.from_ranges(list(ranges))))
-      -            new_children.append(((int(pop), llm_bv), dests_list))
-      -
-      -        # Deterministic sort
-      -        def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
-      -            try:
-      -                return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
-      -            except Exception:
-      -                return ()
-      -
-      -        new_children.sort(
-      -            key=lambda item: (
-      -                int(item[0][0]),
-      -                _ranges_key(item[0][1]),
-      -                tuple(sorted(int(d[0]) for d in item[1])),
-      -            )
-      -        )
-      -
-      -        node.children = new_children
-      -        node.llm_bv_union = llm_union
-      -
-      -    def _normalize_all_children(self) -> None:
-      -        for node in self.arena.values():
-      -            self._normalize_children_for_node(node)
-      -
-      -    def _compute_terminal_states_by_node(self) -> Dict[NodeID, Set[int]]:
-      -        """
-      -        Compute, for each node, the set of LR states that are 'terminal' (can eventually
-      -        reach an end node) ignoring LLM tokens. Uses a fixpoint over the product graph.
-      -        """
-      -        arena = self.arena
-      -        if not arena:
-      -            return {}
-      -
-      -        universe: Set[int] = self._universe_lr_states_set()
-      -
-      -        # Initialize terminal sets
-      -        terminal_by_node: Dict[NodeID, Set[int]] = {}
-      -        for nid, node in arena.items():
-      -            if node.clean_end:
-      -                terminal_by_node[int(nid)] = set(universe)
-      -            else:
-      -                terminal_by_node[int(nid)] = set()
-      -
-      -        # Build edges ignoring LLM tokens: (u) -> [(pop, v, mask_set), ...]
-      -        edges_by_node: Dict[NodeID, List[Tuple[int, NodeID, Set[int]]]] = {}
-      -        for u, node in arena.items():
-      -            u = int(u)
-      -            lst: List[Tuple[int, NodeID, Set[int]]] = []
-      -            for (pop, _llm_bv), dests in node.children:
-      -                for dest_id, state_bv in dests:
-      -                    mask_set = set(int(i) for i in state_bv.to_indices())
-      -                    lst.append((int(pop), int(dest_id), mask_set))
-      -            edges_by_node[u] = lst
-      -
-      -        # Fixpoint iteration
-      -        changed = True
-      -        while changed:
-      -            changed = False
-      -            for u, lst in edges_by_node.items():
-      -                if not lst:
-      -                    continue
-      -                base = terminal_by_node[u]
-      -                accum = set(base)
-      -                for pop, v, mask_set in lst:
-      -                    tv = terminal_by_node.get(int(v), set())
-      -                    if not tv:
-      -                        continue
-      -                    intersect = mask_set.intersection(tv)
-      -                    if not intersect:
-      -                        continue
-      -                    pre = self._reverse_expand_n(intersect, int(pop))
-      -                    if pre:
-      -                        before = len(accum)
-      -                        accum.update(pre)
-      -                        if len(accum) > before:
-      -                            # mark that u grew
-      -                            pass
-      -                if len(accum) > len(base):
-      -                    terminal_by_node[u] = accum
-      -                    changed = True
-      -        return terminal_by_node
-      -
-      -    def _optimize_state_masks_and_edges(self) -> None:
-      -        """
-      -        1) Expand state masks: For each edge to dest D, union in all NonTerminal(D) states.
-      -           This pushes masks towards the full universe where safe (Alt 6).
-      -        2) Collapse chains A->B->C conservatively (Replacement 1) only when:
-      -           - B is not an end node
-      -           - B has exactly one unique destination C across all children
-      -           - All incoming edges to B have full (universe) masks to B
-      -           - The collapse strictly reduces edge count: (incoming_count == 1) or (outgoing_group_count == 1)
-      -           LLM tokens are preserved by intersecting A->B.llm_bv and B->C.llm_bv for the new A->C edge.
-      -        """
-      -        print("Optimizing state masks and collapsing edges...", end='', flush=True)
-      -
-      -        if not self.arena:
-      -            print(" done (empty arena).")
-      -            return
-      -
-      -        # Universe and terminal sets
-      -        universe_rs: StateIDSet = self._universe_lr_states_rangeset()
-      -        universe_set: Set[int] = set(universe_rs.to_indices())
-      -        terminal_by_node: Dict[NodeID, Set[int]] = self._compute_terminal_states_by_node()
-      -        terminal_rs_by_node: Dict[NodeID, StateIDSet] = {
-      -            nid: RangeSet.from_indices(sorted(list(s)))
-      -            for nid, s in terminal_by_node.items()
-      -        }
-      -
-      -        # Step 1: Expand state masks by adding NonTerminal(D) for destination D
-      -        for nid, node in list(self.arena.items()):
-      -            if not node.children:
-      -                continue
-      -            new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-      -            for (pop, llm_bv), dests in node.children:
-      -                new_dests: List[Tuple[int, StateIDSet]] = []
-      -                for dest_id, state_bv in dests:
-      -                    term_rs = terminal_rs_by_node.get(int(dest_id), universe_rs)
-      -                    nonterm_rs = universe_rs.difference(term_rs)
-      -                    expanded_bv = state_bv.union(nonterm_rs)
-      -                    new_dests.append((int(dest_id), expanded_bv))
-      -                new_children.append(((int(pop), llm_bv), new_dests))
-      -            node.children = new_children
-      -
-      -        # Normalize after mask expansions
-      -        self._normalize_all_children()
-      -        self._recompute_llm_bv_unions()
-      -
-      -        # Step 2: Bottom-up collapses with Replacement 1 where beneficial
-      -        roots_set: Set[int] = set(int(v) for v in self.roots_map.values())
-      -
-      -        def collect_incoming_edges(target_nid: int) -> List[Tuple[int, int, int]]:
-      -            """
-      -            Return list of (A_node_id, child_idx, dest_idx) such that A.children[child_idx]
-      -            has a dest entry at dest_idx pointing to target_nid. Computed on the fly.
-      -            """
-      -            incoming: List[Tuple[int, int, int]] = []
-      -            for aid, anode in self.arena.items():
-      -                aid_int = int(aid)
-      -                for ci, child in enumerate(anode.children):
-      -                    _sig, dests = child
-      -                    for di, (dest_id, _bv) in enumerate(dests):
-      -                        if int(dest_id) == int(target_nid):
-      -                            incoming.append((aid_int, int(ci), int(di)))
-      -            return incoming
-      -
-      -        def rs_is_universe(rs: RangeSet) -> bool:
-      -            return self._rs_equals(rs, universe_rs)
-      -
-      -        changed_any = True
-      -        while changed_any:
-      -            changed_any = False
-      -            # Use current depths (may change after removals); default to 0 if missing
-      -            depths = self.max_depth or {}
-      -            node_order = sorted(self.arena.keys(), key=lambda x: int(depths.get(int(x), 0)))
-      -            for b in tqdm(node_order, desc=" Collapsing"):
-      -                b = int(b)
-      -                if b not in self.arena:
-      -                    continue
-      -                bnode = self.arena[b]
-      -                if bnode.clean_end:
-      -                    continue
-      -                # Determine unique destination across all children
-      -                dest_nodes: Set[int] = set()
-      -                for (_sig, dests) in bnode.children:
-      -                    for (did, _bv) in dests:
-      -                        dest_nodes.add(int(did))
-      -                if not dest_nodes:
-      -                    # Orphan node (no outgoing edges). If not root and no incoming, remove it.
-      -                    incoming = collect_incoming_edges(b)
-      -                    if not incoming and (b not in roots_set):
-      -                        # Remove b
-      -                        del self.arena[b]
-      -                        if b in self.max_depth:
-      -                            del self.max_depth[b]
-      -                        changed_any = True
-      -                    continue
-      -                if len(dest_nodes) != 1:
-      -                    continue
-      -                c = next(iter(dest_nodes))
-      -                if c == b:
-      -                    # self-loop; skip
-      -                    continue
-      -
-      -                # Collect B->C groups (must be only destination for each child)
-      -                bc_groups: List[Tuple[int, LLMTokenSet, StateIDSet]] = []
-      -                valid_bc = True
-      -                for (pop_m, llm_bv_bc), dests in bnode.children:
-      -                    # All dests must be exactly to c
-      -                    if len(dests) != 1 or int(dests[0][0]) != int(c):
-      -                        valid_bc = False
-      -                        break
-      -                    y_bv = dests[0][1]
-      -                    bc_groups.append((int(pop_m), llm_bv_bc, y_bv))
-      -                if not valid_bc:
-      -                    continue
-      -                k_bc = len(bc_groups)
-      -                incoming = collect_incoming_edges(b)
-      -                in_count = len(incoming)
-      -
-      -                if in_count == 0:
-      -                    # If B has no incoming edges and is not a root, we can safely remove it and its outgoing edges.
-      -                    if b not in roots_set:
-      -                        bnode.children = []
-      -                        del self.arena[b]
-      -                        if b in self.max_depth:
-      -                            del self.max_depth[b]
-      -                        changed_any = True
-      -                    continue
-      -
-      -                # Check all incoming A->B masks are universe
-      -                all_in_masks_universe = True
-      -                for (aid, ci, di) in incoming:
-      -                    anode = self.arena.get(aid)
-      -                    if anode is None:
-      -                        all_in_masks_universe = False
-      -                        break
-      -                    _sig, dests = anode.children[ci]
-      -                    _did, x_bv = dests[di]
-      -                    if not rs_is_universe(x_bv):
-      -                        all_in_masks_universe = False
-      -                        break
-      -                if not all_in_masks_universe:
-      -                    continue
-      -
-      -                # Ensure net edge reduction: in_count == 1 or k_bc == 1
-      -                if not (in_count == 1 or k_bc == 1):
-      -                    continue
-      -
-      -                # Perform collapse: for each incoming A->B, create A->C edges based on llm_bv intersections
-      -                nodes_to_normalize: Set[int] = set()
-      -                for (aid, ci, di) in incoming:
-      -                    anode = self.arena.get(aid)
-      -                    if anode is None:
-      -                        continue
-      -                    (pop_n, llm_bv_ab), dests = anode.children[ci]
-      -                    # For each B->C group, intersect tokens and add A->C edge
-      -                    for (pop_m, llm_bv_bc, y_bv) in bc_groups:
-      -                        inter_llm = llm_bv_ab.intersection(llm_bv_bc)
-      -                        if inter_llm.is_empty():
+      -                    for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
+      -                        if disallowed_bv.is_empty():
       -                            continue
-      -                        new_pop = int(pop_n) + int(pop_m)
-      -                        # Append new edge ((new_pop, inter_llm), [(c, y_bv)])
-      -                        anode.children.append(((new_pop, inter_llm), [(int(c), y_bv)]))
-      -                        nodes_to_normalize.add(aid)
       -
-      -                # Remove all incoming A->B dest entries
-      -                for (aid, ci, di) in incoming:
-      -                    if aid not in self.arena:
-      -                        continue
-      -                    anode = self.arena[aid]
-      -                    if ci >= len(anode.children):
-      -                        continue
-      -                    (pop_n, llm_bv_ab), dests = anode.children[ci]
-      -                    # Filter out the B entry
-      -                    new_dests = [(did, bv) for (did, bv) in dests if int(did) != int(b)]
-      -                    if not new_dests:
-      -                        # Remove the entire child edge group if no destinations left
-      -                        # Guard against index shifts: rebuild children without index 'ci'
-      -                        new_children = []
-      -                        for idx, item in enumerate(anode.children):
-      -                            if idx != ci:
-      -                                new_children.append(item)
-      -                        anode.children = new_children
-      -                    else:
-      -                        anode.children[ci] = ((pop_n, llm_bv_ab), new_dests)
-      -                    nodes_to_normalize.add(aid)
+      -                        for tsid in range(start, end + 1):
+      -                            possible_matches_for_state = possible_matches.get(tsid)
+      -                            if not possible_matches_for_state:
+      -                                continue
       -
-      -                # Remove B->C edges and possibly node B (if not a root)
-      -                if b in self.arena:
-      -                    self.arena[b].children = []
-      -                # If B is not a root and there are no remaining incoming edges, remove B
-      -                incoming_after = collect_incoming_edges(b)
-      -                if (b not in roots_set) and (not incoming_after):
-      -                    if b in self.arena:
-      -                        del self.arena[b]
-      -                    if b in self.max_depth:
-      -                        del self.max_depth[b]
+      -                            for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
+      -                                terminal_id = int(terminal_id_str)
+      -                                if disallowed_bv.contains(terminal_id):
+      -                                    forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
       -
-      -                # Normalize changed nodes and recompute unions
-      -                for aid in nodes_to_normalize:
-      -                    if aid in self.arena:
-      -                        self._normalize_children_for_node(self.arena[aid])
-      -                self._recompute_llm_bv_unions()
-      -                # Recompute depths since graph changed
-      -                self.max_depth = self._recompute_max_depth_from_arena()
-      -                changed_any = True
+      -                    glr_active_tokens = gss_node.allowed_llm_tokens()
+      -                    glr_active_tokens = llm_mask.intersection(glr_active_tokens)
+      -                    print(f"Allowed LLM tokens from GSS heads (after llm_mask intersection): {glr_active_tokens.to_ranges()}")
+      -                    final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
+      -                    tokens_to_add = final_allowed_tokens
       -
-      -        # Final normalization and metrics recompute
-      -        self._normalize_all_children()
-      -        self._recompute_llm_bv_unions()
-      -        self.max_depth = self._recompute_max_depth_from_arena()
-      -        print(" done.", flush=True)
+      -                    # printf"      - llm_mask (propagated): {llm_mask.to_ranges()}")
+      -                    # printf"      - gss_active_tokens (from GSS): {gss_active_tokens.to_ranges()}")
+      -                    # printf"      - tokens_to_add (intersection): {tokens_to_add.to_ranges()}")
       -
+      -                    final_mask = final_mask.union(tokens_to_add)
+      -                    # printf"      - final_mask after:  {final_mask.to_ranges()}")
       -
+      -                if not gss_node.is_alive():
+      +                    print(f"--- End Node {node_idx} ---")
+      +                    print(f"GSS that reached end node: {gss_node}")
+      +                    print(f"Propagated mask: {llm_mask.to_ranges()}")
+      +
+      +                    single_path_gss_nodes = [s for s in gss_node.stacks.values() if s]
+      +                    if not single_path_gss_nodes:
+      +                        continue
+      +
+      +                    merged_ffi_gss = ffi.gss_merge_many_with_depth(single_path_gss_nodes, 1)
+      +
+      +                    # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
+      +                    forbidden_llm_tokens = ffi.Bitset.zeros()
+      +                    disallowed_terminals_l2 = merged_ffi_gss.disallowed_terminals()
+      +                    print(f"Disallowed Terminals L2 from GSS: {disallowed_terminals_l2}")
+      +                    possible_matches = self.possible_matches_cache
+      +
+      +                    for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
+      +                        if disallowed_bv.is_empty():
+      +                            continue
+      +
+      +                        for tsid in range(start, end + 1):
+      +                            possible_matches_for_state = possible_matches.get(tsid)
+      +                            if not possible_matches_for_state:
+      +                                continue
+      +
+      +                            for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
+      +                                terminal_id = int(terminal_id_str)
+      +                                if disallowed_bv.contains(terminal_id):
+      +                                    forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
+      +
+      +                    glr_active_tokens = merged_ffi_gss.allowed_llm_tokens()
+      +                    glr_active_tokens = llm_mask.intersection(glr_active_tokens)
+      +                    print(f"Allowed LLM tokens from GSS heads (after llm_mask intersection): {glr_active_tokens.to_ranges()}")
+      +                    final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
+      +                    tokens_to_add = final_allowed_tokens
+      +
+      +                    final_mask = final_mask.union(tokens_to_add)
+      +
+      +                if gss_node.is_empty():
+                           stopped.add(node_idx)
+                           # printf"    - STOPPING node {node_idx} (GSS not alive)")
+                           continue
+       
+                       # Transitions grouped by (pop, llm_bv)
+                       node_data = arena.get(node_idx, {})
+                       children = node_data.get("children") or []
+                       # if not children:
+                       #     # printf"    - No children for node {node_idx}")
+                       for (pop, llm_bv), dests in children:
+                           # printf"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
+                           # Collect all pops from GSS parents
+      -                    peeks = gss_node.popn_fast(pop)
+      -                    # printf"      - Found {len(peeks)} peeks from GSS set")
+      -                    if not peeks:
+      +                    popped_gss = gss_node.popn(pop)
+      +                    if popped_gss.is_empty():
+                               continue
+       
+                           llm_empty = llm_bv.is_empty()
+      @@ -283,23 +284,19 @@
+                           for dest_idx, state_bv in dests:
+                               # printf"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
+                               # Filter peeks by destination state bitset
+      -                        matched = []
+      -                        if not state_bv.is_empty():
+      -                            contains = state_bv.contains
+      -                            for sid_val, parent_node in peeks:
+      -                                if contains(sid_val):
+      -                                    matched.append(parent_node)
+      -                        # printf"        - Matched {len(matched)} parent GSS nodes")
+      -                        if not matched:
+      +                        if state_bv.is_empty():
+      +                            continue
+      +
+      +                        # Filter GSS based on which heads match the state bitvector
+      +                        matching_sids = [sid for sid in popped_gss.peek() if state_bv.contains(sid)]
+      +                        if not matching_sids:
+      +                            continue
+      +
+      +                        child_gss_node = popped_gss.isolate_many(matching_sids)
+      +                        if child_gss_node.is_empty():
+                                   continue
+       
+      -                        # Merge matched parent GSS nodes
+      -                        child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+      -
+                               # Compute child mask (intersection with llm_bv when present)
+                               child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+                               # printf"        - Child mask: {child_llm_mask.to_ranges()}")
+      @@ -308,7 +305,7 @@
+                               existing = values.get(d)
+                               if existing is not None:
+                                   existing_gss, existing_mask = existing
+      -                            merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+      +                            merged_gss = GSS.merge_many([existing_gss, child_gss_node])
+                                   combined_mask = existing_mask.union(child_llm_mask)
+                                   values[d] = (merged_gss, combined_mask)
+                                   # printf"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
 
       ```
     metadata:
@@ -4874,11 +4957,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/models/precompute3_model_pure_python.py
-      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
+      Identified target file: python/aug25/models/precompute3_model.py
+      Applying patch to 'python/aug25/models/precompute3_model.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model.py.
     metadata:
-  - user: 'Changes committed with message: "Remove obsolete graph optimization logic
-      and tqdm import in precompute3 model"'
+  - user: 'Changes committed with message: "Refactor get_mask to use ReferenceGSS
+      (GSS) for traversal instead of ffi.GSSNode"'
     metadata:
 ...
