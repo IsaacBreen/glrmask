@@ -2446,7 +2446,7 @@ pub(crate) fn format_acc(
 ) -> String {
     let _ = (original_internal_bimap, llm_token_map);
 
-    let acc = node.acc();
+    let acc = node.local_acc();
 
     if config.verbose {
         // In verbose mode, print the full debug representation of the Acc.

@@ -858,7 +858,7 @@ impl GrammarConstraint {
             max_edges: 500,
             original_internal_bimap: Some(&self.llm_vocab.original_to_internal_id_bimap),
             llm_token_map: Some(&self.llm_vocab.llm_token_map),
-            verbose: true,
+            verbose: false,
         };
 
         let (gss_str, state_ids) = print_gss_forest(roots, &self.parser.terminal_map, &config);
@@ -1875,7 +1875,7 @@ impl<'a> Display for GrammarConstraintState<'a> {
                 max_edges: 50,
                 original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
                 llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
-                verbose: true,
+                verbose: false,
             };
             let (gss_str, _) =
                 crate::datastructures::gss::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
