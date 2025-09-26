@@ -179,36 +179,36 @@ class Model(GraphProvider):
             for uid, node_data in arena_dict.items()
         }
         # Pretty-print the graph for debugging
-        # print("--- Precomputed Graph ---")
-        # print(f"Roots map: {roots_map}")
-        # print("\nArena nodes:")
-        # # Sorting keys to have a consistent output
-        # for node_id in sorted(arena.keys()):
-        #     node = arena[node_id]
-        #     print(f"\n- Node {node_id}:")
-        #     print(f"  - clean_end: {node.clean_end}")
-        #
-        #     llm_union_str = str(node.llm_bv_union)
-        #     if len(llm_union_str) > 80:
-        #         llm_union_str = llm_union_str[:77] + "..."
-        #     print(f"  - llm_bv_union: {llm_union_str}")
-        #
-        #     if not node.children:
-        #         print("  - children: []")
-        #     else:
-        #         print("  - children:")
-        #         for (pop, llm_bv), dests in node.children:
-        #             llm_bv_str = str(llm_bv)
-        #             MAX_STR_LEN = 200
-        #             if len(llm_bv_str) > MAX_STR_LEN:
-        #                 llm_bv_str = llm_bv_str[:MAX_STR_LEN-3] + "..."
-        #             print(f"    - Edge (pop={pop}, llm_bv={llm_bv_str}):")
-        #             for dest_idx, state_bv in dests:
-        #                 state_bv_str = str(state_bv)
-        #                 if len(state_bv_str) > MAX_STR_LEN:
-        #                     state_bv_str = state_bv_str[:MAX_STR_LEN-3] + "..."
-        #                 print(f"      -> Dest Node {dest_idx} with states {state_bv_str}")
-        # print("--- End Precomputed Graph ---")
+        print("--- Precomputed Graph ---")
+        print(f"Roots map: {roots_map}")
+        print("\nArena nodes:")
+        # Sorting keys to have a consistent output
+        for node_id in sorted(arena.keys()):
+            node = arena[node_id]
+            print(f"\n- Node {node_id}:")
+            print(f"  - clean_end: {node.clean_end}")
+
+            llm_union_str = str(node.llm_bv_union)
+            if len(llm_union_str) > 80:
+                llm_union_str = llm_union_str[:77] + "..."
+            print(f"  - llm_bv_union: {llm_union_str}")
+
+            if not node.children:
+                print("  - children: []")
+            else:
+                print("  - children:")
+                for (pop, llm_bv), dests in node.children:
+                    llm_bv_str = str(llm_bv)
+                    MAX_STR_LEN = 200
+                    if len(llm_bv_str) > MAX_STR_LEN:
+                        llm_bv_str = llm_bv_str[:MAX_STR_LEN-3] + "..."
+                    print(f"    - Edge (pop={pop}, llm_bv={llm_bv_str}):")
+                    for dest_idx, state_bv in dests:
+                        state_bv_str = str(state_bv)
+                        if len(state_bv_str) > MAX_STR_LEN:
+                            state_bv_str = state_bv_str[:MAX_STR_LEN-3] + "..."
+                        print(f"      -> Dest Node {dest_idx} with states {state_bv_str}")
+        print("--- End Precomputed Graph ---")
         # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
         tokenizer = constraint.tokenizer()
@@ -293,7 +293,7 @@ class Model(GraphProvider):
         all_internal = constraint.all_internal_llm_tokens_bitset()
         all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
 
-        # print(possible_matches_cache)
+        print(possible_matches_cache)
 
         model = Model(
             arena=arena,
@@ -500,9 +500,9 @@ class Model(GraphProvider):
         - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
-        # print("states in get_mask:")
-        # for k, v in self.state.items():
-        #     print(f"state {k}: {v.to_reference_impl()}")
+        print("states in get_mask:")
+        for k, v in self.state.items():
+            print(f"state {k}: {v.to_reference_impl()}")
 
         state_map: Dict[int, GSS] = self.state
 
@@ -543,6 +543,11 @@ class Model(GraphProvider):
 
         state_map = {sid: gss.apply(initialize_acc) for sid, gss in state_map.items()}
 
+        print("--- After GSS Initialization ---")
+        for sid, gss in state_map.items():
+            print(f"sid {sid}: {gss.to_reference_impl()}")
+
+
         for sid, gss in state_map.items():
             r: NodeID = roots_map[int(sid)]
             if r in values:
@@ -554,6 +559,10 @@ class Model(GraphProvider):
             if r not in enqueued_nodes:
                 enqueued_nodes.add(r)
                 hp(depth_heap, (-d, r))
+
+        print("--- After Seeding ---")
+        for node_idx, gss in values.items():
+            print(f"Node {node_idx}: {gss.to_reference_impl()}")
 
         def enqueue(d: int, n: NodeID) -> None:
             if n not in enqueued_nodes:
@@ -568,9 +577,13 @@ class Model(GraphProvider):
 
             # End-node handling: just union the allowed LLM tokens
             if is_end(node):
+                print(f"--- End Node {node} ---")
+                print(f"GSS that reached end node: {gss_node.to_reference_impl()}")
                 reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                 if reduced_acc:
                     final_mask = final_mask.union(reduced_acc.llm_mask)
+                    print(f"Reduced acc mask: {reduced_acc.llm_mask}")
+                    print(f"Final mask updated to: {final_mask}")
 
             # # Zombie traversal avoidance
             # a_node = arena.get(node)
@@ -643,7 +656,7 @@ class Model(GraphProvider):
                     enqueue(max_depth.get(d, 0), d)
 
 
-        # print("final internal mask:", final_mask)
+        print("final internal mask:", final_mask)
 
         # Convert internal mask back to original IDs
         original_indices: List[int] = []
