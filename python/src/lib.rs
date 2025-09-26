@@ -21,7 +21,7 @@ use sep1::interface::IncrementalParser;
 use sep1::json_serialization::{JSONConvertible, JSONNode};
 use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
 use sep1::datastructures::hybrid_l2_bitset::HybridL2Bitset as RustHybridL2Bitset;
-use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, GSSNode, gather_gss_stats, popn_collect_fast};
+use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, GSSNode, gather_gss_stats, popn_collect_fast, print_gss_forest};
 
 #[pyclass(name = "GrammarExpr")]
 #[derive(Clone)]
@@ -798,6 +798,10 @@ impl PyGSSNode {
     fn print_stats(&self) {
         let stats = gather_gss_stats(&[self.inner.as_ref()]);
         println!("{:#?}", stats);
+    }
+
+    fn __str__(&self) -> String {
+        print_gss_forest(&[self.inner.as_ref()])
     }
 
     fn flatten(&self) -> Vec<(Vec<usize>, PyHybridL2Bitset)> {

@@ -2261,7 +2261,7 @@ impl<'a> Default for GSSPrintConfig<'a> {
 }
 
 /// Pretty-prints a GSS forest for debugging.
-pub(crate) fn print_gss_forest(
+pub fn print_gss_forest(
     roots: &[Arc<GSSNode>],
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
     config: &GSSPrintConfig,
