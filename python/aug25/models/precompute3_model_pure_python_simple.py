@@ -491,14 +491,14 @@ class Model(GraphProvider):
             disallowed_map = acc.terminals_union
 
             for tsid, disallowed_terminals in disallowed_map.items():
-                if tsid > max_state or tsid not in pmc:
+                if tsid not in pmc:
                     continue
                 terminals_to_llm = pmc[tsid]
-                for terminal_id in disallowed_terminals.to_indices():
-                    if terminal_id in terminals_to_llm:
-                        disallowed_llm_mask = disallowed_llm_mask.union(
-                            terminals_to_llm[terminal_id]
-                        )
+                common_state_ids = set(terminals_to_llm.keys()).intersection(set(disallowed_terminals.to_indices()))
+                for terminal_id in common_state_ids:
+                    disallowed_llm_mask = disallowed_llm_mask.union(
+                        terminals_to_llm[terminal_id]
+                    )
 
             allowed_mask = all_ones.difference(disallowed_llm_mask)
             return PyAcc(
