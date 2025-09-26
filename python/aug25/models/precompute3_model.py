@@ -71,7 +71,7 @@ class Model(GraphProvider):
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
         model.constraint = ffi.GrammarConstraint.from_json_string(s)
-        print(model.constraint.precompute3_json_string())
+        print(model.constraint.dump_precomputed3())
         model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         model.possible_matches_cache = model.constraint.possible_matches()
