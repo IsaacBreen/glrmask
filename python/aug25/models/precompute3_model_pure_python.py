@@ -4,11 +4,8 @@ import json
 import heapq
 import collections
 import time
-import random
-from typing import Dict, List, Tuple, Optional, Union, Any, TypedDict, Set
+from typing import Dict, List, Tuple, Optional, Union, Any, Set
 from dataclasses import dataclass, field
-
-from tqdm import tqdm
 
 from ..common_interface import GraphProvider
 from ..range_set.py_range_set import PyRangeSet as RangeSet
@@ -1257,9 +1254,6 @@ class Model(GraphProvider):
     def _compute_universe_lr_states(self) -> Set[int]:
         return set(self.parser_table.table.keys())
 
-    def _rs_equals(self, a: RangeSet, b: RangeSet) -> bool:
-        return a.difference(b).is_empty() and b.difference(a).is_empty()
-
     def _reverse_expand_n(self, base: Set[int], n: int) -> Set[int]:
         """
         Apply the reverse_state_map n times to a set of states.
@@ -1436,7 +1430,7 @@ class Model(GraphProvider):
                 if pop_b != 0:
                     all_full = True
                     for rec in parents_b:
-                        if not self._rs_equals(rec["mask"], universe_rs):
+                        if not rec["mask"] == universe_rs:
                             all_full = False
                             break
                     if not all_full:
