@@ -293,6 +293,8 @@ class Model(GraphProvider):
         model._reorder_llm_tokens_for_range_minimization()
 
         # model._convert_to_bitset_range_set()
+        # After token reordering, optimize state masks (Alt 6) and reduce edges when beneficial.
+        model._optimize_masks_and_edges_alt6()
 
         return model
 
@@ -1266,3 +1268,339 @@ class Model(GraphProvider):
                     new_internal_to_original_map[rep] = set()
                 new_internal_to_original_map[rep].update(orig_set)
             self.internal_to_original_map = new_internal_to_original_map
+
+    # ---------------------------------------------------------
+    # Graph optimization: masks (Alt 6) and node collapsing
+    # ---------------------------------------------------------
+    def _optimize_masks_and_edges_alt6(self) -> None:
+        """
+        Pipeline:
+        1) Compute the universe of LR states involved in the graph and parser.
+        2) Compute terminal LR state sets for each node via bottom-up fixpoint.
+        3) Expand edge masks by adding all non-terminal states at the destination (Alt 6).
+        4) Collapse nodes to reduce the number of edges where it strictly decreases edges.
+        5) Recompute llm_bv_union and max_depth.
+        """
+        try:
+            print("Optimizing masks (Alt 6) and reducing edges...", end='', flush=True)
+            universe_states: Set[int] = self._compute_universe_lr_states()
+            if not universe_states:
+                print(" done (no LR states).", flush=True)
+                return
+            universe_rs: RangeSetABC = PyRangeSet.from_indices(sorted(universe_states))
+            term_by_node: Dict[NodeID, RangeSetABC] = self._compute_terminal_sets(universe_rs, universe_states)
+            self._apply_mask_expansion_alt6(term_by_node, universe_rs)
+            removed = self._collapse_nodes_reduce_edges(term_by_node, universe_rs)
+            # Refresh unions and max_depth metadata
+            self._recompute_llm_bv_unions()
+            self.max_depth = self._recompute_max_depth_from_arena()
+            print(f" done. Nodes removed: {removed}.", flush=True)
+        except Exception as e:
+            # Fail-safe: never let optimization break loading
+            print(f" optimization skipped due to error: {e}", flush=True)
+
+    def _compute_universe_lr_states(self) -> Set[int]:
+        """
+        Collect a conservative universe of LR states to use as the 'full' mask domain.
+        """
+        states: Set[int] = set()
+        # From parser table
+        for sid in self.parser_table.table.keys():
+            states.add(int(sid))
+        for _from_state, row in self.parser_table.table.items():
+            # shifts/splits
+            for action in row.actions.values():
+                if isinstance(action, int):  # Shift
+                    states.add(int(action))
+                elif isinstance(action, Split):
+                    if action.shift is not None:
+                        states.add(int(action.shift))
+            # gotos
+            for to_state in row.gotos.values():
+                states.add(int(to_state))
+        # From reverse_state_map
+        for k, preds in self.reverse_state_map.items():
+            states.add(int(k))
+            for p in preds:
+                states.add(int(p))
+        # From arena edge masks
+        for node in self.arena.values():
+            for (_pop, _llm_bv), dests in node.children:
+                for _dest_id, state_bv in dests:
+                    for i in state_bv.to_indices():
+                        states.add(int(i))
+        return states
+
+    def _rs_equals(self, a: RangeSetABC, b: RangeSetABC) -> bool:
+        return a.difference(b).is_empty() and b.difference(a).is_empty()
+
+    def _reverse_expand_n(self, base: Set[int], n: int) -> Set[int]:
+        """
+        Apply the reverse_state_map n times to a set of states.
+        """
+        if not base or n <= 0:
+            return set(base)
+        cur = set(base)
+        for _ in range(n):
+            nxt: Set[int] = set()
+            for s in cur:
+                nxt.update(self.reverse_state_map.get(int(s), set()))
+            if not nxt:
+                return set()
+            cur = nxt
+        return cur
+
+    def _compute_terminal_sets(
+        self,
+        universe_rs: RangeSetABC,
+        universe_set: Set[int],
+    ) -> Dict[NodeID, RangeSetABC]:
+        """
+        Terminal-set fixpoint:
+        - A state s is terminal at node v if there exists an outgoing edge e=(v --(pop, M)--> w)
+          such that reverse^pop({s}) intersects (M ∩ Term[w]) is non-empty.
+        - End nodes have all states terminal (universe).
+        Implementation ignores LLM token masks as specified.
+        """
+        # Build node-level adjacency (ignoring LLM tokens)
+        node_out: Dict[NodeID, List[Tuple[int, NodeID, RangeSetABC]]] = {}
+        node_in: Dict[NodeID, Set[NodeID]] = collections.defaultdict(set)
+        for nid, node in self.arena.items():
+            edges: List[Tuple[int, NodeID, RangeSetABC]] = []
+            for (pop, _llm_bv), dests in node.children:
+                for dest_id, state_bv in dests:
+                    edges.append((int(pop), int(dest_id), state_bv))
+                    node_in[int(dest_id)].add(int(nid))
+            node_out[int(nid)] = edges
+
+        # Initialize terminal sets
+        term: Dict[NodeID, RangeSetABC] = {}
+        q: collections.deque = collections.deque()
+        for nid, node in self.arena.items():
+            if node.clean_end:
+                term[int(nid)] = universe_rs
+                q.append(int(nid))
+            else:
+                term[int(nid)] = PyRangeSet.empty()
+
+        # Worklist propagation
+        while q:
+            w = int(q.popleft())
+            term_w = term[w]
+            preds = node_in.get(w, set())
+            if not preds:
+                continue
+            for u in preds:
+                add_rs: RangeSetABC = PyRangeSet.empty()
+                for popn, dest_id, mask in node_out.get(u, []):
+                    if dest_id != w:
+                        continue
+                    cand = mask.intersection(term_w)
+                    if cand.is_empty():
+                        continue
+                    cand_set: Set[int] = set(int(i) for i in cand.to_indices())
+                    pre_set = self._reverse_expand_n(cand_set, int(popn))
+                    if pre_set:
+                        add_rs = add_rs.union(PyRangeSet.from_indices(sorted(pre_set)))
+                if add_rs.is_empty():
+                    continue
+                # Only add truly new bits
+                new_bits = add_rs.difference(term[u])
+                if not new_bits.is_empty():
+                    term[u] = term[u].union(new_bits)
+                    q.append(int(u))
+        return term
+
+    def _apply_mask_expansion_alt6(
+        self,
+        term_by_node: Dict[NodeID, RangeSetABC],
+        universe_rs: RangeSetABC,
+    ) -> None:
+        """
+        For each edge e=(A --(pop, M)--> B), expand M by adding all non-terminal states at B:
+        M := M ∪ (Universe \ Term[B]).
+        """
+        nonterm_cache: Dict[NodeID, RangeSetABC] = {}
+        for nid, node in self.arena.items():
+            if not node.children:
+                continue
+            new_children = []
+            for (pop, llm_bv), dests in node.children:
+                new_dests: List[Tuple[int, RangeSetABC]] = []
+                for dest_id, state_bv in dests:
+                    if dest_id not in nonterm_cache:
+                        nonterm_cache[dest_id] = universe_rs.difference(term_by_node.get(dest_id, PyRangeSet.empty()))
+                    expanded_bv = state_bv.union(nonterm_cache[dest_id])
+                    new_dests.append((int(dest_id), expanded_bv))
+                new_children.append(((int(pop), llm_bv), new_dests))
+            node.children = new_children
+
+    def _build_parents_map(self) -> Dict[NodeID, List[Dict[str, Any]]]:
+        """
+        Build a mapping: child_node_id -> list of parent edge records:
+        { 'a_id': A, 'pop': pop(A->child), 'llm': llm_bv(A->child), 'mask': state_bv(A->child for this child) }
+        """
+        parents: Dict[NodeID, List[Dict[str, Any]]] = collections.defaultdict(list)
+        for a_id, a_node in self.arena.items():
+            for (pop, llm_bv), dests in a_node.children:
+                for dest_id, state_bv in dests:
+                    parents[int(dest_id)].append({
+                        "a_id": int(a_id),
+                        "pop": int(pop),
+                        "llm": llm_bv,
+                        "mask": state_bv,
+                    })
+        return parents
+
+    def _collapse_nodes_reduce_edges(
+        self,
+        term_by_node: Dict[NodeID, RangeSetABC],
+        universe_rs: RangeSetABC,
+    ) -> int:
+        """
+        Reduce edges by collapsing intermediate nodes B into direct edges A->C when:
+          - B is not an end node,
+          - B has exactly one child entry with exactly one destination (C),
+          - B has at least one parent,
+          - Either pop(B->C)==0 (Replacement 2) OR for all parents A->B, mask(A->B) == Universe (Replacement 1).
+        For each parent A, add A->C with:
+          - llm_bv := llm(A->B) ∩ llm(B->C),
+          - pop := pop(A->B) + pop(B->C) if Replacement 1, else pop(A->B),
+          - mask := y (B->C mask) if Replacement 1, else mask(A->B) ∩ y,
+          - then mask := mask ∪ (Universe \ Term[C]) [Alt 6].
+        Remove all A->B edges for all parents and delete node B.
+        """
+        removed_nodes = 0
+        roots = set(int(r) for r in self.roots_map.values())
+        # Helper for deterministic sort
+        def _ranges_key(rs: RangeSetABC) -> Tuple[Tuple[int, int], ...]:
+            try:
+                return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+            except Exception:
+                return ()
+
+        while True:
+            parents_map = self._build_parents_map()
+            progress = False
+            # Iterate over a snapshot of node IDs to avoid dict-size-change issues
+            for b_id, b_node in list(self.arena.items()):
+                b_id = int(b_id)
+                if b_id not in self.arena:
+                    continue
+                if b_node.clean_end:
+                    continue
+                if b_id in roots:
+                    # Root nodes are entry points; they typically have no parents, but be conservative.
+                    continue
+                # Must have exactly one child entry and one destination
+                if len(b_node.children) != 1:
+                    continue
+                (pop_b, llm_bv_b), dests_b = b_node.children[0]
+                pop_b = int(pop_b)
+                if len(dests_b) != 1:
+                    continue
+                c_id, y_mask = dests_b[0]
+                c_id = int(c_id)
+                parents_b = parents_map.get(b_id, [])
+                if not parents_b:
+                    continue
+                # Replacement condition:
+                # - If pop_b == 0, Replacement 2 applicable for all parents.
+                # - Else, all parents must have full-mask A->B (Replacement 1).
+                if pop_b != 0:
+                    all_full = True
+                    for rec in parents_b:
+                        if not self._rs_equals(rec["mask"], universe_rs):
+                            all_full = False
+                            break
+                    if not all_full:
+                        continue
+                # Prepare non-terminal filler for C (Alt 6)
+                nonterm_c = universe_rs.difference(term_by_node.get(c_id, PyRangeSet.empty()))
+                # Prepare aggregators per parent A
+                # aggregator_by_A: A_id -> ( (pop_new, llm_ranges_tuple) -> { dest_id: state_bv } )
+                aggregator_by_A: Dict[int, Dict[Tuple[int, Tuple[Tuple[int, int], ...]], Dict[int, RangeSetABC]]] = {}
+                for rec in parents_b:
+                    a_id = int(rec["a_id"])
+                    pop_a = int(rec["pop"])
+                    llm_a: RangeSetABC = rec["llm"]
+                    x_mask: RangeSetABC = rec["mask"]
+                    # Compose LLM masks
+                    llm_inter = llm_a.intersection(llm_bv_b)
+                    if llm_inter.is_empty():
+                        # No tokens that make A->B->C feasible; removing A->B is still safe (no contribution to get_mask).
+                        # We just won't add a replacement edge for these tokens.
+                        pass
+                    else:
+                        # Compose popn and mask
+                        if pop_b == 0:
+                            # Replacement 2: pop stays pop_a, mask becomes x ∩ y
+                            pop_new = pop_a
+                            mask_new = x_mask.intersection(y_mask)
+                        else:
+                            # Replacement 1: pop is pop_a + pop_b, mask is y
+                            pop_new = pop_a + pop_b
+                            mask_new = y_mask
+                        # Apply Alt 6 to the new mask
+                        mask_new = mask_new.union(nonterm_c)
+                        key = (int(pop_new), tuple(_ranges_key(llm_inter)))
+                        aggregator_by_A.setdefault(a_id, {})
+                        aggregator_by_A[a_id].setdefault(key, {})
+                        # Merge per-destination
+                        if c_id in aggregator_by_A[a_id][key]:
+                            aggregator_by_A[a_id][key][c_id] = aggregator_by_A[a_id][key][c_id].union(mask_new)
+                        else:
+                            aggregator_by_A[a_id][key][c_id] = mask_new
+
+                # For each parent A, rebuild its children: remove all A->B edges and add replacements
+                for a_id, grouped in aggregator_by_A.items():
+                    a_node = self.arena.get(int(a_id))
+                    if not a_node:
+                        continue
+                    # Start with existing edges excluding those pointing to B
+                    merged: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], Dict[int, RangeSetABC]] = {}
+                    for (pop, llm_bv), dests in a_node.children:
+                        k = (int(pop), tuple(_ranges_key(llm_bv)))
+                        if k not in merged:
+                            merged[k] = {}
+                        for dest_id, state_bv in dests:
+                            if int(dest_id) == b_id:
+                                # Drop edges to B
+                                continue
+                            if int(dest_id) in merged[k]:
+                                merged[k][int(dest_id)] = merged[k][int(dest_id)].union(state_bv)
+                            else:
+                                merged[k][int(dest_id)] = state_bv
+                    # Add replacements
+                    for key, dest_map in grouped.items():
+                        if key not in merged:
+                            merged[key] = {}
+                        for dest_id, state_bv in dest_map.items():
+                            if int(dest_id) in merged[key]:
+                                merged[key][int(dest_id)] = merged[key][int(dest_id)].union(state_bv)
+                            else:
+                                merged[key][int(dest_id)] = state_bv
+                    # Rebuild children list
+                    new_children: List[Tuple[Tuple[int, RangeSetABC], List[Tuple[int, RangeSetABC]]]] = []
+                    for (pop_new, llm_ranges), dest_map in merged.items():
+                        llm_rs = PyRangeSet.from_ranges(list(llm_ranges))
+                        dest_list = [(int(did), dbv) for did, dbv in dest_map.items()]
+                        new_children.append(((int(pop_new), llm_rs), dest_list))
+                    # Deterministic sort
+                    new_children.sort(
+                        key=lambda item: (
+                            int(item[0][0]),
+                            _ranges_key(item[0][1]),
+                            tuple(sorted(int(d[0]) for d in item[1])),
+                        )
+                    )
+                    a_node.children = new_children
+
+                # Remove node B entirely
+                if b_id in self.arena:
+                    del self.arena[b_id]
+                removed_nodes += 1
+                progress = True
+            if not progress:
+                break
+        return removed_nodes
