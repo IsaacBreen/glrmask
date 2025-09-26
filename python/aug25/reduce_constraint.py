@@ -522,8 +522,8 @@ def ddmin_llm_tokens(
     time_budget_deadline: float,
 ) -> Dict[int, Dict[str, Any]]:
     """
-    For each child edge, try to remove individual tokens from the LLM token bitvector.
-    Accept a deletion if mismatch persists.
+    For each child edge, try to remove chunks of tokens from the LLM token bitvector.
+    Accept a deletion if mismatch persists. This is a faster, chunk-based approach.
     """
     # This reduction does not change graph reachability, so no pruning needed inside.
 
@@ -552,59 +552,66 @@ def ddmin_llm_tokens(
                 if time.time() >= time_budget_deadline:
                     break
 
-                # Get all tokens for this child's llm_bv
-                edge_key, _ = children[ci]
-                _pop, llm_bv_json = edge_key
-
-                tokens_in_bv = []
-                for start, end in llm_bv_json:
-                    tokens_in_bv.extend(range(start, end + 1))
-
-                if not tokens_in_bv:
-                    continue
-
-                random.shuffle(tokens_in_bv)
-
-                # Try removing each token
-                for token_to_remove in tokens_in_bv:
-                    if time.time() >= time_budget_deadline:
+                # Repeatedly try to reduce tokens for this edge
+                while time.time() < time_budget_deadline:
+                    # Get current llm_bv_json from the potentially modified values_dict
+                    current_node = values_dict.get(nid)
+                    if not current_node:
                         break
-
-                    tokens_checked_in_pass += 1
-                    print(f"    - Checks: {tokens_checked_in_pass}, Reductions: {tokens_removed_in_pass}", end='\r')
-
-                    # Get current llm_bv_json from the current values_dict, as it might have changed
-                    current_node = values_dict[nid]
                     current_children = current_node.get("children", [])
                     if ci >= len(current_children):
                         break
-                    _current_pop, current_llm_bv_json = current_children[ci][0]
 
-                    # Check if token is still present
-                    is_present = any(start <= token_to_remove <= end for start, end in current_llm_bv_json)
-                    if not is_present:
-                        continue
+                    edge_key, dests = current_children[ci]
+                    pop, llm_bv_json = edge_key
 
+                    tokens_in_bv = []
+                    for start, end in llm_bv_json:
+                        tokens_in_bv.extend(range(start, end + 1))
+
+                    if len(tokens_in_bv) < 2:
+                        break  # Cannot reduce further
+
+                    # Try removing roughly half the tokens
+                    random.shuffle(tokens_in_bv)
+                    tokens_to_remove = set(tokens_in_bv[:len(tokens_in_bv) // 2])
+
+                    tokens_checked_in_pass += len(tokens_to_remove)
+                    print(f"    - Checks: {tokens_checked_in_pass}, Reductions: {tokens_removed_in_pass}", end='\r')
+
+                    # Build new llm_bv_json by removing tokens
+                    remaining_tokens = sorted([t for t in tokens_in_bv if t not in tokens_to_remove])
+
+                    new_llm_bv_json = []
+                    if remaining_tokens:
+                        range_start = remaining_tokens[0]
+                        for i in range(1, len(remaining_tokens)):
+                            if remaining_tokens[i] > remaining_tokens[i-1] + 1:
+                                new_llm_bv_json.append([range_start, remaining_tokens[i-1]])
+                                range_start = remaining_tokens[i]
+                        new_llm_bv_json.append([range_start, remaining_tokens[-1]])
+
+                    # Create a trial candidate
                     trial_values = {k: dict(v) for k, v in values_dict.items()}
                     trial_children = list((trial_values[nid].get("children") or []))
 
-                    trial_edge_key, trial_dests = trial_children[ci]
-                    trial_pop, trial_llm_bv_json = trial_edge_key
-
-                    new_llm_bv_json = remove_token_from_ranges(trial_llm_bv_json, token_to_remove)
-
-                    trial_children[ci] = [[trial_pop, new_llm_bv_json], trial_dests]
+                    trial_children[ci] = [[pop, new_llm_bv_json], dests]
                     trial_values[nid]["children"] = trial_children
 
                     cand_path = write_candidate_constraint(tmpdir, original, trial_values)
                     ok, _, _ = run_benchmarks_and_has_mismatch(
                         repo_root, cand_path, code_file, baseline_model, candidate_model
                     )
+
                     if ok:
                         # Accept deletion
                         values_dict = trial_values
                         improved = True
-                        tokens_removed_in_pass += 1
+                        tokens_removed_in_pass += len(tokens_to_remove)
+                        # Continue the while loop to try and reduce this edge further
+                    else:
+                        # Failed to reduce with this chunk, break and move to next edge
+                        break
 
         print()  # Newline for the \r progress
         if tokens_removed_in_pass > 0:
