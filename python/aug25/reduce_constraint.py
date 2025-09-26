@@ -658,8 +658,12 @@ def ddmin_llm_tokens(
     return values_dict
 
 
-def main():
+def sweep_prune_llm_tokens(
+    original: Dict[str, Any],
+    values_dict: Dict[int, Dict[str, Any]],
+) -> Tuple[Dict[int, Dict[str, Any]], Dict[str, int]]:
     """
+
     Deterministic, single-sweep pruning of LLM tokens on edges based on:
       - forward token reachability from roots, and
       - backward token reachability to end nodes.
