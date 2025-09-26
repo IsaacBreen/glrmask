@@ -10,7 +10,6 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from collections import deque, defaultdict
 from typing import Dict, List, Tuple, Set, Any, Optional
 
 
@@ -512,260 +511,6 @@ def remove_token_from_ranges(ranges: List[List[int]], token: int) -> List[List[i
     return new_ranges
 
 
-def token_ranges_to_set(ranges: List[List[int]]) -> Set[int]:
-    """
-    Convert a list of [start, end] ranges to a set of integer tokens.
-    """
-    out: Set[int] = set()
-    for start, end in ranges or []:
-        if start > end:
-            continue
-        out.update(range(int(start), int(end) + 1))
-    return out
-
-
-def token_set_to_ranges(tokens: Set[int]) -> List[List[int]]:
-    """
-    Convert a set of integer tokens to a sorted, non-overlapping list of [start, end] ranges.
-    """
-    if not tokens:
-        return []
-    sorted_tokens = sorted(tokens)
-    ranges: List[List[int]] = []
-    start = prev = sorted_tokens[0]
-    for t in sorted_tokens[1:]:
-        if t == prev + 1:
-            prev = t
-        else:
-            ranges.append([start, prev])
-            start = prev = t
-    ranges.append([start, prev])
-    return ranges
-
-
-def count_total_llm_tokens(values_dict: Dict[int, Dict[str, Any]]) -> int:
-    """
-    Count total number of LLM tokens across all child edges (sum of lengths of llm_bv ranges).
-    """
-    total = 0
-    for node in values_dict.values():
-        for edge in node.get("children") or []:
-            edge_key, _dests = edge
-            _pop, llm_bv_json = edge_key
-            for s, e in llm_bv_json or []:
-                total += int(e) - int(s) + 1
-    return total
-
-
-def collect_end_nodes(values_dict: Dict[int, Dict[str, Any]]) -> Set[int]:
-    """
-    Return the set of node ids that are end nodes (clean_end=True).
-    """
-    ends: Set[int] = set()
-    for nid, node in values_dict.items():
-        val = node.get("value") or {}
-        if bool(val.get("clean_end", False)):
-            ends.add(int(nid))
-    return ends
-
-
-def prune_llm_tokens_by_token_flow(
-    original: Dict[str, Any],
-    values_dict: Dict[int, Dict[str, Any]],
-    repo_root: Path,
-    tmpdir: Path,
-    code_file: Path,
-    baseline_model: Path,
-    candidate_model: Path,
-    time_budget_deadline: float,
-) -> Tuple[Dict[int, Dict[str, Any]], int, int]:
-    """
-    Single-pass pruning that removes LLM tokens on edges that cannot contribute to any
-    end-node path under the "intersection along the path" semantics used by get_mask.
-
-    Method:
-    - Compute Universe = union of all llm_bv tokens appearing on any edge.
-    - Compute forward token sets F[node] from roots:
-        F[root] = Universe; propagate along edges with Cand = F[u] ∩ edge_tokens; union into F[v].
-    - Compute backward token sets B[node] from end nodes:
-        B[end] = Universe; along reverse edges, Cand = edge_tokens ∩ B[v]; union into B[u].
-    - For each child edge group ((pop, llm_bv), dests):
-        new_llm = union over dest v of (llm_bv ∩ F[u] ∩ B[v]).
-      If new_llm is empty, drop that child edge entirely.
-    - Then prune unreachable nodes (ignoring tokens) to keep the graph tight.
-    - Accept the pruning only if the known mismatch persists; else return the original.
-
-    Returns (possibly pruned values_dict, tokens_removed, child_edges_removed).
-    """
-    if time.time() >= time_budget_deadline:
-        return values_dict, 0, 0
-
-    precomp = original.get("precomputed3") or []
-    roots = compute_roots(precomp)
-
-    # Build edge structures and Universe of tokens
-    Universe: Set[int] = set()
-    edges_out: Dict[int, List[Dict[str, Any]]] = {}
-    rev: Dict[int, List[Tuple[int, Set[int]]]] = defaultdict(list)
-
-    for nid, node in values_dict.items():
-        nid_i = int(nid)
-        children = node.get("children") or []
-        out_list: List[Dict[str, Any]] = []
-        for edge in children:
-            edge_key, dests = edge
-            pop, llm_bv_json = edge_key
-            tokens = token_ranges_to_set(llm_bv_json or [])
-            if tokens:
-                Universe.update(tokens)
-            dest_ids = [int(did) for did, _state_bv_json in dests]
-            entry = {
-                "pop": int(pop),
-                "tokens": tokens,
-                "dests_ids": dest_ids,
-                "dests_full": dests,  # keep original [dest_id, state_bv_json]
-            }
-            out_list.append(entry)
-            for did in dest_ids:
-                rev[int(did)].append((nid_i, tokens))
-        edges_out[nid_i] = out_list
-
-    if not Universe:
-        # Nothing to prune
-        return values_dict, 0, 0
-
-    # Forward propagation: tokens reachable from roots under path-wise intersection
-    F: Dict[int, Set[int]] = {int(n): set() for n in values_dict.keys()}
-    q_fwd: deque[int] = deque()
-    for r in roots:
-        if int(r) in F:
-            F[int(r)] = set(Universe)
-            q_fwd.append(int(r))
-
-    while q_fwd and time.time() < time_budget_deadline:
-        u = q_fwd.popleft()
-        fu = F.get(u, set())
-        if not fu:
-            continue
-        for rec in edges_out.get(u, []):
-            edge_tokens: Set[int] = rec["tokens"]
-            if not edge_tokens:
-                continue
-            # Cand = F[u] ∩ edge_tokens
-            if len(fu) < len(edge_tokens):
-                cand = fu.intersection(edge_tokens)
-            else:
-                cand = edge_tokens.intersection(fu)
-            if not cand:
-                continue
-            for v in rec["dests_ids"]:
-                dest_set = F.get(v)
-                if dest_set is None:
-                    dest_set = set()
-                    F[v] = dest_set
-                before = len(dest_set)
-                dest_set |= cand
-                if len(dest_set) > before:
-                    q_fwd.append(v)
-
-    # Backward propagation: tokens that can reach an end under path-wise intersection
-    B: Dict[int, Set[int]] = {int(n): set() for n in values_dict.keys()}
-    ends = collect_end_nodes(values_dict)
-    q_bwd: deque[int] = deque()
-    for e in ends:
-        if int(e) in B:
-            B[int(e)] = set(Universe)
-            q_bwd.append(int(e))
-
-    while q_bwd and time.time() < time_budget_deadline:
-        v = q_bwd.popleft()
-        bv = B.get(v, set())
-        if not bv:
-            continue
-        for (u, edge_tokens) in rev.get(v, []):
-            if not edge_tokens:
-                continue
-            # Cand = edge_tokens ∩ B[v]
-            if len(bv) < len(edge_tokens):
-                cand = bv.intersection(edge_tokens)
-            else:
-                cand = edge_tokens.intersection(bv)
-            if not cand:
-                continue
-            uset = B.get(u)
-            if uset is None:
-                uset = set()
-                B[u] = uset
-            before = len(uset)
-            uset |= cand
-            if len(uset) > before:
-                q_bwd.append(u)
-
-    # Construct pruned values with updated llm_bv per child edge group
-    tokens_removed_total = 0
-    child_edges_removed = 0
-    new_values: Dict[int, Dict[str, Any]] = {}
-
-    for nid, node in values_dict.items():
-        nid_i = int(nid)
-        new_children: List[Any] = []
-        for rec in edges_out.get(nid_i, []):
-            edge_tokens: Set[int] = rec["tokens"]
-            if not edge_tokens:
-                # No tokens at all; drop it
-                child_edges_removed += 1
-                continue
-            # allowed for this group is union over dests of tokens that can continue
-            allowed_union: Set[int] = set()
-            fu = F.get(nid_i, set())
-            for did in rec["dests_ids"]:
-                bv = B.get(did, set())
-                allowed = edge_tokens
-                if fu:
-                    if len(fu) < len(allowed):
-                        allowed = allowed.intersection(fu)
-                    else:
-                        allowed = fu.intersection(allowed)
-                else:
-                    allowed = set()  # cannot be reached from roots under semantics
-                if allowed and bv:
-                    if len(bv) < len(allowed):
-                        allowed = allowed.intersection(bv)
-                    else:
-                        allowed = bv.intersection(allowed)
-                else:
-                    allowed = set()
-                if allowed:
-                    allowed_union |= allowed
-
-            if allowed_union:
-                tokens_removed_total += max(0, len(edge_tokens) - len(allowed_union))
-                new_llm_bv_json = token_set_to_ranges(allowed_union)
-                new_children.append([[rec["pop"], new_llm_bv_json], rec["dests_full"]])
-            else:
-                # Entire group becomes useless
-                child_edges_removed += 1
-                tokens_removed_total += len(edge_tokens)
-
-        new_node = dict(node)
-        new_node["children"] = new_children
-        new_values[nid_i] = new_node
-
-    # Prune unreachable nodes (ignoring tokens) after edge removals
-    kept_nodes = bfs_reachable(new_values, roots, None)
-    pruned_values = prune_values_by_reachability(new_values, kept_nodes)
-
-    # Verify mismatch persists; otherwise revert to original.
-    cand_path = write_candidate_constraint(tmpdir, original, pruned_values)
-    ok, _idx, _out = run_benchmarks_and_has_mismatch(
-        repo_root, cand_path, code_file, baseline_model, candidate_model
-    )
-    if ok:
-        return pruned_values, tokens_removed_total, child_edges_removed
-    else:
-        return values_dict, 0, 0
-
-
 def ddmin_llm_tokens(
     original: Dict[str, Any],
     values_dict: Dict[int, Dict[str, Any]],
@@ -951,53 +696,38 @@ def main():
             else:
                 print("[Depth] Depth pruning could not preserve mismatch; keeping full reachability.")
 
-        # Phase 2: Token-flow-based pruning of LLM tokens (roots -> ends)
+        # Phase 2: Delete child edges per node (delta-debug)
         if time.time() < time_budget_deadline:
-            print("\n--- Phase 2: Pruning LLM tokens by path reachability (roots->ends) ---")
-            start = time.time()
-            values_after_flow, tokens_removed, child_edges_removed = prune_llm_tokens_by_token_flow(
-                original, values_dict, repo_root, tmpdir, code_file,
-                baseline_model, candidate_model, time_budget_deadline
-            )
-            if tokens_removed > 0 or child_edges_removed > 0:
-                values_dict = values_after_flow
-                n2, c2, d2 = count_nodes_children_dests(values_dict)
-                print(f"--- Phase 2 finished. Removed {tokens_removed} tokens and {child_edges_removed} child edges. Size: {n2} nodes, {c2} children, {d2} dests. Took {time.time()-start:.1f}s ---")
-            else:
-                print(f"--- Phase 2 finished. No safe token-flow pruning accepted (mismatch would be lost or no change). Took {time.time()-start:.1f}s ---")
-
-        # Phase 3: Delete child edges per node (delta-debug)
-        if time.time() < time_budget_deadline:
-            print("\n--- Phase 3: Reducing child edges ---")
+            print("\n--- Phase 2: Reducing child edges ---")
             start = time.time()
             values_dict = ddmin_children(
                 original, values_dict, repo_root, tmpdir, code_file,
                 baseline_model, candidate_model, time_budget_deadline
             )
             n2, c2, d2 = count_nodes_children_dests(values_dict)
-            print(f"--- Phase 3 finished. Size: {n2} nodes, {c2} children, {d2} dests. Took {time.time()-start:.1f}s ---")
+            print(f"--- Phase 2 finished. Size: {n2} nodes, {c2} children, {d2} dests. Took {time.time()-start:.1f}s ---")
 
-        # Phase 4: Delete dests within child edges (delta-debug)
+        # Phase 3: Delete dests within child edges (delta-debug)
         if time.time() < time_budget_deadline:
-            print("\n--- Phase 4: Reducing destinations ---")
+            print("\n--- Phase 3: Reducing destinations ---")
             start = time.time()
             values_dict = ddmin_dests(
                 original, values_dict, repo_root, tmpdir, code_file,
                 baseline_model, candidate_model, time_budget_deadline
             )
             n3, c3, d3 = count_nodes_children_dests(values_dict)
-            print(f"--- Phase 4 finished. Size: {n3} nodes, {c3} children, {d3} dests. Took {time.time()-start:.1f}s ---")
+            print(f"--- Phase 3 finished. Size: {n3} nodes, {c3} children, {d3} dests. Took {time.time()-start:.1f}s ---")
 
-        # Phase 5: Delete LLM tokens from edges (delta-debug)
+        # Phase 4: Delete LLM tokens from edges (delta-debug)
         if time.time() < time_budget_deadline:
-            print("\n--- Phase 5: Reducing LLM tokens in edges ---")
+            print("\n--- Phase 4: Reducing LLM tokens in edges ---")
             start = time.time()
             values_dict = ddmin_llm_tokens(
                 original, values_dict, repo_root, tmpdir, code_file,
                 baseline_model, candidate_model, time_budget_deadline
             )
             n4, c4, d4 = count_nodes_children_dests(values_dict)
-            print(f"--- Phase 5 finished. Size: {n4} nodes, {c4} children, {d4} dests. Took {time.time()-start:.1f}s ---")
+            print(f"--- Phase 4 finished. Size: {n4} nodes, {c4} children, {d4} dests. Took {time.time()-start:.1f}s ---")
 
         # Final write
         final_candidate_path = write_candidate_constraint(tmpdir, original, values_dict)
