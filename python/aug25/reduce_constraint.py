@@ -24,7 +24,7 @@ def save_json_gz(path: str, data: Dict[str, Any]) -> None:
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
 
 
-def values_list_to_dict(values_list: List[Tuple[int, Dict[str, Any]]]) -> Dict[int, Dict[str, Any]]:
+def values_list_to_dict(values_list: List[Tuple[str, Dict[str, Any]]]) -> Dict[int, Dict[str, Any]]:
     """
     Convert trie3_god['values'] (list of [node_id, node]) to dict[node_id] = node.
     Node ids are normalized to int keys.
@@ -35,13 +35,14 @@ def values_list_to_dict(values_list: List[Tuple[int, Dict[str, Any]]]) -> Dict[i
     return out
 
 
-def dict_to_values_list(values_dict: Dict[int, Dict[str, Any]]) -> List[Tuple[int, Dict[str, Any]]]:
+def dict_to_values_list(values_dict: Dict[int, Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
     """
-    Convert dict[node_id] back to list format that loader expects: [[node_id, node], ...].
+    Convert dict[node_id] back to list format that loader expects: [["node_id", node], ...].
     Use sorted order for determinism.
     """
     items = sorted(values_dict.items(), key=lambda kv: int(kv[0]))
-    return [[int(k), v] for k, v in items]
+    # The loader expects string keys for node IDs in this list format.
+    return [[str(k), v] for k, v in items]
 
 
 def collect_adjacency(values_dict: Dict[int, Dict[str, Any]]) -> Dict[int, Set[int]]:
