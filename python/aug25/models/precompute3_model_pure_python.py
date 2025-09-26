@@ -71,6 +71,13 @@ class PyAcc:
     terminals_union: Dict[int, TerminalIdSet]
     llm_mask: LLMTokenSet
 
+    def __repr__(self) -> str:
+        term_union_str = "{" + ", ".join(
+            f"{k}: {v.to_ranges()}" for k, v in sorted(self.terminals_union.items())
+        ) + "}"
+        return f"PyAcc(terminals_union={term_union_str}, llm_mask={self.llm_mask.to_ranges()})"
+
+
     def __eq__(self, other):
         if not isinstance(other, PyAcc):
             return NotImplemented
@@ -470,6 +477,10 @@ class Model(GraphProvider):
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
         state_map: Dict[int, GSS] = self.state.copy()
+        print("states in get_mask:")
+        for sid, gss in state_map.items():
+            print(f"state {sid}: {gss!r}")
+
 
         all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
         final_mask: LLMTokenSet = RangeSet.empty()
@@ -488,28 +499,50 @@ class Model(GraphProvider):
         max_state: int = self.tokenizer_max_state
 
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-        def initialize_acc(acc: PyAcc) -> PyAcc:
-            # Compute allowed LLM tokens from disallowed terminals for this accumulator
-            disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
-            disallowed_map = acc.terminals_union
+        print("\n--- GSS Initialization ---")
+        initialized_state_map = {}
+        for sid, gss in state_map.items():
+            print(f"Initializing GSS for sid={sid}")
 
-            for tsid, disallowed_terminals in disallowed_map.items():
-                if tsid > max_state or tsid not in pmc:
-                    continue
-                terminals_to_llm = pmc[tsid]
-                for terminal_id in disallowed_terminals.to_indices():
-                    if terminal_id in terminals_to_llm:
-                        disallowed_llm_mask = disallowed_llm_mask.union(
-                            terminals_to_llm[terminal_id]
-                        )
+            def make_initializer(start_sid: int):
+                def initialize_acc(acc: PyAcc) -> PyAcc:
+                    # Compute allowed LLM tokens from disallowed terminals for this accumulator
+                    # ONLY considering the disallowed terminals for the current starting tokenizer state.
+                    disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
+                    disallowed_map = acc.terminals_union
+                    
+                    print(f"  - acc_in: {acc!r}")
 
-            allowed_mask = all_ones.difference(disallowed_llm_mask)
-            return PyAcc(
-                terminals_union={},  # consume
-                llm_mask=allowed_mask,
-            )
+                    # This is the key change: only look at the entry for start_sid
+                    disallowed_terminals = disallowed_map.get(start_sid, RangeSet.empty())
 
-        state_map = {sid: gss.apply(initialize_acc) for sid, gss in state_map.items()}
+                    if not disallowed_terminals.is_empty():
+                        if start_sid <= max_state and start_sid in pmc:
+                            terminals_to_llm = pmc[start_sid]
+                            for terminal_id in disallowed_terminals.to_indices():
+                                if terminal_id in terminals_to_llm:
+                                    disallowed_llm_mask = disallowed_llm_mask.union(
+                                        terminals_to_llm[terminal_id]
+                                    )
+                    
+                    allowed_mask = all_ones.difference(disallowed_llm_mask)
+                    
+                    print(f"    - disallowed_terminals for sid {start_sid}: {disallowed_terminals.to_ranges()}")
+                    print(f"    - disallowed_llm_mask: {disallowed_llm_mask.to_ranges()}")
+                    print(f"    - allowed_mask: {allowed_mask.to_ranges()}")
+
+                    return PyAcc(
+                        terminals_union={},  # consume
+                        llm_mask=allowed_mask,
+                    )
+                return initialize_acc
+
+            initialized_state_map[sid] = gss.apply(make_initializer(sid))
+        state_map = initialized_state_map
+
+        print("\n--- After GSS Initialization ---")
+        for sid, gss in state_map.items():
+            print(f"sid {sid}: {gss!r}")
 
         for sid, gss in state_map.items():
             r: NodeID = roots_map[int(sid)]
@@ -522,6 +555,11 @@ class Model(GraphProvider):
             if r not in enqueued_nodes:
                 enqueued_nodes.add(r)
                 hp(depth_heap, (-d, r))
+
+        print("\n--- After Seeding ---")
+        for node_idx, gss in values.items():
+            print(f"Node {node_idx}: {gss!r}")
+
 
         def enqueue(d: int, n: NodeID) -> None:
             if n not in enqueued_nodes:
@@ -536,9 +574,13 @@ class Model(GraphProvider):
 
             # End-node handling: just union the allowed LLM tokens
             if is_end(node):
+                print(f"--- End Node {node} ---")
+                print(f"GSS that reached end node: {gss_node!r}")
                 reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                 if reduced_acc:
+                    print(f"Reduced acc mask: {reduced_acc.llm_mask.to_ranges()}")
                     final_mask = final_mask.union(reduced_acc.llm_mask)
+                    print(f"Final mask updated to: {final_mask.to_ranges()}")
 
             # Zombie traversal avoidance
             a_node = arena.get(node)
@@ -609,6 +651,8 @@ class Model(GraphProvider):
                     else:
                         values[d] = child_gss
                     enqueue(max_depth[d], d)
+
+        print("final internal mask:", final_mask.to_ranges())
 
 
         # Convert internal mask back to original IDs

@@ -241,10 +241,12 @@ class Model(GraphProvider):
                                 if disallowed_bv.contains(terminal_id):
                                     forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
+                    print(f"Forbidden LLM tokens from disallowed terminals: {forbidden_llm_tokens.to_ranges()}")
                     glr_active_tokens = gss_node.allowed_llm_tokens()
                     glr_active_tokens = llm_mask.intersection(glr_active_tokens)
                     print(f"Allowed LLM tokens from GSS heads (after llm_mask intersection): {glr_active_tokens.to_ranges()}")
                     final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
+                    print(f"Final allowed tokens for this path: {final_allowed_tokens.to_ranges()}")
                     tokens_to_add = final_allowed_tokens
 
                     # printf"      - llm_mask (propagated): {llm_mask.to_ranges()}")
