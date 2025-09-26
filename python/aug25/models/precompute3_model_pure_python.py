@@ -7,6 +7,8 @@ import time
 from typing import Dict, List, Tuple, Optional, Union, Any, Set
 from dataclasses import dataclass, field
 
+from tqdm import tqdm
+
 from ..common_interface import GraphProvider
 from ..range_set.py_range_set import PyRangeSet as RangeSet
 import _sep1 as ffi
@@ -1438,12 +1440,11 @@ class Model(GraphProvider):
 
         changed_any = True
         while changed_any:
-            print(".", end='', flush=True)
             changed_any = False
             # Use current depths (may change after removals); default to 0 if missing
             depths = self.max_depth or {}
             node_order = sorted(self.arena.keys(), key=lambda x: int(depths.get(int(x), 0)))
-            for b in list(node_order):
+            for b in tqdm(node_order, desc=" Collapsing"):
                 b = int(b)
                 if b not in self.arena:
                     continue
