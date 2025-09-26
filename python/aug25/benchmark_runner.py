@@ -77,8 +77,22 @@ def greedy_tokenizer(text_bytes, id_to_token):
 
 def load_model_class(model_path: Path):
     """Dynamically loads the 'Model' class from a Python file."""
-    # Convert path like 'aug25/precompute3_model.py' to 'aug25.precompute3_model' for correct package context
-    module_name = ".".join(model_path.with_suffix('').parts)
+    # To support relative imports within the model file, we must construct
+    # a module name that reflects its package structure relative to the project root.
+    module_path_for_name = model_path
+    if module_path_for_name.is_absolute():
+        try:
+            # Try to make it relative to the project root.
+            module_path_for_name = module_path_for_name.relative_to(_project_root)
+        except ValueError:
+            # Path is not within the project root. The original absolute path's parts
+            # will be used, which is unlikely to work for relative imports but is the
+            # best we can do.
+            pass
+
+    module_name = ".".join(module_path_for_name.with_suffix('').parts)
+
+    # The file location for importlib must be the original path.
     spec = importlib.util.spec_from_file_location(module_name, model_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load spec for module at {model_path}")
