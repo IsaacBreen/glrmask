@@ -291,6 +291,8 @@ class Model(GraphProvider):
         all_internal = constraint.all_internal_llm_tokens_bitset()
         all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
 
+        print(possible_matches_cache)
+
         model = Model(
             arena=arena,
             roots_map=roots_map,
