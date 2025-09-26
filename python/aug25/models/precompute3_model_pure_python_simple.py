@@ -482,7 +482,6 @@ class Model(GraphProvider):
         arena: Dict[NodeID, ArenaNode] = self.arena
         is_end = self.is_end
         pmc: Dict[int, Dict[int, LLMTokenSet]] = self.possible_matches_cache or {}
-        max_state: int = self.tokenizer_max_state
 
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
         def initialize_acc(acc: PyAcc) -> PyAcc:
@@ -533,16 +532,16 @@ class Model(GraphProvider):
                 if reduced_acc:
                     final_mask = final_mask.union(reduced_acc.llm_mask)
 
-            # Zombie traversal avoidance
-            a_node = arena.get(node)
-            node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-            potential_new_tokens = node_llm_bv_union.difference(final_mask)
-            if potential_new_tokens.is_empty():
-                continue
-
-            gss_mask_acc = gss_node.reduce_acc()
-            if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
-                continue
+            # # Zombie traversal avoidance
+            # a_node = arena.get(node)
+            # node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
+            # potential_new_tokens = node_llm_bv_union.difference(final_mask)
+            # if potential_new_tokens.is_empty():
+            #     continue
+            #
+            # gss_mask_acc = gss_node.reduce_acc()
+            # if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
+            #     continue
 
             # Traverse edges and propagate masks
             a_node = arena.get(node)
