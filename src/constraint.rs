@@ -2507,7 +2507,10 @@ impl<'a> GrammarConstraintState<'a> {
             println!("GSS is empty.");
             return;
         }
+        self.print_gss_nodes()
+    }
 
+    pub fn print_gss_nodes(&self, roots: &[GSSNode]) {
         let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
 
         let config = GSSPrintConfig {
