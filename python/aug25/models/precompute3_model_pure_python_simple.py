@@ -496,9 +496,7 @@ class Model(GraphProvider):
                 terminals_to_llm = pmc[tsid]
                 common_state_ids = set(terminals_to_llm.keys()).intersection(set(disallowed_terminals.to_indices()))
                 for terminal_id in common_state_ids:
-                    disallowed_llm_mask = disallowed_llm_mask.union(
-                        terminals_to_llm[terminal_id]
-                    )
+                    disallowed_llm_mask = disallowed_llm_mask.union(terminals_to_llm[terminal_id])
 
             allowed_mask = all_ones.difference(disallowed_llm_mask)
             return PyAcc(
