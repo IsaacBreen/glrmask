@@ -430,11 +430,22 @@ impl PyGrammarConstraint {
         println!("{}", self.inner.parser);
     }
 
-    fn state_with_nodes(&mut self, nodes: Vec<(usize, PyGSSNode)>) -> PyResult<GrammarConstraintState> {
-        let gss_nodes: Vec<(sep1::glr::table::StateID, Arc<RustGSSNode>)> = nodes.into_iter()
+    fn state_with_nodes(&mut self, nodes: Vec<(usize, PyGSSNode)>) -> PyResult<PyGrammarConstraintState> {
+        let gss_nodes: Vec<(usize, Arc<RustGSSNode>)> = nodes.into_iter()
             .map(|(sid, py_node)| (sid, py_node.inner))
             .collect();
-        Ok(self.inner.state_with_nodes(gss_nodes))
+
+        let constraint_clone = self.clone();
+
+        Ok(PyGrammarConstraintState {
+            inner: PyGrammarConstraintStateWrapperTryBuilder {
+                constraint: constraint_clone,
+                inner_builder: move |c: &PyGrammarConstraint| {
+                    let state = c.inner.state_with_nodes(gss_nodes);
+                    Ok::<_, PyErr>(state)
+                },
+            }.try_build()?
+        })
     }
 
     fn to_json_string(&self) -> PyResult<String> {
