@@ -335,13 +335,14 @@ def ddmin_children(
     precomp = original.get("precomputed3") or []
     roots = compute_roots(precomp)
 
-    # Work through nodes in deterministic random order
-    node_ids = list(values_dict.keys())
-    random.shuffle(node_ids)
-
     improved = True
     while improved and time.time() < time_budget_deadline:
         improved = False
+
+        # Work through nodes in deterministic random order each pass
+        node_ids = list(values_dict.keys())
+        random.shuffle(node_ids)
+
         for nid in node_ids:
             if time.time() >= time_budget_deadline:
                 break
@@ -396,12 +397,14 @@ def ddmin_dests(
     precomp = original.get("precomputed3") or []
     roots = compute_roots(precomp)
 
-    node_ids = list(values_dict.keys())
-    random.shuffle(node_ids)
-
     improved = True
     while improved and time.time() < time_budget_deadline:
         improved = False
+
+        # Work through nodes in deterministic random order each pass
+        node_ids = list(values_dict.keys())
+        random.shuffle(node_ids)
+
         for nid in node_ids:
             if time.time() >= time_budget_deadline:
                 break
