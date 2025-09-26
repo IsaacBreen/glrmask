@@ -1240,7 +1240,7 @@ class Model(GraphProvider):
                 print(" done (no LR states).", flush=True)
                 return
             universe_rs: RangeSet = RangeSet.from_indices(sorted(universe_states))
-            term_by_node: Dict[NodeID, RangeSet] = self._compute_terminal_sets(universe_rs, universe_states)
+            term_by_node: Dict[NodeID, RangeSet] = self._compute_terminal_sets(universe_rs)
             self._apply_mask_expansion_alt6(term_by_node, universe_rs)
             removed = self._collapse_nodes_reduce_edges(term_by_node, universe_rs)
             # Refresh unions and max_depth metadata
@@ -1270,11 +1270,7 @@ class Model(GraphProvider):
             cur = nxt
         return cur
 
-    def _compute_terminal_sets(
-        self,
-        universe_rs: RangeSet,
-        universe_set: Set[int],
-    ) -> Dict[NodeID, RangeSet]:
+    def _compute_terminal_sets(self, universe_rs: RangeSet) -> Dict[NodeID, RangeSet]:
         """
         Terminal-set fixpoint:
         - A state s is terminal at node v if there exists an outgoing edge e=(v --(pop, M)--> w)
