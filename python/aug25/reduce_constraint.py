@@ -552,8 +552,10 @@ def ddmin_llm_tokens(
                 if time.time() >= time_budget_deadline:
                     break
 
+                MAX_ATTEMPTS_PER_EDGE = 10
+                attempts_left = MAX_ATTEMPTS_PER_EDGE
                 # Repeatedly try to reduce tokens for this edge
-                while time.time() < time_budget_deadline:
+                while time.time() < time_budget_deadline and attempts_left > 0:
                     # Get current llm_bv_json from the potentially modified values_dict
                     current_node = values_dict.get(nid)
                     if not current_node:
@@ -608,10 +610,11 @@ def ddmin_llm_tokens(
                         values_dict = trial_values
                         improved = True
                         tokens_removed_in_pass += len(tokens_to_remove)
+                        attempts_left = MAX_ATTEMPTS_PER_EDGE  # Reset on success
                         # Continue the while loop to try and reduce this edge further
                     else:
-                        # Failed to reduce with this chunk, break and move to next edge
-                        break
+                        # Failed to reduce with this chunk, try another random chunk
+                        attempts_left -= 1
 
         print()  # Newline for the \r progress
         if tokens_removed_in_pass > 0:
