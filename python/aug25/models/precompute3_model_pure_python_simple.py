@@ -81,14 +81,18 @@ class PyAcc:
         return hash((len(self.terminals_union), self.llm_mask))
 
     def merge(self, other: "PyAcc") -> "PyAcc":
+        d1 = self.terminals_union
+        d2 = other.terminals_union
+        all_keys = d1.keys() | d2.keys()
+
         return PyAcc(
             terminals_union={
-                k: self.terminals_union[k].intersection(other.terminals_union[k])
-                for k in self.terminals_union
-                if k in other.terminals_union
+                k: d1[k].intersection(d2[k]) if k in d1 and k in d2 else d1.get(k) or d2.get(k)
+                for k in all_keys
             },
             llm_mask=self.llm_mask.union(other.llm_mask),
         )
+
     def is_empty(self):
         return self.llm_mask.is_empty()
 
@@ -295,9 +299,11 @@ class Model(GraphProvider):
             old_map = acc.terminals_union
             new_bvs: Dict[int, TerminalIdSet] = collections.defaultdict(RangeSet.empty)
             for old_sid, new_sid in state_map.items():
-                bv_source = old_map.get(old_sid, RangeSet.empty())
-                new_bvs[new_sid] = new_bvs[new_sid].intersection(bv_source)
-
+                if old_sid in old_map:
+                    if new_sid in new_bvs:
+                        new_bvs[new_sid] = new_bvs[new_sid].intersection(old_map[old_sid])
+                    else:
+                        new_bvs[new_sid] = old_map[old_sid]
             return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
         return gss.apply(apply_map)
 
