@@ -111,7 +111,7 @@ class Model(GraphProvider):
         # print"\n--- get_mask START ---")
         # print"GSS at start of get_mask:")
 
-        state_map = self.constraint_state.get_state_map()
+        state_map: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
         all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
 
         print("states in get_mask:")
