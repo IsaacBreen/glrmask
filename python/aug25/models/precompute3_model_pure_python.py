@@ -11,9 +11,7 @@ from dataclasses import dataclass, field
 from tqdm import tqdm
 
 from ..common_interface import GraphProvider
-from ..range_set.range_set_abc import RangeSet as RangeSetABC
-from ..range_set.bitset_range_set import BitsetRangeSet
-from ..range_set.py_range_set import PyRangeSet
+from ..range_set.py_range_set import PyRangeSet as RangeSet
 import _sep1 as ffi
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
@@ -21,10 +19,10 @@ from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 
 NodeID = int
 
-# Type aliases for different uses of PyRangeSet to improve clarity.
-LLMTokenSet = RangeSetABC
-StateIDSet = RangeSetABC
-TerminalIdSet = RangeSetABC
+# Type aliases for different uses of RangeSet to improve clarity.
+LLMTokenSet = RangeSet
+StateIDSet = RangeSet
+TerminalIdSet = RangeSet
 
 
 # Add a dummy profiler for when not running under kernprof
@@ -68,7 +66,7 @@ class ParserTable:
 @dataclass
 class ArenaNode:
     children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = field(default_factory=list)
-    llm_bv_union: LLMTokenSet = field(default_factory=PyRangeSet.empty)
+    llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
     clean_end: bool = False
 
 @dataclass(frozen=True, eq=False)
@@ -158,21 +156,21 @@ class Model(GraphProvider):
             children = node.get("children") or []
             if not children:
                 node["children"] = []
-                node["llm_bv_union"] = PyRangeSet.empty()
+                node["llm_bv_union"] = RangeSet.empty()
                 continue
 
             new_children = []
-            llm_bv_union: LLMTokenSet = PyRangeSet.empty()
+            llm_bv_union: LLMTokenSet = RangeSet.empty()
             for edge_key, dest_map in children:
                 pop, llm_bv_json = edge_key
                 llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
-                # Convert to PyRangeSet for ffi-free operations in commit/get_mask
-                llm_bv: LLMTokenSet = PyRangeSet.from_ranges(llm_bv_bitset.to_ranges())
+                # Convert to RangeSet for ffi-free operations in commit/get_mask
+                llm_bv: LLMTokenSet = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
                 llm_bv_union = llm_bv_union.union(llm_bv)
                 new_dest_map = []
                 for dest_idx, state_bv_json in dest_map:
                     state_bv_bitset = bs_from_json(dumps(state_bv_json))
-                    state_bv: StateIDSet = PyRangeSet.from_ranges(state_bv_bitset.to_ranges())
+                    state_bv: StateIDSet = RangeSet.from_ranges(state_bv_bitset.to_ranges())
                     new_dest_map.append((int(dest_idx), state_bv))
                 new_children.append(((int(pop), llm_bv), new_dest_map))
             node["children"] = new_children
@@ -181,7 +179,7 @@ class Model(GraphProvider):
         arena: Dict[NodeID, ArenaNode] = {
             uid: ArenaNode(
                 children=node_data.get("children", []),
-                llm_bv_union=node_data.get("llm_bv_union", PyRangeSet.empty()),
+                llm_bv_union=node_data.get("llm_bv_union", RangeSet.empty()),
                 clean_end=node_data.get("value", {}).get("clean_end", False),
             )
             for uid, node_data in arena_dict.items()
@@ -246,29 +244,29 @@ class Model(GraphProvider):
             all_terminals.update(row.actions.keys())
         if ignore_terminal_id is not None:
             all_terminals.add(ignore_terminal_id)
-        all_terminals_bitset = PyRangeSet.from_indices(list(all_terminals))
+        all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
 
-        initial_acc = PyAcc(terminals_union={}, llm_mask=PyRangeSet.empty())
+        initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
         initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
         state = {tokenizer_initial_state: initial_gss}
 
         id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-        # Convert possible_matches_cache to PyRangeSet
+        # Convert possible_matches_cache to RangeSet
         pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
         pmc_rs: Dict[int, Dict[int, LLMTokenSet]] = {}
         for tsid, inner in pmc_ffi.items():
             mapped: Dict[int, LLMTokenSet] = {}
             for term_id, bit in inner.items():
-                mapped[int(term_id)] = PyRangeSet.from_ranges(bit.to_ranges())
+                mapped[int(term_id)] = RangeSet.from_ranges(bit.to_ranges())
             pmc_rs[int(tsid)] = mapped
         possible_matches_cache = pmc_rs
         internal_to_original_map_raw = constraint.internal_to_original_map()
         internal_to_original_map = {
             k: {v} for k, v in internal_to_original_map_raw.items()
         }
-        # Convert universe LLM tokens bitset to PyRangeSet
+        # Convert universe LLM tokens bitset to RangeSet
         all_internal = constraint.all_internal_llm_tokens_bitset()
-        all_internal_llm_tokens_bitset = PyRangeSet.from_ranges(all_internal.to_ranges())
+        all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
 
         model = Model(
             arena=arena,
@@ -303,7 +301,7 @@ class Model(GraphProvider):
         def predicate(acc: PyAcc) -> bool:
             disallowed_terminals_map = acc.terminals_union
             for state_id, matched_bv in terminals_map.items():
-                disallowed_for_state = disallowed_terminals_map.get(state_id, BitsetRangeSet.empty())
+                disallowed_for_state = disallowed_terminals_map.get(state_id, RangeSet.empty())
                 if not matched_bv.intersection(disallowed_for_state).is_empty():
                     return False
             return True
@@ -313,9 +311,9 @@ class Model(GraphProvider):
     def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
         def apply_map(acc: PyAcc) -> PyAcc:
             old_map = acc.terminals_union
-            new_bvs: Dict[int, TerminalIdSet] = collections.defaultdict(BitsetRangeSet.empty)
+            new_bvs: Dict[int, TerminalIdSet] = collections.defaultdict(RangeSet.empty)
             for old_sid, new_sid in state_map.items():
-                bv_source = old_map.get(old_sid, BitsetRangeSet.empty())
+                bv_source = old_map.get(old_sid, RangeSet.empty())
                 new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
 
             return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
@@ -325,8 +323,8 @@ class Model(GraphProvider):
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         def apply_disallow(acc: PyAcc) -> PyAcc:
             current_map = acc.terminals_union.copy()
-            curr_bv = current_map.get(state_id, BitsetRangeSet.empty())
-            to_add = BitsetRangeSet.from_indices([terminal_id])
+            curr_bv = current_map.get(state_id, RangeSet.empty())
+            to_add = RangeSet.from_indices([terminal_id])
             new_bv = curr_bv.union(to_add)
             current_map[state_id] = new_bv
             return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
@@ -367,7 +365,7 @@ class Model(GraphProvider):
             if end_state is not None:
                 state_map[tokenizer_sid] = end_state
             matched_terminals = [terminal_id for terminal_id, _ in matches]
-            terminals_map[tokenizer_sid] = BitsetRangeSet.from_indices(matched_terminals)
+            terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
 
         # Prune and map per-state GSS
         temp_states: Dict[int, GSS] = {}
@@ -482,7 +480,7 @@ class Model(GraphProvider):
         state_map: Dict[int, GSS] = self.state
 
         all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
-        final_mask: LLMTokenSet = BitsetRangeSet.empty()
+        final_mask: LLMTokenSet = RangeSet.empty()
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
         values: Dict[NodeID, GSS] = {}
@@ -500,7 +498,7 @@ class Model(GraphProvider):
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
         def initialize_acc(acc: PyAcc) -> PyAcc:
             # Compute allowed LLM tokens from disallowed terminals for this accumulator
-            disallowed_llm_mask: LLMTokenSet = BitsetRangeSet.empty()
+            disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
             disallowed_map = acc.terminals_union
 
             for tsid, disallowed_terminals in disallowed_map.items():
@@ -550,7 +548,7 @@ class Model(GraphProvider):
 
             # Zombie traversal avoidance
             a_node = arena.get(node)
-            node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else BitsetRangeSet.empty()
+            node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
             potential_new_tokens = node_llm_bv_union.difference(final_mask)
             if potential_new_tokens.is_empty():
                 continue
@@ -626,7 +624,7 @@ class Model(GraphProvider):
                 original_indices.extend(list(self.internal_to_original_map[i]))
 
 
-        return BitsetRangeSet.from_indices(original_indices)
+        return RangeSet.from_indices(original_indices)
 
     # ===========================
     # Optimization/conversion API
@@ -647,11 +645,11 @@ class Model(GraphProvider):
     def _merge_equivalent_llm_tokens(self) -> None:
         """
         Merge internal LLM tokens that are indistinguishable across the entire model:
-        two tokens are "equivalent" if they occur together in every PyRangeSet occurrence
+        two tokens are "equivalent" if they occur together in every RangeSet occurrence
         the model uses (arena edge llm_bv, node llm_bv_union, and possible_matches_cache).
 
         Implementation:
-        - Build a family of all PyRangeSet occurrences that reference internal tokens.
+        - Build a family of all RangeSet occurrences that reference internal tokens.
         - For each internal token, build a signature: the ordered list of set indices in
           which it appears.
         - Group tokens by identical signatures; each group is merged into its smallest-id
@@ -742,53 +740,10 @@ class Model(GraphProvider):
         ...
         print(" done.")
 
-    def _convert_to_bitset_range_set(self) -> None:
-        """
-        Converts all PyRangeSet instances (which are py_range_set.PyRangeSet during
-        optimization) to bitset_range_set.BitsetRangeSet for runtime efficiency.
-        """
-        print("Converting PyRangeSet implementations to BitsetRangeSet...", end='', flush=True)
-
-        def convert(rs: RangeSetABC) -> BitsetRangeSet:
-            if isinstance(rs, BitsetRangeSet):
-                return rs
-            return BitsetRangeSet.from_ranges(rs.to_ranges())
-
-        # 1. Convert arena
-        for node in self.arena.values():
-            new_children = []
-            for (pop, llm_bv), dests in node.children:
-                new_dests = []
-                for dest_idx, state_bv in dests:
-                    new_dests.append((dest_idx, convert(state_bv)))
-                new_children.append(((pop, convert(llm_bv)), new_dests))
-            node.children = new_children
-            node.llm_bv_union = convert(node.llm_bv_union)
-
-        # 2. Convert possible_matches_cache
-        if self.possible_matches_cache:
-            for tsid, inner in self.possible_matches_cache.items():
-                for term_id, llm_bv in inner.items():
-                    inner[term_id] = convert(llm_bv)
-
-        # 3. Convert top-level bitsets
-        self.all_internal_llm_tokens_bitset = convert(self.all_internal_llm_tokens_bitset)
-        self.all_terminals_bitset = convert(self.all_terminals_bitset)
-
-        # 4. Convert GSS accumulators in self.state
-        def convert_acc(acc: PyAcc) -> PyAcc:
-            new_terminals_union = {
-                state_id: convert(term_set)
-                for state_id, term_set in acc.terminals_union.items()
-            }
-            return PyAcc(terminals_union=new_terminals_union, llm_mask=convert(acc.llm_mask))
-        self.state = {tsid: gss.apply(convert_acc) for tsid, gss in self.state.items()}
-        print(" done.")
-
     def _reorder_llm_tokens_for_range_minimization(self) -> None:
         """
         Permute internal LLM token IDs to reduce the number of ranges present in
-        all PyRangeSet occurrences across the model (arena edges, unions, and possible_matches_cache).
+        all RangeSet occurrences across the model (arena edges, unions, and possible_matches_cache).
         External token IDs remain unchanged; we only adjust internal indices used in RangeSets.
 
         Heuristic:
@@ -1015,7 +970,7 @@ class Model(GraphProvider):
         based on the union of llm_bvs of its direct children edges.
         """
         for node in self.arena.values():
-            union_bv: LLMTokenSet = PyRangeSet.empty()
+            union_bv: LLMTokenSet = RangeSet.empty()
             for (_pop, llm_bv), _dests in node.children:
                 union_bv = union_bv.union(llm_bv)
             node.llm_bv_union = union_bv
@@ -1081,8 +1036,8 @@ class Model(GraphProvider):
                 return s
             new_indices = [old_to_new_map[i] for i in s.to_indices() if i in old_to_new_map]
             if not new_indices:
-                return PyRangeSet.empty()
-            return PyRangeSet.from_indices(sorted(new_indices))
+                return RangeSet.empty()
+            return RangeSet.from_indices(sorted(new_indices))
 
         # Remap possible_matches_cache
         if self.possible_matches_cache:
@@ -1107,7 +1062,7 @@ class Model(GraphProvider):
             groups: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = collections.defaultdict(set)
             for (pop, llm_bv), dests in children:
                 # Sort dests for a canonical signature. Each dest is (dest_id, state_bv).
-                # state_bv is a PyRangeSet, so we use its ranges for the signature.
+                # state_bv is a RangeSet, so we use its ranges for the signature.
                 dests_sig = tuple(sorted(
                     (dest_id, tuple(state_bv.to_ranges())) for dest_id, state_bv in dests
                 ))
@@ -1116,17 +1071,17 @@ class Model(GraphProvider):
 
             # Rebuild children with remapped tokens
             new_children = []
-            llm_union = PyRangeSet.empty()
+            llm_union = RangeSet.empty()
             for (pop, dests_sig), old_tokens in groups.items():
                 new_tokens = {old_to_new_map[t] for t in old_tokens if t in old_to_new_map}
                 if not new_tokens:
                     continue
 
-                new_llm_bv = PyRangeSet.from_indices(sorted(list(new_tokens)))
+                new_llm_bv = RangeSet.from_indices(sorted(list(new_tokens)))
                 llm_union = llm_union.union(new_llm_bv)
                 # Convert dests_sig back to list of (int, StateIDSet)
                 dests_list = [
-                    (dest_id, PyRangeSet.from_ranges(list(ranges)))
+                    (dest_id, RangeSet.from_ranges(list(ranges)))
                     for dest_id, ranges in dests_sig
                 ]
                 new_children.append(((pop, new_llm_bv), dests_list))
@@ -1178,8 +1133,8 @@ class Model(GraphProvider):
                 ii = int(i)
                 mapped.add(old_to_new_map.get(ii, ii))
             if not mapped:
-                return PyRangeSet.empty()
-            return PyRangeSet.from_indices(sorted(mapped))
+                return RangeSet.empty()
+            return RangeSet.from_indices(sorted(mapped))
 
         # Remap possible_matches_cache
         if self.possible_matches_cache:
@@ -1225,17 +1180,17 @@ class Model(GraphProvider):
 
             # Rebuild children and union
             new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-            llm_union: LLMTokenSet = PyRangeSet.empty()
+            llm_union: LLMTokenSet = RangeSet.empty()
 
             for (pop, dests_sig), tokens_set in groups.items():
                 if not tokens_set:
                     continue
-                llm_bv_new = PyRangeSet.from_indices(sorted(tokens_set))
+                llm_bv_new = RangeSet.from_indices(sorted(tokens_set))
                 llm_union = llm_union.union(llm_bv_new)
 
                 dests_list: List[Tuple[int, StateIDSet]] = []
                 for dest_id, ranges in dests_sig:
-                    dests_list.append((int(dest_id), PyRangeSet.from_ranges(list(ranges))))
+                    dests_list.append((int(dest_id), RangeSet.from_ranges(list(ranges))))
                 new_children.append(((int(pop), llm_bv_new), dests_list))
 
             # Deterministic sort
@@ -1287,8 +1242,8 @@ class Model(GraphProvider):
             if not universe_states:
                 print(" done (no LR states).", flush=True)
                 return
-            universe_rs: RangeSetABC = PyRangeSet.from_indices(sorted(universe_states))
-            term_by_node: Dict[NodeID, RangeSetABC] = self._compute_terminal_sets(universe_rs, universe_states)
+            universe_rs: RangeSet = RangeSet.from_indices(sorted(universe_states))
+            term_by_node: Dict[NodeID, RangeSet] = self._compute_terminal_sets(universe_rs, universe_states)
             self._apply_mask_expansion_alt6(term_by_node, universe_rs)
             removed = self._collapse_nodes_reduce_edges(term_by_node, universe_rs)
             # Refresh unions and max_depth metadata
@@ -1300,38 +1255,9 @@ class Model(GraphProvider):
             print(f" optimization skipped due to error: {e}", flush=True)
 
     def _compute_universe_lr_states(self) -> Set[int]:
-        """
-        Collect a conservative universe of LR states to use as the 'full' mask domain.
-        """
-        states: Set[int] = set()
-        # From parser table
-        for sid in self.parser_table.table.keys():
-            states.add(int(sid))
-        for _from_state, row in self.parser_table.table.items():
-            # shifts/splits
-            for action in row.actions.values():
-                if isinstance(action, int):  # Shift
-                    states.add(int(action))
-                elif isinstance(action, Split):
-                    if action.shift is not None:
-                        states.add(int(action.shift))
-            # gotos
-            for to_state in row.gotos.values():
-                states.add(int(to_state))
-        # From reverse_state_map
-        for k, preds in self.reverse_state_map.items():
-            states.add(int(k))
-            for p in preds:
-                states.add(int(p))
-        # From arena edge masks
-        for node in self.arena.values():
-            for (_pop, _llm_bv), dests in node.children:
-                for _dest_id, state_bv in dests:
-                    for i in state_bv.to_indices():
-                        states.add(int(i))
-        return states
+        return set(self.parser_table.table.keys())
 
-    def _rs_equals(self, a: RangeSetABC, b: RangeSetABC) -> bool:
+    def _rs_equals(self, a: RangeSet, b: RangeSet) -> bool:
         return a.difference(b).is_empty() and b.difference(a).is_empty()
 
     def _reverse_expand_n(self, base: Set[int], n: int) -> Set[int]:
@@ -1352,9 +1278,9 @@ class Model(GraphProvider):
 
     def _compute_terminal_sets(
         self,
-        universe_rs: RangeSetABC,
+        universe_rs: RangeSet,
         universe_set: Set[int],
-    ) -> Dict[NodeID, RangeSetABC]:
+    ) -> Dict[NodeID, RangeSet]:
         """
         Terminal-set fixpoint:
         - A state s is terminal at node v if there exists an outgoing edge e=(v --(pop, M)--> w)
@@ -1363,10 +1289,10 @@ class Model(GraphProvider):
         Implementation ignores LLM token masks as specified.
         """
         # Build node-level adjacency (ignoring LLM tokens)
-        node_out: Dict[NodeID, List[Tuple[int, NodeID, RangeSetABC]]] = {}
+        node_out: Dict[NodeID, List[Tuple[int, NodeID, RangeSet]]] = {}
         node_in: Dict[NodeID, Set[NodeID]] = collections.defaultdict(set)
         for nid, node in self.arena.items():
-            edges: List[Tuple[int, NodeID, RangeSetABC]] = []
+            edges: List[Tuple[int, NodeID, RangeSet]] = []
             for (pop, _llm_bv), dests in node.children:
                 for dest_id, state_bv in dests:
                     edges.append((int(pop), int(dest_id), state_bv))
@@ -1374,14 +1300,14 @@ class Model(GraphProvider):
             node_out[int(nid)] = edges
 
         # Initialize terminal sets
-        term: Dict[NodeID, RangeSetABC] = {}
+        term: Dict[NodeID, RangeSet] = {}
         q: collections.deque = collections.deque()
         for nid, node in self.arena.items():
             if node.clean_end:
                 term[int(nid)] = universe_rs
                 q.append(int(nid))
             else:
-                term[int(nid)] = PyRangeSet.empty()
+                term[int(nid)] = RangeSet.empty()
 
         # Worklist propagation
         while q:
@@ -1391,7 +1317,7 @@ class Model(GraphProvider):
             if not preds:
                 continue
             for u in preds:
-                add_rs: RangeSetABC = PyRangeSet.empty()
+                add_rs: RangeSet = RangeSet.empty()
                 for popn, dest_id, mask in node_out.get(u, []):
                     if dest_id != w:
                         continue
@@ -1401,7 +1327,7 @@ class Model(GraphProvider):
                     cand_set: Set[int] = set(int(i) for i in cand.to_indices())
                     pre_set = self._reverse_expand_n(cand_set, int(popn))
                     if pre_set:
-                        add_rs = add_rs.union(PyRangeSet.from_indices(sorted(pre_set)))
+                        add_rs = add_rs.union(RangeSet.from_indices(sorted(pre_set)))
                 if add_rs.is_empty():
                     continue
                 # Only add truly new bits
@@ -1413,23 +1339,23 @@ class Model(GraphProvider):
 
     def _apply_mask_expansion_alt6(
         self,
-        term_by_node: Dict[NodeID, RangeSetABC],
-        universe_rs: RangeSetABC,
+        term_by_node: Dict[NodeID, RangeSet],
+        universe_rs: RangeSet,
     ) -> None:
         """
         For each edge e=(A --(pop, M)--> B), expand M by adding all non-terminal states at B:
         M := M ∪ (Universe \ Term[B]).
         """
-        nonterm_cache: Dict[NodeID, RangeSetABC] = {}
+        nonterm_cache: Dict[NodeID, RangeSet] = {}
         for nid, node in self.arena.items():
             if not node.children:
                 continue
             new_children = []
             for (pop, llm_bv), dests in node.children:
-                new_dests: List[Tuple[int, RangeSetABC]] = []
+                new_dests: List[Tuple[int, RangeSet]] = []
                 for dest_id, state_bv in dests:
                     if dest_id not in nonterm_cache:
-                        nonterm_cache[dest_id] = universe_rs.difference(term_by_node.get(dest_id, PyRangeSet.empty()))
+                        nonterm_cache[dest_id] = universe_rs.difference(term_by_node.get(dest_id, RangeSet.empty()))
                     expanded_bv = state_bv.union(nonterm_cache[dest_id])
                     new_dests.append((int(dest_id), expanded_bv))
                 new_children.append(((int(pop), llm_bv), new_dests))
@@ -1454,8 +1380,8 @@ class Model(GraphProvider):
 
     def _collapse_nodes_reduce_edges(
         self,
-        term_by_node: Dict[NodeID, RangeSetABC],
-        universe_rs: RangeSetABC,
+        term_by_node: Dict[NodeID, RangeSet],
+        universe_rs: RangeSet,
     ) -> int:
         """
         Reduce edges by collapsing intermediate nodes B into direct edges A->C when:
@@ -1473,7 +1399,7 @@ class Model(GraphProvider):
         removed_nodes = 0
         roots = set(int(r) for r in self.roots_map.values())
         # Helper for deterministic sort
-        def _ranges_key(rs: RangeSetABC) -> Tuple[Tuple[int, int], ...]:
+        def _ranges_key(rs: RangeSet) -> Tuple[Tuple[int, int], ...]:
             try:
                 return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
             except Exception:
@@ -1516,15 +1442,15 @@ class Model(GraphProvider):
                     if not all_full:
                         continue
                 # Prepare non-terminal filler for C (Alt 6)
-                nonterm_c = universe_rs.difference(term_by_node.get(c_id, PyRangeSet.empty()))
+                nonterm_c = universe_rs.difference(term_by_node.get(c_id, RangeSet.empty()))
                 # Prepare aggregators per parent A
                 # aggregator_by_A: A_id -> ( (pop_new, llm_ranges_tuple) -> { dest_id: state_bv } )
-                aggregator_by_A: Dict[int, Dict[Tuple[int, Tuple[Tuple[int, int], ...]], Dict[int, RangeSetABC]]] = {}
+                aggregator_by_A: Dict[int, Dict[Tuple[int, Tuple[Tuple[int, int], ...]], Dict[int, RangeSet]]] = {}
                 for rec in parents_b:
                     a_id = int(rec["a_id"])
                     pop_a = int(rec["pop"])
-                    llm_a: RangeSetABC = rec["llm"]
-                    x_mask: RangeSetABC = rec["mask"]
+                    llm_a: RangeSet = rec["llm"]
+                    x_mask: RangeSet = rec["mask"]
                     # Compose LLM masks
                     llm_inter = llm_a.intersection(llm_bv_b)
                     if llm_inter.is_empty():
@@ -1558,7 +1484,7 @@ class Model(GraphProvider):
                     if not a_node:
                         continue
                     # Start with existing edges excluding those pointing to B
-                    merged: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], Dict[int, RangeSetABC]] = {}
+                    merged: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], Dict[int, RangeSet]] = {}
                     for (pop, llm_bv), dests in a_node.children:
                         k = (int(pop), tuple(_ranges_key(llm_bv)))
                         if k not in merged:
@@ -1581,9 +1507,9 @@ class Model(GraphProvider):
                             else:
                                 merged[key][int(dest_id)] = state_bv
                     # Rebuild children list
-                    new_children: List[Tuple[Tuple[int, RangeSetABC], List[Tuple[int, RangeSetABC]]]] = []
+                    new_children: List[Tuple[Tuple[int, RangeSet], List[Tuple[int, RangeSet]]]] = []
                     for (pop_new, llm_ranges), dest_map in merged.items():
-                        llm_rs = PyRangeSet.from_ranges(list(llm_ranges))
+                        llm_rs = RangeSet.from_ranges(list(llm_ranges))
                         dest_list = [(int(did), dbv) for did, dbv in dest_map.items()]
                         new_children.append(((int(pop_new), llm_rs), dest_list))
                     # Deterministic sort
