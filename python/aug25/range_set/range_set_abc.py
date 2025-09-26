@@ -87,6 +87,14 @@ class RangeSet(ABC, Generic[T]):
         """Return the set difference self \\ other."""
         raise NotImplementedError
 
+    @classmethod
+    def union_many(cls, sets: Iterable["RangeSet[T]"]) -> "RangeSet[T]":
+        """Return the union of many RangeSets."""
+        result: RangeSet[T] = cls.empty()
+        for s in sets:
+            result = result.union(s)
+        return result
+
     @abstractmethod
     def to_ranges(self) -> List[Tuple[T]]:
         """Returns the intervals as a list of lists for JSON serialization."""
