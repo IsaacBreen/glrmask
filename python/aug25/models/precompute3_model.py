@@ -2,13 +2,38 @@ import json
 import time
 import heapq
 import collections
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
+from dataclasses import dataclass, field
 
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
 
-from python.gss_tester.implementations.reference_impl import ReferenceGSS as GSS
+from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+
+
+@dataclass(frozen=True, eq=False)
+class PyAcc:
+    disallowed_terminals: ffi.HybridL2Bitset
+    allowed_llm_tokens: ffi.Bitset
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, PyAcc):
+            return NotImplemented
+        return self.allowed_llm_tokens == other.allowed_llm_tokens and self.disallowed_terminals.is_equal(other.disallowed_terminals)
+
+    def __hash__(self) -> int:
+        disallowed_ranges = tuple(
+            (start, end, bv.to_ranges_tuple())
+            for (start, end), bv in self.disallowed_terminals.range_values()
+        )
+        return hash((self.allowed_llm_tokens.to_ranges_tuple(), disallowed_ranges))
+
+    def merge(self, other: "PyAcc") -> "PyAcc":
+        return PyAcc(
+            disallowed_terminals=self.disallowed_terminals.union(other.disallowed_terminals),
+            allowed_llm_tokens=self.allowed_llm_tokens.union(other.allowed_llm_tokens),
+        )
 
 
 class Model(GraphProvider):
@@ -124,7 +149,7 @@ class Model(GraphProvider):
         final_mask = ffi.Bitset.zeros()
 
         # node_idx -> (GSSNode, Bitset)
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        values: Dict[int, Tuple[GSS, ffi.Bitset]] = {}
 
         stopped: set[int] = set()  # nodes that stopped (no gss parents)
         todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
@@ -143,16 +168,21 @@ class Model(GraphProvider):
             if root_idx is None:
                 continue
             root_idx = int(root_idx)
-            
+
+            acc = PyAcc(
+                disallowed_terminals=gss.disallowed_terminals(),
+                allowed_llm_tokens=gss.allowed_llm_tokens()
+            )
+            leveled_gss = GSS.from_stacks([(s, acc) for s, _ in gss.flatten()])
             # printf"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
 
             existing = values.get(root_idx)
             if existing is not None:
                 existing_gss, existing_mask = existing
-                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
+                merged_gss = existing_gss.merge(leveled_gss)
                 values[root_idx] = (merged_gss, existing_mask.union(new_mask))
             else:
-                values[root_idx] = (gss, new_mask)
+                values[root_idx] = (leveled_gss, new_mask)
 
             depth = max_depth[root_idx]
             bucket = todo.get(depth)
@@ -164,7 +194,7 @@ class Model(GraphProvider):
 
         print("--- After Seeding ---")
         for node_idx, (gss, mask) in values.items():
-            print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}, mask={mask.to_ranges()}")
+            print(f"Node {node_idx}: gss={gss}, mask={mask.to_ranges()}")
 
 
         # Main scheduler
@@ -221,9 +251,13 @@ class Model(GraphProvider):
                     # printf"    - END NODE found. Updating final_mask.")
                     # printf"      - final_mask before: {final_mask.to_ranges()}")
 
+                    reduced_acc = gss_node.reduce_acc()
+                    if not reduced_acc:
+                        continue
+
                     # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
                     forbidden_llm_tokens = ffi.Bitset.zeros()
-                    disallowed_terminals_l2 = gss_node.disallowed_terminals()
+                    disallowed_terminals_l2 = reduced_acc.disallowed_terminals
                     print(f"Disallowed Terminals L2 from GSS: {disallowed_terminals_l2}")
                     possible_matches = self.possible_matches_cache
 
@@ -241,7 +275,7 @@ class Model(GraphProvider):
                                 if disallowed_bv.contains(terminal_id):
                                     forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
-                    glr_active_tokens = gss_node.allowed_llm_tokens()
+                    glr_active_tokens = reduced_acc.allowed_llm_tokens
                     glr_active_tokens = llm_mask.intersection(glr_active_tokens)
                     print(f"Allowed LLM tokens from GSS heads (after llm_mask intersection): {glr_active_tokens.to_ranges()}")
                     final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
@@ -254,7 +288,7 @@ class Model(GraphProvider):
                     final_mask = final_mask.union(tokens_to_add)
                     # printf"      - final_mask after:  {final_mask.to_ranges()}")
 
-                if not gss_node.is_alive():
+                if gss_node.is_empty():
                     stopped.add(node_idx)
                     # printf"    - STOPPING node {node_idx} (GSS not alive)")
                     continue
@@ -267,38 +301,38 @@ class Model(GraphProvider):
                 for (pop, llm_bv), dests in children:
                     # printf"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                     # Collect all pops from GSS parents
-                    peeks = gss_node.popn_fast(pop)
-                    # printf"      - Found {len(peeks)} peeks from GSS set")
-                    if not peeks:
+                    popped_gss = gss_node.popn(pop)
+                    if popped_gss.is_empty():
                         continue
 
+                    peeked_sids = popped_gss.peek()
                     llm_empty = llm_bv.is_empty()
 
                     for dest_idx, state_bv in dests:
                         # printf"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
                         # Filter peeks by destination state bitset
-                        matched = []
+                        sids_to_keep = []
                         if not state_bv.is_empty():
                             contains = state_bv.contains
-                            for sid_val, parent_node in peeks:
-                                if contains(sid_val):
-                                    matched.append(parent_node)
+                            for sid in peeked_sids:
+                                if contains(sid):
+                                    sids_to_keep.append(sid)
                         # printf"        - Matched {len(matched)} parent GSS nodes")
-                        if not matched:
+                        if not sids_to_keep:
                             continue
 
-                        # Merge matched parent GSS nodes
-                        child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+                        child_gss_node = popped_gss.isolate_many(sids_to_keep)
+                        if child_gss_node.is_empty():
+                            continue
 
                         # Compute child mask (intersection with llm_bv when present)
                         child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
                         # printf"        - Child mask: {child_llm_mask.to_ranges()}")
-
                         d = int(dest_idx)
                         existing = values.get(d)
                         if existing is not None:
                             existing_gss, existing_mask = existing
-                            merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+                            merged_gss = existing_gss.merge(child_gss_node)
                             combined_mask = existing_mask.union(child_llm_mask)
                             values[d] = (merged_gss, combined_mask)
                             # printf"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
