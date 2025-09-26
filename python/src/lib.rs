@@ -801,7 +801,7 @@ impl PyGSSNode {
     }
 
     fn __str__(&self) -> String {
-        print_gss_forest(&[self.inner.as_ref()])
+        self.inner.print()
     }
 
     fn flatten(&self) -> Vec<(Vec<usize>, PyHybridL2Bitset)> {

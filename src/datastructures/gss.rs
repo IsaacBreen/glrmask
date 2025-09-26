@@ -2424,6 +2424,13 @@ impl GSSNode {
             GSSNode::Internal(i) => i.hash_key_cache,
         }
     }
+
+    pub fn print(&self) -> String {
+        let config = GSSPrintConfig::default();
+        let terminal_map = BiBTreeMap::new();
+        let (s, _) = print_gss_forest(&[Arc::new(self.clone())], &terminal_map, &config);
+        s
+    }
 }
 
 /// Formats an accumulator for concise display in the GSS printout.
