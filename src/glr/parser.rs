@@ -2299,6 +2299,7 @@ impl GLRParser {
                     &self.terminal_map,
                     original_internal_bimap,
                     llm_token_map,
+                    &GSSPrintConfig::default(),
                 );
                 let escaped_acc = acc_str
                     .replace('\\', "\\\\")
