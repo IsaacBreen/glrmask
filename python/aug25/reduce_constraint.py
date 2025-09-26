@@ -369,6 +369,7 @@ def ddmin_children(
                     # Accept deletion
                     values_dict = pruned_values
                     node = values_dict.get(nid)  # may be gone; refresh
+                    children = (node.get("children") or []) if node else []
                     improved = True
                     # No increment: keep same index i (new element at i after pop)
                     continue
