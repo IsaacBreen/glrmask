@@ -232,7 +232,7 @@ class Model(GraphProvider):
                                     forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
                     glr_active_tokens = gss_node.allowed_llm_tokens()
-                    # glr_active_tokens = llm_mask.intersection(glr_active_tokens)
+                    glr_active_tokens = llm_mask.intersection(glr_active_tokens)
                     final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
                     tokens_to_add = final_allowed_tokens
 
