@@ -107,6 +107,7 @@ class Model(GraphProvider):
         while depth_heap:
             neg_depth, node = hpop(depth_heap)
             gss_node: GSS = values.pop(node)
+            enqueued_nodes.remove(node)
 
             # End-node handling: just union the allowed LLM tokens
             if is_end(node):
