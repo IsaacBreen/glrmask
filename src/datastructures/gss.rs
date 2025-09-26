@@ -819,10 +819,6 @@ impl GSSNode {
     pub fn flatten(&self) -> Vec<(Vec<ParseStateEdgeContent>, Acc)> {
         let mut memo: HashMap<*const GSSNode, Vec<(Vec<ParseStateEdgeContent>, Acc)>> = HashMap::new();
         let mut paths = self._flatten_recursive(&mut memo);
-        // The paths are reversed (from leaf to root), so we need to reverse them back.
-        for (path, _) in &mut paths {
-            path.reverse();
-        }
         paths
     }
 
