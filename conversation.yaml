@@ -1116,8 +1116,10 @@ local_system:
                       if time.time() >= time_budget_deadline:
                           break
 
+                      MAX_ATTEMPTS_PER_EDGE = 10
+                      attempts_left = MAX_ATTEMPTS_PER_EDGE
                       # Repeatedly try to reduce tokens for this edge
-                      while time.time() < time_budget_deadline:
+                      while time.time() < time_budget_deadline and attempts_left > 0:
                           # Get current llm_bv_json from the potentially modified values_dict
                           current_node = values_dict.get(nid)
                           if not current_node:
@@ -1172,10 +1174,11 @@ local_system:
                               values_dict = trial_values
                               improved = True
                               tokens_removed_in_pass += len(tokens_to_remove)
+                              attempts_left = MAX_ATTEMPTS_PER_EDGE  # Reset on success
                               # Continue the while loop to try and reduce this edge further
                           else:
-                              # Failed to reduce with this chunk, break and move to next edge
-                              break
+                              # Failed to reduce with this chunk, try another random chunk
+                              attempts_left -= 1
 
               print()  # Newline for the \r progress
               if tokens_removed_in_pass > 0:
@@ -1927,6 +1930,19 @@ local_system:
           return adj
 
 
+      def collect_reverse_adjacency(values_dict: Dict[int, Dict[str, Any]]) -> Dict[int, Set[int]]:
+          """
+          Build reverse adjacency: dest_node_id -> set(source_node_ids).
+          """
+          rev_adj: Dict[int, Set[int]] = {nid: set() for nid in values_dict.keys()}
+          for nid, node in values_dict.items():
+              for edge in node.get("children") or []:
+                  _edge_key, dests = edge
+                  for dest_id, _state_bv_json in dests:
+                      rev_adj.setdefault(int(dest_id), set()).add(int(nid))
+          return rev_adj
+
+
       def compute_roots(precomputed3: List[Tuple[int, int]]) -> List[int]:
           """
           Extract all root node ids from precomputed3 mapping (tokenizer_state_id -> root_node_id).
@@ -1957,6 +1973,33 @@ local_system:
                   if v not in seen and v in values_dict:
                       seen.add(v)
                       q.append((v, d + 1))
+          return seen
+
+
+      def bfs_reachable_from_ends(values_dict: Dict[int, Dict[str, Any]]) -> Set[int]:
+          """
+          BFS backwards from all clean_end nodes.
+          Returns the set of node ids that can reach an end node.
+          """
+          end_nodes = {int(nid) for nid, node in values_dict.items() if node.get("clean_end")}
+          if not end_nodes:
+              return set()
+          
+          rev_adj = collect_reverse_adjacency(values_dict)
+          
+          seen: Set[int] = set()
+          q: List[int] = []
+          for nid in end_nodes:
+              if nid in values_dict:
+                  seen.add(nid)
+                  q.append(nid)
+                  
+          while q:
+              u = q.pop(0)
+              for v_parent in rev_adj.get(u, set()):
+                  if v_parent not in seen and v_parent in values_dict:
+                      seen.add(v_parent)
+                      q.append(v_parent)
           return seen
 
 
@@ -2546,6 +2589,25 @@ local_system:
           # Initial sizes
           n0, c0, d0 = count_nodes_children_dests(values_dict)
           print(f"Initial trie size: {n0} nodes, {c0} children, {d0} dests")
+
+          print("\n--- Statically pruning unreachable/dead-end nodes ---")
+          roots = compute_roots(original.get("precomputed3") or [])
+          reachable_fwd = bfs_reachable(values_dict, roots, None)
+          print(f"  - Found {len(reachable_fwd)} nodes reachable from roots.")
+          
+          reachable_bwd = bfs_reachable_from_ends(values_dict)
+          print(f"  - Found {len(reachable_bwd)} nodes that can reach a clean_end.")
+          
+          live_nodes = reachable_fwd.intersection(reachable_bwd)
+          print(f"  - {len(live_nodes)} nodes are live (in intersection).")
+          
+          if len(live_nodes) < len(values_dict):
+              values_dict = prune_values_by_reachability(values_dict, live_nodes)
+              n_new, c_new, d_new = count_nodes_children_dests(values_dict)
+              print(f"  - Pruned graph. New size: {n_new} nodes, {c_new} children, {d_new} dests.")
+          else:
+              print("  - No dead nodes found to prune.")
+          print("--- Static pruning finished ---\n")
 
           time_budget_deadline = time.time() + int(args.time_budget_seconds)
 
@@ -3784,8 +3846,10 @@ messages:
                       if time.time() >= time_budget_deadline:
                           break
 
+                      MAX_ATTEMPTS_PER_EDGE = 10
+                      attempts_left = MAX_ATTEMPTS_PER_EDGE
                       # Repeatedly try to reduce tokens for this edge
-                      while time.time() < time_budget_deadline:
+                      while time.time() < time_budget_deadline and attempts_left > 0:
                           # Get current llm_bv_json from the potentially modified values_dict
                           current_node = values_dict.get(nid)
                           if not current_node:
@@ -3840,10 +3904,11 @@ messages:
                               values_dict = trial_values
                               improved = True
                               tokens_removed_in_pass += len(tokens_to_remove)
+                              attempts_left = MAX_ATTEMPTS_PER_EDGE  # Reset on success
                               # Continue the while loop to try and reduce this edge further
                           else:
-                              # Failed to reduce with this chunk, break and move to next edge
-                              break
+                              # Failed to reduce with this chunk, try another random chunk
+                              attempts_left -= 1
 
               print()  # Newline for the \r progress
               if tokens_removed_in_pass > 0:
@@ -3984,389 +4049,7 @@ messages:
     metadata:
       filename: python/aug25/reduce_constraint.py
   - user: |-
-      SKIP_CPP_BUILD=1 CONSTRAINT_FILE="/Users/isaacbreen/Projects2/grammars2024/reduced_js_grammar_constraint4.json.gz" CODE_FILE=./src/example_code5.js bash python/run_benchmarks.sh python/aug25/models/precompute3_model.py python/aug25/models/precompute3_model_pure_python_simple.py
-      Benchmark results will be saved in: benchmark_results/2025-09-26_15-38-07
-      ---
-      Baseline Model: python/aug25/models/precompute3_model.py
-      Other Models: python/aug25/models/precompute3_model_pure_python_simple.py
-      Constraint File: /Users/isaacbreen/Projects2/grammars2024/reduced_js_grammar_constraint4.json.gz
-      Code: ./src/example_code5.js
-      ---
-      Skipping C++ extension build (SKIP_CPP_BUILD=1).
-      ---
-      Starting benchmark runs...
-
-      >>> Running benchmark for: precompute3_model.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code5.js --constraint-file /Users/isaacbreen/Projects2/grammars2024/reduced_js_grammar_constraint4.json.gz --model python/aug25/models/precompute3_model.py --output benchmark_results/2025-09-26_15-38-07
-      --- Setting up benchmark environment ---
-      Loading pre-compiled grammar constraint from: /Users/isaacbreen/Projects2/grammars2024/reduced_js_grammar_constraint4.json.gz
-      Loading model from: python/aug25/models/precompute3_model.py
-      Normalizing precompute3 BVs: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 19/19 [00:00<00:00, 35121.98it/s]
-      Dumping Precomputed Trie 3 Structure (showing original LLM Token IDs):
-      ===================================
-
-      --- Tokenizer State ID: 0 ---
-      Root Node Trie2Index(0) (MaxDepth: 0)
-
-      --- Tokenizer State ID: 1 ---
-      Root Node Trie2Index(1) (MaxDepth: 0)
-
-      --- Tokenizer State ID: 2 ---
-      Root Node Trie2Index(2) (MaxDepth: 0)
-
-      --- Tokenizer State ID: 3 ---
-      Root Node Trie2Index(3) (MaxDepth: 0)
-
-      --- Tokenizer State ID: 4 ---
-      Root Node Trie2Index(3) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 5 ---
-      Root Node Trie2Index(3) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 6 ---
-      Root Node Trie2Index(3) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 7 ---
-      Root Node Trie2Index(3) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 8 ---
-      Root Node Trie2Index(3) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 9 ---
-      Root Node Trie2Index(9) (MaxDepth: 0)
-
-      --- Tokenizer State ID: 10 ---
-      Root Node Trie2Index(10) (MaxDepth: 0)
-
-      --- Tokenizer State ID: 11 ---
-      Root Node Trie2Index(11) (MaxDepth: 0)
-      └── Edge (pop: 0, tokens: [174, 271, 276, 290, 296, ...] (e.g., [")", "04", "09", "21", "27"], ...)): states [0..=62] -> Node Trie2Index(1480) (MaxDepth: 1)
-         ├── Edge (pop: 0, tokens: [12..=13, 29, 101, 118, 179, ...] (e.g., [" *", " +", " ;", "!)", "\";"], ...)): states [0, 10, 14, 16, 24, ...] -> Node Trie2Index(2281) (MaxDepth: 2)
-         │  └── Edge (pop: 0, tokens: [391] (e.g., [";;"])): states [0, 26, 41, 48..=49, 61] -> Node Trie2Index(45) (MaxDepth: 17) [END]
-         └── Edge (pop: 0, tokens: [86, 1258, 1517, 1534, 1562, ...] (e.g., [" t", "e", "r", "ru", "t"], ...)): states [0..=62] -> Node Trie2Index(5750) (MaxDepth: 3)
-            └── Edge (pop: 0, tokens: [1258] (e.g., ["e"])): states [0, 10, 14, 16, 24, ...] -> Node Trie2Index(45) (MaxDepth: 17) [END]
-
-      --- Tokenizer State ID: 12 ---
-      Root Node Trie2Index(12) (MaxDepth: 0)
-
-      --- Tokenizer State ID: 13 ---
-      Root Node Trie2Index(13) (MaxDepth: 0)
-
-      --- Tokenizer State ID: 14 ---
-      Root Node Trie2Index(11) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 15 ---
-      Root Node Trie2Index(15) (MaxDepth: 0)
-
-      --- Tokenizer State ID: 16 ---
-      Root Node Trie2Index(13) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 17 ---
-      Root Node Trie2Index(15) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 18 ---
-      Root Node Trie2Index(15) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 19 ---
-      Root Node Trie2Index(19) (MaxDepth: 0)
-
-      --- Tokenizer State ID: 20 ---
-      Root Node Trie2Index(15) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 21 ---
-      Root Node Trie2Index(11) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 22 ---
-      Root Node Trie2Index(22) (MaxDepth: 0)
-
-      --- Tokenizer State ID: 23 ---
-      Root Node Trie2Index(13) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 24 ---
-      Root Node Trie2Index(13) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 25 ---
-      Root Node Trie2Index(10) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 26 ---
-      Root Node Trie2Index(10) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 27 ---
-      Root Node Trie2Index(10) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 28 ---
-      Root Node Trie2Index(10) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 29 ---
-      Root Node Trie2Index(10) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 30 ---
-      Root Node Trie2Index(2) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 31 ---
-      Root Node Trie2Index(31) (MaxDepth: 0)
-
-      --- Tokenizer State ID: 32 ---
-      Root Node Trie2Index(32) (MaxDepth: 0)
-
-      --- Tokenizer State ID: 33 ---
-      Root Node Trie2Index(9) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 34 ---
-      Root Node Trie2Index(9) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 35 ---
-      Root Node Trie2Index(9) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 36 ---
-      Root Node Trie2Index(36) (MaxDepth: 0)
-
-      --- Tokenizer State ID: 37 ---
-      Root Node Trie2Index(9) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 38 ---
-      Root Node Trie2Index(9) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 39 ---
-      Root Node Trie2Index(9) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 40 ---
-      Root Node Trie2Index(9) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 41 ---
-      Root Node Trie2Index(9) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 42 ---
-      Root Node Trie2Index(9) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 43 ---
-      Root Node Trie2Index(9) (MaxDepth: 0)
-        (Root already visited)
-
-      --- Tokenizer State ID: 44 ---
-      Root Node Trie2Index(9) (MaxDepth: 0)
-        (Root already visited)
-
-      ===================================
-      Dump Complete.
-      None
-      Model loaded in 0.0601 seconds.
-      Loading and tokenizing code from: src/example_code5.js
-      Tokenized into 2 tokens.
-
-      --- Running benchmark (2 steps) ---
-      Benchmarking steps:   0%|                                                                                                                                                         | 0/2 [00:00<?, ?it/s, get_mask]states in get_mask:
-      state 0: ReferenceGSS:
-        - Stack: [41], Acc: HybridL2Bitset(HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) })
-      Benchmarking steps:   0%|                                                                                                                                                         | 0/2 [00:00<?, ?it/s, get_mask]states in get_mask:
-      state 0: ReferenceGSS:
-        - Stack: [41, 32], Acc: HybridL2Bitset(HybridL2Bitset { inner: (0..=10, HybridBitset { inner: 0..=18446744073709551615 }), (11..=11, HybridBitset { inner: 0..=0, 2..=18446744073709551615 }), (12..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) })
-      state 11: ReferenceGSS:
-        - Stack: [41], Acc: HybridL2Bitset(HybridL2Bitset { inner: (0..=18446744073709551615, HybridBitset { inner: 0..=18446744073709551615 }) })
-      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 2881.69it/s, commit]
-      --- Benchmark finished ---
-
-      Benchmark results saved to: benchmark_results/2025-09-26_15-38-07/precompute3_model_results.json
-      >>> Finished benchmark for: precompute3_model.py
-
-      >>> Running benchmark for: precompute3_model_pure_python_simple.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code5.js --constraint-file /Users/isaacbreen/Projects2/grammars2024/reduced_js_grammar_constraint4.json.gz --model python/aug25/models/precompute3_model_pure_python_simple.py --output benchmark_results/2025-09-26_15-38-07
-      --- Setting up benchmark environment ---
-      Loading pre-compiled grammar constraint from: /Users/isaacbreen/Projects2/grammars2024/reduced_js_grammar_constraint4.json.gz
-      Loading model from: python/aug25/models/precompute3_model_pure_python_simple.py
-      --- Precomputed Graph ---
-      Roots map: {0: 0, 1: 1, 2: 2, 3: 3, 4: 3, 5: 3, 6: 3, 7: 3, 8: 3, 9: 9, 10: 10, 11: 11, 12: 12, 13: 13, 14: 11, 15: 15, 16: 13, 17: 15, 18: 15, 19: 19, 20: 15, 21: 11, 22: 22, 23: 13, 24: 13, 25: 10, 26: 10, 27: 10, 28: 10, 29: 10, 30: 2, 31: 31, 32: 32, 33: 9, 34: 9, 35: 9, 36: 36, 37: 9, 38: 9, 39: 9, 40: 9, 41: 9, 42: 9, 43: 9, 44: 9}
-
-      Arena nodes:
-
-      - Node 0:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 1:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 2:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 3:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 9:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 10:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 11:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(((174, 174), (271, 271), (276, 276), (290, 290), (296...
-        - children:
-          - Edge (pop=0, llm_bv=FFIRangeSet.from_ranges(((174, 174), (271, 271), (276, 27...):
-            -> Dest Node 1480 with states FFIRangeSet.from_ranges(((0, 62),))
-
-      - Node 12:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 13:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 15:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 19:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 22:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 31:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 32:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 36:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 45:
-        - clean_end: True
-        - llm_bv_union: FFIRangeSet.from_ranges(())
-        - children: []
-
-      - Node 1480:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(((12, 13), (29, 29), (86, 86), (101, 101), (118, 118)...
-        - children:
-          - Edge (pop=0, llm_bv=FFIRangeSet.from_ranges(((12, 13), (29, 29), (101, 101), ...):
-            -> Dest Node 2281 with states FFIRangeSet.from_ranges(((0, 0), (10, 10), (14, 14), (16,...
-          - Edge (pop=0, llm_bv=FFIRangeSet.from_ranges(((86, 86), (1258, 1258), (1517, 1...):
-            -> Dest Node 5750 with states FFIRangeSet.from_ranges(((0, 62),))
-
-      - Node 2281:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(((391, 391),))
-        - children:
-          - Edge (pop=0, llm_bv=FFIRangeSet.from_ranges(((391, 391),))):
-            -> Dest Node 45 with states FFIRangeSet.from_ranges(((0, 0), (26, 26), (41, 41), (48,...
-
-      - Node 5750:
-        - clean_end: False
-        - llm_bv_union: FFIRangeSet.from_ranges(((1258, 1258),))
-        - children:
-          - Edge (pop=0, llm_bv=FFIRangeSet.from_ranges(((1258, 1258),))):
-            -> Dest Node 45 with states FFIRangeSet.from_ranges(((0, 0), (10, 10), (14, 14), (16,...
-      --- End Precomputed Graph ---
-      Model loaded in 0.0135 seconds.
-      Loading and tokenizing code from: src/example_code5.js
-      Tokenized into 2 tokens.
-
-      --- Running benchmark (2 steps) ---
-      Benchmarking steps:   0%|                                                                                                                                                         | 0/2 [00:00<?, ?it/s, get_mask]states in get_mask:
-      state 0: ReferenceGSS:
-        - Stack: [41], Acc: PyAcc(terminals_union={}, llm_mask=FFIRangeSet.from_ranges(()))
-      Benchmarking steps:   0%|                                                                                                                                                         | 0/2 [00:00<?, ?it/s, get_mask]states in get_mask:
-      state 0: ReferenceGSS:
-        - Stack: [41, 32], Acc: PyAcc(terminals_union={11: FFIRangeSet.from_ranges(((1, 1),))}, llm_mask=FFIRangeSet.from_ranges(()))
-      state 11: ReferenceGSS:
-        - Stack: [41], Acc: PyAcc(terminals_union={}, llm_mask=FFIRangeSet.from_ranges(()))
-      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 1545.43it/s, commit]
-      --- Benchmark finished ---
-
-      Benchmark results saved to: benchmark_results/2025-09-26_15-38-07/precompute3_model_pure_python_simple_results.json
-      >>> Finished benchmark for: precompute3_model_pure_python_simple.py
-
-      All benchmark runs completed.
-      ---
-      Analyzing results and generating plots...
-      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-26_15-38-07/precompute3_model_pure_python_simple_results.json benchmark_results/2025-09-26_15-38-07/precompute3_model_results.json --baseline precompute3_model --output-dir benchmark_results/2025-09-26_15-38-07/analysis
-      Selected baseline: precompute3_model
-      Mask mismatch at token index 1 for model precompute3_model_pure_python_simple
-      Baseline: ((294, 294), (1161, 1161))
-      Current:  ((1161, 1161),)
-      --- Benchmark Summary ---
-                                           equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
-      model                                                                                                                                             
-      precompute3_model                             ✅                    0      2     0.1911    0.0049    0.1876    0.1911    0.1938    0.1945    0.1945
-      precompute3_model_pure_python_simple          ❌                    1      2     0.3536    0.0445    0.3221    0.3536    0.3787    0.3844    0.3850
-
-      Baseline: precompute3_model
-      ✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch
-
-      Saving plots to benchmark_results/2025-09-26_15-38-07/analysis...
-      Saved linear scale plot to benchmark_results/2025-09-26_15-38-07/analysis/timings_per_token_linear.png
-      Saved log scale plot to benchmark_results/2025-09-26_15-38-07/analysis/timings_per_token_log.png
-      Saved box plot to benchmark_results/2025-09-26_15-38-07/analysis/timings_distribution_boxplot.png
-      Saved commit linear scale plot to benchmark_results/2025-09-26_15-38-07/analysis/commit_timings_per_token_linear.png
-      Saved commit log scale plot to benchmark_results/2025-09-26_15-38-07/analysis/commit_timings_per_token_log.png
-      Saved combined linear scale plot to benchmark_results/2025-09-26_15-38-07/analysis/combined_timings_per_token_linear.png
-      Saved combined log scale plot to benchmark_results/2025-09-26_15-38-07/analysis/combined_timings_per_token_log.png
-      Saved stacked area plot to benchmark_results/2025-09-26_15-38-07/analysis/timings_stacked_area.png
-      Saved total time linear scale plot to benchmark_results/2025-09-26_15-38-07/analysis/total_timings_per_token_linear.png
-      Saved total time log scale plot to benchmark_results/2025-09-26_15-38-07/analysis/total_timings_per_token_log.png
-
-      ---
-      Benchmark analysis complete.
-      Baseline: precompute3_model
-      Summary printed above. Plots are saved in: benchmark_results/2025-09-26_15-38-07/analysis
-      Full JSON results are in: benchmark_results/2025-09-26_15-38-07
-    metadata:
-  - user: |-
+      ```bash
       python -m python.aug25.reduce_constraint \
              --constraint-in "./reduced_js_grammar_constraint2.json.gz" \
              --code ./src/example_code5.js \
@@ -4408,9 +4091,36 @@ messages:
       --- Phase 4 finished. Size: 19 nodes, 5 children, 5 dests. Took 131.8s ---
       Verifying final minimized constraint still mismatches...
       Done. Minimized constraint written to: /Users/isaacbreen/Projects2/grammars2024/reduced_js_grammar_constraint4.json.gz
-    metadata:
-  - user: It seems the LLM token masks on edges are still pretty complex, despite
-      a big reduction in the size of the mismatching masks... but...
+      ```
+
+      ```bash
+      SKIP_CPP_BUILD=1 CONSTRAINT_FILE="/Users/isaacbreen/Projects2/grammars2024/reduced_js_grammar_constraint4.json.gz" CODE_FILE=./src/example_code5.js bash python/run_benchmarks.sh python/aug25/models/precompute3_model.py python/aug25/models/precompute3_model_pure_python_simple.py
+      ...
+      - Node 1480:
+        - clean_end: False
+        - llm_bv_union: FFIRangeSet.from_ranges(((12, 13), (29, 29), (86, 86), (101, 101), (118, 118)...
+        - children:
+          - Edge (pop=0, llm_bv=FFIRangeSet.from_ranges(((12, 13), (29, 29), (101, 101), ...):
+            -> Dest Node 2281 with states FFIRangeSet.from_ranges(((0, 0), (10, 10), (14, 14), (16,...
+          - Edge (pop=0, llm_bv=FFIRangeSet.from_ranges(((86, 86), (1258, 1258), (1517, 1...):
+            -> Dest Node 5750 with states FFIRangeSet.from_ranges(((0, 62),))
+
+      - Node 2281:
+        - clean_end: False
+        - llm_bv_union: FFIRangeSet.from_ranges(((391, 391),))
+        - children:
+          - Edge (pop=0, llm_bv=FFIRangeSet.from_ranges(((391, 391),))):
+            -> Dest Node 45 with states FFIRangeSet.from_ranges(((0, 0), (26, 26), (41, 41), (48,...
+      ...
+      Mask mismatch at token index 1 for model precompute3_model_pure_python_simple
+      Baseline: ((294, 294), (1161, 1161))
+      Current:  ((1161, 1161),)
+      ...
+      ```
+
+      It seems the LLM token masks on edges are still pretty complex, despite a big reduction in the size of the mismatching masks.
+      I think what we could do is do a once-through on the graph and prune redundant LLM tokens. That is, LLM tokens on an edge that can never reach an end node, because I guess they get filtered out at some point or something.
+      Also, LLM tokens on edges that can never *be reached* from a root node.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4429,102 +4139,177 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Based on your observation that the LLM token masks remain complex after reduction, I've identified an opportunity to make the reduction process in `python/aug25/reduce_constraint.py` more aggressive and effective.
+      Of course. Dealing with large, complex graph structures can be challenging. Adding a static pruning phase to your reduction script is an excellent idea to simplify the graph by removing nodes that can't be part of a valid path from start to finish. This should make the subsequent, more expensive, reduction steps faster and more effective.
 
-      The current implementation for reducing LLM tokens (`ddmin_llm_tokens`) tries to remove a random half of the tokens on an edge. If this single attempt fails, it gives up on that edge for the rest of the pass. This can be too conservative, especially if the minimal set of tokens required to reproduce the bug is more than 50% of the total.
-
-      I'll adjust the logic to make multiple attempts with different random chunks before moving on. This makes the reduction more robust without a complete rewrite of the algorithm.
-
-      Here are the step-by-step instructions to apply the change:
+      Here are the step-by-step instructions to modify `python/aug25/reduce_constraint.py` and the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open `python/aug25/reduce_constraint.py`** for editing.
+      1.  **Open `python/aug25/reduce_constraint.py`**.
 
-      2.  **Locate the `ddmin_llm_tokens` function.** Inside this function, find the loop that iterates over the children of a node (`for ci in range(len(children)):`). We will modify the `while` loop immediately inside it.
+      2.  **Add a helper function for reverse adjacency**: After the `collect_adjacency` function (around line 77), insert the new `collect_reverse_adjacency` function. This will be used to traverse the graph backward from end nodes.
 
-      3.  **Add an attempt counter:** Before the `while` loop that starts around line 513, insert two new lines to define and initialize an attempt counter:
           ```python
-                      MAX_ATTEMPTS_PER_EDGE = 10
-                      attempts_left = MAX_ATTEMPTS_PER_EDGE
+          def collect_reverse_adjacency(values_dict: Dict[int, Dict[str, Any]]) -> Dict[int, Set[int]]:
+              """
+              Build reverse adjacency: dest_node_id -> set(source_node_ids).
+              """
+              rev_adj: Dict[int, Set[int]] = {nid: set() for nid in values_dict.keys()}
+              for nid, node in values_dict.items():
+                  for edge in node.get("children") or []:
+                      _edge_key, dests = edge
+                      for dest_id, _state_bv_json in dests:
+                          rev_adj.setdefault(int(dest_id), set()).add(int(nid))
+              return rev_adj
           ```
 
-      4.  **Update the `while` loop condition:** Modify the `while` loop to terminate after several failed attempts.
-          Change this line:
-          ```python
-                      while time.time() < time_budget_deadline:
-          ```
-          to this:
-          ```python
-                      while time.time() < time_budget_deadline and attempts_left > 0:
-          ```
+      3.  **Add a helper function for backward reachability**: After the `bfs_reachable` function (around line 102), insert the new `bfs_reachable_from_ends` function. This will find all nodes that can reach a `clean_end` node.
 
-      5.  **Modify the loop's success and failure cases:**
-          *   Inside the `if ok:` block (after a successful reduction), add a line to reset the attempt counter.
-          *   In the `else:` block, replace the `break` statement with code to decrement the counter.
-
-          Change this block of code:
           ```python
-                          if ok:
-                              # Accept deletion
-                              values_dict = trial_values
-                              improved = True
-                              tokens_removed_in_pass += len(tokens_to_remove)
-                              # Continue the while loop to try and reduce this edge further
-                          else:
-                              # Failed to reduce with this chunk, break and move to next edge
-                              break
-          ```
-          to this:
-          ```python
-                          if ok:
-                              # Accept deletion
-                              values_dict = trial_values
-                              improved = True
-                              tokens_removed_in_pass += len(tokens_to_remove)
-                              attempts_left = MAX_ATTEMPTS_PER_EDGE  # Reset on success
-                              # Continue the while loop to try and reduce this edge further
-                          else:
-                              # Failed to reduce with this chunk, try another random chunk
-                              attempts_left -= 1
+          def bfs_reachable_from_ends(values_dict: Dict[int, Dict[str, Any]]) -> Set[int]:
+              """
+              BFS backwards from all clean_end nodes.
+              Returns the set of node ids that can reach an end node.
+              """
+              end_nodes = {int(nid) for nid, node in values_dict.items() if node.get("clean_end")}
+              if not end_nodes:
+                  return set()
+              
+              rev_adj = collect_reverse_adjacency(values_dict)
+              
+              seen: Set[int] = set()
+              q: List[int] = []
+              for nid in end_nodes:
+                  if nid in values_dict:
+                      seen.add(nid)
+                      q.append(nid)
+                      
+              while q:
+                  u = q.pop(0)
+                  for v_parent in rev_adj.get(u, set()):
+                      if v_parent not in seen and v_parent in values_dict:
+                          seen.add(v_parent)
+                          q.append(v_parent)
+              return seen
           ```
 
-      These changes will make the token reduction phase more thorough, leading to simpler final constraint files.
+      4.  **Integrate the static pruning phase into `main`**: In the `main` function, just after printing the initial trie size (after line 636), insert the new static pruning logic. This will compute nodes reachable from roots and nodes that can reach an end, find their intersection, and prune the graph to only these "live" nodes before the main reduction loop begins.
 
-      ### Git Diffs
+          ```python
+          # Initial sizes
+          n0, c0, d0 = count_nodes_children_dests(values_dict)
+          print(f"Initial trie size: {n0} nodes, {c0} children, {d0} dests")
 
-      Here is the git diff for the change.
+          print("\n--- Statically pruning unreachable/dead-end nodes ---")
+          roots = compute_roots(original.get("precomputed3") or [])
+          reachable_fwd = bfs_reachable(values_dict, roots, None)
+          print(f"  - Found {len(reachable_fwd)} nodes reachable from roots.")
+          
+          reachable_bwd = bfs_reachable_from_ends(values_dict)
+          print(f"  - Found {len(reachable_bwd)} nodes that can reach a clean_end.")
+          
+          live_nodes = reachable_fwd.intersection(reachable_bwd)
+          print(f"  - {len(live_nodes)} nodes are live (in intersection).")
+          
+          if len(live_nodes) < len(values_dict):
+              values_dict = prune_values_by_reachability(values_dict, live_nodes)
+              n_new, c_new, d_new = count_nodes_children_dests(values_dict)
+              print(f"  - Pruned graph. New size: {n_new} nodes, {c_new} children, {d_new} dests.")
+          else:
+              print("  - No dead nodes found to prune.")
+          print("--- Static pruning finished ---\n")
+
+          time_budget_deadline = time.time() + int(args.time_budget_seconds)
+          ```
+
+      ### Git Diff
+
+      Here is the git diff for the changes described above.
 
       ```diff
       diff --git a/python/aug25/reduce_constraint.py b/python/aug25/reduce_constraint.py
       --- a/python/aug25/reduce_constraint.py
       +++ b/python/aug25/reduce_constraint.py
-      @@ -507,9 +507,11 @@
-                       if time.time() >= time_budget_deadline:
-                           break
+      @@ -74,6 +74,19 @@
+           return adj
        
-      +                MAX_ATTEMPTS_PER_EDGE = 10
-      +                attempts_left = MAX_ATTEMPTS_PER_EDGE
-                       # Repeatedly try to reduce tokens for this edge
-      -                while time.time() < time_budget_deadline:
-      +                while time.time() < time_budget_deadline and attempts_left > 0:
-                           # Get current llm_bv_json from the potentially modified values_dict
-                           current_node = values_dict.get(nid)
-                           if not current_node:
-      @@ -554,11 +556,11 @@
-                               values_dict = trial_values
-                               improved = True
-                               tokens_removed_in_pass += len(tokens_to_remove)
-      +                        attempts_left = MAX_ATTEMPTS_PER_EDGE  # Reset on success
-                               # Continue the while loop to try and reduce this edge further
-                           else:
-      -                        # Failed to reduce with this chunk, break and move to next edge
-      -                        break
-      +                        # Failed to reduce with this chunk, try another random chunk
-      +                        attempts_left -= 1
        
-               print()  # Newline for the \r progress
-               if tokens_removed_in_pass > 0:
+      +def collect_reverse_adjacency(values_dict: Dict[int, Dict[str, Any]]) -> Dict[int, Set[int]]:
+      +    """
+      +    Build reverse adjacency: dest_node_id -> set(source_node_ids).
+      +    """
+      +    rev_adj: Dict[int, Set[int]] = {nid: set() for nid in values_dict.keys()}
+      +    for nid, node in values_dict.items():
+      +        for edge in node.get("children") or []:
+      +            _edge_key, dests = edge
+      +            for dest_id, _state_bv_json in dests:
+      +                rev_adj.setdefault(int(dest_id), set()).add(int(nid))
+      +    return rev_adj
+      +
+      +
+       def compute_roots(precomputed3: List[Tuple[int, int]]) -> List[int]:
+           """
+           Extract all root node ids from precomputed3 mapping (tokenizer_state_id -> root_node_id).
+      @@ -102,6 +115,32 @@
+                       seen.add(v)
+                       q.append((v, d + 1))
+           return seen
+      +
+      +
+      +def bfs_reachable_from_ends(values_dict: Dict[int, Dict[str, Any]]) -> Set[int]:
+      +    """
+      +    BFS backwards from all clean_end nodes.
+      +    Returns the set of node ids that can reach an end node.
+      +    """
+      +    end_nodes = {int(nid) for nid, node in values_dict.items() if node.get("clean_end")}
+      +    if not end_nodes:
+      +        return set()
+      +    
+      +    rev_adj = collect_reverse_adjacency(values_dict)
+      +    
+      +    seen: Set[int] = set()
+      +    q: List[int] = []
+      +    for nid in end_nodes:
+      +        if nid in values_dict:
+      +            seen.add(nid)
+      +            q.append(nid)
+      +            
+      +    while q:
+      +        u = q.pop(0)
+      +        for v_parent in rev_adj.get(u, set()):
+      +            if v_parent not in seen and v_parent in values_dict:
+      +                seen.add(v_parent)
+      +                q.append(v_parent)
+      +    return seen
+       
+       
+       def prune_values_by_reachability(values_dict: Dict[int, Dict[str, Any]], keep: Set[int]) -> Dict[int, Dict[str, Any]]:
+      @@ -633,6 +672,26 @@
+           n0, c0, d0 = count_nodes_children_dests(values_dict)
+           print(f"Initial trie size: {n0} nodes, {c0} children, {d0} dests")
+       
+      +    print("\n--- Statically pruning unreachable/dead-end nodes ---")
+      +    roots = compute_roots(original.get("precomputed3") or [])
+      +    reachable_fwd = bfs_reachable(values_dict, roots, None)
+      +    print(f"  - Found {len(reachable_fwd)} nodes reachable from roots.")
+      +    
+      +    reachable_bwd = bfs_reachable_from_ends(values_dict)
+      +    print(f"  - Found {len(reachable_bwd)} nodes that can reach a clean_end.")
+      +    
+      +    live_nodes = reachable_fwd.intersection(reachable_bwd)
+      +    print(f"  - {len(live_nodes)} nodes are live (in intersection).")
+      +    
+      +    if len(live_nodes) < len(values_dict):
+      +        values_dict = prune_values_by_reachability(values_dict, live_nodes)
+      +        n_new, c_new, d_new = count_nodes_children_dests(values_dict)
+      +        print(f"  - Pruned graph. New size: {n_new} nodes, {c_new} children, {d_new} dests.")
+      +    else:
+      +        print("  - No dead nodes found to prune.")
+      +    print("--- Static pruning finished ---\n")
+      +
+           time_budget_deadline = time.time() + int(args.time_budget_seconds)
+       
+           with tempfile.TemporaryDirectory(prefix="constraint_reduce_") as td:
 
       ```
     metadata:
@@ -4537,7 +4322,7 @@ messages:
       Applying patch to 'python/aug25/reduce_constraint.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/reduce_constraint.py.
     metadata:
-  - user: 'Changes committed with message: "Reduce: Make LLM token reduction more
-      robust by adding multiple random chunk attempts per edge"'
+  - user: 'Changes committed with message: "feat: Add static pruning phase to constraint
+      reduction to remove unreachable nodes"'
     metadata:
 ...
