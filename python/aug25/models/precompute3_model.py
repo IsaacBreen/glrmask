@@ -20,14 +20,10 @@ class PyAcc:
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, PyAcc):
             return NotImplemented
-        return self.allowed_llm_tokens == other.allowed_llm_tokens and self.disallowed_terminals.is_equal(other.disallowed_terminals)
+        return self.allowed_llm_tokens == other.allowed_llm_tokens and self.disallowed_terminals == other.disallowed_terminals
 
     def __hash__(self) -> int:
-        disallowed_ranges = tuple(
-            (start, end, bv.to_ranges_tuple())
-            for (start, end), bv in self.disallowed_terminals.range_values()
-        )
-        return hash((self.allowed_llm_tokens.to_ranges_tuple(), disallowed_ranges))
+        return hash(str(self))
 
     def merge(self, other: "PyAcc") -> "PyAcc":
         return PyAcc(
@@ -246,7 +242,7 @@ class Model(GraphProvider):
                 # End-node handling
                 if is_end(node_idx):
                     print(f"--- End Node {node_idx} ---")
-                    print(f"GSS that reached end node: gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}")
+                    print(f"GSS that reached end node: gss_ptr={gss_node} flat={gss_node}")
                     print(f"Propagated mask: {llm_mask.to_ranges()}")
                     # printf"    - END NODE found. Updating final_mask.")
                     # printf"      - final_mask before: {final_mask.to_ranges()}")
