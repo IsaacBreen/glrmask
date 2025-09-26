@@ -71,13 +71,6 @@ class PyAcc:
     terminals_union: Dict[int, TerminalIdSet]
     llm_mask: LLMTokenSet
 
-    def __repr__(self) -> str:
-        term_union_str = "{" + ", ".join(
-            f"{k}: {v.to_ranges()}" for k, v in sorted(self.terminals_union.items())
-        ) + "}"
-        return f"PyAcc(terminals_union={term_union_str}, llm_mask={self.llm_mask.to_ranges()})"
-
-
     def __eq__(self, other):
         if not isinstance(other, PyAcc):
             return NotImplemented
@@ -477,10 +470,6 @@ class Model(GraphProvider):
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
         state_map: Dict[int, GSS] = self.state.copy()
-        print("states in get_mask:")
-        for sid, gss in state_map.items():
-            print(f"state {sid}: {gss!r}")
-
 
         all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
         final_mask: LLMTokenSet = RangeSet.empty()
@@ -499,50 +488,28 @@ class Model(GraphProvider):
         max_state: int = self.tokenizer_max_state
 
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-        print("\n--- GSS Initialization ---")
-        initialized_state_map = {}
-        for sid, gss in state_map.items():
-            print(f"Initializing GSS for sid={sid}")
+        def initialize_acc(acc: PyAcc) -> PyAcc:
+            # Compute allowed LLM tokens from disallowed terminals for this accumulator
+            disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
+            disallowed_map = acc.terminals_union
 
-            def make_initializer(start_sid: int):
-                def initialize_acc(acc: PyAcc) -> PyAcc:
-                    # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                    # ONLY considering the disallowed terminals for the current starting tokenizer state.
-                    disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
-                    disallowed_map = acc.terminals_union
-                    
-                    print(f"  - acc_in: {acc!r}")
+            for tsid, disallowed_terminals in disallowed_map.items():
+                if tsid > max_state or tsid not in pmc:
+                    continue
+                terminals_to_llm = pmc[tsid]
+                for terminal_id in disallowed_terminals.to_indices():
+                    if terminal_id in terminals_to_llm:
+                        disallowed_llm_mask = disallowed_llm_mask.union(
+                            terminals_to_llm[terminal_id]
+                        )
 
-                    # This is the key change: only look at the entry for start_sid
-                    disallowed_terminals = disallowed_map.get(start_sid, RangeSet.empty())
+            allowed_mask = all_ones.difference(disallowed_llm_mask)
+            return PyAcc(
+                terminals_union={},  # consume
+                llm_mask=allowed_mask,
+            )
 
-                    if not disallowed_terminals.is_empty():
-                        if start_sid <= max_state and start_sid in pmc:
-                            terminals_to_llm = pmc[start_sid]
-                            for terminal_id in disallowed_terminals.to_indices():
-                                if terminal_id in terminals_to_llm:
-                                    disallowed_llm_mask = disallowed_llm_mask.union(
-                                        terminals_to_llm[terminal_id]
-                                    )
-                    
-                    allowed_mask = all_ones.difference(disallowed_llm_mask)
-                    
-                    print(f"    - disallowed_terminals for sid {start_sid}: {disallowed_terminals.to_ranges()}")
-                    print(f"    - disallowed_llm_mask: {disallowed_llm_mask.to_ranges()}")
-                    print(f"    - allowed_mask: {allowed_mask.to_ranges()}")
-
-                    return PyAcc(
-                        terminals_union={},  # consume
-                        llm_mask=allowed_mask,
-                    )
-                return initialize_acc
-
-            initialized_state_map[sid] = gss.apply(make_initializer(sid))
-        state_map = initialized_state_map
-
-        print("\n--- After GSS Initialization ---")
-        for sid, gss in state_map.items():
-            print(f"sid {sid}: {gss!r}")
+        state_map = {sid: gss.apply(initialize_acc) for sid, gss in state_map.items()}
 
         for sid, gss in state_map.items():
             r: NodeID = roots_map[int(sid)]
@@ -556,11 +523,6 @@ class Model(GraphProvider):
                 enqueued_nodes.add(r)
                 hp(depth_heap, (-d, r))
 
-        print("\n--- After Seeding ---")
-        for node_idx, gss in values.items():
-            print(f"Node {node_idx}: {gss!r}")
-
-
         def enqueue(d: int, n: NodeID) -> None:
             if n not in enqueued_nodes:
                 enqueued_nodes.add(n)
@@ -571,18 +533,12 @@ class Model(GraphProvider):
             neg_depth, node = hpop(depth_heap)
             gss_node: GSS = values.pop(node)
             enqueued_nodes.remove(node)
-            print(f"\n>>> Processing Node {node} (depth={-neg_depth})")
-            print(f"  - GSS: {gss_node!r}")
 
             # End-node handling: just union the allowed LLM tokens
             if is_end(node):
-                print(f"--- End Node {node} ---")
-                print(f"GSS that reached end node: {gss_node!r}")
                 reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                 if reduced_acc:
-                    print(f"Reduced acc mask: {reduced_acc.llm_mask.to_ranges()}")
                     final_mask = final_mask.union(reduced_acc.llm_mask)
-                    print(f"Final mask updated to: {final_mask.to_ranges()}")
 
             # Zombie traversal avoidance
             a_node = arena.get(node)
@@ -599,7 +555,6 @@ class Model(GraphProvider):
             a_node = arena.get(node)
             edges = a_node.children if a_node else []
             for (pop, llm_bv), dests in edges:
-                print(f"  - Traversing edge from node {node}: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                 llm_bv = llm_bv.difference(final_mask)
                 if llm_bv.is_empty():
                     continue
@@ -607,7 +562,6 @@ class Model(GraphProvider):
                 popped: GSS = gss_node.popn(pop)
                 if popped.is_empty():
                     continue
-                print(f"    - Popped GSS (pop={pop}): {popped!r}")
 
                 peeked = popped.peek()
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
@@ -637,7 +591,6 @@ class Model(GraphProvider):
 
                 for dest_idx, state_bv in dests:
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-                    print(f"    - Considering destination {dest_idx} with states {state_bv.to_ranges()} (matched {len(values_to_keep)} heads)")
 
                     if not values_to_keep:
                         continue
@@ -645,7 +598,6 @@ class Model(GraphProvider):
                     child_gss = popped.isolate_many(values_to_keep)
                     if child_gss.is_empty():
                         continue
-                    print(f"      - Child GSS for dest {dest_idx}: {child_gss!r}")
 
                     reduced_child = child_gss.reduce_acc()
                     if not reduced_child or reduced_child.is_empty():
@@ -653,15 +605,10 @@ class Model(GraphProvider):
 
                     d: NodeID = int(dest_idx)
                     if d in values:
-                        print(f"      - Merging child GSS into existing values for node {d}")
                         values[d] = values[d].merge(child_gss)
-                        print(f"      - Merged GSS for node {d}: {values[d]!r}")
                     else:
-                        print(f"      - Creating new entry for node {d} with child GSS")
                         values[d] = child_gss
                     enqueue(max_depth[d], d)
-
-        print("final internal mask:", final_mask.to_ranges())
 
 
         # Convert internal mask back to original IDs
