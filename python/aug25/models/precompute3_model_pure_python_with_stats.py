@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+# from python.gss_tester.implementations.reference_impl import ReferenceGSS as GSS
 from ..stats import Stats
 
 # --- Monkey-patch RangeSet to collect stats on union/intersection ---
