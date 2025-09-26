@@ -71,11 +71,11 @@ class Model(GraphProvider):
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
         model.constraint = ffi.GrammarConstraint.from_json_string(s)
-        print(model.constraint.dump_precomputed3())
+        # print(model.constraint.dump_precomputed3())
         model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         model.possible_matches_cache = model.constraint.possible_matches()
-        print("model.possible_matches_cache", model.possible_matches_cache)
+        # print("model.possible_matches_cache", model.possible_matches_cache)
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -114,9 +114,9 @@ class Model(GraphProvider):
         state_map = self.constraint_state.get_state_map()
         all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
 
-        print("states in get_mask:")
-        for k, v in state_map.items():
-            print(f"state {k}: {GSS.from_stacks(v.flatten())}")
+        # print("states in get_mask:")
+        # for k, v in state_map.items():
+        #     print(f"state {k}: {GSS.from_stacks(v.flatten())}")
 
 
         t0 = time.time()
@@ -298,7 +298,7 @@ class Model(GraphProvider):
 
                         enqueue(max_depth[d], d)
 
-        print("final internal mask:", final_mask)
+        # print("final internal mask:", final_mask)
 
         original_mask = self.constraint.internal_bv_to_original(final_mask)
         return RangeSet.from_ranges(original_mask.to_ranges())

@@ -179,36 +179,36 @@ class Model(GraphProvider):
             for uid, node_data in arena_dict.items()
         }
         # Pretty-print the graph for debugging
-        print("--- Precomputed Graph ---")
-        print(f"Roots map: {roots_map}")
-        print("\nArena nodes:")
-        # Sorting keys to have a consistent output
-        for node_id in sorted(arena.keys()):
-            node = arena[node_id]
-            print(f"\n- Node {node_id}:")
-            print(f"  - clean_end: {node.clean_end}")
-
-            llm_union_str = str(node.llm_bv_union)
-            if len(llm_union_str) > 80:
-                llm_union_str = llm_union_str[:77] + "..."
-            print(f"  - llm_bv_union: {llm_union_str}")
-
-            if not node.children:
-                print("  - children: []")
-            else:
-                print("  - children:")
-                for (pop, llm_bv), dests in node.children:
-                    llm_bv_str = str(llm_bv)
-                    MAX_STR_LEN = 200
-                    if len(llm_bv_str) > MAX_STR_LEN:
-                        llm_bv_str = llm_bv_str[:MAX_STR_LEN-3] + "..."
-                    print(f"    - Edge (pop={pop}, llm_bv={llm_bv_str}):")
-                    for dest_idx, state_bv in dests:
-                        state_bv_str = str(state_bv)
-                        if len(state_bv_str) > MAX_STR_LEN:
-                            state_bv_str = state_bv_str[:MAX_STR_LEN-3] + "..."
-                        print(f"      -> Dest Node {dest_idx} with states {state_bv_str}")
-        print("--- End Precomputed Graph ---")
+        # print("--- Precomputed Graph ---")
+        # print(f"Roots map: {roots_map}")
+        # print("\nArena nodes:")
+        # # Sorting keys to have a consistent output
+        # for node_id in sorted(arena.keys()):
+        #     node = arena[node_id]
+        #     print(f"\n- Node {node_id}:")
+        #     print(f"  - clean_end: {node.clean_end}")
+        #
+        #     llm_union_str = str(node.llm_bv_union)
+        #     if len(llm_union_str) > 80:
+        #         llm_union_str = llm_union_str[:77] + "..."
+        #     print(f"  - llm_bv_union: {llm_union_str}")
+        #
+        #     if not node.children:
+        #         print("  - children: []")
+        #     else:
+        #         print("  - children:")
+        #         for (pop, llm_bv), dests in node.children:
+        #             llm_bv_str = str(llm_bv)
+        #             MAX_STR_LEN = 200
+        #             if len(llm_bv_str) > MAX_STR_LEN:
+        #                 llm_bv_str = llm_bv_str[:MAX_STR_LEN-3] + "..."
+        #             print(f"    - Edge (pop={pop}, llm_bv={llm_bv_str}):")
+        #             for dest_idx, state_bv in dests:
+        #                 state_bv_str = str(state_bv)
+        #                 if len(state_bv_str) > MAX_STR_LEN:
+        #                     state_bv_str = state_bv_str[:MAX_STR_LEN-3] + "..."
+        #                 print(f"      -> Dest Node {dest_idx} with states {state_bv_str}")
+        # print("--- End Precomputed Graph ---")
         # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
         tokenizer = constraint.tokenizer()
@@ -293,7 +293,7 @@ class Model(GraphProvider):
         all_internal = constraint.all_internal_llm_tokens_bitset()
         all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
 
-        print(possible_matches_cache)
+        # print(possible_matches_cache)
 
         model = Model(
             arena=arena,
@@ -500,9 +500,9 @@ class Model(GraphProvider):
         - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
-        print("states in get_mask:")
-        for k, v in self.state.items():
-            print(f"state {k}: {v.to_reference_impl()}")
+        # print("states in get_mask:")
+        # for k, v in self.state.items():
+        #     print(f"state {k}: {v.to_reference_impl()}")
 
         state_map: Dict[int, GSS] = self.state
 
@@ -643,7 +643,7 @@ class Model(GraphProvider):
                     enqueue(max_depth.get(d, 0), d)
 
 
-        print("final internal mask:", final_mask)
+        # print("final internal mask:", final_mask)
 
         # Convert internal mask back to original IDs
         original_indices: List[int] = []
