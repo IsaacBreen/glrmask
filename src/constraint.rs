@@ -851,6 +851,29 @@ impl GrammarConstraint {
         cache.insert(cache_key, result_map.clone());
         result_map
     }
+
+    pub fn print_gss_nodes(&self, roots: &Vec<Arc<GSSNode>>, labels: Option<&[String]>) {
+        let config = GSSPrintConfig {
+            labels,
+            max_edges: 500,
+            original_internal_bimap: Some(&self.llm_vocab.original_to_internal_id_bimap),
+            llm_token_map: Some(&self.llm_vocab.llm_token_map),
+            verbose: false,
+        };
+
+        let (gss_str, state_ids) = print_gss_forest(roots, &self.parser.terminal_map, &config);
+        println!("{}", gss_str);
+    }
+
+    pub fn state_with_nodes(&self, nodes: Vec<(usize, Arc<GSSNode>)>) -> GrammarConstraintState<'_> {
+        let mut state = BTreeMap::new();
+        for (tokenizer_state_id_val, gss_node) in nodes {
+            let tokenizer_state_id = TokenizerStateID(tokenizer_state_id_val);
+            let glr_state = self.parser.init_glr_parser_from_stack(gss_node).with_god(self.trie3_god.clone());
+            state.insert(tokenizer_state_id, glr_state);
+        }
+        GrammarConstraintState { parent: self, state }
+    }
 }
 
 struct Precomputer<'r> {
@@ -2507,22 +2530,8 @@ impl<'a> GrammarConstraintState<'a> {
             println!("GSS is empty.");
             return;
         }
-        self.print_gss_nodes()
-    }
-
-    pub fn print_gss_nodes(&self, roots: &[GSSNode]) {
         let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
-
-        let config = GSSPrintConfig {
-            labels: Some(&labels),
-            max_edges: 500,
-            original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
-            llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
-            verbose: false,
-        };
-
-        let (gss_str, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &config);
-        println!("{}", gss_str);
+        self.parent.print_gss_nodes(&roots, Some(&labels));
     }
 
     pub fn explain_stack(&self) {
