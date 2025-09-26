@@ -177,6 +177,36 @@ class Model(GraphProvider):
             )
             for uid, node_data in arena_dict.items()
         }
+        # Pretty-print the graph for debugging
+        print("--- Precomputed Graph ---")
+        print(f"Roots map: {roots_map}")
+        print("\nArena nodes:")
+        # Sorting keys to have a consistent output
+        for node_id in sorted(arena.keys()):
+            node = arena[node_id]
+            print(f"\n- Node {node_id}:")
+            print(f"  - clean_end: {node.clean_end}")
+
+            llm_union_str = str(node.llm_bv_union)
+            if len(llm_union_str) > 80:
+                llm_union_str = llm_union_str[:77] + "..."
+            print(f"  - llm_bv_union: {llm_union_str}")
+
+            if not node.children:
+                print("  - children: []")
+            else:
+                print("  - children:")
+                for (pop, llm_bv), dests in node.children:
+                    llm_bv_str = str(llm_bv)
+                    if len(llm_bv_str) > 60:
+                        llm_bv_str = llm_bv_str[:57] + "..."
+                    print(f"    - Edge (pop={pop}, llm_bv={llm_bv_str}):")
+                    for dest_idx, state_bv in dests:
+                        state_bv_str = str(state_bv)
+                        if len(state_bv_str) > 60:
+                            state_bv_str = state_bv_str[:57] + "..."
+                        print(f"      -> Dest Node {dest_idx} with states {state_bv_str}")
+        print("--- End Precomputed Graph ---")
         # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
         tokenizer = constraint.tokenizer()
