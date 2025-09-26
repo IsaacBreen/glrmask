@@ -11,16 +11,11 @@ local_system:
       import heapq
       import collections
       import time
-      import random
-      from typing import Dict, List, Tuple, Optional, Union, Any, TypedDict, Set
+      from typing import Dict, List, Tuple, Optional, Union, Any, Set
       from dataclasses import dataclass, field
 
-      from tqdm import tqdm
-
       from ..common_interface import GraphProvider
-      from ..range_set.range_set_abc import RangeSet as RangeSetABC
-      from ..range_set.bitset_range_set import BitsetRangeSet
-      from ..range_set.py_range_set import PyRangeSet
+      from ..range_set.py_range_set import PyRangeSet as RangeSet
       import _sep1 as ffi
       from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
       # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
@@ -28,10 +23,10 @@ local_system:
 
       NodeID = int
 
-      # Type aliases for different uses of PyRangeSet to improve clarity.
-      LLMTokenSet = RangeSetABC
-      StateIDSet = RangeSetABC
-      TerminalIdSet = RangeSetABC
+      # Type aliases for different uses of RangeSet to improve clarity.
+      LLMTokenSet = RangeSet
+      StateIDSet = RangeSet
+      TerminalIdSet = RangeSet
 
 
       # Add a dummy profiler for when not running under kernprof
@@ -75,7 +70,7 @@ local_system:
       @dataclass
       class ArenaNode:
           children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = field(default_factory=list)
-          llm_bv_union: LLMTokenSet = field(default_factory=PyRangeSet.empty)
+          llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
           clean_end: bool = False
 
       @dataclass(frozen=True, eq=False)
@@ -165,21 +160,21 @@ local_system:
                   children = node.get("children") or []
                   if not children:
                       node["children"] = []
-                      node["llm_bv_union"] = PyRangeSet.empty()
+                      node["llm_bv_union"] = RangeSet.empty()
                       continue
 
                   new_children = []
-                  llm_bv_union: LLMTokenSet = PyRangeSet.empty()
+                  llm_bv_union: LLMTokenSet = RangeSet.empty()
                   for edge_key, dest_map in children:
                       pop, llm_bv_json = edge_key
                       llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
-                      # Convert to PyRangeSet for ffi-free operations in commit/get_mask
-                      llm_bv: LLMTokenSet = PyRangeSet.from_ranges(llm_bv_bitset.to_ranges())
+                      # Convert to RangeSet for ffi-free operations in commit/get_mask
+                      llm_bv: LLMTokenSet = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
                       llm_bv_union = llm_bv_union.union(llm_bv)
                       new_dest_map = []
                       for dest_idx, state_bv_json in dest_map:
                           state_bv_bitset = bs_from_json(dumps(state_bv_json))
-                          state_bv: StateIDSet = PyRangeSet.from_ranges(state_bv_bitset.to_ranges())
+                          state_bv: StateIDSet = RangeSet.from_ranges(state_bv_bitset.to_ranges())
                           new_dest_map.append((int(dest_idx), state_bv))
                       new_children.append(((int(pop), llm_bv), new_dest_map))
                   node["children"] = new_children
@@ -188,7 +183,7 @@ local_system:
               arena: Dict[NodeID, ArenaNode] = {
                   uid: ArenaNode(
                       children=node_data.get("children", []),
-                      llm_bv_union=node_data.get("llm_bv_union", PyRangeSet.empty()),
+                      llm_bv_union=node_data.get("llm_bv_union", RangeSet.empty()),
                       clean_end=node_data.get("value", {}).get("clean_end", False),
                   )
                   for uid, node_data in arena_dict.items()
@@ -253,29 +248,29 @@ local_system:
                   all_terminals.update(row.actions.keys())
               if ignore_terminal_id is not None:
                   all_terminals.add(ignore_terminal_id)
-              all_terminals_bitset = PyRangeSet.from_indices(list(all_terminals))
+              all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
 
-              initial_acc = PyAcc(terminals_union={}, llm_mask=PyRangeSet.empty())
+              initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
               initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
               state = {tokenizer_initial_state: initial_gss}
 
               id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-              # Convert possible_matches_cache to PyRangeSet
+              # Convert possible_matches_cache to RangeSet
               pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
               pmc_rs: Dict[int, Dict[int, LLMTokenSet]] = {}
               for tsid, inner in pmc_ffi.items():
                   mapped: Dict[int, LLMTokenSet] = {}
                   for term_id, bit in inner.items():
-                      mapped[int(term_id)] = PyRangeSet.from_ranges(bit.to_ranges())
+                      mapped[int(term_id)] = RangeSet.from_ranges(bit.to_ranges())
                   pmc_rs[int(tsid)] = mapped
               possible_matches_cache = pmc_rs
               internal_to_original_map_raw = constraint.internal_to_original_map()
               internal_to_original_map = {
                   k: {v} for k, v in internal_to_original_map_raw.items()
               }
-              # Convert universe LLM tokens bitset to PyRangeSet
+              # Convert universe LLM tokens bitset to RangeSet
               all_internal = constraint.all_internal_llm_tokens_bitset()
-              all_internal_llm_tokens_bitset = PyRangeSet.from_ranges(all_internal.to_ranges())
+              all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
 
               model = Model(
                   arena=arena,
@@ -299,8 +294,6 @@ local_system:
               model._merge_equivalent_llm_tokens()
               model._reorder_llm_tokens_for_range_minimization()
 
-              # model._convert_to_bitset_range_set()
-
               return model
 
           @profile
@@ -308,7 +301,7 @@ local_system:
               def predicate(acc: PyAcc) -> bool:
                   disallowed_terminals_map = acc.terminals_union
                   for state_id, matched_bv in terminals_map.items():
-                      disallowed_for_state = disallowed_terminals_map.get(state_id, BitsetRangeSet.empty())
+                      disallowed_for_state = disallowed_terminals_map.get(state_id, RangeSet.empty())
                       if not matched_bv.intersection(disallowed_for_state).is_empty():
                           return False
                   return True
@@ -318,9 +311,9 @@ local_system:
           def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
               def apply_map(acc: PyAcc) -> PyAcc:
                   old_map = acc.terminals_union
-                  new_bvs: Dict[int, TerminalIdSet] = collections.defaultdict(BitsetRangeSet.empty)
+                  new_bvs: Dict[int, TerminalIdSet] = collections.defaultdict(RangeSet.empty)
                   for old_sid, new_sid in state_map.items():
-                      bv_source = old_map.get(old_sid, BitsetRangeSet.empty())
+                      bv_source = old_map.get(old_sid, RangeSet.empty())
                       new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
 
                   return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
@@ -330,8 +323,8 @@ local_system:
           def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
               def apply_disallow(acc: PyAcc) -> PyAcc:
                   current_map = acc.terminals_union.copy()
-                  curr_bv = current_map.get(state_id, BitsetRangeSet.empty())
-                  to_add = BitsetRangeSet.from_indices([terminal_id])
+                  curr_bv = current_map.get(state_id, RangeSet.empty())
+                  to_add = RangeSet.from_indices([terminal_id])
                   new_bv = curr_bv.union(to_add)
                   current_map[state_id] = new_bv
                   return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
@@ -372,7 +365,7 @@ local_system:
                   if end_state is not None:
                       state_map[tokenizer_sid] = end_state
                   matched_terminals = [terminal_id for terminal_id, _ in matches]
-                  terminals_map[tokenizer_sid] = BitsetRangeSet.from_indices(matched_terminals)
+                  terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
 
               # Prune and map per-state GSS
               temp_states: Dict[int, GSS] = {}
@@ -487,7 +480,7 @@ local_system:
               state_map: Dict[int, GSS] = self.state
 
               all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
-              final_mask: LLMTokenSet = BitsetRangeSet.empty()
+              final_mask: LLMTokenSet = RangeSet.empty()
 
               # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
               values: Dict[NodeID, GSS] = {}
@@ -505,7 +498,7 @@ local_system:
               # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
               def initialize_acc(acc: PyAcc) -> PyAcc:
                   # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                  disallowed_llm_mask: LLMTokenSet = BitsetRangeSet.empty()
+                  disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
                   disallowed_map = acc.terminals_union
 
                   for tsid, disallowed_terminals in disallowed_map.items():
@@ -555,7 +548,7 @@ local_system:
 
                   # Zombie traversal avoidance
                   a_node = arena.get(node)
-                  node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else BitsetRangeSet.empty()
+                  node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
                   potential_new_tokens = node_llm_bv_union.difference(final_mask)
                   if potential_new_tokens.is_empty():
                       continue
@@ -631,7 +624,7 @@ local_system:
                       original_indices.extend(list(self.internal_to_original_map[i]))
 
 
-              return BitsetRangeSet.from_indices(original_indices)
+              return RangeSet.from_indices(original_indices)
 
           # ===========================
           # Optimization/conversion API
@@ -652,11 +645,11 @@ local_system:
           def _merge_equivalent_llm_tokens(self) -> None:
               """
               Merge internal LLM tokens that are indistinguishable across the entire model:
-              two tokens are "equivalent" if they occur together in every PyRangeSet occurrence
+              two tokens are "equivalent" if they occur together in every RangeSet occurrence
               the model uses (arena edge llm_bv, node llm_bv_union, and possible_matches_cache).
 
               Implementation:
-              - Build a family of all PyRangeSet occurrences that reference internal tokens.
+              - Build a family of all RangeSet occurrences that reference internal tokens.
               - For each internal token, build a signature: the ordered list of set indices in
                 which it appears.
               - Group tokens by identical signatures; each group is merged into its smallest-id
@@ -747,53 +740,10 @@ local_system:
               ...
               print(" done.")
 
-          def _convert_to_bitset_range_set(self) -> None:
-              """
-              Converts all PyRangeSet instances (which are py_range_set.PyRangeSet during
-              optimization) to bitset_range_set.BitsetRangeSet for runtime efficiency.
-              """
-              print("Converting PyRangeSet implementations to BitsetRangeSet...", end='', flush=True)
-
-              def convert(rs: RangeSetABC) -> BitsetRangeSet:
-                  if isinstance(rs, BitsetRangeSet):
-                      return rs
-                  return BitsetRangeSet.from_ranges(rs.to_ranges())
-
-              # 1. Convert arena
-              for node in self.arena.values():
-                  new_children = []
-                  for (pop, llm_bv), dests in node.children:
-                      new_dests = []
-                      for dest_idx, state_bv in dests:
-                          new_dests.append((dest_idx, convert(state_bv)))
-                      new_children.append(((pop, convert(llm_bv)), new_dests))
-                  node.children = new_children
-                  node.llm_bv_union = convert(node.llm_bv_union)
-
-              # 2. Convert possible_matches_cache
-              if self.possible_matches_cache:
-                  for tsid, inner in self.possible_matches_cache.items():
-                      for term_id, llm_bv in inner.items():
-                          inner[term_id] = convert(llm_bv)
-
-              # 3. Convert top-level bitsets
-              self.all_internal_llm_tokens_bitset = convert(self.all_internal_llm_tokens_bitset)
-              self.all_terminals_bitset = convert(self.all_terminals_bitset)
-
-              # 4. Convert GSS accumulators in self.state
-              def convert_acc(acc: PyAcc) -> PyAcc:
-                  new_terminals_union = {
-                      state_id: convert(term_set)
-                      for state_id, term_set in acc.terminals_union.items()
-                  }
-                  return PyAcc(terminals_union=new_terminals_union, llm_mask=convert(acc.llm_mask))
-              self.state = {tsid: gss.apply(convert_acc) for tsid, gss in self.state.items()}
-              print(" done.")
-
           def _reorder_llm_tokens_for_range_minimization(self) -> None:
               """
               Permute internal LLM token IDs to reduce the number of ranges present in
-              all PyRangeSet occurrences across the model (arena edges, unions, and possible_matches_cache).
+              all RangeSet occurrences across the model (arena edges, unions, and possible_matches_cache).
               External token IDs remain unchanged; we only adjust internal indices used in RangeSets.
 
               Heuristic:
@@ -1020,7 +970,7 @@ local_system:
               based on the union of llm_bvs of its direct children edges.
               """
               for node in self.arena.values():
-                  union_bv: LLMTokenSet = PyRangeSet.empty()
+                  union_bv: LLMTokenSet = RangeSet.empty()
                   for (_pop, llm_bv), _dests in node.children:
                       union_bv = union_bv.union(llm_bv)
                   node.llm_bv_union = union_bv
@@ -1086,8 +1036,8 @@ local_system:
                       return s
                   new_indices = [old_to_new_map[i] for i in s.to_indices() if i in old_to_new_map]
                   if not new_indices:
-                      return PyRangeSet.empty()
-                  return PyRangeSet.from_indices(sorted(new_indices))
+                      return RangeSet.empty()
+                  return RangeSet.from_indices(sorted(new_indices))
 
               # Remap possible_matches_cache
               if self.possible_matches_cache:
@@ -1112,7 +1062,7 @@ local_system:
                   groups: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = collections.defaultdict(set)
                   for (pop, llm_bv), dests in children:
                       # Sort dests for a canonical signature. Each dest is (dest_id, state_bv).
-                      # state_bv is a PyRangeSet, so we use its ranges for the signature.
+                      # state_bv is a RangeSet, so we use its ranges for the signature.
                       dests_sig = tuple(sorted(
                           (dest_id, tuple(state_bv.to_ranges())) for dest_id, state_bv in dests
                       ))
@@ -1121,17 +1071,17 @@ local_system:
 
                   # Rebuild children with remapped tokens
                   new_children = []
-                  llm_union = PyRangeSet.empty()
+                  llm_union = RangeSet.empty()
                   for (pop, dests_sig), old_tokens in groups.items():
                       new_tokens = {old_to_new_map[t] for t in old_tokens if t in old_to_new_map}
                       if not new_tokens:
                           continue
 
-                      new_llm_bv = PyRangeSet.from_indices(sorted(list(new_tokens)))
+                      new_llm_bv = RangeSet.from_indices(sorted(list(new_tokens)))
                       llm_union = llm_union.union(new_llm_bv)
                       # Convert dests_sig back to list of (int, StateIDSet)
                       dests_list = [
-                          (dest_id, PyRangeSet.from_ranges(list(ranges)))
+                          (dest_id, RangeSet.from_ranges(list(ranges)))
                           for dest_id, ranges in dests_sig
                       ]
                       new_children.append(((pop, new_llm_bv), dests_list))
@@ -1183,8 +1133,8 @@ local_system:
                       ii = int(i)
                       mapped.add(old_to_new_map.get(ii, ii))
                   if not mapped:
-                      return PyRangeSet.empty()
-                  return PyRangeSet.from_indices(sorted(mapped))
+                      return RangeSet.empty()
+                  return RangeSet.from_indices(sorted(mapped))
 
               # Remap possible_matches_cache
               if self.possible_matches_cache:
@@ -1230,17 +1180,17 @@ local_system:
 
                   # Rebuild children and union
                   new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-                  llm_union: LLMTokenSet = PyRangeSet.empty()
+                  llm_union: LLMTokenSet = RangeSet.empty()
 
                   for (pop, dests_sig), tokens_set in groups.items():
                       if not tokens_set:
                           continue
-                      llm_bv_new = PyRangeSet.from_indices(sorted(tokens_set))
+                      llm_bv_new = RangeSet.from_indices(sorted(tokens_set))
                       llm_union = llm_union.union(llm_bv_new)
 
                       dests_list: List[Tuple[int, StateIDSet]] = []
                       for dest_id, ranges in dests_sig:
-                          dests_list.append((int(dest_id), PyRangeSet.from_ranges(list(ranges))))
+                          dests_list.append((int(dest_id), RangeSet.from_ranges(list(ranges))))
                       new_children.append(((int(pop), llm_bv_new), dests_list))
 
                   # Deterministic sort
@@ -1273,24 +1223,38 @@ local_system:
                           new_internal_to_original_map[rep] = set()
                       new_internal_to_original_map[rep].update(orig_set)
                   self.internal_to_original_map = new_internal_to_original_map
+
+          def _compute_universe_lr_states(self) -> Set[int]:
+              return set(self.parser_table.table.keys())
+
+          def _reverse_expand_n(self, base: Set[int], n: int) -> Set[int]:
+              """
+              Apply the reverse_state_map n times to a set of states.
+              """
+              if not base or n <= 0:
+                  return set(base)
+              cur = set(base)
+              for _ in range(n):
+                  nxt: Set[int] = set()
+                  for s in cur:
+                      nxt.update(self.reverse_state_map.get(int(s), set()))
+                  if not nxt:
+                      return set()
+                  cur = nxt
+              return cur
   prev_file_contents:
-    python/aug25/models/precompute3_model_pure_python.py: |
+    python/aug25/models/precompute3_model_pure_python.py: |+
       from __future__ import annotations
 
       import json
       import heapq
       import collections
       import time
-      import random
-      from typing import Dict, List, Tuple, Optional, Union, Any, TypedDict, Set
+      from typing import Dict, List, Tuple, Optional, Union, Any, Set
       from dataclasses import dataclass, field
 
-      from tqdm import tqdm
-
       from ..common_interface import GraphProvider
-      from ..range_set.range_set_abc import RangeSet as RangeSetABC
-      from ..range_set.bitset_range_set import BitsetRangeSet
-      from ..range_set.py_range_set import PyRangeSet
+      from ..range_set.py_range_set import PyRangeSet as RangeSet
       import _sep1 as ffi
       from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
       # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
@@ -1298,10 +1262,10 @@ local_system:
 
       NodeID = int
 
-      # Type aliases for different uses of PyRangeSet to improve clarity.
-      LLMTokenSet = RangeSetABC
-      StateIDSet = RangeSetABC
-      TerminalIdSet = RangeSetABC
+      # Type aliases for different uses of RangeSet to improve clarity.
+      LLMTokenSet = RangeSet
+      StateIDSet = RangeSet
+      TerminalIdSet = RangeSet
 
 
       # Add a dummy profiler for when not running under kernprof
@@ -1345,7 +1309,7 @@ local_system:
       @dataclass
       class ArenaNode:
           children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = field(default_factory=list)
-          llm_bv_union: LLMTokenSet = field(default_factory=PyRangeSet.empty)
+          llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
           clean_end: bool = False
 
       @dataclass(frozen=True, eq=False)
@@ -1435,21 +1399,21 @@ local_system:
                   children = node.get("children") or []
                   if not children:
                       node["children"] = []
-                      node["llm_bv_union"] = PyRangeSet.empty()
+                      node["llm_bv_union"] = RangeSet.empty()
                       continue
 
                   new_children = []
-                  llm_bv_union: LLMTokenSet = PyRangeSet.empty()
+                  llm_bv_union: LLMTokenSet = RangeSet.empty()
                   for edge_key, dest_map in children:
                       pop, llm_bv_json = edge_key
                       llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
-                      # Convert to PyRangeSet for ffi-free operations in commit/get_mask
-                      llm_bv: LLMTokenSet = PyRangeSet.from_ranges(llm_bv_bitset.to_ranges())
+                      # Convert to RangeSet for ffi-free operations in commit/get_mask
+                      llm_bv: LLMTokenSet = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
                       llm_bv_union = llm_bv_union.union(llm_bv)
                       new_dest_map = []
                       for dest_idx, state_bv_json in dest_map:
                           state_bv_bitset = bs_from_json(dumps(state_bv_json))
-                          state_bv: StateIDSet = PyRangeSet.from_ranges(state_bv_bitset.to_ranges())
+                          state_bv: StateIDSet = RangeSet.from_ranges(state_bv_bitset.to_ranges())
                           new_dest_map.append((int(dest_idx), state_bv))
                       new_children.append(((int(pop), llm_bv), new_dest_map))
                   node["children"] = new_children
@@ -1458,7 +1422,7 @@ local_system:
               arena: Dict[NodeID, ArenaNode] = {
                   uid: ArenaNode(
                       children=node_data.get("children", []),
-                      llm_bv_union=node_data.get("llm_bv_union", PyRangeSet.empty()),
+                      llm_bv_union=node_data.get("llm_bv_union", RangeSet.empty()),
                       clean_end=node_data.get("value", {}).get("clean_end", False),
                   )
                   for uid, node_data in arena_dict.items()
@@ -1523,29 +1487,29 @@ local_system:
                   all_terminals.update(row.actions.keys())
               if ignore_terminal_id is not None:
                   all_terminals.add(ignore_terminal_id)
-              all_terminals_bitset = PyRangeSet.from_indices(list(all_terminals))
+              all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
 
-              initial_acc = PyAcc(terminals_union={}, llm_mask=PyRangeSet.empty())
+              initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
               initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
               state = {tokenizer_initial_state: initial_gss}
 
               id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-              # Convert possible_matches_cache to PyRangeSet
+              # Convert possible_matches_cache to RangeSet
               pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
               pmc_rs: Dict[int, Dict[int, LLMTokenSet]] = {}
               for tsid, inner in pmc_ffi.items():
                   mapped: Dict[int, LLMTokenSet] = {}
                   for term_id, bit in inner.items():
-                      mapped[int(term_id)] = PyRangeSet.from_ranges(bit.to_ranges())
+                      mapped[int(term_id)] = RangeSet.from_ranges(bit.to_ranges())
                   pmc_rs[int(tsid)] = mapped
               possible_matches_cache = pmc_rs
               internal_to_original_map_raw = constraint.internal_to_original_map()
               internal_to_original_map = {
                   k: {v} for k, v in internal_to_original_map_raw.items()
               }
-              # Convert universe LLM tokens bitset to PyRangeSet
+              # Convert universe LLM tokens bitset to RangeSet
               all_internal = constraint.all_internal_llm_tokens_bitset()
-              all_internal_llm_tokens_bitset = PyRangeSet.from_ranges(all_internal.to_ranges())
+              all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
 
               model = Model(
                   arena=arena,
@@ -1568,10 +1532,8 @@ local_system:
 
               model._merge_equivalent_llm_tokens()
               model._reorder_llm_tokens_for_range_minimization()
-
-              # model._convert_to_bitset_range_set()
-              # After token reordering, optimize state masks (Alt 6) and reduce edges when beneficial.
-              model._optimize_masks_and_edges_alt6()
+              # After LLM token reordering, optimize state masks and collapse edges
+              model._optimize_state_masks_and_edges()
 
               return model
 
@@ -1580,7 +1542,7 @@ local_system:
               def predicate(acc: PyAcc) -> bool:
                   disallowed_terminals_map = acc.terminals_union
                   for state_id, matched_bv in terminals_map.items():
-                      disallowed_for_state = disallowed_terminals_map.get(state_id, BitsetRangeSet.empty())
+                      disallowed_for_state = disallowed_terminals_map.get(state_id, RangeSet.empty())
                       if not matched_bv.intersection(disallowed_for_state).is_empty():
                           return False
                   return True
@@ -1590,9 +1552,9 @@ local_system:
           def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
               def apply_map(acc: PyAcc) -> PyAcc:
                   old_map = acc.terminals_union
-                  new_bvs: Dict[int, TerminalIdSet] = collections.defaultdict(BitsetRangeSet.empty)
+                  new_bvs: Dict[int, TerminalIdSet] = collections.defaultdict(RangeSet.empty)
                   for old_sid, new_sid in state_map.items():
-                      bv_source = old_map.get(old_sid, BitsetRangeSet.empty())
+                      bv_source = old_map.get(old_sid, RangeSet.empty())
                       new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
 
                   return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
@@ -1602,8 +1564,8 @@ local_system:
           def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
               def apply_disallow(acc: PyAcc) -> PyAcc:
                   current_map = acc.terminals_union.copy()
-                  curr_bv = current_map.get(state_id, BitsetRangeSet.empty())
-                  to_add = BitsetRangeSet.from_indices([terminal_id])
+                  curr_bv = current_map.get(state_id, RangeSet.empty())
+                  to_add = RangeSet.from_indices([terminal_id])
                   new_bv = curr_bv.union(to_add)
                   current_map[state_id] = new_bv
                   return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
@@ -1644,7 +1606,7 @@ local_system:
                   if end_state is not None:
                       state_map[tokenizer_sid] = end_state
                   matched_terminals = [terminal_id for terminal_id, _ in matches]
-                  terminals_map[tokenizer_sid] = BitsetRangeSet.from_indices(matched_terminals)
+                  terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
 
               # Prune and map per-state GSS
               temp_states: Dict[int, GSS] = {}
@@ -1759,7 +1721,7 @@ local_system:
               state_map: Dict[int, GSS] = self.state
 
               all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
-              final_mask: LLMTokenSet = BitsetRangeSet.empty()
+              final_mask: LLMTokenSet = RangeSet.empty()
 
               # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
               values: Dict[NodeID, GSS] = {}
@@ -1777,7 +1739,7 @@ local_system:
               # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
               def initialize_acc(acc: PyAcc) -> PyAcc:
                   # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                  disallowed_llm_mask: LLMTokenSet = BitsetRangeSet.empty()
+                  disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
                   disallowed_map = acc.terminals_union
 
                   for tsid, disallowed_terminals in disallowed_map.items():
@@ -1827,7 +1789,7 @@ local_system:
 
                   # Zombie traversal avoidance
                   a_node = arena.get(node)
-                  node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else BitsetRangeSet.empty()
+                  node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
                   potential_new_tokens = node_llm_bv_union.difference(final_mask)
                   if potential_new_tokens.is_empty():
                       continue
@@ -1903,7 +1865,7 @@ local_system:
                       original_indices.extend(list(self.internal_to_original_map[i]))
 
 
-              return BitsetRangeSet.from_indices(original_indices)
+              return RangeSet.from_indices(original_indices)
 
           # ===========================
           # Optimization/conversion API
@@ -1924,11 +1886,11 @@ local_system:
           def _merge_equivalent_llm_tokens(self) -> None:
               """
               Merge internal LLM tokens that are indistinguishable across the entire model:
-              two tokens are "equivalent" if they occur together in every PyRangeSet occurrence
+              two tokens are "equivalent" if they occur together in every RangeSet occurrence
               the model uses (arena edge llm_bv, node llm_bv_union, and possible_matches_cache).
 
               Implementation:
-              - Build a family of all PyRangeSet occurrences that reference internal tokens.
+              - Build a family of all RangeSet occurrences that reference internal tokens.
               - For each internal token, build a signature: the ordered list of set indices in
                 which it appears.
               - Group tokens by identical signatures; each group is merged into its smallest-id
@@ -2019,53 +1981,10 @@ local_system:
               ...
               print(" done.")
 
-          def _convert_to_bitset_range_set(self) -> None:
-              """
-              Converts all PyRangeSet instances (which are py_range_set.PyRangeSet during
-              optimization) to bitset_range_set.BitsetRangeSet for runtime efficiency.
-              """
-              print("Converting PyRangeSet implementations to BitsetRangeSet...", end='', flush=True)
-
-              def convert(rs: RangeSetABC) -> BitsetRangeSet:
-                  if isinstance(rs, BitsetRangeSet):
-                      return rs
-                  return BitsetRangeSet.from_ranges(rs.to_ranges())
-
-              # 1. Convert arena
-              for node in self.arena.values():
-                  new_children = []
-                  for (pop, llm_bv), dests in node.children:
-                      new_dests = []
-                      for dest_idx, state_bv in dests:
-                          new_dests.append((dest_idx, convert(state_bv)))
-                      new_children.append(((pop, convert(llm_bv)), new_dests))
-                  node.children = new_children
-                  node.llm_bv_union = convert(node.llm_bv_union)
-
-              # 2. Convert possible_matches_cache
-              if self.possible_matches_cache:
-                  for tsid, inner in self.possible_matches_cache.items():
-                      for term_id, llm_bv in inner.items():
-                          inner[term_id] = convert(llm_bv)
-
-              # 3. Convert top-level bitsets
-              self.all_internal_llm_tokens_bitset = convert(self.all_internal_llm_tokens_bitset)
-              self.all_terminals_bitset = convert(self.all_terminals_bitset)
-
-              # 4. Convert GSS accumulators in self.state
-              def convert_acc(acc: PyAcc) -> PyAcc:
-                  new_terminals_union = {
-                      state_id: convert(term_set)
-                      for state_id, term_set in acc.terminals_union.items()
-                  }
-                  return PyAcc(terminals_union=new_terminals_union, llm_mask=convert(acc.llm_mask))
-              self.state = {tsid: gss.apply(convert_acc) for tsid, gss in self.state.items()}
-              print(" done.")
-
           def _reorder_llm_tokens_for_range_minimization(self) -> None:
               """
               Permute internal LLM token IDs to reduce the number of ranges present in
-              all PyRangeSet occurrences across the model (arena edges, unions, and possible_matches_cache).
+              all RangeSet occurrences across the model (arena edges, unions, and possible_matches_cache).
               External token IDs remain unchanged; we only adjust internal indices used in RangeSets.
 
               Heuristic:
@@ -2292,7 +2211,7 @@ local_system:
               based on the union of llm_bvs of its direct children edges.
               """
               for node in self.arena.values():
-                  union_bv: LLMTokenSet = PyRangeSet.empty()
+                  union_bv: LLMTokenSet = RangeSet.empty()
                   for (_pop, llm_bv), _dests in node.children:
                       union_bv = union_bv.union(llm_bv)
                   node.llm_bv_union = union_bv
@@ -2358,8 +2277,8 @@ local_system:
                       return s
                   new_indices = [old_to_new_map[i] for i in s.to_indices() if i in old_to_new_map]
                   if not new_indices:
-                      return PyRangeSet.empty()
-                  return PyRangeSet.from_indices(sorted(new_indices))
+                      return RangeSet.empty()
+                  return RangeSet.from_indices(sorted(new_indices))
 
               # Remap possible_matches_cache
               if self.possible_matches_cache:
@@ -2384,7 +2303,7 @@ local_system:
                   groups: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = collections.defaultdict(set)
                   for (pop, llm_bv), dests in children:
                       # Sort dests for a canonical signature. Each dest is (dest_id, state_bv).
-                      # state_bv is a PyRangeSet, so we use its ranges for the signature.
+                      # state_bv is a RangeSet, so we use its ranges for the signature.
                       dests_sig = tuple(sorted(
                           (dest_id, tuple(state_bv.to_ranges())) for dest_id, state_bv in dests
                       ))
@@ -2393,17 +2312,17 @@ local_system:
 
                   # Rebuild children with remapped tokens
                   new_children = []
-                  llm_union = PyRangeSet.empty()
+                  llm_union = RangeSet.empty()
                   for (pop, dests_sig), old_tokens in groups.items():
                       new_tokens = {old_to_new_map[t] for t in old_tokens if t in old_to_new_map}
                       if not new_tokens:
                           continue
 
-                      new_llm_bv = PyRangeSet.from_indices(sorted(list(new_tokens)))
+                      new_llm_bv = RangeSet.from_indices(sorted(list(new_tokens)))
                       llm_union = llm_union.union(new_llm_bv)
                       # Convert dests_sig back to list of (int, StateIDSet)
                       dests_list = [
-                          (dest_id, PyRangeSet.from_ranges(list(ranges)))
+                          (dest_id, RangeSet.from_ranges(list(ranges)))
                           for dest_id, ranges in dests_sig
                       ]
                       new_children.append(((pop, new_llm_bv), dests_list))
@@ -2455,8 +2374,8 @@ local_system:
                       ii = int(i)
                       mapped.add(old_to_new_map.get(ii, ii))
                   if not mapped:
-                      return PyRangeSet.empty()
-                  return PyRangeSet.from_indices(sorted(mapped))
+                      return RangeSet.empty()
+                  return RangeSet.from_indices(sorted(mapped))
 
               # Remap possible_matches_cache
               if self.possible_matches_cache:
@@ -2502,17 +2421,17 @@ local_system:
 
                   # Rebuild children and union
                   new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-                  llm_union: LLMTokenSet = PyRangeSet.empty()
+                  llm_union: LLMTokenSet = RangeSet.empty()
 
                   for (pop, dests_sig), tokens_set in groups.items():
                       if not tokens_set:
                           continue
-                      llm_bv_new = PyRangeSet.from_indices(sorted(tokens_set))
+                      llm_bv_new = RangeSet.from_indices(sorted(tokens_set))
                       llm_union = llm_union.union(llm_bv_new)
 
                       dests_list: List[Tuple[int, StateIDSet]] = []
                       for dest_id, ranges in dests_sig:
-                          dests_list.append((int(dest_id), PyRangeSet.from_ranges(list(ranges))))
+                          dests_list.append((int(dest_id), RangeSet.from_ranges(list(ranges))))
                       new_children.append(((int(pop), llm_bv_new), dests_list))
 
                   # Deterministic sort
@@ -2546,70 +2465,8 @@ local_system:
                       new_internal_to_original_map[rep].update(orig_set)
                   self.internal_to_original_map = new_internal_to_original_map
 
-          # ---------------------------------------------------------
-          # Graph optimization: masks (Alt 6) and node collapsing
-          # ---------------------------------------------------------
-          def _optimize_masks_and_edges_alt6(self) -> None:
-              """
-              Pipeline:
-              1) Compute the universe of LR states involved in the graph and parser.
-              2) Compute terminal LR state sets for each node via bottom-up fixpoint.
-              3) Expand edge masks by adding all non-terminal states at the destination (Alt 6).
-              4) Collapse nodes to reduce the number of edges where it strictly decreases edges.
-              5) Recompute llm_bv_union and max_depth.
-              """
-              try:
-                  print("Optimizing masks (Alt 6) and reducing edges...", end='', flush=True)
-                  universe_states: Set[int] = self._compute_universe_lr_states()
-                  if not universe_states:
-                      print(" done (no LR states).", flush=True)
-                      return
-                  universe_rs: RangeSetABC = PyRangeSet.from_indices(sorted(universe_states))
-                  term_by_node: Dict[NodeID, RangeSetABC] = self._compute_terminal_sets(universe_rs, universe_states)
-                  self._apply_mask_expansion_alt6(term_by_node, universe_rs)
-                  removed = self._collapse_nodes_reduce_edges(term_by_node, universe_rs)
-                  # Refresh unions and max_depth metadata
-                  self._recompute_llm_bv_unions()
-                  self.max_depth = self._recompute_max_depth_from_arena()
-                  print(f" done. Nodes removed: {removed}.", flush=True)
-              except Exception as e:
-                  # Fail-safe: never let optimization break loading
-                  print(f" optimization skipped due to error: {e}", flush=True)
-
           def _compute_universe_lr_states(self) -> Set[int]:
-              """
-              Collect a conservative universe of LR states to use as the 'full' mask domain.
-              """
-              states: Set[int] = set()
-              # From parser table
-              for sid in self.parser_table.table.keys():
-                  states.add(int(sid))
-              for _from_state, row in self.parser_table.table.items():
-                  # shifts/splits
-                  for action in row.actions.values():
-                      if isinstance(action, int):  # Shift
-                          states.add(int(action))
-                      elif isinstance(action, Split):
-                          if action.shift is not None:
-                              states.add(int(action.shift))
-                  # gotos
-                  for to_state in row.gotos.values():
-                      states.add(int(to_state))
-              # From reverse_state_map
-              for k, preds in self.reverse_state_map.items():
-                  states.add(int(k))
-                  for p in preds:
-                      states.add(int(p))
-              # From arena edge masks
-              for node in self.arena.values():
-                  for (_pop, _llm_bv), dests in node.children:
-                      for _dest_id, state_bv in dests:
-                          for i in state_bv.to_indices():
-                              states.add(int(i))
-              return states
-
-          def _rs_equals(self, a: RangeSetABC, b: RangeSetABC) -> bool:
-              return a.difference(b).is_empty() and b.difference(a).is_empty()
+              return set(self.parser_table.table.keys())
 
           def _reverse_expand_n(self, base: Set[int], n: int) -> Set[int]:
               """
@@ -2627,263 +2484,350 @@ local_system:
                   cur = nxt
               return cur
 
-          def _compute_terminal_sets(
-              self,
-              universe_rs: RangeSetABC,
-              universe_set: Set[int],
-          ) -> Dict[NodeID, RangeSetABC]:
-              """
-              Terminal-set fixpoint:
-              - A state s is terminal at node v if there exists an outgoing edge e=(v --(pop, M)--> w)
-                such that reverse^pop({s}) intersects (M ∩ Term[w]) is non-empty.
-              - End nodes have all states terminal (universe).
-              Implementation ignores LLM token masks as specified.
-              """
-              # Build node-level adjacency (ignoring LLM tokens)
-              node_out: Dict[NodeID, List[Tuple[int, NodeID, RangeSetABC]]] = {}
-              node_in: Dict[NodeID, Set[NodeID]] = collections.defaultdict(set)
-              for nid, node in self.arena.items():
-                  edges: List[Tuple[int, NodeID, RangeSetABC]] = []
-                  for (pop, _llm_bv), dests in node.children:
-                      for dest_id, state_bv in dests:
-                          edges.append((int(pop), int(dest_id), state_bv))
-                          node_in[int(dest_id)].add(int(nid))
-                  node_out[int(nid)] = edges
+          # ===========================
+          # Graph optimization (Alt 6 + edge reduction Alt 2)
+          # ===========================
+          def _rs_equals(self, a: RangeSet, b: RangeSet) -> bool:
+              # Robust equality via mutual subset checks
+              return a.difference(b).is_empty() and b.difference(a).is_empty()
 
-              # Initialize terminal sets
-              term: Dict[NodeID, RangeSetABC] = {}
-              q: collections.deque = collections.deque()
-              for nid, node in self.arena.items():
-                  if node.clean_end:
-                      term[int(nid)] = universe_rs
-                      q.append(int(nid))
+          def _universe_lr_states_set(self) -> Set[int]:
+              return set(self._compute_universe_lr_states())
+
+          def _universe_lr_states_rangeset(self) -> StateIDSet:
+              return RangeSet.from_indices(sorted(self._compute_universe_lr_states()))
+
+          def _normalize_children_for_node(self, node: ArenaNode) -> None:
+              """
+              Merge child edges with identical (pop, dests) signature by uniting their llm_bv.
+              """
+              children = node.children
+              if not children:
+                  node.llm_bv_union = RangeSet.empty()
+                  return
+
+              # signature: (pop, ((dest_id, ((start,end),...)), ...))
+              groups: Dict[
+                  Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]],
+                  LLMTokenSet
+              ] = {}
+
+              for (pop, llm_bv), dests in children:
+                  dests_sig = tuple(sorted(
+                      (int(dest_id), tuple((int(a), int(b)) for (a, b) in state_bv.to_ranges()))
+                      for dest_id, state_bv in dests
+                  ))
+                  key = (int(pop), dests_sig)
+                  if key in groups:
+                      groups[key] = groups[key].union(llm_bv)
                   else:
-                      term[int(nid)] = PyRangeSet.empty()
+                      groups[key] = llm_bv
 
-              # Worklist propagation
-              while q:
-                  w = int(q.popleft())
-                  term_w = term[w]
-                  preds = node_in.get(w, set())
-                  if not preds:
+              new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+              llm_union = RangeSet.empty()
+              for (pop, dests_sig), llm_bv in groups.items():
+                  if llm_bv.is_empty():
                       continue
-                  for u in preds:
-                      add_rs: RangeSetABC = PyRangeSet.empty()
-                      for popn, dest_id, mask in node_out.get(u, []):
-                          if dest_id != w:
-                              continue
-                          cand = mask.intersection(term_w)
-                          if cand.is_empty():
-                              continue
-                          cand_set: Set[int] = set(int(i) for i in cand.to_indices())
-                          pre_set = self._reverse_expand_n(cand_set, int(popn))
-                          if pre_set:
-                              add_rs = add_rs.union(PyRangeSet.from_indices(sorted(pre_set)))
-                      if add_rs.is_empty():
-                          continue
-                      # Only add truly new bits
-                      new_bits = add_rs.difference(term[u])
-                      if not new_bits.is_empty():
-                          term[u] = term[u].union(new_bits)
-                          q.append(int(u))
-              return term
+                  llm_union = llm_union.union(llm_bv)
+                  dests_list: List[Tuple[int, StateIDSet]] = []
+                  for dest_id, ranges in dests_sig:
+                      dests_list.append((int(dest_id), RangeSet.from_ranges(list(ranges))))
+                  new_children.append(((int(pop), llm_bv), dests_list))
 
-          def _apply_mask_expansion_alt6(
-              self,
-              term_by_node: Dict[NodeID, RangeSetABC],
-              universe_rs: RangeSetABC,
-          ) -> None:
-              """
-              For each edge e=(A --(pop, M)--> B), expand M by adding all non-terminal states at B:
-              M := M ∪ (Universe \ Term[B]).
-              """
-              nonterm_cache: Dict[NodeID, RangeSetABC] = {}
-              for nid, node in self.arena.items():
-                  if not node.children:
-                      continue
-                  new_children = []
-                  for (pop, llm_bv), dests in node.children:
-                      new_dests: List[Tuple[int, RangeSetABC]] = []
-                      for dest_id, state_bv in dests:
-                          if dest_id not in nonterm_cache:
-                              nonterm_cache[dest_id] = universe_rs.difference(term_by_node.get(dest_id, PyRangeSet.empty()))
-                          expanded_bv = state_bv.union(nonterm_cache[dest_id])
-                          new_dests.append((int(dest_id), expanded_bv))
-                      new_children.append(((int(pop), llm_bv), new_dests))
-                  node.children = new_children
-
-          def _build_parents_map(self) -> Dict[NodeID, List[Dict[str, Any]]]:
-              """
-              Build a mapping: child_node_id -> list of parent edge records:
-              { 'a_id': A, 'pop': pop(A->child), 'llm': llm_bv(A->child), 'mask': state_bv(A->child for this child) }
-              """
-              parents: Dict[NodeID, List[Dict[str, Any]]] = collections.defaultdict(list)
-              for a_id, a_node in self.arena.items():
-                  for (pop, llm_bv), dests in a_node.children:
-                      for dest_id, state_bv in dests:
-                          parents[int(dest_id)].append({
-                              "a_id": int(a_id),
-                              "pop": int(pop),
-                              "llm": llm_bv,
-                              "mask": state_bv,
-                          })
-              return parents
-
-          def _collapse_nodes_reduce_edges(
-              self,
-              term_by_node: Dict[NodeID, RangeSetABC],
-              universe_rs: RangeSetABC,
-          ) -> int:
-              """
-              Reduce edges by collapsing intermediate nodes B into direct edges A->C when:
-                - B is not an end node,
-                - B has exactly one child entry with exactly one destination (C),
-                - B has at least one parent,
-                - Either pop(B->C)==0 (Replacement 2) OR for all parents A->B, mask(A->B) == Universe (Replacement 1).
-              For each parent A, add A->C with:
-                - llm_bv := llm(A->B) ∩ llm(B->C),
-                - pop := pop(A->B) + pop(B->C) if Replacement 1, else pop(A->B),
-                - mask := y (B->C mask) if Replacement 1, else mask(A->B) ∩ y,
-                - then mask := mask ∪ (Universe \ Term[C]) [Alt 6].
-              Remove all A->B edges for all parents and delete node B.
-              """
-              removed_nodes = 0
-              roots = set(int(r) for r in self.roots_map.values())
-              # Helper for deterministic sort
-              def _ranges_key(rs: RangeSetABC) -> Tuple[Tuple[int, int], ...]:
+              # Deterministic sort
+              def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
                   try:
                       return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
                   except Exception:
                       return ()
 
-              while True:
-                  parents_map = self._build_parents_map()
-                  progress = False
-                  # Iterate over a snapshot of node IDs to avoid dict-size-change issues
-                  for b_id, b_node in list(self.arena.items()):
-                      b_id = int(b_id)
-                      if b_id not in self.arena:
+              new_children.sort(
+                  key=lambda item: (
+                      int(item[0][0]),
+                      _ranges_key(item[0][1]),
+                      tuple(sorted(int(d[0]) for d in item[1])),
+                  )
+              )
+
+              node.children = new_children
+              node.llm_bv_union = llm_union
+
+          def _normalize_all_children(self) -> None:
+              for node in self.arena.values():
+                  self._normalize_children_for_node(node)
+
+          def _compute_terminal_states_by_node(self) -> Dict[NodeID, Set[int]]:
+              """
+              Compute, for each node, the set of LR states that are 'terminal' (can eventually
+              reach an end node) ignoring LLM tokens. Uses a fixpoint over the product graph.
+              """
+              arena = self.arena
+              if not arena:
+                  return {}
+
+              universe: Set[int] = self._universe_lr_states_set()
+
+              # Initialize terminal sets
+              terminal_by_node: Dict[NodeID, Set[int]] = {}
+              for nid, node in arena.items():
+                  if node.clean_end:
+                      terminal_by_node[int(nid)] = set(universe)
+                  else:
+                      terminal_by_node[int(nid)] = set()
+
+              # Build edges ignoring LLM tokens: (u) -> [(pop, v, mask_set), ...]
+              edges_by_node: Dict[NodeID, List[Tuple[int, NodeID, Set[int]]]] = {}
+              for u, node in arena.items():
+                  u = int(u)
+                  lst: List[Tuple[int, NodeID, Set[int]]] = []
+                  for (pop, _llm_bv), dests in node.children:
+                      for dest_id, state_bv in dests:
+                          mask_set = set(int(i) for i in state_bv.to_indices())
+                          lst.append((int(pop), int(dest_id), mask_set))
+                  edges_by_node[u] = lst
+
+              # Fixpoint iteration
+              changed = True
+              while changed:
+                  changed = False
+                  for u, lst in edges_by_node.items():
+                      if not lst:
                           continue
-                      if b_node.clean_end:
-                          continue
-                      if b_id in roots:
-                          # Root nodes are entry points; they typically have no parents, but be conservative.
-                          continue
-                      # Must have exactly one child entry and one destination
-                      if len(b_node.children) != 1:
-                          continue
-                      (pop_b, llm_bv_b), dests_b = b_node.children[0]
-                      pop_b = int(pop_b)
-                      if len(dests_b) != 1:
-                          continue
-                      c_id, y_mask = dests_b[0]
-                      c_id = int(c_id)
-                      parents_b = parents_map.get(b_id, [])
-                      if not parents_b:
-                          continue
-                      # Replacement condition:
-                      # - If pop_b == 0, Replacement 2 applicable for all parents.
-                      # - Else, all parents must have full-mask A->B (Replacement 1).
-                      if pop_b != 0:
-                          all_full = True
-                          for rec in parents_b:
-                              if not self._rs_equals(rec["mask"], universe_rs):
-                                  all_full = False
-                                  break
-                          if not all_full:
+                      base = terminal_by_node[u]
+                      accum = set(base)
+                      for pop, v, mask_set in lst:
+                          tv = terminal_by_node.get(int(v), set())
+                          if not tv:
                               continue
-                      # Prepare non-terminal filler for C (Alt 6)
-                      nonterm_c = universe_rs.difference(term_by_node.get(c_id, PyRangeSet.empty()))
-                      # Prepare aggregators per parent A
-                      # aggregator_by_A: A_id -> ( (pop_new, llm_ranges_tuple) -> { dest_id: state_bv } )
-                      aggregator_by_A: Dict[int, Dict[Tuple[int, Tuple[Tuple[int, int], ...]], Dict[int, RangeSetABC]]] = {}
-                      for rec in parents_b:
-                          a_id = int(rec["a_id"])
-                          pop_a = int(rec["pop"])
-                          llm_a: RangeSetABC = rec["llm"]
-                          x_mask: RangeSetABC = rec["mask"]
-                          # Compose LLM masks
-                          llm_inter = llm_a.intersection(llm_bv_b)
-                          if llm_inter.is_empty():
-                              # No tokens that make A->B->C feasible; removing A->B is still safe (no contribution to get_mask).
-                              # We just won't add a replacement edge for these tokens.
-                              pass
+                          intersect = mask_set.intersection(tv)
+                          if not intersect:
+                              continue
+                          pre = self._reverse_expand_n(intersect, int(pop))
+                          if pre:
+                              before = len(accum)
+                              accum.update(pre)
+                              if len(accum) > before:
+                                  # mark that u grew
+                                  pass
+                      if len(accum) > len(base):
+                          terminal_by_node[u] = accum
+                          changed = True
+              return terminal_by_node
+
+          def _optimize_state_masks_and_edges(self) -> None:
+              """
+              1) Expand state masks: For each edge to dest D, union in all NonTerminal(D) states.
+                 This pushes masks towards the full universe where safe (Alt 6).
+              2) Collapse chains A->B->C conservatively (Replacement 1) only when:
+                 - B is not an end node
+                 - B has exactly one unique destination C across all children
+                 - All incoming edges to B have full (universe) masks to B
+                 - The collapse strictly reduces edge count: (incoming_count == 1) or (outgoing_group_count == 1)
+                 LLM tokens are preserved by intersecting A->B.llm_bv and B->C.llm_bv for the new A->C edge.
+              """
+              print("Optimizing state masks and collapsing edges...", end='', flush=True)
+
+              if not self.arena:
+                  print(" done (empty arena).")
+                  return
+
+              # Universe and terminal sets
+              universe_rs: StateIDSet = self._universe_lr_states_rangeset()
+              universe_set: Set[int] = set(universe_rs.to_indices())
+              terminal_by_node: Dict[NodeID, Set[int]] = self._compute_terminal_states_by_node()
+              terminal_rs_by_node: Dict[NodeID, StateIDSet] = {
+                  nid: RangeSet.from_indices(sorted(list(s)))
+                  for nid, s in terminal_by_node.items()
+              }
+
+              # Step 1: Expand state masks by adding NonTerminal(D) for destination D
+              for nid, node in list(self.arena.items()):
+                  if not node.children:
+                      continue
+                  new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+                  for (pop, llm_bv), dests in node.children:
+                      new_dests: List[Tuple[int, StateIDSet]] = []
+                      for dest_id, state_bv in dests:
+                          term_rs = terminal_rs_by_node.get(int(dest_id), universe_rs)
+                          nonterm_rs = universe_rs.difference(term_rs)
+                          expanded_bv = state_bv.union(nonterm_rs)
+                          new_dests.append((int(dest_id), expanded_bv))
+                      new_children.append(((int(pop), llm_bv), new_dests))
+                  node.children = new_children
+
+              # Normalize after mask expansions
+              self._normalize_all_children()
+              self._recompute_llm_bv_unions()
+
+              # Step 2: Bottom-up collapses with Replacement 1 where beneficial
+              roots_set: Set[int] = set(int(v) for v in self.roots_map.values())
+
+              def collect_incoming_edges(target_nid: int) -> List[Tuple[int, int, int]]:
+                  """
+                  Return list of (A_node_id, child_idx, dest_idx) such that A.children[child_idx]
+                  has a dest entry at dest_idx pointing to target_nid. Computed on the fly.
+                  """
+                  incoming: List[Tuple[int, int, int]] = []
+                  for aid, anode in self.arena.items():
+                      aid_int = int(aid)
+                      for ci, child in enumerate(anode.children):
+                          _sig, dests = child
+                          for di, (dest_id, _bv) in enumerate(dests):
+                              if int(dest_id) == int(target_nid):
+                                  incoming.append((aid_int, int(ci), int(di)))
+                  return incoming
+
+              def rs_is_universe(rs: RangeSet) -> bool:
+                  return self._rs_equals(rs, universe_rs)
+
+              changed_any = True
+              while changed_any:
+                  changed_any = False
+                  # Use current depths (may change after removals); default to 0 if missing
+                  depths = self.max_depth or {}
+                  node_order = sorted(self.arena.keys(), key=lambda x: int(depths.get(int(x), 0)))
+                  for b in list(node_order):
+                      b = int(b)
+                      if b not in self.arena:
+                          continue
+                      bnode = self.arena[b]
+                      if bnode.clean_end:
+                          continue
+                      # Determine unique destination across all children
+                      dest_nodes: Set[int] = set()
+                      for (_sig, dests) in bnode.children:
+                          for (did, _bv) in dests:
+                              dest_nodes.add(int(did))
+                      if not dest_nodes:
+                          # Orphan node (no outgoing edges). If not root and no incoming, remove it.
+                          incoming = collect_incoming_edges(b)
+                          if not incoming and (b not in roots_set):
+                              # Remove b
+                              del self.arena[b]
+                              if b in self.max_depth:
+                                  del self.max_depth[b]
+                              changed_any = True
+                          continue
+                      if len(dest_nodes) != 1:
+                          continue
+                      c = next(iter(dest_nodes))
+                      if c == b:
+                          # self-loop; skip
+                          continue
+
+                      # Collect B->C groups (must be only destination for each child)
+                      bc_groups: List[Tuple[int, LLMTokenSet, StateIDSet]] = []
+                      valid_bc = True
+                      for (pop_m, llm_bv_bc), dests in bnode.children:
+                          # All dests must be exactly to c
+                          if len(dests) != 1 or int(dests[0][0]) != int(c):
+                              valid_bc = False
+                              break
+                          y_bv = dests[0][1]
+                          bc_groups.append((int(pop_m), llm_bv_bc, y_bv))
+                      if not valid_bc:
+                          continue
+                      k_bc = len(bc_groups)
+                      incoming = collect_incoming_edges(b)
+                      in_count = len(incoming)
+
+                      if in_count == 0:
+                          # If B has no incoming edges and is not a root, we can safely remove it and its outgoing edges.
+                          if b not in roots_set:
+                              bnode.children = []
+                              del self.arena[b]
+                              if b in self.max_depth:
+                                  del self.max_depth[b]
+                              changed_any = True
+                          continue
+
+                      # Check all incoming A->B masks are universe
+                      all_in_masks_universe = True
+                      for (aid, ci, di) in incoming:
+                          anode = self.arena.get(aid)
+                          if anode is None:
+                              all_in_masks_universe = False
+                              break
+                          _sig, dests = anode.children[ci]
+                          _did, x_bv = dests[di]
+                          if not rs_is_universe(x_bv):
+                              all_in_masks_universe = False
+                              break
+                      if not all_in_masks_universe:
+                          continue
+
+                      # Ensure net edge reduction: in_count == 1 or k_bc == 1
+                      if not (in_count == 1 or k_bc == 1):
+                          continue
+
+                      # Perform collapse: for each incoming A->B, create A->C edges based on llm_bv intersections
+                      nodes_to_normalize: Set[int] = set()
+                      for (aid, ci, di) in incoming:
+                          anode = self.arena.get(aid)
+                          if anode is None:
+                              continue
+                          (pop_n, llm_bv_ab), dests = anode.children[ci]
+                          # For each B->C group, intersect tokens and add A->C edge
+                          for (pop_m, llm_bv_bc, y_bv) in bc_groups:
+                              inter_llm = llm_bv_ab.intersection(llm_bv_bc)
+                              if inter_llm.is_empty():
+                                  continue
+                              new_pop = int(pop_n) + int(pop_m)
+                              # Append new edge ((new_pop, inter_llm), [(c, y_bv)])
+                              anode.children.append(((new_pop, inter_llm), [(int(c), y_bv)]))
+                              nodes_to_normalize.add(aid)
+
+                      # Remove all incoming A->B dest entries
+                      for (aid, ci, di) in incoming:
+                          if aid not in self.arena:
+                              continue
+                          anode = self.arena[aid]
+                          if ci >= len(anode.children):
+                              continue
+                          (pop_n, llm_bv_ab), dests = anode.children[ci]
+                          # Filter out the B entry
+                          new_dests = [(did, bv) for (did, bv) in dests if int(did) != int(b)]
+                          if not new_dests:
+                              # Remove the entire child edge group if no destinations left
+                              # Guard against index shifts: rebuild children without index 'ci'
+                              new_children = []
+                              for idx, item in enumerate(anode.children):
+                                  if idx != ci:
+                                      new_children.append(item)
+                              anode.children = new_children
                           else:
-                              # Compose popn and mask
-                              if pop_b == 0:
-                                  # Replacement 2: pop stays pop_a, mask becomes x ∩ y
-                                  pop_new = pop_a
-                                  mask_new = x_mask.intersection(y_mask)
-                              else:
-                                  # Replacement 1: pop is pop_a + pop_b, mask is y
-                                  pop_new = pop_a + pop_b
-                                  mask_new = y_mask
-                              # Apply Alt 6 to the new mask
-                              mask_new = mask_new.union(nonterm_c)
-                              key = (int(pop_new), tuple(_ranges_key(llm_inter)))
-                              aggregator_by_A.setdefault(a_id, {})
-                              aggregator_by_A[a_id].setdefault(key, {})
-                              # Merge per-destination
-                              if c_id in aggregator_by_A[a_id][key]:
-                                  aggregator_by_A[a_id][key][c_id] = aggregator_by_A[a_id][key][c_id].union(mask_new)
-                              else:
-                                  aggregator_by_A[a_id][key][c_id] = mask_new
+                              anode.children[ci] = ((pop_n, llm_bv_ab), new_dests)
+                          nodes_to_normalize.add(aid)
 
-                      # For each parent A, rebuild its children: remove all A->B edges and add replacements
-                      for a_id, grouped in aggregator_by_A.items():
-                          a_node = self.arena.get(int(a_id))
-                          if not a_node:
-                              continue
-                          # Start with existing edges excluding those pointing to B
-                          merged: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], Dict[int, RangeSetABC]] = {}
-                          for (pop, llm_bv), dests in a_node.children:
-                              k = (int(pop), tuple(_ranges_key(llm_bv)))
-                              if k not in merged:
-                                  merged[k] = {}
-                              for dest_id, state_bv in dests:
-                                  if int(dest_id) == b_id:
-                                      # Drop edges to B
-                                      continue
-                                  if int(dest_id) in merged[k]:
-                                      merged[k][int(dest_id)] = merged[k][int(dest_id)].union(state_bv)
-                                  else:
-                                      merged[k][int(dest_id)] = state_bv
-                          # Add replacements
-                          for key, dest_map in grouped.items():
-                              if key not in merged:
-                                  merged[key] = {}
-                              for dest_id, state_bv in dest_map.items():
-                                  if int(dest_id) in merged[key]:
-                                      merged[key][int(dest_id)] = merged[key][int(dest_id)].union(state_bv)
-                                  else:
-                                      merged[key][int(dest_id)] = state_bv
-                          # Rebuild children list
-                          new_children: List[Tuple[Tuple[int, RangeSetABC], List[Tuple[int, RangeSetABC]]]] = []
-                          for (pop_new, llm_ranges), dest_map in merged.items():
-                              llm_rs = PyRangeSet.from_ranges(list(llm_ranges))
-                              dest_list = [(int(did), dbv) for did, dbv in dest_map.items()]
-                              new_children.append(((int(pop_new), llm_rs), dest_list))
-                          # Deterministic sort
-                          new_children.sort(
-                              key=lambda item: (
-                                  int(item[0][0]),
-                                  _ranges_key(item[0][1]),
-                                  tuple(sorted(int(d[0]) for d in item[1])),
-                              )
-                          )
-                          a_node.children = new_children
+                      # Remove B->C edges and possibly node B (if not a root)
+                      if b in self.arena:
+                          self.arena[b].children = []
+                      # If B is not a root and there are no remaining incoming edges, remove B
+                      incoming_after = collect_incoming_edges(b)
+                      if (b not in roots_set) and (not incoming_after):
+                          if b in self.arena:
+                              del self.arena[b]
+                          if b in self.max_depth:
+                              del self.max_depth[b]
 
-                      # Remove node B entirely
-                      if b_id in self.arena:
-                          del self.arena[b_id]
-                      removed_nodes += 1
-                      progress = True
-                  if not progress:
-                      break
-              return removed_nodes
+                      # Normalize changed nodes and recompute unions
+                      for aid in nodes_to_normalize:
+                          if aid in self.arena:
+                              self._normalize_children_for_node(self.arena[aid])
+                      self._recompute_llm_bv_unions()
+                      # Recompute depths since graph changed
+                      self.max_depth = self._recompute_max_depth_from_arena()
+                      changed_any = True
+
+              # Final normalization and metrics recompute
+              self._normalize_all_children()
+              self._recompute_llm_bv_unions()
+              self.max_depth = self._recompute_max_depth_from_arena()
+              print(" done.", flush=True)
+
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: llm
+  prev_apply_mode: git-llm
 system:
   message: |-
     You are a helpful assistant.
@@ -2891,7 +2835,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -2902,7 +2846,7 @@ system:
     - cp
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: llm
+  apply_mode: git-llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -2932,16 +2876,11 @@ messages:
       import heapq
       import collections
       import time
-      import random
-      from typing import Dict, List, Tuple, Optional, Union, Any, TypedDict, Set
+      from typing import Dict, List, Tuple, Optional, Union, Any, Set
       from dataclasses import dataclass, field
 
-      from tqdm import tqdm
-
       from ..common_interface import GraphProvider
-      from ..range_set.range_set_abc import RangeSet as RangeSetABC
-      from ..range_set.bitset_range_set import BitsetRangeSet
-      from ..range_set.py_range_set import PyRangeSet
+      from ..range_set.py_range_set import PyRangeSet as RangeSet
       import _sep1 as ffi
       from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
       # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
@@ -2949,10 +2888,10 @@ messages:
 
       NodeID = int
 
-      # Type aliases for different uses of PyRangeSet to improve clarity.
-      LLMTokenSet = RangeSetABC
-      StateIDSet = RangeSetABC
-      TerminalIdSet = RangeSetABC
+      # Type aliases for different uses of RangeSet to improve clarity.
+      LLMTokenSet = RangeSet
+      StateIDSet = RangeSet
+      TerminalIdSet = RangeSet
 
 
       # Add a dummy profiler for when not running under kernprof
@@ -2996,7 +2935,7 @@ messages:
       @dataclass
       class ArenaNode:
           children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = field(default_factory=list)
-          llm_bv_union: LLMTokenSet = field(default_factory=PyRangeSet.empty)
+          llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
           clean_end: bool = False
 
       @dataclass(frozen=True, eq=False)
@@ -3086,21 +3025,21 @@ messages:
                   children = node.get("children") or []
                   if not children:
                       node["children"] = []
-                      node["llm_bv_union"] = PyRangeSet.empty()
+                      node["llm_bv_union"] = RangeSet.empty()
                       continue
 
                   new_children = []
-                  llm_bv_union: LLMTokenSet = PyRangeSet.empty()
+                  llm_bv_union: LLMTokenSet = RangeSet.empty()
                   for edge_key, dest_map in children:
                       pop, llm_bv_json = edge_key
                       llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
-                      # Convert to PyRangeSet for ffi-free operations in commit/get_mask
-                      llm_bv: LLMTokenSet = PyRangeSet.from_ranges(llm_bv_bitset.to_ranges())
+                      # Convert to RangeSet for ffi-free operations in commit/get_mask
+                      llm_bv: LLMTokenSet = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
                       llm_bv_union = llm_bv_union.union(llm_bv)
                       new_dest_map = []
                       for dest_idx, state_bv_json in dest_map:
                           state_bv_bitset = bs_from_json(dumps(state_bv_json))
-                          state_bv: StateIDSet = PyRangeSet.from_ranges(state_bv_bitset.to_ranges())
+                          state_bv: StateIDSet = RangeSet.from_ranges(state_bv_bitset.to_ranges())
                           new_dest_map.append((int(dest_idx), state_bv))
                       new_children.append(((int(pop), llm_bv), new_dest_map))
                   node["children"] = new_children
@@ -3109,7 +3048,7 @@ messages:
               arena: Dict[NodeID, ArenaNode] = {
                   uid: ArenaNode(
                       children=node_data.get("children", []),
-                      llm_bv_union=node_data.get("llm_bv_union", PyRangeSet.empty()),
+                      llm_bv_union=node_data.get("llm_bv_union", RangeSet.empty()),
                       clean_end=node_data.get("value", {}).get("clean_end", False),
                   )
                   for uid, node_data in arena_dict.items()
@@ -3174,29 +3113,29 @@ messages:
                   all_terminals.update(row.actions.keys())
               if ignore_terminal_id is not None:
                   all_terminals.add(ignore_terminal_id)
-              all_terminals_bitset = PyRangeSet.from_indices(list(all_terminals))
+              all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
 
-              initial_acc = PyAcc(terminals_union={}, llm_mask=PyRangeSet.empty())
+              initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
               initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
               state = {tokenizer_initial_state: initial_gss}
 
               id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-              # Convert possible_matches_cache to PyRangeSet
+              # Convert possible_matches_cache to RangeSet
               pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
               pmc_rs: Dict[int, Dict[int, LLMTokenSet]] = {}
               for tsid, inner in pmc_ffi.items():
                   mapped: Dict[int, LLMTokenSet] = {}
                   for term_id, bit in inner.items():
-                      mapped[int(term_id)] = PyRangeSet.from_ranges(bit.to_ranges())
+                      mapped[int(term_id)] = RangeSet.from_ranges(bit.to_ranges())
                   pmc_rs[int(tsid)] = mapped
               possible_matches_cache = pmc_rs
               internal_to_original_map_raw = constraint.internal_to_original_map()
               internal_to_original_map = {
                   k: {v} for k, v in internal_to_original_map_raw.items()
               }
-              # Convert universe LLM tokens bitset to PyRangeSet
+              # Convert universe LLM tokens bitset to RangeSet
               all_internal = constraint.all_internal_llm_tokens_bitset()
-              all_internal_llm_tokens_bitset = PyRangeSet.from_ranges(all_internal.to_ranges())
+              all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
 
               model = Model(
                   arena=arena,
@@ -3220,8 +3159,6 @@ messages:
               model._merge_equivalent_llm_tokens()
               model._reorder_llm_tokens_for_range_minimization()
 
-              # model._convert_to_bitset_range_set()
-
               return model
 
           @profile
@@ -3229,7 +3166,7 @@ messages:
               def predicate(acc: PyAcc) -> bool:
                   disallowed_terminals_map = acc.terminals_union
                   for state_id, matched_bv in terminals_map.items():
-                      disallowed_for_state = disallowed_terminals_map.get(state_id, BitsetRangeSet.empty())
+                      disallowed_for_state = disallowed_terminals_map.get(state_id, RangeSet.empty())
                       if not matched_bv.intersection(disallowed_for_state).is_empty():
                           return False
                   return True
@@ -3239,9 +3176,9 @@ messages:
           def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
               def apply_map(acc: PyAcc) -> PyAcc:
                   old_map = acc.terminals_union
-                  new_bvs: Dict[int, TerminalIdSet] = collections.defaultdict(BitsetRangeSet.empty)
+                  new_bvs: Dict[int, TerminalIdSet] = collections.defaultdict(RangeSet.empty)
                   for old_sid, new_sid in state_map.items():
-                      bv_source = old_map.get(old_sid, BitsetRangeSet.empty())
+                      bv_source = old_map.get(old_sid, RangeSet.empty())
                       new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
 
                   return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
@@ -3251,8 +3188,8 @@ messages:
           def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
               def apply_disallow(acc: PyAcc) -> PyAcc:
                   current_map = acc.terminals_union.copy()
-                  curr_bv = current_map.get(state_id, BitsetRangeSet.empty())
-                  to_add = BitsetRangeSet.from_indices([terminal_id])
+                  curr_bv = current_map.get(state_id, RangeSet.empty())
+                  to_add = RangeSet.from_indices([terminal_id])
                   new_bv = curr_bv.union(to_add)
                   current_map[state_id] = new_bv
                   return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
@@ -3293,7 +3230,7 @@ messages:
                   if end_state is not None:
                       state_map[tokenizer_sid] = end_state
                   matched_terminals = [terminal_id for terminal_id, _ in matches]
-                  terminals_map[tokenizer_sid] = BitsetRangeSet.from_indices(matched_terminals)
+                  terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
 
               # Prune and map per-state GSS
               temp_states: Dict[int, GSS] = {}
@@ -3408,7 +3345,7 @@ messages:
               state_map: Dict[int, GSS] = self.state
 
               all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
-              final_mask: LLMTokenSet = BitsetRangeSet.empty()
+              final_mask: LLMTokenSet = RangeSet.empty()
 
               # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
               values: Dict[NodeID, GSS] = {}
@@ -3426,7 +3363,7 @@ messages:
               # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
               def initialize_acc(acc: PyAcc) -> PyAcc:
                   # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                  disallowed_llm_mask: LLMTokenSet = BitsetRangeSet.empty()
+                  disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
                   disallowed_map = acc.terminals_union
 
                   for tsid, disallowed_terminals in disallowed_map.items():
@@ -3476,7 +3413,7 @@ messages:
 
                   # Zombie traversal avoidance
                   a_node = arena.get(node)
-                  node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else BitsetRangeSet.empty()
+                  node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
                   potential_new_tokens = node_llm_bv_union.difference(final_mask)
                   if potential_new_tokens.is_empty():
                       continue
@@ -3552,7 +3489,7 @@ messages:
                       original_indices.extend(list(self.internal_to_original_map[i]))
 
 
-              return BitsetRangeSet.from_indices(original_indices)
+              return RangeSet.from_indices(original_indices)
 
           # ===========================
           # Optimization/conversion API
@@ -3573,11 +3510,11 @@ messages:
           def _merge_equivalent_llm_tokens(self) -> None:
               """
               Merge internal LLM tokens that are indistinguishable across the entire model:
-              two tokens are "equivalent" if they occur together in every PyRangeSet occurrence
+              two tokens are "equivalent" if they occur together in every RangeSet occurrence
               the model uses (arena edge llm_bv, node llm_bv_union, and possible_matches_cache).
 
               Implementation:
-              - Build a family of all PyRangeSet occurrences that reference internal tokens.
+              - Build a family of all RangeSet occurrences that reference internal tokens.
               - For each internal token, build a signature: the ordered list of set indices in
                 which it appears.
               - Group tokens by identical signatures; each group is merged into its smallest-id
@@ -3668,53 +3605,10 @@ messages:
               ...
               print(" done.")
 
-          def _convert_to_bitset_range_set(self) -> None:
-              """
-              Converts all PyRangeSet instances (which are py_range_set.PyRangeSet during
-              optimization) to bitset_range_set.BitsetRangeSet for runtime efficiency.
-              """
-              print("Converting PyRangeSet implementations to BitsetRangeSet...", end='', flush=True)
-
-              def convert(rs: RangeSetABC) -> BitsetRangeSet:
-                  if isinstance(rs, BitsetRangeSet):
-                      return rs
-                  return BitsetRangeSet.from_ranges(rs.to_ranges())
-
-              # 1. Convert arena
-              for node in self.arena.values():
-                  new_children = []
-                  for (pop, llm_bv), dests in node.children:
-                      new_dests = []
-                      for dest_idx, state_bv in dests:
-                          new_dests.append((dest_idx, convert(state_bv)))
-                      new_children.append(((pop, convert(llm_bv)), new_dests))
-                  node.children = new_children
-                  node.llm_bv_union = convert(node.llm_bv_union)
-
-              # 2. Convert possible_matches_cache
-              if self.possible_matches_cache:
-                  for tsid, inner in self.possible_matches_cache.items():
-                      for term_id, llm_bv in inner.items():
-                          inner[term_id] = convert(llm_bv)
-
-              # 3. Convert top-level bitsets
-              self.all_internal_llm_tokens_bitset = convert(self.all_internal_llm_tokens_bitset)
-              self.all_terminals_bitset = convert(self.all_terminals_bitset)
-
-              # 4. Convert GSS accumulators in self.state
-              def convert_acc(acc: PyAcc) -> PyAcc:
-                  new_terminals_union = {
-                      state_id: convert(term_set)
-                      for state_id, term_set in acc.terminals_union.items()
-                  }
-                  return PyAcc(terminals_union=new_terminals_union, llm_mask=convert(acc.llm_mask))
-              self.state = {tsid: gss.apply(convert_acc) for tsid, gss in self.state.items()}
-              print(" done.")
-
           def _reorder_llm_tokens_for_range_minimization(self) -> None:
               """
               Permute internal LLM token IDs to reduce the number of ranges present in
-              all PyRangeSet occurrences across the model (arena edges, unions, and possible_matches_cache).
+              all RangeSet occurrences across the model (arena edges, unions, and possible_matches_cache).
               External token IDs remain unchanged; we only adjust internal indices used in RangeSets.
 
               Heuristic:
@@ -3941,7 +3835,7 @@ messages:
               based on the union of llm_bvs of its direct children edges.
               """
               for node in self.arena.values():
-                  union_bv: LLMTokenSet = PyRangeSet.empty()
+                  union_bv: LLMTokenSet = RangeSet.empty()
                   for (_pop, llm_bv), _dests in node.children:
                       union_bv = union_bv.union(llm_bv)
                   node.llm_bv_union = union_bv
@@ -4007,8 +3901,8 @@ messages:
                       return s
                   new_indices = [old_to_new_map[i] for i in s.to_indices() if i in old_to_new_map]
                   if not new_indices:
-                      return PyRangeSet.empty()
-                  return PyRangeSet.from_indices(sorted(new_indices))
+                      return RangeSet.empty()
+                  return RangeSet.from_indices(sorted(new_indices))
 
               # Remap possible_matches_cache
               if self.possible_matches_cache:
@@ -4033,7 +3927,7 @@ messages:
                   groups: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = collections.defaultdict(set)
                   for (pop, llm_bv), dests in children:
                       # Sort dests for a canonical signature. Each dest is (dest_id, state_bv).
-                      # state_bv is a PyRangeSet, so we use its ranges for the signature.
+                      # state_bv is a RangeSet, so we use its ranges for the signature.
                       dests_sig = tuple(sorted(
                           (dest_id, tuple(state_bv.to_ranges())) for dest_id, state_bv in dests
                       ))
@@ -4042,17 +3936,17 @@ messages:
 
                   # Rebuild children with remapped tokens
                   new_children = []
-                  llm_union = PyRangeSet.empty()
+                  llm_union = RangeSet.empty()
                   for (pop, dests_sig), old_tokens in groups.items():
                       new_tokens = {old_to_new_map[t] for t in old_tokens if t in old_to_new_map}
                       if not new_tokens:
                           continue
 
-                      new_llm_bv = PyRangeSet.from_indices(sorted(list(new_tokens)))
+                      new_llm_bv = RangeSet.from_indices(sorted(list(new_tokens)))
                       llm_union = llm_union.union(new_llm_bv)
                       # Convert dests_sig back to list of (int, StateIDSet)
                       dests_list = [
-                          (dest_id, PyRangeSet.from_ranges(list(ranges)))
+                          (dest_id, RangeSet.from_ranges(list(ranges)))
                           for dest_id, ranges in dests_sig
                       ]
                       new_children.append(((pop, new_llm_bv), dests_list))
@@ -4104,8 +3998,8 @@ messages:
                       ii = int(i)
                       mapped.add(old_to_new_map.get(ii, ii))
                   if not mapped:
-                      return PyRangeSet.empty()
-                  return PyRangeSet.from_indices(sorted(mapped))
+                      return RangeSet.empty()
+                  return RangeSet.from_indices(sorted(mapped))
 
               # Remap possible_matches_cache
               if self.possible_matches_cache:
@@ -4151,17 +4045,17 @@ messages:
 
                   # Rebuild children and union
                   new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
-                  llm_union: LLMTokenSet = PyRangeSet.empty()
+                  llm_union: LLMTokenSet = RangeSet.empty()
 
                   for (pop, dests_sig), tokens_set in groups.items():
                       if not tokens_set:
                           continue
-                      llm_bv_new = PyRangeSet.from_indices(sorted(tokens_set))
+                      llm_bv_new = RangeSet.from_indices(sorted(tokens_set))
                       llm_union = llm_union.union(llm_bv_new)
 
                       dests_list: List[Tuple[int, StateIDSet]] = []
                       for dest_id, ranges in dests_sig:
-                          dests_list.append((int(dest_id), PyRangeSet.from_ranges(list(ranges))))
+                          dests_list.append((int(dest_id), RangeSet.from_ranges(list(ranges))))
                       new_children.append(((int(pop), llm_bv_new), dests_list))
 
                   # Deterministic sort
@@ -4194,6 +4088,25 @@ messages:
                           new_internal_to_original_map[rep] = set()
                       new_internal_to_original_map[rep].update(orig_set)
                   self.internal_to_original_map = new_internal_to_original_map
+
+          def _compute_universe_lr_states(self) -> Set[int]:
+              return set(self.parser_table.table.keys())
+
+          def _reverse_expand_n(self, base: Set[int], n: int) -> Set[int]:
+              """
+              Apply the reverse_state_map n times to a set of states.
+              """
+              if not base or n <= 0:
+                  return set(base)
+              cur = set(base)
+              for _ in range(n):
+                  nxt: Set[int] = set()
+                  for s in cur:
+                      nxt.update(self.reverse_state_map.get(int(s), set()))
+                  if not nxt:
+                      return set()
+                  cur = nxt
+              return cur
 
       ```
     metadata:
@@ -4340,450 +4253,445 @@ messages:
 
       Implement this in full.
       Run the optimization method after `_reorder_llm_tokens_for_range_minimization` so we're dealing with fewer LLM tokens.
+
+      Remember: I've described the algorithm *for a single LLM token*.
+      To generalize it to our graph, we need to take extra care.
+      We can't simply *ignore* LLM tokens.
+      We could perhaps do it by imagining a unique graph for each LLM token, retaining only edges that contain that token; a unique input graph, a unique output graph. And then somehow we merge them. But that'd be *too hard*...
+      Perhaps we should, to start with, rewrite the children in the form
+      - `LLM token -> dest -> popn -> state mask`.
     metadata:
   - user: |-
-      Mode instruction: For this turn, produce instructions only (no full code files, no diffs).
-                  - Give concrete, step-by-step edits the user can apply.
-                  - Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - Do NOT include full files or git diffs unless explicitly requested in this same message.
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
                   Additional general constraints:
       - Do not split your response across multiple messages.
       - Avoid local cache/config advice; focus on actionable fixes or outputs.
       - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
     metadata:
       kind: mode-guidance
-      mode: llm
+      mode: git-llm
       phase: default
   - assistant: |-
-      Below are the concrete steps and the corresponding git patches to implement the requested optimization:
+      Below are the concrete steps and the corresponding diffs to add state-mask and edge optimizations to your model, following the plan:
+
+      - Goal 1 (Alt 6): expand edge state masks by adding all non-terminal states at the destination, thereby turning many masks into the full universe where safe.
+      - Goal 2 (Alt 2): collapse chains A -> B -> C using Replacement 1 (only when all incoming A -> B masks are full) and only when it strictly reduces the number of edges (incoming_count == 1 or outgoing_group_count == 1). This is done bottom-up and generalized to LLM tokens by taking llm_bv intersections.
 
       Step-by-step instructions
 
-      1) Add a new optimization pipeline to Model
-      - Implement a new method _optimize_masks_and_edges_alt6 that:
-        - Computes the universe of LR states.
-        - Computes per-node terminal LR state sets via a monotone fixed-point (bottom-up) using the reverse_state_map and ignoring LLM tokens.
-        - Expands every edge’s state mask with all non-terminal states of its destination (Goal 1, Alt 6).
-        - Collapses nodes to reduce edges (Goal 2, Alt 2), but only when it strictly reduces edges:
-          - Only collapse a node B if:
-            - B is not an end node.
-            - B has exactly one outgoing child entry with exactly one destination (to C).
-            - B has at least one incoming edge.
-            - Either popn(B->C) == 0 (Replacement 2 can be applied for all parents), or for every incoming A->B edge, its mask is a full mask over the LR state universe (Replacement 1 can be applied for all parents).
-          - For each parent A, replace A->B and B->C by A->C with:
-            - LLM mask: intersection(llm(A->B), llm(B->C))
-            - popn: pop(A->B) + pop(B->C) for Replacement 1, or pop(A->B) for Replacement 2 (m == 0).
-            - state mask: y (mask of B->C) for Replacement 1, or intersection(x, y) for Replacement 2.
-            - Then expand the new mask with non-terminal states at C (Alt 6).
-          - Remove all A->B edges for all parents and remove node B from the arena.
-        - Recompute node llm_bv_unions and max_depth at the end of optimization.
+      File to edit: python/aug25/models/precompute3_model_pure_python.py
 
-      2) Implement helpers used by the optimization
-      - Add:
-        - _compute_universe_lr_states to gather all LR states present.
-        - _compute_terminal_sets to compute per-node terminal LR states using reverse_state_map and a worklist.
-        - _apply_mask_expansion_alt6 to fill edge masks with non-terminal states at their destination.
-        - _collapse_nodes_reduce_edges for the edge-replacement logic described above.
-        - Small helpers for RangeSet equality and reverse expansion.
+      1) Add optimization helpers to the Model class:
+         - A method to normalize a node’s children by merging edges with identical signatures (same pop and dests), uniting their llm_bv. This reduces duplicate edges after modifications.
+         - A fixpoint-based solver to compute, for every node, which LR states are terminal (i.e., can eventually reach an end node) ignoring LLM tokens.
+         - Methods to:
+           - Expand state masks (Alt 6): for each edge’s destination node, union the non-terminal LR states into the edge’s state mask.
+           - Attempt collapsing nodes B with unique outgoing destination C (and B not end), if all incoming edges use full masks; only when incoming_count == 1 or outgoing_group_count == 1 to guarantee a net reduction of edge count. This preserves LLM token correctness by intersecting llm_bv from A->B and B->C when creating A->C edges.
+         - A method _optimize_state_masks_and_edges to orchestrate all the above:
+           - Compute terminal state sets.
+           - Expand masks bottom-up (safe, behavior-preserving).
+           - Repeatedly attempt node collapses bottom-up until no changes occur.
+           - Normalize children and recompute llm_bv_unions and max_depth.
 
-      3) Call the optimization
-      - Invoke model._optimize_masks_and_edges_alt6() after model._reorder_llm_tokens_for_range_minimization() inside from_json_string.
+      2) Wire the optimizer to run after token reordering:
+         - In Model.from_json_string, after model._reorder_llm_tokens_for_range_minimization(), call model._optimize_state_masks_and_edges().
 
-      4) Determinism & consistency
-      - When rebuilding children lists for parents:
-        - Merge edges by (popn, llm_bv) and accumulate multiple dests with unioned masks.
-        - Sort children deterministically (same style as existing code).
-      - After all modifications:
-        - Call _recompute_llm_bv_unions to refresh per-node LLM unions.
-        - Update self.max_depth via _recompute_max_depth_from_arena for get_mask traversal ordering heuristics.
+      3) Notes on correctness and safety:
+         - The terminal solver ignores LLM tokens for a conservative approximation: a state is considered terminal if it can reach an end via any token. This yields fewer non-terminals, thus fewer mask expansions, and is safe.
+         - Expanding state masks by adding non-terminal states at the destination does not affect behavior: terminal propagation depends only on the intersection of destination’s terminal set with the mask; adding non-terminal states doesn’t change that intersection.
+         - Collapsing A->B->C applies only when all incoming A->B masks are full and when the collapse strictly reduces total edge count, and it preserves LLM token correctness via llm_bv intersection.
 
-      5) Notes and assumptions
-      - This implementation deliberately ignores LLM tokens for terminal-set computation (as discussed in your spec) but correctly composes LLM masks during edge replacement (via intersection of A->B and B->C masks).
-      - We use PyRangeSet operations, which is consistent with the current runtime.
-      - We only apply node-collapsing when it provably reduces edges (node B has exactly one outgoing child entry with one dest), avoiding the “2n+m” traversal cost pitfall.
+      4) Implementation details you’ll see in the patch:
+         - _normalize_children_for_node and _normalize_all_children merge identical (pop, dests) groups by uniting their llm_bv.
+         - _compute_terminal_states_by_node performs a fixpoint over the “product” graph induced by reverse_state_map and edge masks (ignoring LLM tokens).
+         - _optimize_state_masks_and_edges applies mask expansion and controlled edge collapsing, with repeated passes until stable.
+         - Equality of RangeSets is performed via difference checks (rs1 ⊆ rs2 and rs2 ⊆ rs1) to be robust.
 
       Git diffs
 
-      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
       ```diff
-      *** Begin Patch
-      *** Update File: python/aug25/models/precompute3_model_pure_python.py
-      @@
+      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      index 3e9f4a3..c3e48a1 100644
+      --- a/python/aug25/models/precompute3_model_pure_python.py
+      +++ b/python/aug25/models/precompute3_model_pure_python.py
+      @@ -1,4 +1,4 @@
+      -from __future__ import annotations
+      +from __future__ import annotations
+       
+       import json
+       import heapq
+      @@ -374,6 +374,8 @@ class Model(GraphProvider):
        
                model._merge_equivalent_llm_tokens()
                model._reorder_llm_tokens_for_range_minimization()
-       
-               # model._convert_to_bitset_range_set()
-      +        # After token reordering, optimize state masks (Alt 6) and reduce edges when beneficial.
-      +        model._optimize_masks_and_edges_alt6()
+      +        # After LLM token reordering, optimize state masks and collapse edges
+      +        model._optimize_state_masks_and_edges()
        
                return model
-      @@
-               self.internal_to_original_map = new_internal_to_original_map
        
+      @@ -875,4 +877,338 @@ class Model(GraphProvider):
+                   cur = nxt
+               return cur
        
-           def _remap_llm_tokens_many_to_one(self, old_to_new_map: Dict[int, int]) -> None:
-               """
-      @@
-                   self.internal_to_original_map = new_internal_to_original_map
-       
-      +    # ---------------------------------------------------------
-      +    # Graph optimization: masks (Alt 6) and node collapsing
-      +    # ---------------------------------------------------------
-      +    def _optimize_masks_and_edges_alt6(self) -> None:
-      +        """
-      +        Pipeline:
-      +        1) Compute the universe of LR states involved in the graph and parser.
-      +        2) Compute terminal LR state sets for each node via bottom-up fixpoint.
-      +        3) Expand edge masks by adding all non-terminal states at the destination (Alt 6).
-      +        4) Collapse nodes to reduce the number of edges where it strictly decreases edges.
-      +        5) Recompute llm_bv_union and max_depth.
-      +        """
-      +        try:
-      +            print("Optimizing masks (Alt 6) and reducing edges...", end='', flush=True)
-      +            universe_states: Set[int] = self._compute_universe_lr_states()
-      +            if not universe_states:
-      +                print(" done (no LR states).", flush=True)
-      +                return
-      +            universe_rs: RangeSetABC = PyRangeSet.from_indices(sorted(universe_states))
-      +            term_by_node: Dict[NodeID, RangeSetABC] = self._compute_terminal_sets(universe_rs, universe_states)
-      +            self._apply_mask_expansion_alt6(term_by_node, universe_rs)
-      +            removed = self._collapse_nodes_reduce_edges(term_by_node, universe_rs)
-      +            # Refresh unions and max_depth metadata
-      +            self._recompute_llm_bv_unions()
-      +            self.max_depth = self._recompute_max_depth_from_arena()
-      +            print(f" done. Nodes removed: {removed}.", flush=True)
-      +        except Exception as e:
-      +            # Fail-safe: never let optimization break loading
-      +            print(f" optimization skipped due to error: {e}", flush=True)
-      +
-      +    def _compute_universe_lr_states(self) -> Set[int]:
-      +        """
-      +        Collect a conservative universe of LR states to use as the 'full' mask domain.
-      +        """
-      +        states: Set[int] = set()
-      +        # From parser table
-      +        for sid in self.parser_table.table.keys():
-      +            states.add(int(sid))
-      +        for _from_state, row in self.parser_table.table.items():
-      +            # shifts/splits
-      +            for action in row.actions.values():
-      +                if isinstance(action, int):  # Shift
-      +                    states.add(int(action))
-      +                elif isinstance(action, Split):
-      +                    if action.shift is not None:
-      +                        states.add(int(action.shift))
-      +            # gotos
-      +            for to_state in row.gotos.values():
-      +                states.add(int(to_state))
-      +        # From reverse_state_map
-      +        for k, preds in self.reverse_state_map.items():
-      +            states.add(int(k))
-      +            for p in preds:
-      +                states.add(int(p))
-      +        # From arena edge masks
-      +        for node in self.arena.values():
-      +            for (_pop, _llm_bv), dests in node.children:
-      +                for _dest_id, state_bv in dests:
-      +                    for i in state_bv.to_indices():
-      +                        states.add(int(i))
-      +        return states
-      +
-      +    def _rs_equals(self, a: RangeSetABC, b: RangeSetABC) -> bool:
+      +    # ===========================
+      +    # Graph optimization (Alt 6 + edge reduction Alt 2)
+      +    # ===========================
+      +    def _rs_equals(self, a: RangeSet, b: RangeSet) -> bool:
+      +        # Robust equality via mutual subset checks
       +        return a.difference(b).is_empty() and b.difference(a).is_empty()
       +
-      +    def _reverse_expand_n(self, base: Set[int], n: int) -> Set[int]:
-      +        """
-      +        Apply the reverse_state_map n times to a set of states.
-      +        """
-      +        if not base or n <= 0:
-      +            return set(base)
-      +        cur = set(base)
-      +        for _ in range(n):
-      +            nxt: Set[int] = set()
-      +            for s in cur:
-      +                nxt.update(self.reverse_state_map.get(int(s), set()))
-      +            if not nxt:
-      +                return set()
-      +            cur = nxt
-      +        return cur
+      +    def _universe_lr_states_set(self) -> Set[int]:
+      +        return set(self._compute_universe_lr_states())
       +
-      +    def _compute_terminal_sets(
-      +        self,
-      +        universe_rs: RangeSetABC,
-      +        universe_set: Set[int],
-      +    ) -> Dict[NodeID, RangeSetABC]:
-      +        """
-      +        Terminal-set fixpoint:
-      +        - A state s is terminal at node v if there exists an outgoing edge e=(v --(pop, M)--> w)
-      +          such that reverse^pop({s}) intersects (M ∩ Term[w]) is non-empty.
-      +        - End nodes have all states terminal (universe).
-      +        Implementation ignores LLM token masks as specified.
-      +        """
-      +        # Build node-level adjacency (ignoring LLM tokens)
-      +        node_out: Dict[NodeID, List[Tuple[int, NodeID, RangeSetABC]]] = {}
-      +        node_in: Dict[NodeID, Set[NodeID]] = collections.defaultdict(set)
-      +        for nid, node in self.arena.items():
-      +            edges: List[Tuple[int, NodeID, RangeSetABC]] = []
-      +            for (pop, _llm_bv), dests in node.children:
-      +                for dest_id, state_bv in dests:
-      +                    edges.append((int(pop), int(dest_id), state_bv))
-      +                    node_in[int(dest_id)].add(int(nid))
-      +            node_out[int(nid)] = edges
+      +    def _universe_lr_states_rangeset(self) -> StateIDSet:
+      +        return RangeSet.from_indices(sorted(self._compute_universe_lr_states()))
       +
-      +        # Initialize terminal sets
-      +        term: Dict[NodeID, RangeSetABC] = {}
-      +        q: collections.deque = collections.deque()
-      +        for nid, node in self.arena.items():
-      +            if node.clean_end:
-      +                term[int(nid)] = universe_rs
-      +                q.append(int(nid))
+      +    def _normalize_children_for_node(self, node: ArenaNode) -> None:
+      +        """
+      +        Merge child edges with identical (pop, dests) signature by uniting their llm_bv.
+      +        """
+      +        children = node.children
+      +        if not children:
+      +            node.llm_bv_union = RangeSet.empty()
+      +            return
+      +
+      +        # signature: (pop, ((dest_id, ((start,end),...)), ...))
+      +        groups: Dict[
+      +            Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]],
+      +            LLMTokenSet
+      +        ] = {}
+      +
+      +        for (pop, llm_bv), dests in children:
+      +            dests_sig = tuple(sorted(
+      +                (int(dest_id), tuple((int(a), int(b)) for (a, b) in state_bv.to_ranges()))
+      +                for dest_id, state_bv in dests
+      +            ))
+      +            key = (int(pop), dests_sig)
+      +            if key in groups:
+      +                groups[key] = groups[key].union(llm_bv)
       +            else:
-      +                term[int(nid)] = PyRangeSet.empty()
+      +                groups[key] = llm_bv
       +
-      +        # Worklist propagation
-      +        while q:
-      +            w = int(q.popleft())
-      +            term_w = term[w]
-      +            preds = node_in.get(w, set())
-      +            if not preds:
+      +        new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+      +        llm_union = RangeSet.empty()
+      +        for (pop, dests_sig), llm_bv in groups.items():
+      +            if llm_bv.is_empty():
       +                continue
-      +            for u in preds:
-      +                add_rs: RangeSetABC = PyRangeSet.empty()
-      +                for popn, dest_id, mask in node_out.get(u, []):
-      +                    if dest_id != w:
-      +                        continue
-      +                    cand = mask.intersection(term_w)
-      +                    if cand.is_empty():
-      +                        continue
-      +                    cand_set: Set[int] = set(int(i) for i in cand.to_indices())
-      +                    pre_set = self._reverse_expand_n(cand_set, int(popn))
-      +                    if pre_set:
-      +                        add_rs = add_rs.union(PyRangeSet.from_indices(sorted(pre_set)))
-      +                if add_rs.is_empty():
-      +                    continue
-      +                # Only add truly new bits
-      +                new_bits = add_rs.difference(term[u])
-      +                if not new_bits.is_empty():
-      +                    term[u] = term[u].union(new_bits)
-      +                    q.append(int(u))
-      +        return term
+      +            llm_union = llm_union.union(llm_bv)
+      +            dests_list: List[Tuple[int, StateIDSet]] = []
+      +            for dest_id, ranges in dests_sig:
+      +                dests_list.append((int(dest_id), RangeSet.from_ranges(list(ranges))))
+      +            new_children.append(((int(pop), llm_bv), dests_list))
       +
-      +    def _apply_mask_expansion_alt6(
-      +        self,
-      +        term_by_node: Dict[NodeID, RangeSetABC],
-      +        universe_rs: RangeSetABC,
-      +    ) -> None:
-      +        """
-      +        For each edge e=(A --(pop, M)--> B), expand M by adding all non-terminal states at B:
-      +        M := M ∪ (Universe \ Term[B]).
-      +        """
-      +        nonterm_cache: Dict[NodeID, RangeSetABC] = {}
-      +        for nid, node in self.arena.items():
-      +            if not node.children:
-      +                continue
-      +            new_children = []
-      +            for (pop, llm_bv), dests in node.children:
-      +                new_dests: List[Tuple[int, RangeSetABC]] = []
-      +                for dest_id, state_bv in dests:
-      +                    if dest_id not in nonterm_cache:
-      +                        nonterm_cache[dest_id] = universe_rs.difference(term_by_node.get(dest_id, PyRangeSet.empty()))
-      +                    expanded_bv = state_bv.union(nonterm_cache[dest_id])
-      +                    new_dests.append((int(dest_id), expanded_bv))
-      +                new_children.append(((int(pop), llm_bv), new_dests))
-      +            node.children = new_children
-      +
-      +    def _build_parents_map(self) -> Dict[NodeID, List[Dict[str, Any]]]:
-      +        """
-      +        Build a mapping: child_node_id -> list of parent edge records:
-      +        { 'a_id': A, 'pop': pop(A->child), 'llm': llm_bv(A->child), 'mask': state_bv(A->child for this child) }
-      +        """
-      +        parents: Dict[NodeID, List[Dict[str, Any]]] = collections.defaultdict(list)
-      +        for a_id, a_node in self.arena.items():
-      +            for (pop, llm_bv), dests in a_node.children:
-      +                for dest_id, state_bv in dests:
-      +                    parents[int(dest_id)].append({
-      +                        "a_id": int(a_id),
-      +                        "pop": int(pop),
-      +                        "llm": llm_bv,
-      +                        "mask": state_bv,
-      +                    })
-      +        return parents
-      +
-      +    def _collapse_nodes_reduce_edges(
-      +        self,
-      +        term_by_node: Dict[NodeID, RangeSetABC],
-      +        universe_rs: RangeSetABC,
-      +    ) -> int:
-      +        """
-      +        Reduce edges by collapsing intermediate nodes B into direct edges A->C when:
-      +          - B is not an end node,
-      +          - B has exactly one child entry with exactly one destination (C),
-      +          - B has at least one parent,
-      +          - Either pop(B->C)==0 (Replacement 2) OR for all parents A->B, mask(A->B) == Universe (Replacement 1).
-      +        For each parent A, add A->C with:
-      +          - llm_bv := llm(A->B) ∩ llm(B->C),
-      +          - pop := pop(A->B) + pop(B->C) if Replacement 1, else pop(A->B),
-      +          - mask := y (B->C mask) if Replacement 1, else mask(A->B) ∩ y,
-      +          - then mask := mask ∪ (Universe \ Term[C]) [Alt 6].
-      +        Remove all A->B edges for all parents and delete node B.
-      +        """
-      +        removed_nodes = 0
-      +        roots = set(int(r) for r in self.roots_map.values())
-      +        # Helper for deterministic sort
-      +        def _ranges_key(rs: RangeSetABC) -> Tuple[Tuple[int, int], ...]:
+      +        # Deterministic sort
+      +        def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
       +            try:
       +                return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
       +            except Exception:
       +                return ()
       +
-      +        while True:
-      +            parents_map = self._build_parents_map()
-      +            progress = False
-      +            # Iterate over a snapshot of node IDs to avoid dict-size-change issues
-      +            for b_id, b_node in list(self.arena.items()):
-      +                b_id = int(b_id)
-      +                if b_id not in self.arena:
+      +        new_children.sort(
+      +            key=lambda item: (
+      +                int(item[0][0]),
+      +                _ranges_key(item[0][1]),
+      +                tuple(sorted(int(d[0]) for d in item[1])),
+      +            )
+      +        )
+      +
+      +        node.children = new_children
+      +        node.llm_bv_union = llm_union
+      +
+      +    def _normalize_all_children(self) -> None:
+      +        for node in self.arena.values():
+      +            self._normalize_children_for_node(node)
+      +
+      +    def _compute_terminal_states_by_node(self) -> Dict[NodeID, Set[int]]:
+      +        """
+      +        Compute, for each node, the set of LR states that are 'terminal' (can eventually
+      +        reach an end node) ignoring LLM tokens. Uses a fixpoint over the product graph.
+      +        """
+      +        arena = self.arena
+      +        if not arena:
+      +            return {}
+      +
+      +        universe: Set[int] = self._universe_lr_states_set()
+      +
+      +        # Initialize terminal sets
+      +        terminal_by_node: Dict[NodeID, Set[int]] = {}
+      +        for nid, node in arena.items():
+      +            if node.clean_end:
+      +                terminal_by_node[int(nid)] = set(universe)
+      +            else:
+      +                terminal_by_node[int(nid)] = set()
+      +
+      +        # Build edges ignoring LLM tokens: (u) -> [(pop, v, mask_set), ...]
+      +        edges_by_node: Dict[NodeID, List[Tuple[int, NodeID, Set[int]]]] = {}
+      +        for u, node in arena.items():
+      +            u = int(u)
+      +            lst: List[Tuple[int, NodeID, Set[int]]] = []
+      +            for (pop, _llm_bv), dests in node.children:
+      +                for dest_id, state_bv in dests:
+      +                    mask_set = set(int(i) for i in state_bv.to_indices())
+      +                    lst.append((int(pop), int(dest_id), mask_set))
+      +            edges_by_node[u] = lst
+      +
+      +        # Fixpoint iteration
+      +        changed = True
+      +        while changed:
+      +            changed = False
+      +            for u, lst in edges_by_node.items():
+      +                if not lst:
       +                    continue
-      +                if b_node.clean_end:
-      +                    continue
-      +                if b_id in roots:
-      +                    # Root nodes are entry points; they typically have no parents, but be conservative.
-      +                    continue
-      +                # Must have exactly one child entry and one destination
-      +                if len(b_node.children) != 1:
-      +                    continue
-      +                (pop_b, llm_bv_b), dests_b = b_node.children[0]
-      +                pop_b = int(pop_b)
-      +                if len(dests_b) != 1:
-      +                    continue
-      +                c_id, y_mask = dests_b[0]
-      +                c_id = int(c_id)
-      +                parents_b = parents_map.get(b_id, [])
-      +                if not parents_b:
-      +                    continue
-      +                # Replacement condition:
-      +                # - If pop_b == 0, Replacement 2 applicable for all parents.
-      +                # - Else, all parents must have full-mask A->B (Replacement 1).
-      +                if pop_b != 0:
-      +                    all_full = True
-      +                    for rec in parents_b:
-      +                        if not self._rs_equals(rec["mask"], universe_rs):
-      +                            all_full = False
-      +                            break
-      +                    if not all_full:
+      +                base = terminal_by_node[u]
+      +                accum = set(base)
+      +                for pop, v, mask_set in lst:
+      +                    tv = terminal_by_node.get(int(v), set())
+      +                    if not tv:
       +                        continue
-      +                # Prepare non-terminal filler for C (Alt 6)
-      +                nonterm_c = universe_rs.difference(term_by_node.get(c_id, PyRangeSet.empty()))
-      +                # Prepare aggregators per parent A
-      +                # aggregator_by_A: A_id -> ( (pop_new, llm_ranges_tuple) -> { dest_id: state_bv } )
-      +                aggregator_by_A: Dict[int, Dict[Tuple[int, Tuple[Tuple[int, int], ...]], Dict[int, RangeSetABC]]] = {}
-      +                for rec in parents_b:
-      +                    a_id = int(rec["a_id"])
-      +                    pop_a = int(rec["pop"])
-      +                    llm_a: RangeSetABC = rec["llm"]
-      +                    x_mask: RangeSetABC = rec["mask"]
-      +                    # Compose LLM masks
-      +                    llm_inter = llm_a.intersection(llm_bv_b)
-      +                    if llm_inter.is_empty():
-      +                        # No tokens that make A->B->C feasible; removing A->B is still safe (no contribution to get_mask).
-      +                        # We just won't add a replacement edge for these tokens.
-      +                        pass
+      +                    intersect = mask_set.intersection(tv)
+      +                    if not intersect:
+      +                        continue
+      +                    pre = self._reverse_expand_n(intersect, int(pop))
+      +                    if pre:
+      +                        before = len(accum)
+      +                        accum.update(pre)
+      +                        if len(accum) > before:
+      +                            # mark that u grew
+      +                            pass
+      +                if len(accum) > len(base):
+      +                    terminal_by_node[u] = accum
+      +                    changed = True
+      +        return terminal_by_node
+      +
+      +    def _optimize_state_masks_and_edges(self) -> None:
+      +        """
+      +        1) Expand state masks: For each edge to dest D, union in all NonTerminal(D) states.
+      +           This pushes masks towards the full universe where safe (Alt 6).
+      +        2) Collapse chains A->B->C conservatively (Replacement 1) only when:
+      +           - B is not an end node
+      +           - B has exactly one unique destination C across all children
+      +           - All incoming edges to B have full (universe) masks to B
+      +           - The collapse strictly reduces edge count: (incoming_count == 1) or (outgoing_group_count == 1)
+      +           LLM tokens are preserved by intersecting A->B.llm_bv and B->C.llm_bv for the new A->C edge.
+      +        """
+      +        print("Optimizing state masks and collapsing edges...", end='', flush=True)
+      +
+      +        if not self.arena:
+      +            print(" done (empty arena).")
+      +            return
+      +
+      +        # Universe and terminal sets
+      +        universe_rs: StateIDSet = self._universe_lr_states_rangeset()
+      +        universe_set: Set[int] = set(universe_rs.to_indices())
+      +        terminal_by_node: Dict[NodeID, Set[int]] = self._compute_terminal_states_by_node()
+      +        terminal_rs_by_node: Dict[NodeID, StateIDSet] = {
+      +            nid: RangeSet.from_indices(sorted(list(s)))
+      +            for nid, s in terminal_by_node.items()
+      +        }
+      +
+      +        # Step 1: Expand state masks by adding NonTerminal(D) for destination D
+      +        for nid, node in list(self.arena.items()):
+      +            if not node.children:
+      +                continue
+      +            new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+      +            for (pop, llm_bv), dests in node.children:
+      +                new_dests: List[Tuple[int, StateIDSet]] = []
+      +                for dest_id, state_bv in dests:
+      +                    term_rs = terminal_rs_by_node.get(int(dest_id), universe_rs)
+      +                    nonterm_rs = universe_rs.difference(term_rs)
+      +                    expanded_bv = state_bv.union(nonterm_rs)
+      +                    new_dests.append((int(dest_id), expanded_bv))
+      +                new_children.append(((int(pop), llm_bv), new_dests))
+      +            node.children = new_children
+      +
+      +        # Normalize after mask expansions
+      +        self._normalize_all_children()
+      +        self._recompute_llm_bv_unions()
+      +
+      +        # Step 2: Bottom-up collapses with Replacement 1 where beneficial
+      +        roots_set: Set[int] = set(int(v) for v in self.roots_map.values())
+      +
+      +        def collect_incoming_edges(target_nid: int) -> List[Tuple[int, int, int]]:
+      +            """
+      +            Return list of (A_node_id, child_idx, dest_idx) such that A.children[child_idx]
+      +            has a dest entry at dest_idx pointing to target_nid. Computed on the fly.
+      +            """
+      +            incoming: List[Tuple[int, int, int]] = []
+      +            for aid, anode in self.arena.items():
+      +                aid_int = int(aid)
+      +                for ci, child in enumerate(anode.children):
+      +                    _sig, dests = child
+      +                    for di, (dest_id, _bv) in enumerate(dests):
+      +                        if int(dest_id) == int(target_nid):
+      +                            incoming.append((aid_int, int(ci), int(di)))
+      +            return incoming
+      +
+      +        def rs_is_universe(rs: RangeSet) -> bool:
+      +            return self._rs_equals(rs, universe_rs)
+      +
+      +        changed_any = True
+      +        while changed_any:
+      +            changed_any = False
+      +            # Use current depths (may change after removals); default to 0 if missing
+      +            depths = self.max_depth or {}
+      +            node_order = sorted(self.arena.keys(), key=lambda x: int(depths.get(int(x), 0)))
+      +            for b in list(node_order):
+      +                b = int(b)
+      +                if b not in self.arena:
+      +                    continue
+      +                bnode = self.arena[b]
+      +                if bnode.clean_end:
+      +                    continue
+      +                # Determine unique destination across all children
+      +                dest_nodes: Set[int] = set()
+      +                for (_sig, dests) in bnode.children:
+      +                    for (did, _bv) in dests:
+      +                        dest_nodes.add(int(did))
+      +                if not dest_nodes:
+      +                    # Orphan node (no outgoing edges). If not root and no incoming, remove it.
+      +                    incoming = collect_incoming_edges(b)
+      +                    if not incoming and (b not in roots_set):
+      +                        # Remove b
+      +                        del self.arena[b]
+      +                        if b in self.max_depth:
+      +                            del self.max_depth[b]
+      +                        changed_any = True
+      +                    continue
+      +                if len(dest_nodes) != 1:
+      +                    continue
+      +                c = next(iter(dest_nodes))
+      +                if c == b:
+      +                    # self-loop; skip
+      +                    continue
+      +
+      +                # Collect B->C groups (must be only destination for each child)
+      +                bc_groups: List[Tuple[int, LLMTokenSet, StateIDSet]] = []
+      +                valid_bc = True
+      +                for (pop_m, llm_bv_bc), dests in bnode.children:
+      +                    # All dests must be exactly to c
+      +                    if len(dests) != 1 or int(dests[0][0]) != int(c):
+      +                        valid_bc = False
+      +                        break
+      +                    y_bv = dests[0][1]
+      +                    bc_groups.append((int(pop_m), llm_bv_bc, y_bv))
+      +                if not valid_bc:
+      +                    continue
+      +                k_bc = len(bc_groups)
+      +                incoming = collect_incoming_edges(b)
+      +                in_count = len(incoming)
+      +
+      +                if in_count == 0:
+      +                    # If B has no incoming edges and is not a root, we can safely remove it and its outgoing edges.
+      +                    if b not in roots_set:
+      +                        bnode.children = []
+      +                        del self.arena[b]
+      +                        if b in self.max_depth:
+      +                            del self.max_depth[b]
+      +                        changed_any = True
+      +                    continue
+      +
+      +                # Check all incoming A->B masks are universe
+      +                all_in_masks_universe = True
+      +                for (aid, ci, di) in incoming:
+      +                    anode = self.arena.get(aid)
+      +                    if anode is None:
+      +                        all_in_masks_universe = False
+      +                        break
+      +                    _sig, dests = anode.children[ci]
+      +                    _did, x_bv = dests[di]
+      +                    if not rs_is_universe(x_bv):
+      +                        all_in_masks_universe = False
+      +                        break
+      +                if not all_in_masks_universe:
+      +                    continue
+      +
+      +                # Ensure net edge reduction: in_count == 1 or k_bc == 1
+      +                if not (in_count == 1 or k_bc == 1):
+      +                    continue
+      +
+      +                # Perform collapse: for each incoming A->B, create A->C edges based on llm_bv intersections
+      +                nodes_to_normalize: Set[int] = set()
+      +                for (aid, ci, di) in incoming:
+      +                    anode = self.arena.get(aid)
+      +                    if anode is None:
+      +                        continue
+      +                    (pop_n, llm_bv_ab), dests = anode.children[ci]
+      +                    # For each B->C group, intersect tokens and add A->C edge
+      +                    for (pop_m, llm_bv_bc, y_bv) in bc_groups:
+      +                        inter_llm = llm_bv_ab.intersection(llm_bv_bc)
+      +                        if inter_llm.is_empty():
+      +                            continue
+      +                        new_pop = int(pop_n) + int(pop_m)
+      +                        # Append new edge ((new_pop, inter_llm), [(c, y_bv)])
+      +                        anode.children.append(((new_pop, inter_llm), [(int(c), y_bv)]))
+      +                        nodes_to_normalize.add(aid)
+      +
+      +                # Remove all incoming A->B dest entries
+      +                for (aid, ci, di) in incoming:
+      +                    if aid not in self.arena:
+      +                        continue
+      +                    anode = self.arena[aid]
+      +                    if ci >= len(anode.children):
+      +                        continue
+      +                    (pop_n, llm_bv_ab), dests = anode.children[ci]
+      +                    # Filter out the B entry
+      +                    new_dests = [(did, bv) for (did, bv) in dests if int(did) != int(b)]
+      +                    if not new_dests:
+      +                        # Remove the entire child edge group if no destinations left
+      +                        # Guard against index shifts: rebuild children without index 'ci'
+      +                        new_children = []
+      +                        for idx, item in enumerate(anode.children):
+      +                            if idx != ci:
+      +                                new_children.append(item)
+      +                        anode.children = new_children
       +                    else:
-      +                        # Compose popn and mask
-      +                        if pop_b == 0:
-      +                            # Replacement 2: pop stays pop_a, mask becomes x ∩ y
-      +                            pop_new = pop_a
-      +                            mask_new = x_mask.intersection(y_mask)
-      +                        else:
-      +                            # Replacement 1: pop is pop_a + pop_b, mask is y
-      +                            pop_new = pop_a + pop_b
-      +                            mask_new = y_mask
-      +                        # Apply Alt 6 to the new mask
-      +                        mask_new = mask_new.union(nonterm_c)
-      +                        key = (int(pop_new), tuple(_ranges_key(llm_inter)))
-      +                        aggregator_by_A.setdefault(a_id, {})
-      +                        aggregator_by_A[a_id].setdefault(key, {})
-      +                        # Merge per-destination
-      +                        if c_id in aggregator_by_A[a_id][key]:
-      +                            aggregator_by_A[a_id][key][c_id] = aggregator_by_A[a_id][key][c_id].union(mask_new)
-      +                        else:
-      +                            aggregator_by_A[a_id][key][c_id] = mask_new
+      +                        anode.children[ci] = ((pop_n, llm_bv_ab), new_dests)
+      +                    nodes_to_normalize.add(aid)
       +
-      +                # For each parent A, rebuild its children: remove all A->B edges and add replacements
-      +                for a_id, grouped in aggregator_by_A.items():
-      +                    a_node = self.arena.get(int(a_id))
-      +                    if not a_node:
-      +                        continue
-      +                    # Start with existing edges excluding those pointing to B
-      +                    merged: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], Dict[int, RangeSetABC]] = {}
-      +                    for (pop, llm_bv), dests in a_node.children:
-      +                        k = (int(pop), tuple(_ranges_key(llm_bv)))
-      +                        if k not in merged:
-      +                            merged[k] = {}
-      +                        for dest_id, state_bv in dests:
-      +                            if int(dest_id) == b_id:
-      +                                # Drop edges to B
-      +                                continue
-      +                            if int(dest_id) in merged[k]:
-      +                                merged[k][int(dest_id)] = merged[k][int(dest_id)].union(state_bv)
-      +                            else:
-      +                                merged[k][int(dest_id)] = state_bv
-      +                    # Add replacements
-      +                    for key, dest_map in grouped.items():
-      +                        if key not in merged:
-      +                            merged[key] = {}
-      +                        for dest_id, state_bv in dest_map.items():
-      +                            if int(dest_id) in merged[key]:
-      +                                merged[key][int(dest_id)] = merged[key][int(dest_id)].union(state_bv)
-      +                            else:
-      +                                merged[key][int(dest_id)] = state_bv
-      +                    # Rebuild children list
-      +                    new_children: List[Tuple[Tuple[int, RangeSetABC], List[Tuple[int, RangeSetABC]]]] = []
-      +                    for (pop_new, llm_ranges), dest_map in merged.items():
-      +                        llm_rs = PyRangeSet.from_ranges(list(llm_ranges))
-      +                        dest_list = [(int(did), dbv) for did, dbv in dest_map.items()]
-      +                        new_children.append(((int(pop_new), llm_rs), dest_list))
-      +                    # Deterministic sort
-      +                    new_children.sort(
-      +                        key=lambda item: (
-      +                            int(item[0][0]),
-      +                            _ranges_key(item[0][1]),
-      +                            tuple(sorted(int(d[0]) for d in item[1])),
-      +                        )
-      +                    )
-      +                    a_node.children = new_children
+      +                # Remove B->C edges and possibly node B (if not a root)
+      +                if b in self.arena:
+      +                    self.arena[b].children = []
+      +                # If B is not a root and there are no remaining incoming edges, remove B
+      +                incoming_after = collect_incoming_edges(b)
+      +                if (b not in roots_set) and (not incoming_after):
+      +                    if b in self.arena:
+      +                        del self.arena[b]
+      +                    if b in self.max_depth:
+      +                        del self.max_depth[b]
       +
-      +                # Remove node B entirely
-      +                if b_id in self.arena:
-      +                    del self.arena[b_id]
-      +                removed_nodes += 1
-      +                progress = True
-      +            if not progress:
-      +                break
-      +        return removed_nodes
+      +                # Normalize changed nodes and recompute unions
+      +                for aid in nodes_to_normalize:
+      +                    if aid in self.arena:
+      +                        self._normalize_children_for_node(self.arena[aid])
+      +                self._recompute_llm_bv_unions()
+      +                # Recompute depths since graph changed
+      +                self.max_depth = self._recompute_max_depth_from_arena()
+      +                changed_any = True
       +
-      *** End Patch
+      +        # Final normalization and metrics recompute
+      +        self._normalize_all_children()
+      +        self._recompute_llm_bv_unions()
+      +        self.max_depth = self._recompute_max_depth_from_arena()
+      +        print(" done.", flush=True)
+      +
       ```
     metadata:
   - user: |
-      Using model 'cp' for code completion.
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
 
-      --- LLM Code Generation Attempt 1/5 ---
-      Parsed actions JSON: [
-        {
-          "action": "replace",
-          "filepath": "python/aug25/models/precompute3_model_pure_python.py"
-        }
-      ]
-      Found 1 code blocks with filepaths in attempt 1.
-      Received code for required file: python/aug25/models/precompute3_model_pure_python.py
-      All required file contents received or no content needed.
-
-      --- Applying Changes ---
-      Successfully replaced file: python/aug25/models/precompute3_model_pure_python.py
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "feat: Implement graph optimization for
-      mask expansion and edge reduction"'
+  - user: 'Changes committed with message: "feat: Optimize graph by expanding state
+      masks and collapsing edges"'
     metadata:
 ...
