@@ -543,6 +543,11 @@ class Model(GraphProvider):
 
         state_map = {sid: gss.apply(initialize_acc) for sid, gss in state_map.items()}
 
+        print("--- After GSS Initialization ---")
+        for sid, gss in state_map.items():
+            print(f"sid {sid}: {gss.to_reference_impl()}")
+
+
         for sid, gss in state_map.items():
             r: NodeID = roots_map[int(sid)]
             if r in values:
@@ -554,6 +559,10 @@ class Model(GraphProvider):
             if r not in enqueued_nodes:
                 enqueued_nodes.add(r)
                 hp(depth_heap, (-d, r))
+
+        print("--- After Seeding ---")
+        for node_idx, gss in values.items():
+            print(f"Node {node_idx}: {gss.to_reference_impl()}")
 
         def enqueue(d: int, n: NodeID) -> None:
             if n not in enqueued_nodes:
@@ -567,9 +576,13 @@ class Model(GraphProvider):
 
             # End-node handling: just union the allowed LLM tokens
             if is_end(node):
+                print(f"--- End Node {node} ---")
+                print(f"GSS that reached end node: {gss_node.to_reference_impl()}")
                 reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                 if reduced_acc:
                     final_mask = final_mask.union(reduced_acc.llm_mask)
+                    print(f"Reduced acc mask: {reduced_acc.llm_mask}")
+                    print(f"Final mask updated to: {final_mask}")
 
             # # Zombie traversal avoidance
             # a_node = arena.get(node)

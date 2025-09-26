@@ -116,7 +116,7 @@ class Model(GraphProvider):
 
         print("states in get_mask:")
         for k, v in state_map.items():
-            print(f"state {k}: {GSS.from_stacks(v.flatten())}")
+            print(f"state {k}: gss_ptr={v.ptr()} flat={GSS.from_stacks(v.flatten())}")
 
 
         t0 = time.time()
@@ -161,6 +161,11 @@ class Model(GraphProvider):
                 heappush(depth_heap, depth)
             else:
                 bucket.add(root_idx)
+
+        print("--- After Seeding ---")
+        for node_idx, (gss, mask) in values.items():
+            print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}, mask={mask.to_ranges()}")
+
 
         # Main scheduler
 
@@ -210,23 +215,27 @@ class Model(GraphProvider):
 
                 # End-node handling
                 if is_end(node_idx):
+                    print(f"--- End Node {node_idx} ---")
+                    print(f"GSS that reached end node: gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}")
+                    print(f"Propagated mask: {llm_mask.to_ranges()}")
                     # printf"    - END NODE found. Updating final_mask.")
                     # printf"      - final_mask before: {final_mask.to_ranges()}")
 
                     # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
                     forbidden_llm_tokens = ffi.Bitset.zeros()
                     disallowed_terminals_l2 = gss_node.disallowed_terminals()
+                    print(f"Disallowed Terminals L2 from GSS: {disallowed_terminals_l2}")
                     possible_matches = self.possible_matches_cache
 
                     for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
                         if disallowed_bv.is_empty():
                             continue
-                        
+
                         for tsid in range(start, end + 1):
                             possible_matches_for_state = possible_matches.get(tsid)
                             if not possible_matches_for_state:
                                 continue
-                            
+
                             for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
                                 terminal_id = int(terminal_id_str)
                                 if disallowed_bv.contains(terminal_id):
@@ -234,6 +243,7 @@ class Model(GraphProvider):
 
                     glr_active_tokens = gss_node.allowed_llm_tokens()
                     glr_active_tokens = llm_mask.intersection(glr_active_tokens)
+                    print(f"Allowed LLM tokens from GSS heads (after llm_mask intersection): {glr_active_tokens.to_ranges()}")
                     final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
                     tokens_to_add = final_allowed_tokens
 
