@@ -432,7 +432,7 @@ impl PyGrammarConstraint {
 
     fn state_with_nodes(&mut self, nodes: Vec<(usize, PyGSSNode)>) -> PyResult<GrammarConstraintState> {
         let gss_nodes: Vec<(sep1::glr::table::StateID, Arc<RustGSSNode>)> = nodes.into_iter()
-            .map(|(sid, py_node)| (sep1::glr::table::StateID(sid), py_node.inner))
+            .map(|(sid, py_node)| (sid, py_node.inner))
             .collect();
         Ok(self.inner.state_with_nodes(gss_nodes))
     }
