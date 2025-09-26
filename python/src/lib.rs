@@ -470,6 +470,10 @@ impl PyGrammarConstraint {
         Ok(top.to_json_string())
     }
 
+    fn dump_precomputed3(&self) {
+        self.inner.dump_precomputed3();
+    }
+
     fn get_id_to_token_map(&self, py: Python) -> PyResult<PyObject> {
         let dict = PyDict::new_bound(py);
         for (token_bytes, token_id) in self.inner.llm_vocab.llm_token_map.iter() {
