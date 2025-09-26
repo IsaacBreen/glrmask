@@ -2426,7 +2426,8 @@ impl GSSNode {
     }
 
     pub fn print(&self) -> String {
-        let config = GSSPrintConfig::default();
+        let mut config = GSSPrintConfig::default();
+        // config.verbose = true;
         let terminal_map = BiBTreeMap::new();
         let (s, _) = print_gss_forest(&[Arc::new(self.clone())], &terminal_map, &config);
         s
