@@ -8,6 +8,8 @@ import time
 from typing import Dict, List, Tuple, Optional, Union, Any, Set
 from dataclasses import dataclass, field
 
+from tqdm import tqdm
+
 from ..common_interface import GraphProvider
 from ..range_set.py_range_set import PyRangeSet as RangeSet
 import _sep1 as ffi
@@ -1180,7 +1182,7 @@ class Model(GraphProvider):
         are merged back into arena.children by grouping tokens that have identical (pop -> dest->mask)
         signatures at each source node.
         """
-        print("Optimizing masks and edges (Alt6 + Alt2)...", end='', flush=True)
+        print("Optimizing masks and edges (Alt6 + Alt2)...")
         t_start = time.perf_counter()
 
         # Precompute LR universe and forward map once.
@@ -1373,7 +1375,7 @@ class Model(GraphProvider):
             return edges_by_src
 
         # Process all tokens actually used.
-        for token_id in sorted(tokens_in_use):
+        for token_id in tqdm(sorted(tokens_in_use), desc="Optimizing per-token edges"):
             edges_for_token = build_token_edges(token_id)
             if not edges_for_token:
                 # No edges under this token (shouldn't happen if tokens_in_use is correct), skip.
