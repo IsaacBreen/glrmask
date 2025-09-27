@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, VecDeque, HashSet};
 use ordered_hash_map::OrderedHashMap;
-use crate::constraint::{GrammarConstraintConfig, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper};
+use crate::constraint::{GrammarConstraintConfig, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper, StageVocab};
 use crate::datastructures::EntryApi;
 use crate::datastructures::gss::LLMTokenBV;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
@@ -43,6 +43,170 @@ pub fn optimize_trie3_size(
         Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
     }
     Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+}
+
+fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>) -> LLMTokenBV {
+    if bv.is_empty() { return LLMTokenBV::zeros(); }
+    let mut out = LLMTokenBV::zeros();
+    for t in bv.iter() {
+        let ti = t as usize;
+        let rep = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+        out.insert(rep);
+    }
+    out
+}
+
+fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>) -> LLMTokenBV {
+    remap_llm_bv_many_to_one(bv, map_old_to_new)
+}
+
+/// Merge equivalent internal LLM token ids in Trie3:
+/// Two tokens are equivalent if they occur together in every LLMTokenBV occurrence across:
+/// - node.value.live_tokens
+/// - each edge key's (pop, LLMTokenBV) mask
+///
+/// Applies many-to-one mapping into representative ids, remapping node/edge masks,
+/// and updates the provided StageVocab.
+pub fn merge_equivalent_llm_tokens_trie3(
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+    trie3_god: &Trie3GodWrapper,
+    stage_vocab: &mut StageVocab,
+) {
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    if all_nodes.is_empty() { return; }
+
+    // 1) Collect family of LLM sets
+    let mut family: Vec<LLMTokenBV> = Vec::new();
+    for n in &all_nodes {
+        let g = n.read(trie3_god).expect("read");
+        if !g.value.live_tokens.is_empty() {
+            family.push(g.value.live_tokens.clone());
+        }
+        for ((_, llm_bv), _dm) in g.children() {
+            if !llm_bv.is_empty() {
+                family.push(llm_bv.clone());
+            }
+        }
+    }
+    if family.is_empty() { return; }
+
+    // 2) Group tokens by signature
+    let max_tok = stage_vocab.internal_max_llm_token;
+    let mut sig_map: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
+    for tok in 0..=max_tok {
+        let mut sig: Vec<usize> = Vec::new();
+        for (i, setv) in family.iter().enumerate() {
+            if setv.contains(tok) { sig.push(i); }
+        }
+        if sig.is_empty() { continue; }
+        sig_map.entry(sig).or_default().push(tok);
+    }
+    if sig_map.is_empty() { return; }
+
+    let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
+    for (_sig, group) in sig_map {
+        if group.len() <= 1 { continue; }
+        let rep = *group.iter().min().unwrap();
+        for t in group {
+            old_to_new.insert(t, rep);
+        }
+    }
+    if old_to_new.is_empty() { return; }
+
+    // 3) Remap trie
+    for n in &all_nodes {
+        let mut w = n.write(trie3_god).expect("write");
+        if !w.value.live_tokens.is_empty() {
+            w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new);
+        }
+        let mut new_children = BTreeMap::new();
+        for ((pop, llm_bv), dm) in w.children().clone() {
+            let mapped_key_bv = remap_llm_bv_many_to_one(&llm_bv, &old_to_new);
+            if mapped_key_bv.is_empty() { continue; }
+            let entry = new_children.entry((pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
+            for (dst, sid_bv) in dm {
+                entry.entry(dst).and_modify(|e| *e |= &sid_bv).or_insert(sid_bv);
+            }
+        }
+        *w.children_mut() = new_children;
+    }
+
+    // 4) Update StageVocab
+    for (old, rep) in &old_to_new {
+        if old == rep { continue; }
+        let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
+        stage_vocab.internal_to_original.entry(*rep).or_default().extend(moved.clone());
+        for o in moved {
+            stage_vocab.original_to_internal.insert(o, *rep);
+        }
+    }
+}
+
+/// Reorder internal LLM tokens in Trie3 with a simple heuristic to cluster co-occurring tokens.
+pub fn reorder_llm_tokens_for_range_minimization_trie3(
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+    trie3_god: &Trie3GodWrapper,
+    stage_vocab: &mut StageVocab,
+) {
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    if all_nodes.is_empty() { return; }
+    let max_tok = stage_vocab.internal_max_llm_token;
+    let mut freq: Vec<usize> = vec![0; max_tok + 1];
+    for n in &all_nodes {
+        let g = n.read(trie3_god).expect("read");
+        for t in g.value.live_tokens.iter() {
+            if t as usize <= max_tok { freq[t as usize] += 1; }
+        }
+        for ((_, llm_bv), _dm) in g.children() {
+            for t in llm_bv.iter() {
+                if t as usize <= max_tok { freq[t as usize] += 1; }
+            }
+        }
+    }
+    let mut present: Vec<usize> = (0..=max_tok).filter(|t| freq[*t] > 0).collect();
+    if present.is_empty() { return; }
+    present.sort_by_key(|&t| (std::cmp::Reverse(freq[t]), t));
+
+    let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
+    for (new_id, old_id) in present.iter().enumerate() {
+        old_to_new.insert(*old_id, new_id);
+    }
+
+    for n in &all_nodes {
+        let mut w = n.write(trie3_god).expect("write");
+        if !w.value.live_tokens.is_empty() {
+            w.value.live_tokens = remap_llm_bv_permutation(&w.value.live_tokens, &old_to_new);
+        }
+        let mut new_children = BTreeMap::new();
+        for ((pop, llm_bv), dm) in w.children().clone() {
+            let mapped_key_bv = remap_llm_bv_permutation(&llm_bv, &old_to_new);
+            if mapped_key_bv.is_empty() { continue; }
+            let entry = new_children.entry((pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
+            for (dst, sid_bv) in dm {
+                entry.entry(dst).and_modify(|e| *e |= &sid_bv).or_insert(sid_bv);
+            }
+        }
+        *w.children_mut() = new_children;
+    }
+
+    // Update StageVocab under permutation
+    let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    for (old_id, setv) in stage_vocab.internal_to_original.clone() {
+        if let Some(new_id) = old_to_new.get(&old_id) {
+            new_internal_to_original.insert(*new_id, setv);
+        }
+    }
+    stage_vocab.internal_to_original = new_internal_to_original;
+    let mut new_original_to_internal: BTreeMap<usize, usize> = BTreeMap::new();
+    for (orig, old_internal) in stage_vocab.original_to_internal.clone() {
+        if let Some(new_internal) = old_to_new.get(&old_internal) {
+            new_original_to_internal.insert(orig, *new_internal);
+        }
+    }
+    stage_vocab.original_to_internal = new_original_to_internal;
+    stage_vocab.internal_max_llm_token = present.len().saturating_sub(1);
 }
 
 fn constrain_bitvecs_trie3(

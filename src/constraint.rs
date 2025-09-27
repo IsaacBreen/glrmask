@@ -1,6 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
+use std::collections::btree_map::Entry as BTreeEntry;
 use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use crate::datastructures::ordered_hash_map::Retain;
@@ -57,6 +58,7 @@ use crate::constraint_precompute3_utils::optimize_trie3_size;
 use crate::datastructures::trie::{God, GodWrapper};
 
 const MERGE_THRESHOLD: usize = 20;
+const STAGE_VOCAB_JSON_VERSION: usize = 1;
 
 pub type StateIDBV = HybridBitset;
 
@@ -110,9 +112,52 @@ pub type Precomputed3 = BTreeMap<TokenizerStateID, PrecomputeNode3Index>;
 pub struct LLMVocab {
     pub llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
     pub max_original_llm_token_id: usize,
+    // One-to-one original->internal index mapping for the baseline/global view.
+    // Note: this is a simple mapping (not a BiBTreeMap) so we can evolve stage-local
+    // vocabularies independently. Use internal_to_original_ for reverse lookups.
     pub original_to_internal_id_bimap: BTreeMap<usize, usize>,
+    // Reverse mapping (many-to-one support): internal index -> set of original ids
     pub internal_to_original_: BTreeMap<usize, BTreeSet<usize>>,
     pub internal_max_llm_token: usize
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageVocab {
+    pub original_to_internal: BTreeMap<usize, usize>,
+    pub internal_to_original: BTreeMap<usize, BTreeSet<usize>>,
+    pub internal_max_llm_token: usize,
+}
+
+impl JSONConvertible for StageVocab {
+    fn to_json(&self) -> JSONNode {
+        let mut m = StdMap::new();
+        m.insert("version".to_string(), JSONNode::Number((STAGE_VOCAB_JSON_VERSION as i64).into()));
+        m.insert("original_to_internal".to_string(), self.original_to_internal.to_json());
+        // Serialize internal_to_original as Vec<(usize, Vec<usize>)> to keep it compact
+        let mut ito: Vec<(usize, Vec<usize>)> = Vec::new();
+        for (k, setv) in &self.internal_to_original {
+            ito.push((*k, setv.iter().cloned().collect::<Vec<_>>()));
+        }
+        m.insert("internal_to_original".to_string(), ito.to_json());
+        m.insert("internal_max_llm_token".to_string(), self.internal_max_llm_token.to_json());
+        JSONNode::Object(m)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let _ver = obj.remove("version").unwrap_or(JSONNode::Number(1.into()));
+                let original_to_internal = obj.remove("original_to_internal").ok_or("StageVocab: missing original_to_internal".to_string()).and_then(|n| BTreeMap::<usize, usize>::from_json(n))?;
+                let internal_max_llm_token = obj.remove("internal_max_llm_token").ok_or("StageVocab: missing internal_max_llm_token".to_string()).and_then(usize::from_json)?;
+                let ito_vec = obj.remove("internal_to_original").ok_or("StageVocab: missing internal_to_original".to_string()).and_then(|n| Vec::<(usize, Vec<usize>)>::from_json(n))?;
+                let mut internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+                for (k, v) in ito_vec {
+                    internal_to_original.insert(k, v.into_iter().collect());
+                }
+                Ok(StageVocab { original_to_internal, internal_to_original, internal_max_llm_token })
+            }
+            _ => Err("StageVocab: expected object".to_string())
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +169,12 @@ pub struct GrammarConstraintConfig {
     pub optimize_trie2_gc: bool,
     pub skip_precomputation: bool,
     pub optimize_trie3_constrain_bitvecs: bool,
+    // Stage-level token optimizations (disabled by default to avoid changing
+    // global token-ID semantics until explicitly enabled).
+    pub optimize_trie1_merge_equivalent_llm_tokens: bool,
+    pub optimize_trie1_reorder_llm_tokens: bool,
+    pub optimize_trie3_merge_equivalent_llm_tokens: bool,
+    pub optimize_trie3_reorder_llm_tokens: bool,
 }
 
 impl Default for GrammarConstraintConfig {
@@ -143,6 +194,10 @@ impl Default for GrammarConstraintConfig {
             optimize_trie2_gc: true,
             skip_precomputation: false,
             optimize_trie3_constrain_bitvecs: true,
+            optimize_trie1_merge_equivalent_llm_tokens: false,
+            optimize_trie1_reorder_llm_tokens: false,
+            optimize_trie3_merge_equivalent_llm_tokens: false,
+            optimize_trie3_reorder_llm_tokens: false,
         }
     }
 }
@@ -161,6 +216,10 @@ pub struct GrammarConstraint {
     pub trie2_god: Trie2GodWrapper,
     pub trie3_god: Trie3GodWrapper,
     pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
+    // Stage-local vocabularies for internal<->original mappings
+    pub precompute_vocab: StageVocab,
+    pub precompute2_vocab: StageVocab,
+    pub precompute3_vocab: StageVocab,
 }
 
 impl GrammarConstraint {
@@ -210,6 +269,10 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("trie2_god".to_string(), self.trie2_god.to_json());
         obj.insert("trie3_god".to_string(), self.trie3_god.to_json());
         obj.insert("post_commit_allow_check_mode".to_string(), self.post_commit_allow_check_mode.to_json());
+        // Stage vocabs
+        obj.insert("precompute_vocab".to_string(), self.precompute_vocab.to_json());
+        obj.insert("precompute2_vocab".to_string(), self.precompute2_vocab.to_json());
+        obj.insert("precompute3_vocab".to_string(), self.precompute3_vocab.to_json());
         JSONNode::Object(obj)
     }
 
@@ -234,7 +297,7 @@ impl JSONConvertible for GrammarConstraint {
                 let max_original_llm_token_id = obj.remove("max_original_llm_token_id").ok_or_else(|| "Missing field max_original_llm_token_id".to_string())
                                                    .and_then(usize::from_json)?;
                 let original_to_internal_id_bimap = obj.remove("original_to_internal_id_bimap").ok_or_else(|| "Missing field original_to_internal_id_bimap".to_string())
-                                                       .and_then(|n| BiBTreeMap::<usize, usize>::from_json(n))?;
+                                                       .and_then(|n| BTreeMap::<usize, usize>::from_json(n))?;
                 let internal_max_llm_token = obj.remove("internal_max_llm_token").ok_or_else(|| "Missing field internal_max_llm_token".to_string())
                                                   .and_then(usize::from_json)?;
                 let possible_matches = obj.remove("possible_matches").ok_or_else(|| "Missing field possible_matches".to_string())
@@ -249,20 +312,52 @@ impl JSONConvertible for GrammarConstraint {
                     Some(n) => TerminalAllowanceCheckMode::from_json(n)?,
                     None => TerminalAllowanceCheckMode::default(),
                 };
+                // Stage vocabs (optional)
+                let precompute_vocab = match obj.remove("precompute_vocab") {
+                    Some(n) => StageVocab::from_json(n)?,
+                    None => {
+                        // Synthesize from global mapping
+                        let mut ito: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+                        for (orig, int_id) in &original_to_internal_id_bimap {
+                            ito.entry(*int_id).or_default().insert(*orig);
+                        }
+                        StageVocab {
+                            original_to_internal: original_to_internal_id_bimap.clone(),
+                            internal_to_original: ito.clone(),
+                            internal_max_llm_token,
+                        }
+                    }
+                };
+                let precompute2_vocab = match obj.remove("precompute2_vocab") {
+                    Some(n) => StageVocab::from_json(n)?,
+                    None => precompute_vocab.clone(),
+                };
+                let precompute3_vocab = match obj.remove("precompute3_vocab") {
+                    Some(n) => StageVocab::from_json(n)?,
+                    None => precompute_vocab.clone(),
+                };
 
+                // Build llm_vocab reverse map too
+                let mut global_ito: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+                for (o, i) in &original_to_internal_id_bimap {
+                    global_ito.entry(*i).or_default().insert(*o);
+                }
                 Ok(GrammarConstraint {
                     tokenizer,
                     parser,
                     precomputed,
                     precomputed2,
                     precomputed3,
-                    llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_max_llm_token }),
+                    llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_to_original_: global_ito, internal_max_llm_token }),
                     token_name_map,
                     possible_matches,
                     trie1_god,
                     trie2_god,
                     trie3_god,
                     post_commit_allow_check_mode,
+                    precompute_vocab,
+                    precompute2_vocab,
+                    precompute3_vocab,
                 })
             }
             _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
@@ -303,7 +398,7 @@ impl GrammarConstraint {
 
     pub(crate) fn setup_llm_token_mappings(
         original_llm_token_map: &LLMTokenMap,
-    ) -> BiBTreeMap<usize, usize>
+    ) -> BTreeMap<usize, usize>
     {
         // // TODO: delete this
         // let mut original_to_internal_id_bimap = BiBTreeMap::new();
@@ -318,7 +413,7 @@ impl GrammarConstraint {
             .collect();
         sorted_tokens_with_original_ids.sort_by(|(bytes_a, _), (bytes_b, _)| bytes_a.cmp(bytes_b));
 
-        let mut original_to_internal_id_bimap = BiBTreeMap::new();
+        let mut original_to_internal_id_bimap = BTreeMap::new();
         let mut internal_id_counter = 0;
 
         for (_bytes, original_llm_id) in sorted_tokens_with_original_ids {
@@ -361,10 +456,15 @@ impl GrammarConstraint {
         let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
 
         let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap_or(0);
+        // Build reverse mapping for global vocab
+        let mut internal_to_original_: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+        for (orig, int_id) in &original_to_internal_id_bimap {
+            internal_to_original_.entry(*int_id).or_default().insert(*orig);
+        }
 
         let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
         for (bytes, original_id) in llm_token_map.iter() {
-            if let Some(internal_id_val) = original_to_internal_id_bimap.get_by_left(&original_id.0) {
+            if let Some(internal_id_val) = original_to_internal_id_bimap.get(&original_id.0) {
                 internal_llm_token_map_for_precompute.insert(bytes.clone(), LLMTokenID(*internal_id_val));
             }
         }
@@ -431,8 +531,18 @@ impl GrammarConstraint {
             llm_token_map,
             max_original_llm_token_id,
             original_to_internal_id_bimap,
+            internal_to_original_: internal_to_original_.clone(),
             internal_max_llm_token,
         });
+
+        // Initialize per-stage vocabularies (start identical to global)
+        let precompute_vocab = StageVocab {
+            original_to_internal: llm_vocab.original_to_internal_id_bimap.clone(),
+            internal_to_original: internal_to_original_.clone(),
+            internal_max_llm_token: internal_max_llm_token,
+        };
+        let precompute2_vocab = precompute_vocab.clone();
+        let precompute3_vocab = precompute_vocab.clone();
 
         if config.skip_precomputation {
             return Self {
@@ -448,6 +558,9 @@ impl GrammarConstraint {
                 trie2_god: Trie2GodWrapper::new(),
                 trie3_god: Trie3GodWrapper::new(),
                 post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
+                precompute_vocab,
+                precompute2_vocab,
+                precompute3_vocab,
             };
         }
 
@@ -527,6 +640,9 @@ impl GrammarConstraint {
             trie2_god,
             trie3_god,
             post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
+            precompute_vocab,
+            precompute2_vocab,
+            precompute3_vocab,
         };
 
         gc
@@ -768,24 +884,45 @@ impl GrammarConstraint {
     pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
         let mut internal_bv = HybridBitset::zeros();
         for original_id_val in original_bv.iter() {
-            let internal_id_val = self.llm_vocab.original_to_internal_id_bimap.get_by_left(&(original_id_val as usize)).expect(format!("Original ID {} not found in original_to_internal_id_bimap", original_id_val).as_str());
-            internal_bv.insert(*internal_id_val as usize);
+            if let Some(internal_id_val) = self.llm_vocab.original_to_internal_id_bimap.get(&(original_id_val as usize)) {
+                internal_bv.insert(*internal_id_val as usize);
+            }
         }
         internal_bv
     }
 
     #[time_it]
     pub fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
+        self.internal_bv_to_original_with_map(internal_bv, &self.llm_vocab.internal_to_original_, self.llm_vocab.internal_max_llm_token)
+    }
+
+    // Stage-aware conversion (for Trie1)
+    pub fn internal_bv_to_original_precompute(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
+        self.internal_bv_to_original_with_map(internal_bv, &self.precompute_vocab.internal_to_original, self.precompute_vocab.internal_max_llm_token)
+    }
+    // Stage-aware conversion (for Trie2)
+    pub fn internal_bv_to_original_precompute2(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
+        self.internal_bv_to_original_with_map(internal_bv, &self.precompute2_vocab.internal_to_original, self.precompute2_vocab.internal_max_llm_token)
+    }
+    // Stage-aware conversion (for Trie3)
+    pub fn internal_bv_to_original_precompute3(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
+        self.internal_bv_to_original_with_map(internal_bv, &self.precompute3_vocab.internal_to_original, self.precompute3_vocab.internal_max_llm_token)
+    }
+
+    fn internal_bv_to_original_with_map(
+        &self,
+        internal_bv: &LLMTokenBV,
+        internal_to_original: &BTreeMap<usize, BTreeSet<usize>>,
+        internal_max_llm_token: usize,
+    ) -> LLMTokenBV {
         let internal_bv = internal_bv & &LLMTokenBV::max_ones();
         let mut original_bv = HybridBitset::zeros();
-        // for internal_id_val in internal_bv.iter() {
-        //     let original_id_val = self.llm_vocab.original_to_internal_id_bimap.get_by_right(&(internal_id_val as usize)).expect(format!("Internal ID {} not found in original_to_internal_id_bimap while converting to original BV: {:?}", internal_id_val, internal_bv).as_str());
-        //     original_bv.insert(*original_id_val as usize);
-        // }
-        for i in 0..=self.llm_vocab.internal_max_llm_token {
+        for i in 0..=internal_max_llm_token {
             if internal_bv.contains(i) {
-                if let Some(original_id_val) = self.llm_vocab.original_to_internal_id_bimap.get_by_right(&i) {
-                    original_bv.insert(*original_id_val);
+                if let Some(setv) = internal_to_original.get(&i) {
+                    for orig in setv {
+                        original_bv.insert(*orig);
+                    }
                 }
             }
         }
@@ -857,7 +994,7 @@ impl GrammarConstraint {
         let config = GSSPrintConfig {
             labels,
             max_edges: 500,
-            original_internal_bimap: Some(&self.llm_vocab.original_to_internal_id_bimap),
+            original_internal_bimap: None,
             llm_token_map: Some(&self.llm_vocab.llm_token_map),
             verbose: false,
         };
@@ -1871,13 +2008,13 @@ impl<'a> Display for GrammarConstraintState<'a> {
 
         if !gss_roots.is_empty() {
             writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
-            let config = GSSPrintConfig {
-                labels: None,
-                max_edges: 50,
-                original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
-                llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
-                verbose: false,
-            };
+        let config = GSSPrintConfig {
+            labels: None,
+            max_edges: 50,
+            original_internal_bimap: None,
+            llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
+            verbose: false,
+        };
             let (gss_str, _) =
                 crate::datastructures::gss::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
             write!(f, "{}", gss_str)?;
@@ -1990,7 +2127,7 @@ impl<'a> GrammarConstraintState<'a> {
         if initial_values_for_map.is_empty() {
              // This can happen if all GLR states had empty GSS stacks or no corresponding precomputed tries.
              crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
-             return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+             return self.parent.internal_bv_to_original_precompute(&final_mask_internal.into_inner());
         }
 
         let t1 = std::time::Instant::now();
@@ -2246,14 +2383,14 @@ impl<'a> GrammarConstraintState<'a> {
             let config = GSSPrintConfig {
                 labels: Some(&labels),
                 max_edges: 300,
-                original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                original_internal_bimap: None,
                 llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
                 verbose: false,
             };
             print!("{}", print_gss_forest(&roots, &self.parent.parser.terminal_map, &config).0);
         }
 
-        let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+        let final_mask_mapped = self.parent.internal_bv_to_original_precompute(&final_mask_internal.into_inner());
 
         let t_end = std::time::Instant::now();
         if env::var("RUST_LOG_MASK_TIMING").is_ok() {
@@ -2337,7 +2474,7 @@ impl<'a> GrammarConstraintState<'a> {
         if initial_values_for_map.is_empty() {
              // This can happen if all GLR states had empty GSS stacks or no corresponding precomputed tries.
              crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
-             return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+             return self.parent.internal_bv_to_original_precompute2(&final_mask_internal.into_inner());
         }
 
         let t1 = std::time::Instant::now();
@@ -2455,7 +2592,7 @@ impl<'a> GrammarConstraintState<'a> {
             let config = GSSPrintConfig {
                 labels: Some(&labels),
                 max_edges: 300,
-                original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                original_internal_bimap: None,
                 llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
                 verbose: false,
             };
@@ -2463,7 +2600,7 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         crate::debug!(4, "Final mask internal: {:?}", final_mask_internal.borrow());
-        let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+        let final_mask_mapped = self.parent.internal_bv_to_original_precompute2(&final_mask_internal.into_inner());
         crate::debug!(4, "Final mask mapped: {:?}", final_mask_mapped);
 
         let t_end = std::time::Instant::now();
@@ -2576,7 +2713,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
         if self.state.is_empty() {
-            return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+            return self.parent.internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
         }
         let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, GLRParserState<'a>> = BTreeMap::new();
         crate::debug!(10, "\n--- Seeding work queue ---");
@@ -2695,7 +2832,7 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(10, "\n--- get_mask3 END ---");
         crate::debug!(10, "Final mask internal: {}", format_bv(&final_mask_internal.borrow()));
         crate::debug!(4, "Final mask internal: {}", format_bv(&final_mask_internal.borrow()));
-        let final_mask_mapped = self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+        let final_mask_mapped = self.parent.internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
         crate::debug!(10, "Final mask mapped: {}", format_bv(&final_mask_mapped));
         crate::debug!(4, "Final mask mapped: {}", format_bv(&final_mask_mapped));
 
