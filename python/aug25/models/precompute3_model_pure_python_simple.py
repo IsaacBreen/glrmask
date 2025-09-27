@@ -187,30 +187,6 @@ class Model(GraphProvider):
         # Pretty-print the graph for debugging
         print("--- Precomputed Graph ---")
 
-        def get_token_examples_str(llm_bv: LLMTokenSet, limit=5) -> str:
-            indices = llm_bv.to_indices()
-            if not indices:
-                return ""
-
-            examples = []
-            count = 0
-            for i in indices:
-                if count >= limit:
-                    break
-                if i in id_to_token:
-                    try:
-                        examples.append(f'"{id_to_token[i].decode("utf-8")}"')
-                    except UnicodeDecodeError:
-                        examples.append(str(id_to_token[i]))
-                else:
-                    examples.append(f"id:{i}")
-                count += 1
-
-            example_str = ", ".join(examples)
-            if len(indices) > limit:
-                example_str += ", ..."
-            return f' (e.g., [{example_str}])'
-
         def print_graph_recursive(node_id: NodeID, prefix: str, visited: Set[NodeID]):
             node = arena.get(node_id)
             if not node:
@@ -222,8 +198,6 @@ class Model(GraphProvider):
                     if len(llm_bv_str) > 40:
                         llm_bv_str = llm_bv_str[:37] + "..."
 
-                    token_examples = get_token_examples_str(llm_bv)
-
                     state_bv_str = str(state_bv)
                     if len(state_bv_str) > 40:
                         state_bv_str = state_bv_str[:37] + "..."
@@ -231,7 +205,7 @@ class Model(GraphProvider):
                     dest_node = arena.get(dest_idx)
                     dest_end_marker = " [END]" if dest_node and dest_node.clean_end else ""
 
-                    print(f"{prefix}└── Edge (pop: {pop}, tokens: {llm_bv_str}{token_examples}): states {state_bv_str} -> Node Trie2Index({dest_idx}) (MaxDepth: {max_depth.get(dest_idx, 0)}){dest_end_marker}")
+                    print(f"{prefix}└── Edge (pop: {pop}, tokens: {llm_bv_str}): states {state_bv_str} -> Node Trie2Index({dest_idx}) (MaxDepth: {max_depth.get(dest_idx, 0)}){dest_end_marker}")
 
                     if dest_idx not in visited:
                         visited.add(dest_idx)
