@@ -295,6 +295,8 @@ class Model(GraphProvider):
         model._reorder_llm_tokens_for_range_minimization()
         # Run graph optimization after LLM token reorder, as requested
         model._optimize_state_masks_and_edges()
+        model._merge_equivalent_llm_tokens()
+        model._reorder_llm_tokens_for_range_minimization()
         return model
 
     @profile
