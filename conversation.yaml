@@ -365,7 +365,22 @@ local_system:
           }
 
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
-              
+              let narrowed_acc = Arc::new(Acc::narrow(self.path_acc, &self.parent_arc.local_acc()));
+
+              // Optimization: if the parent already represents this single path and the path_acc
+              // didn't add any constraints, we can return it directly.
+              if self.parent_arc.num_predecessors() == 1 && narrowed_acc == self.parent_arc.local_acc() {
+                  return self.parent_arc.clone();
+              }
+
+              // Otherwise, create a new parent node representing only this path.
+              let mut predecessors = NodeMap::new();
+              predecessors
+                  .entry(self.edge_value.clone())
+                  .or_default()
+                  .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
+
+              Arc::new(GSSNode::new_with_map(narrowed_acc, predecessors))
           }
       }
 
@@ -1116,7 +1131,20 @@ local_system:
 
           /// Creates a new `GSSNode` that represents only the path segment of this peek.
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
+              // Optimization: if the parent already represents this single path, return it.
+              if self.parent_arc.num_predecessors() == 1 {
+                  return self.parent_arc.clone();
+              }
 
+              // Create a new parent node representing only this path segment.
+              let mut predecessors = NodeMap::new();
+              predecessors
+                  .entry(self.edge_value.clone())
+                  .or_default()
+                  .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
+
+              // The new node keeps the original parent's local acc.
+              Arc::new(GSSNode::new_with_map(self.parent_arc.local_acc(), predecessors))
           }
       }
 
@@ -3316,6 +3344,15 @@ local_system:
               }
           }
 
+          /// Creates a "dead" accumulator that allows no tokens.
+          pub(crate) fn new_dead() -> Self {
+              Self {
+                  llm_tokens_union: HybridBitset::zeros(),
+                  terminals_union: HybridL2Bitset::all(), // Doesn't matter, token check will fail first
+                  stored_trie_nodes: BTreeSet::new(),
+              }
+          }
+
           /// Returns true if this Acc acts as a neutral element for merging.
           /// That is, it contributes no constraints and carries no stored_trie nodes.
           /// This is used to detect safe early-return cases in GSS merges.
@@ -3836,6 +3873,10 @@ local_system:
                       .push(pred_tx.clone());
               }
               Self::new_with_map(Arc::new(final_parent_acc), predecessors_map)
+          }
+
+          pub fn new_dead() -> Self {
+              Self::new(Acc::new_dead())
           }
 
           pub fn new_fresh() -> Self {
@@ -4533,7 +4574,7 @@ local_system:
       ) {
           let node_ptr = Arc::as_ptr(root_arc);
           if let Some(cached) = memo.get(&node_ptr) {
-              *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+              *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
               return;
           }
           let new_arc_opt = match root_arc.as_ref() {
@@ -4560,7 +4601,7 @@ local_system:
               }
           };
           memo.insert(node_ptr, new_arc_opt.clone());
-          *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+          *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
       }
 
       pub(crate) fn disallow_llm_tokens_and_prune_arc(
@@ -4589,7 +4630,7 @@ local_system:
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
               *root_arc = new_root;
           } else {
-              *root_arc = Arc::new(GSSNode::new_fresh());
+              *root_arc = Arc::new(GSSNode::new_dead());
           }
       }
 
@@ -4610,7 +4651,7 @@ local_system:
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
               *root_arc = new_root;
           } else {
-              *root_arc = Arc::new(GSSNode::new_fresh());
+              *root_arc = Arc::new(GSSNode::new_dead());
           }
       }
 
@@ -4621,7 +4662,7 @@ local_system:
       ) {
           let node_ptr = Arc::as_ptr(root_arc);
           if let Some(cached) = memo.get(&node_ptr) {
-              *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+              *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
               return;
           }
 
@@ -4691,7 +4732,7 @@ local_system:
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
               *root_arc = new_root;
           } else {
-              *root_arc = Arc::new(GSSNode::new_fresh());
+              *root_arc = Arc::new(GSSNode::new_dead());
           }
       }
 
@@ -4724,7 +4765,7 @@ local_system:
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
               *root_arc = new_root;
           } else {
-              *root_arc = Arc::new(GSSNode::new_fresh());
+              *root_arc = Arc::new(GSSNode::new_dead());
           }
       }
 
@@ -4764,7 +4805,7 @@ local_system:
           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
               *root_arc = new_root;
           } else {
-              *root_arc = Arc::new(GSSNode::new_fresh());
+              *root_arc = Arc::new(GSSNode::new_dead());
           }
       }
 
@@ -6838,7 +6879,22 @@ messages:
           }
 
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
-              
+              let narrowed_acc = Arc::new(Acc::narrow(self.path_acc, &self.parent_arc.local_acc()));
+
+              // Optimization: if the parent already represents this single path and the path_acc
+              // didn't add any constraints, we can return it directly.
+              if self.parent_arc.num_predecessors() == 1 && narrowed_acc == self.parent_arc.local_acc() {
+                  return self.parent_arc.clone();
+              }
+
+              // Otherwise, create a new parent node representing only this path.
+              let mut predecessors = NodeMap::new();
+              predecessors
+                  .entry(self.edge_value.clone())
+                  .or_default()
+                  .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
+
+              Arc::new(GSSNode::new_with_map(narrowed_acc, predecessors))
           }
       }
 
@@ -7589,7 +7645,20 @@ messages:
 
           /// Creates a new `GSSNode` that represents only the path segment of this peek.
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
+              // Optimization: if the parent already represents this single path, return it.
+              if self.parent_arc.num_predecessors() == 1 {
+                  return self.parent_arc.clone();
+              }
 
+              // Create a new parent node representing only this path segment.
+              let mut predecessors = NodeMap::new();
+              predecessors
+                  .entry(self.edge_value.clone())
+                  .or_default()
+                  .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
+
+              // The new node keeps the original parent's local acc.
+              Arc::new(GSSNode::new_with_map(self.parent_arc.local_acc(), predecessors))
           }
       }
 
@@ -9682,14 +9751,14 @@ messages:
     metadata:
       filename: src/datastructures/gss.rs
   - user: |-
-      Implement `isolated_parent`.
-
-      For GSSPeek, check if this predecessor is the only one. If so, we can just return the parent as-is. It's preferable for node-sharing purposes to return the exact arc node if possible.
-      If it's not, just create a new node where it is the only predecessor. Use the parent's local acc. Don't narrow with the predecessor.
-
-      For GSSPopperItemPeek, first narrow the parent's acc with the path acc.
-      If there's just one predecessor (this one) and the parent's acc equals the narrowed acc (unchanged by narrowing with path), just return the parent as-is.
-      Otherwise, make a new parent. Use the narrowed acc for the parent's local acc (parent narrowed with path).
+      In a lot of cases it makes more sense to use `new_dead()`. Define it and use it eg
+      ```rust
+          if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+              *root_arc = new_root;
+          } else {
+              *root_arc = Arc::new(GSSNode::new_dead());
+          }
+      ```
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9708,110 +9777,201 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement the `isolated_parent` method, followed by the corresponding git diff.
+      Of course! Here are the step-by-step instructions to define and use `new_dead()` for pruned GSS nodes, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      I will implement the `isolated_parent` method for both `GSSPopperItemPeek` and `GSSPeek` in the file `src/datastructures/gss.rs`.
+      1.  **Open the file `src/datastructures/gss.rs`**.
 
-      1.  **Implement `GSSPopperItemPeek::isolated_parent`:**
-          *   Locate the `impl<'a> GSSPopperItemPeek<'a>` block.
-          *   Find the empty `isolated_parent` method within it.
-          *   Replace the empty method body with the following implementation:
-              ```rust
-              let narrowed_acc = Arc::new(Acc::narrow(self.path_acc, &self.parent_arc.local_acc()));
+      2.  **Add `Acc::new_dead()`**: In the `impl Acc` block, right after the `new_fresh` function, insert the new `new_dead` function to create an accumulator that represents a pruned or "dead" path.
 
-              // Optimization: if the parent already represents this single path and the path_acc
-              // didn't add any constraints, we can return it directly.
-              if self.parent_arc.num_predecessors() == 1 && narrowed_acc == self.parent_arc.local_acc() {
-                  return self.parent_arc.clone();
+          ```rust
+          /// Creates a "dead" accumulator that allows no tokens.
+          pub(crate) fn new_dead() -> Self {
+              Self {
+                  llm_tokens_union: HybridBitset::zeros(),
+                  terminals_union: HybridL2Bitset::all(), // Doesn't matter, token check will fail first
+                  stored_trie_nodes: BTreeSet::new(),
               }
+          }
+          ```
 
-              // Otherwise, create a new parent node representing only this path.
-              let mut predecessors = NodeMap::new();
-              predecessors
-                  .entry(self.edge_value.clone())
-                  .or_default()
-                  .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
+      3.  **Add `GSSNode::new_dead()`**: In the `impl GSSNode` block that contains `new_fresh`, add the corresponding `new_dead` function.
 
-              Arc::new(GSSNode::new_with_map(narrowed_acc, predecessors))
-              ```
-          *   This logic correctly creates a new parent node that represents the single path from the original parent to the predecessor, applying the accumulated constraints from the pop operation. It includes an optimization to reuse the existing parent node if it already represents this isolated path.
+          ```rust
+          pub fn new_dead() -> Self {
+              Self::new(Acc::new_dead())
+          }
+          ```
 
-      2.  **Implement `GSSPeek::isolated_parent`:**
-          *   Locate the `impl<'a> GSSPeek<'a>` block.
-          *   Find the empty `isolated_parent` method within it.
-          *   Replace the empty method body with the following implementation:
+      4.  **Update Pruning Functions**: In the same file, locate the following functions and replace their fallback `GSSNode::new_fresh()` with `GSSNode::new_dead()`. This ensures that when a GSS branch is completely pruned, it is replaced by a node that correctly represents a dead end.
+
+          *   In `allow_only_llm_tokens_and_prune_arc`, update both `unwrap_or_else` calls:
               ```rust
-              // Optimization: if the parent already represents this single path, return it.
-              if self.parent_arc.num_predecessors() == 1 {
-                  return self.parent_arc.clone();
-              }
+              // Change this:
+              *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+              // To this:
+              *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
 
-              // Create a new parent node representing only this path segment.
-              let mut predecessors = NodeMap::new();
-              predecessors
-                  .entry(self.edge_value.clone())
-                  .or_default()
-                  .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
-
-              // The new node keeps the original parent's local acc.
-              Arc::new(GSSNode::new_with_map(self.parent_arc.local_acc(), predecessors))
+              // And change this:
+              *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+              // To this:
+              *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
               ```
-          *   This implementation is simpler as it doesn't involve a `path_acc`. It creates a new parent node with the original parent's constraints but with only the single predecessor from the `peek`.
+
+          *   In `reset_llm_tokens`, update the `else` block:
+              ```rust
+              // Change this:
+              *root_arc = Arc::new(GSSNode::new_fresh());
+              // To this:
+              *root_arc = Arc::new(GSSNode::new_dead());
+              ```
+
+          *   In `reset_terminals`, update the `else` block:
+              ```rust
+              // Change this:
+              *root_arc = Arc::new(GSSNode::new_fresh());
+              // To this:
+              *root_arc = Arc::new(GSSNode::new_dead());
+              ```
+
+          *   In `disallow_terminals_and_prune_arc`, update the `unwrap_or_else` call:
+              ```rust
+              // Change this:
+              *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+              // To this:
+              *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
+              ```
+
+          *   In `prune_llm_tokens_by_disallowed_terminals`, update the `else` block:
+              ```rust
+              // Change this:
+              *root_arc = Arc::new(GSSNode::new_fresh());
+              // To this:
+              *root_arc = Arc::new(GSSNode::new_dead());
+              ```
+
+          *   In `prune_disallowed_terminals`, update the `else` block:
+              ```rust
+              // Change this:
+              *root_arc = Arc::new(GSSNode::new_fresh());
+              // To this:
+              *root_arc = Arc::new(GSSNode::new_dead());
+              ```
+
+          *   In `map_allowed_terminals_tokenizer_states`, update the `else` block:
+              ```rust
+              // Change this:
+              *root_arc = Arc::new(GSSNode::new_fresh());
+              // To this:
+              *root_arc = Arc::new(GSSNode::new_dead());
+              ```
 
       ### Git Diff
 
-      Here is the git diff with the changes:
+      Here is the git patch with all the changes described above.
 
       ```diff
       diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
-      index 81b2505..3595561 100644
+      index 0352128..f399f98 100644
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -406,7 +406,22 @@
+      @@ -100,6 +100,16 @@
+               }
            }
        
-           pub fn isolated_parent(&self) -> Arc<GSSNode> {
-      -        
-      +        let narrowed_acc = Arc::new(Acc::narrow(self.path_acc, &self.parent_arc.local_acc()));
-      +
-      +        // Optimization: if the parent already represents this single path and the path_acc
-      +        // didn't add any constraints, we can return it directly.
-      +        if self.parent_arc.num_predecessors() == 1 && narrowed_acc == self.parent_arc.local_acc() {
-      +            return self.parent_arc.clone();
+      +    /// Creates a "dead" accumulator that allows no tokens.
+      +    pub(crate) fn new_dead() -> Self {
+      +        Self {
+      +            llm_tokens_union: HybridBitset::zeros(),
+      +            terminals_union: HybridL2Bitset::all(), // Doesn't matter, token check will fail first
+      +            stored_trie_nodes: BTreeSet::new(),
       +        }
+      +    }
       +
-      +        // Otherwise, create a new parent node representing only this path.
-      +        let mut predecessors = NodeMap::new();
-      +        predecessors
-      +            .entry(self.edge_value.clone())
-      +            .or_default()
-      +            .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
+           /// Returns true if this Acc acts as a neutral element for merging.
+           /// That is, it contributes no constraints and carries no stored_trie nodes.
+           /// This is used to detect safe early-return cases in GSS merges.
+      @@ -623,6 +633,10 @@
+               Self::new_with_map(Arc::new(final_parent_acc), predecessors_map)
+           }
+       
+      +    pub fn new_dead() -> Self {
+      +        Self::new(Acc::new_dead())
+      +    }
       +
-      +        Arc::new(GSSNode::new_with_map(narrowed_acc, predecessors))
+           pub fn new_fresh() -> Self {
+               Self::new(Acc::new_fresh())
+           }
+      @@ -1071,7 +1085,7 @@
+       ) {
+           let node_ptr = Arc::as_ptr(root_arc);
+           if let Some(cached) = memo.get(&node_ptr) {
+      -        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+      +        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
+               return;
+           }
+           let new_arc_opt = match root_arc.as_ref() {
+      @@ -1096,7 +1110,7 @@
+               }
+           };
+           memo.insert(node_ptr, new_arc_opt.clone());
+      -    *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+      +    *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
+       }
+       
+       pub(crate) fn disallow_llm_tokens_and_prune_arc(
+      @@ -1122,7 +1136,7 @@
+           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+               *root_arc = new_root;
+           } else {
+      -        *root_arc = Arc::new(GSSNode::new_fresh());
+      +        *root_arc = Arc::new(GSSNode::new_dead());
            }
        }
        
-      @@ -1067,7 +1082,21 @@
+      @@ -1142,7 +1156,7 @@
+           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+               *root_arc = new_root;
+           } else {
+      -        *root_arc = Arc::new(GSSNode::new_fresh());
+      +        *root_arc = Arc::new(GSSNode::new_dead());
+           }
+       }
        
-           /// Creates a new `GSSNode` that represents only the path segment of this peek.
-           pub fn isolated_parent(&self) -> Arc<GSSNode> {
-      -
-      +        // Optimization: if the parent already represents this single path, return it.
-      +        if self.parent_arc.num_predecessors() == 1 {
-      +            return self.parent_arc.clone();
-      +        }
-      +
-      +        // Create a new parent node representing only this path segment.
-      +        let mut predecessors = NodeMap::new();
-      +        predecessors
-      +            .entry(self.edge_value.clone())
-      +            .or_default()
-      +            .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
-      +
-      +        // The new node keeps the original parent's local acc.
-      +        Arc::new(GSSNode::new_with_map(self.parent_arc.local_acc(), predecessors))
+      @@ -1153,7 +1167,7 @@
+       ) {
+           let node_ptr = Arc::as_ptr(root_arc);
+           if let Some(cached) = memo.get(&node_ptr) {
+      -        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+      +        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
+               return;
+           }
+       
+      @@ -1221,7 +1235,7 @@
+           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+               *root_arc = new_root;
+           } else {
+      -        *root_arc = Arc::new(GSSNode::new_fresh());
+      +        *root_arc = Arc::new(GSSNode::new_dead());
+           }
+       }
+       
+      @@ -1251,7 +1265,7 @@
+           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+               *root_arc = new_root;
+           } else {
+      -        *root_arc = Arc::new(GSSNode::new_fresh());
+      +        *root_arc = Arc::new(GSSNode::new_dead());
+           }
+       }
+       
+      @@ -1288,7 +1302,7 @@
+           if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+               *root_arc = new_root;
+           } else {
+      -        *root_arc = Arc::new(GSSNode::new_fresh());
+      +        *root_arc = Arc::new(GSSNode::new_dead());
            }
        }
        
@@ -9827,7 +9987,7 @@ messages:
       Applying patch to 'src/datastructures/gss.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/gss.rs.
     metadata:
-  - user: 'Changes committed with message: "Implement isolated_parent for GSSPopperItemPeek
-      and GSSPeek"'
+  - user: 'Changes committed with message: "feat(gss): Implement GSSNode::new_dead()
+      and use it for pruned nodes"'
     metadata:
 ...

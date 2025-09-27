@@ -108,6 +108,15 @@ impl Acc {
         }
     }
 
+    /// Creates a "dead" accumulator that allows no tokens.
+    pub(crate) fn new_dead() -> Self {
+        Self {
+            llm_tokens_union: HybridBitset::zeros(),
+            terminals_union: HybridL2Bitset::all(), // Doesn't matter, token check will fail first
+            stored_trie_nodes: BTreeSet::new(),
+        }
+    }
+
     /// Returns true if this Acc acts as a neutral element for merging.
     /// That is, it contributes no constraints and carries no stored_trie nodes.
     /// This is used to detect safe early-return cases in GSS merges.
@@ -628,6 +637,10 @@ impl GSSNode {
                 .push(pred_tx.clone());
         }
         Self::new_with_map(Arc::new(final_parent_acc), predecessors_map)
+    }
+
+    pub fn new_dead() -> Self {
+        Self::new(Acc::new_dead())
     }
 
     pub fn new_fresh() -> Self {
@@ -1325,7 +1338,7 @@ pub(crate) fn allow_only_llm_tokens_and_prune_arc(
 ) {
     let node_ptr = Arc::as_ptr(root_arc);
     if let Some(cached) = memo.get(&node_ptr) {
-        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
         return;
     }
     let new_arc_opt = match root_arc.as_ref() {
@@ -1352,7 +1365,7 @@ pub(crate) fn allow_only_llm_tokens_and_prune_arc(
         }
     };
     memo.insert(node_ptr, new_arc_opt.clone());
-    *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+    *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
 }
 
 pub(crate) fn disallow_llm_tokens_and_prune_arc(
@@ -1381,7 +1394,7 @@ pub fn reset_llm_tokens(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new_fresh());
+        *root_arc = Arc::new(GSSNode::new_dead());
     }
 }
 
@@ -1402,7 +1415,7 @@ pub(crate) fn reset_terminals(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new_fresh());
+        *root_arc = Arc::new(GSSNode::new_dead());
     }
 }
 
@@ -1413,7 +1426,7 @@ pub(crate) fn disallow_terminals_and_prune_arc(
 ) {
     let node_ptr = Arc::as_ptr(root_arc);
     if let Some(cached) = memo.get(&node_ptr) {
-        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+        *root_arc = cached.clone().unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
         return;
     }
 
@@ -1483,7 +1496,7 @@ pub fn prune_llm_tokens_by_disallowed_terminals(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new_fresh());
+        *root_arc = Arc::new(GSSNode::new_dead());
     }
 }
 
@@ -1516,7 +1529,7 @@ pub fn prune_disallowed_terminals(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new_fresh());
+        *root_arc = Arc::new(GSSNode::new_dead());
     }
 }
 
@@ -1556,7 +1569,7 @@ pub fn map_allowed_terminals_tokenizer_states(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new_fresh());
+        *root_arc = Arc::new(GSSNode::new_dead());
     }
 }
 
