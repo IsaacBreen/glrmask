@@ -86,7 +86,10 @@ public:
     std::vector<std::pair<unsigned long long, unsigned long long>> to_ranges() const {
         std::vector<std::pair<unsigned long long, unsigned long long>> ranges;
         for (const auto& interval : set) {
-            ranges.emplace_back(interval.lower(), interval.upper());
+            // A right-open interval [lower, upper) represents the inclusive range [lower, upper-1].
+            if (interval.lower() < interval.upper()) {
+                ranges.emplace_back(interval.lower(), interval.upper() - 1);
+            }
         }
         return ranges;
     }
@@ -94,10 +97,10 @@ public:
     std::vector<unsigned long long> to_indices() const {
         std::vector<unsigned long long> indices;
         for (const auto& interval : set) {
-            for (unsigned long long i = interval.lower(); ; ++i) {
+            // A right-open interval [lower, upper) contains elements from lower up to (but not including) upper.
+            unsigned long long upper = interval.upper();
+            for (unsigned long long i = interval.lower(); i != upper; ++i)
                 indices.push_back(i);
-                if (i == interval.upper()) break; // handle overflow for max ull
-            }
         }
         return indices;
     }
@@ -114,7 +117,10 @@ public:
             if (!first) {
                 ss << ", ";
             }
-            ss << "(" << interval.lower() << ", " << interval.upper() << ")";
+            // A right-open interval [lower, upper) represents the inclusive range [lower, upper-1].
+            if (interval.lower() < interval.upper()) {
+                ss << "(" << interval.lower() << ", " << (interval.upper() - 1) << ")";
+            }
             first = false;
         }
         ss << "]";
