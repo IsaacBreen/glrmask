@@ -12,6 +12,7 @@ from ..range_set.py_range_set import PyRangeSet as RangeSet
 # from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
 import _sep1 as ffi
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+import os
 # from python.gss_tester.implementations.reference_impl import ReferenceGSS as GSS
 # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
 
@@ -128,6 +129,7 @@ class Model(GraphProvider):
 
     # State
     state: Dict[int, GSS]
+    debug_logging: bool = field(default=False, init=False)
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -184,53 +186,55 @@ class Model(GraphProvider):
             )
             for uid, node_data in arena_dict.items()
         }
-        # Pretty-print the graph for debugging
-        print("--- Precomputed Graph ---")
+        debug_logging = os.environ.get("RUST_LOG") == "debug"
+        if debug_logging:
+            # Pretty-print the graph for debugging
+            print("--- Precomputed Graph ---")
 
-        def print_graph_recursive(node_id: NodeID, prefix: str, visited: Set[NodeID]):
-            node = arena.get(node_id)
-            if not node:
-                return
+            def print_graph_recursive(node_id: NodeID, prefix: str, visited: Set[NodeID]):
+                node = arena.get(node_id)
+                if not node:
+                    return
 
-            for i, ((pop, llm_bv), dests) in enumerate(node.children):
-                for j, (dest_idx, state_bv) in enumerate(dests):
-                    llm_bv_str = str(llm_bv)
-                    if len(llm_bv_str) > 40:
-                        llm_bv_str = llm_bv_str[:37] + "..."
+                for i, ((pop, llm_bv), dests) in enumerate(node.children):
+                    for j, (dest_idx, state_bv) in enumerate(dests):
+                        llm_bv_str = str(llm_bv)
+                        if len(llm_bv_str) > 40:
+                            llm_bv_str = llm_bv_str[:37] + "..."
 
-                    state_bv_str = str(state_bv)
-                    if len(state_bv_str) > 40:
-                        state_bv_str = state_bv_str[:37] + "..."
+                        state_bv_str = str(state_bv)
+                        if len(state_bv_str) > 40:
+                            state_bv_str = state_bv_str[:37] + "..."
 
-                    dest_node = arena.get(dest_idx)
-                    dest_end_marker = " [END]" if dest_node and dest_node.clean_end else ""
+                        dest_node = arena.get(dest_idx)
+                        dest_end_marker = " [END]" if dest_node and dest_node.clean_end else ""
 
-                    print(f"{prefix}└── Edge (pop: {pop}, tokens: {llm_bv_str}): states {state_bv_str} -> Node Trie2Index({dest_idx}) (MaxDepth: {max_depth.get(dest_idx, 0)}){dest_end_marker}")
+                        print(f"{prefix}└── Edge (pop: {pop}, tokens: {llm_bv_str}): states {state_bv_str} -> Node Trie2Index({dest_idx}) (MaxDepth: {max_depth.get(dest_idx, 0)}){dest_end_marker}")
 
-                    if dest_idx not in visited:
-                        visited.add(dest_idx)
-                        print_graph_recursive(dest_idx, prefix + "   ", visited)
+                        if dest_idx not in visited:
+                            visited.add(dest_idx)
+                            print_graph_recursive(dest_idx, prefix + "   ", visited)
 
-        visited_roots = set()
-        for tsid in range(tokenizer_max_state + 1):
-            if tsid in roots_map:
-                print(f"\n--- Tokenizer State ID: {tsid} ---")
-                root_id = roots_map[tsid]
+            visited_roots = set()
+            for tsid in range(tokenizer_max_state + 1):
+                if tsid in roots_map:
+                    print(f"\n--- Tokenizer State ID: {tsid} ---")
+                    root_id = roots_map[tsid]
 
-                root_node = arena.get(root_id)
-                root_end_marker = " [END]" if root_node and root_node.clean_end else ""
-                print(f"Root Node Trie2Index({root_id}) (MaxDepth: {max_depth.get(root_id, 0)}){root_end_marker}")
+                    root_node = arena.get(root_id)
+                    root_end_marker = " [END]" if root_node and root_node.clean_end else ""
+                    print(f"Root Node Trie2Index({root_id}) (MaxDepth: {max_depth.get(root_id, 0)}){root_end_marker}")
 
-                if root_id in visited_roots:
-                    print("  (Root already visited)")
-                    continue
+                    if root_id in visited_roots:
+                        print("  (Root already visited)")
+                        continue
 
-                visited_roots.add(root_id)
-                visited_for_this_root = {root_id}
+                    visited_roots.add(root_id)
+                    visited_for_this_root = {root_id}
 
-                print_graph_recursive(root_id, "", visited_for_this_root)
+                    print_graph_recursive(root_id, "", visited_for_this_root)
 
-        print("--- End Precomputed Graph ---")
+            print("--- End Precomputed Graph ---")
         # Load tokenizer and parser table from the full constraint JSON
         glr_parser = constraint.glr_parser()
         ignore_terminal_id = glr_parser.ignore_terminal_id
@@ -311,7 +315,8 @@ class Model(GraphProvider):
         all_internal = constraint.all_internal_llm_tokens_bitset()
         all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
 
-        print(possible_matches_cache)
+        if debug_logging:
+            print(possible_matches_cache)
 
         model = Model(
             arena=arena,
@@ -331,6 +336,7 @@ class Model(GraphProvider):
             ignore_terminal_id=ignore_terminal_id,
             state=state,
         )
+        model.debug_logging = debug_logging
 
         return model
 
@@ -518,9 +524,10 @@ class Model(GraphProvider):
         - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
-        print("states in get_mask:")
-        for k, v in self.state.items():
-            print(f"state {k}: {v.to_reference_impl()}")
+        if self.debug_logging:
+            print("states in get_mask:")
+            for k, v in self.state.items():
+                print(f"state {k}: {v.to_reference_impl()}")
 
         state_map: Dict[int, GSS] = self.state
 
@@ -561,9 +568,10 @@ class Model(GraphProvider):
 
         state_map = {sid: gss.apply(initialize_acc) for sid, gss in state_map.items()}
 
-        print("--- After GSS Initialization ---")
-        for sid, gss in state_map.items():
-            print(f"sid {sid}: {gss.to_reference_impl()}")
+        if self.debug_logging:
+            print("--- After GSS Initialization ---")
+            for sid, gss in state_map.items():
+                print(f"sid {sid}: {gss.to_reference_impl()}")
 
 
         for sid, gss in state_map.items():
@@ -578,10 +586,11 @@ class Model(GraphProvider):
                 enqueued_nodes.add(r)
                 hp(depth_heap, (-d, r))
 
-        print("--- After Seeding ---")
-        for node_idx in sorted(values.keys()):
-            gss = values[node_idx]
-            print(f"Node {node_idx}: {gss.to_reference_impl()}")
+        if self.debug_logging:
+            print("--- After Seeding ---")
+            for node_idx in sorted(values.keys()):
+                gss = values[node_idx]
+                print(f"Node {node_idx}: {gss.to_reference_impl()}")
 
         def enqueue(d: int, n: NodeID) -> None:
             if n not in enqueued_nodes:
@@ -595,18 +604,21 @@ class Model(GraphProvider):
             neg_depth, node = hpop(depth_heap)
             gss_node: GSS = values.pop(node)
             enqueued_nodes.remove(node)
-            print(f"\n[{iter_count}] Processing depth={-neg_depth}, node={node}")
-            print(f"  - Popped GSS: {gss_node.to_reference_impl()}")
+            if self.debug_logging:
+                print(f"\n[{iter_count}] Processing depth={-neg_depth}, node={node}")
+                print(f"  - Popped GSS: {gss_node.to_reference_impl()}")
 
             # End-node handling: just union the allowed LLM tokens
             if is_end(node):
-                print(f"--- End Node {node} ---")
-                print(f"GSS that reached end node: {gss_node.to_reference_impl()}")
+                if self.debug_logging:
+                    print(f"--- End Node {node} ---")
+                    print(f"GSS that reached end node: {gss_node.to_reference_impl()}")
                 reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                 if reduced_acc:
                     final_mask = final_mask.union(reduced_acc.llm_mask)
-                    print(f"Reduced acc mask: {reduced_acc.llm_mask}")
-                    print(f"Final mask updated to: {final_mask}")
+                    if self.debug_logging:
+                        print(f"Reduced acc mask: {reduced_acc.llm_mask}")
+                        print(f"Final mask updated to: {final_mask}")
 
             # # Zombie traversal avoidance
             # a_node = arena.get(node)
@@ -623,18 +635,23 @@ class Model(GraphProvider):
             a_node = arena.get(node)
             edges = a_node.children if a_node else []
             for (pop, llm_bv), dests in edges:
-                print(f"    - Edge: pop={pop}, llm_bv={llm_bv}")
+                if self.debug_logging:
+                    print(f"    - Edge: pop={pop}, llm_bv={llm_bv}")
                 llm_bv_eff = llm_bv.difference(final_mask)
                 if llm_bv_eff.is_empty():
-                    print(f"      - SKIPPING edge (llm_bv empty after diff with final_mask)")
+                    if self.debug_logging:
+                        print(f"      - SKIPPING edge (llm_bv empty after diff with final_mask)")
                     continue
-                print(f"      - Effective llm_bv: {llm_bv_eff}")
+                if self.debug_logging:
+                    print(f"      - Effective llm_bv: {llm_bv_eff}")
 
                 popped: GSS = gss_node.popn(pop)
                 if popped.is_empty():
-                    print(f"      - SKIPPING edge (GSS empty after popn({pop}))")
+                    if self.debug_logging:
+                        print(f"      - SKIPPING edge (GSS empty after popn({pop}))")
                     continue
-                print(f"      - GSS after popn({pop}): {popped.to_reference_impl()}")
+                if self.debug_logging:
+                    print(f"      - GSS after popn({pop}): {popped.to_reference_impl()}")
 
                 peeked = popped.peek()
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
@@ -656,9 +673,11 @@ class Model(GraphProvider):
 
                 popped_after_prune = popped.apply_and_prune(intersect_and_prune)
                 if popped_after_prune.is_empty():
-                    print(f"      - SKIPPING edge (GSS empty after intersecting with edge mask)")
+                    if self.debug_logging:
+                        print(f"      - SKIPPING edge (GSS empty after intersecting with edge mask)")
                     continue
-                print(f"      - GSS after mask intersection: {popped_after_prune.to_reference_impl()}")
+                if self.debug_logging:
+                    print(f"      - GSS after mask intersection: {popped_after_prune.to_reference_impl()}")
                 popped = popped_after_prune
 
                 reduced = popped.reduce_acc()
@@ -667,7 +686,8 @@ class Model(GraphProvider):
 
                 for dest_idx, state_bv in dests:
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-                    print(f"      - Dest: node={dest_idx}, states={state_bv}, valid peeks={values_to_keep}")
+                    if self.debug_logging:
+                        print(f"      - Dest: node={dest_idx}, states={state_bv}, valid peeks={values_to_keep}")
 
                     if not values_to_keep:
                         continue
@@ -675,7 +695,8 @@ class Model(GraphProvider):
                     child_gss = popped.isolate_many(values_to_keep)
                     if child_gss.is_empty():
                         continue
-                    print(f"        - Child GSS for dest {dest_idx}: {child_gss.to_reference_impl()}")
+                    if self.debug_logging:
+                        print(f"        - Child GSS for dest {dest_idx}: {child_gss.to_reference_impl()}")
 
                     reduced_child = child_gss.reduce_acc()
                     if not reduced_child or reduced_child.is_empty():
@@ -683,16 +704,17 @@ class Model(GraphProvider):
 
                     d: NodeID = int(dest_idx)
                     if d in values:
-                        print(f"        - MERGING into node {d}")
-                        print(f"          - Existing GSS: {values[d].to_reference_impl()}")
+                        if self.debug_logging:
+                            print(f"        - MERGING into node {d}")
+                            print(f"          - Existing GSS: {values[d].to_reference_impl()}")
                         values[d] = values[d].merge(child_gss)
-                        print(f"          - Merged GSS: {values[d].to_reference_impl()}")
+                        if self.debug_logging:
+                            print(f"          - Merged GSS: {values[d].to_reference_impl()}")
                     else:
                         values[d] = child_gss
                     enqueue(max_depth.get(d, 0), d)
-
-
-        print("final internal mask:", final_mask)
+        if self.debug_logging:
+            print("final internal mask:", final_mask)
 
         # Convert internal mask back to original IDs
         original_indices: List[int] = []

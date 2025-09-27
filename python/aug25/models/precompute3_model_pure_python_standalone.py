@@ -908,6 +908,7 @@ class Model(GraphProvider):
         self.tokenizer_initial_state: Optional[int] = None
         self.tokenizer_max_state: Optional[int] = None
         self.all_terminals_bitset: Optional[RangeSet] = None
+        self.debug_logging = os.environ.get("RUST_LOG") == "debug"
 
         dumps = json.dumps
         bs_from_json = ffi.Bitset.from_json_string
@@ -1137,11 +1138,12 @@ class Model(GraphProvider):
 
         self.state = merged_states
 
-        if os.environ.get("RUST_LOG") == "debug":
+        if self.debug_logging:
             print("\n--- State after commit ---")
             for tsid, gss in sorted(self.state.items()):
                 print(f"  TSID {tsid}: {gss.to_stacks()}")
             print("--------------------------\n")
+
 
 
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
@@ -1256,7 +1258,7 @@ class Model(GraphProvider):
                 enqueued_nodes.add(r)
                 hp(depth_heap, (-d, r))
 
-        if os.environ.get("RUST_LOG") == "debug":
+        if self.debug_logging:
             print("\n--- get_mask initial values ---")
             for node_id, gss in sorted(values.items()):
                 print(f"  Node {node_id}: {gss.to_stacks()}")
@@ -1273,7 +1275,7 @@ class Model(GraphProvider):
             gss_node: GSS = values.pop(node)
             enqueued_nodes.remove(node)
 
-            if os.environ.get("RUST_LOG") == "debug":
+            if self.debug_logging:
                 print(f"\n--- get_mask processing node {node} ---")
                 print(f"  GSS: {gss_node.to_stacks()}")
                 print(f"  Current final_mask: {final_mask.to_ranges()}")
@@ -1283,35 +1285,35 @@ class Model(GraphProvider):
             if is_end(node):
                 reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                 if reduced_acc:
-                    if os.environ.get("RUST_LOG") == "debug":
+                    if self.debug_logging:
                         print(f"    -> Is end node. Reduced acc mask: {reduced_acc.llm_mask.to_ranges()}")
                         print(f"       final_mask before union: {final_mask.to_ranges()}")
                     final_mask = final_mask.union(reduced_acc.llm_mask)
-                    if os.environ.get("RUST_LOG") == "debug":
+                    if self.debug_logging:
                         print(f"       final_mask after union:  {final_mask.to_ranges()}")
 
             # Zombie traversal avoidance
             node_llm_bv_union = arena.get(node, {}).get("llm_bv_union", RangeSet.empty())
             potential_new_tokens = node_llm_bv_union.difference(final_mask)
-            if os.environ.get("RUST_LOG") == "debug":
+            if self.debug_logging:
                 print(f"  Zombie check: potential_new_tokens={potential_new_tokens.to_ranges()}")
             if potential_new_tokens.is_empty():
-                if os.environ.get("RUST_LOG") == "debug":
+                if self.debug_logging:
                     print("    -> Skipping node (no potential new tokens)")
                 continue
 
             gss_mask_acc = gss_node.reduce_acc()
             if gss_mask_acc:
-                if os.environ.get("RUST_LOG") == "debug":
+                if self.debug_logging:
                     print(f"  Zombie check: gss_mask_acc.llm_mask={gss_mask_acc.llm_mask.to_ranges()}")
                 gss_potential_overlap = gss_mask_acc.llm_mask.intersection(potential_new_tokens)
-                if os.environ.get("RUST_LOG") == "debug":
+                if self.debug_logging:
                     print(f"  Zombie check: gss_potential_overlap={gss_potential_overlap.to_ranges()}")
                 if gss_potential_overlap.is_empty():
-                    if os.environ.get("RUST_LOG") == "debug":
+                    if self.debug_logging:
                         print("    -> Skipping node (gss has no overlap with potential)")
                     continue
-            elif os.environ.get("RUST_LOG") == "debug":
+            elif self.debug_logging:
                 print("  Zombie check: gss_mask_acc is None")
 
             # Traverse edges and propagate masks
@@ -1343,7 +1345,7 @@ class Model(GraphProvider):
                     return result
 
                 popped = popped_before_limit.apply_and_prune(intersect_and_prune)
-                if os.environ.get("RUST_LOG") == "debug":
+                if self.debug_logging:
                     print(f"  - Edge from {node}: pop={pop}, llm_bv={llm_bv_edge.to_ranges()}, limited_llm_bv={llm_bv.to_ranges()}")
                     print(f"    popped GSS: {popped_before_limit.to_stacks()}")
                     print(f"    limited GSS: {popped.to_stacks()}")
@@ -1366,7 +1368,7 @@ class Model(GraphProvider):
                     if child_gss.is_empty():
                         continue
 
-                    if os.environ.get("RUST_LOG") == "debug":
+                    if self.debug_logging:
                         print(f"    -> Dest {dest_idx} (states: {state_bv.to_ranges()})")
                         print(f"       Child GSS: {child_gss.to_stacks()}")
 
@@ -1387,7 +1389,7 @@ class Model(GraphProvider):
             if i in self.internal_to_original_map:
                 original_indices.append(self.internal_to_original_map[i])
 
-        if os.environ.get("RUST_LOG") == "debug":
+        if self.debug_logging:
             print(f"\n--- get_mask final internal mask ---")
             print(f"  Mask: {final_mask.to_ranges()}")
             print("------------------------------------\n")

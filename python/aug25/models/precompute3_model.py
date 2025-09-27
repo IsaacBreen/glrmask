@@ -40,6 +40,7 @@ class Model(GraphProvider):
         self.id_to_token: Dict[int, bytes] = {}
         self.max_depth: Dict[int, int] = {}
         self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
+        self.debug_logging = os.environ.get("RUST_LOG") == "debug"
 
         # Normalize arena children bitsets and cache max_depth
         dumps = json.dumps
@@ -92,11 +93,13 @@ class Model(GraphProvider):
         arena = {int(k): v for k, v in arena_values}
         model = Model(roots_map, arena)
         model.constraint = ffi.GrammarConstraint.from_json_string(s)
-        print(model.constraint.dump_precomputed3())
+        if model.debug_logging:
+            print(model.constraint.dump_precomputed3())
         model.constraint_state = ffi.GrammarConstraintState(model.constraint)
         model.id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         model.possible_matches_cache = model.constraint.possible_matches()
-        print("model.possible_matches_cache", model.possible_matches_cache)
+        if model.debug_logging:
+            print("model.possible_matches_cache", model.possible_matches_cache)
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -131,9 +134,10 @@ class Model(GraphProvider):
         """
         state_map: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
 
-        print("states in get_mask:")
-        for k, v in state_map.items():
-            print(f"state {k}: gss_ptr={v.ptr()} flat={self.gss_from_ffi_node(v)}")
+        if self.debug_logging:
+            print("states in get_mask:")
+            for k, v in state_map.items():
+                print(f"state {k}: gss_ptr={v.ptr()} flat={self.gss_from_ffi_node(v)}")
 
 
         # t0 = time.time()
@@ -153,14 +157,16 @@ class Model(GraphProvider):
         roots_map = self.roots_map
         max_depth = self.max_depth
 
-        print("\n--- Seeding work queue ---")
+        if self.debug_logging:
+            print("\n--- Seeding work queue ---")
         for sid, gss in state_map.items():
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
             root_idx = int(root_idx)
             
-            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}")
+            if self.debug_logging:
+                print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}")
 
             gss = gss.clone_node()
             ffi.gss_prune_llm_tokens_by_disallowed_terminals(gss, self.possible_matches_cache)
@@ -168,9 +174,10 @@ class Model(GraphProvider):
             existing = values.get(root_idx)
             if existing is not None:
                 existing_gss = existing
-                print(f"  - MERGING into root {root_idx}:")
-                print(f"    - Existing GSS: ptr={existing_gss.ptr()} flat={self.gss_from_ffi_node(existing_gss)}")
-                print(f"    - New GSS:      ptr={gss.ptr()} flat={self.gss_from_ffi_node(gss)}")
+                if self.debug_logging:
+                    print(f"  - MERGING into root {root_idx}:")
+                    print(f"    - Existing GSS: ptr={existing_gss.ptr()} flat={self.gss_from_ffi_node(existing_gss)}")
+                    print(f"    - New GSS:      ptr={gss.ptr()} flat={self.gss_from_ffi_node(gss)}")
 
                 merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
                 values[root_idx] = merged_gss
@@ -185,9 +192,10 @@ class Model(GraphProvider):
             else:
                 bucket.add(root_idx)
 
-        print("--- After Seeding ---")
-        for node_idx, gss in values.items():
-            print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={self.gss_from_ffi_node(gss)}")
+        if self.debug_logging:
+            print("--- After Seeding ---")
+            for node_idx, gss in values.items():
+                print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={self.gss_from_ffi_node(gss)}")
 
 
         # Main scheduler
@@ -205,7 +213,8 @@ class Model(GraphProvider):
         arena = self.arena
         is_end = self.is_end
 
-        print("\n--- Main loop ---")
+        if self.debug_logging:
+            print("\n--- Main loop ---")
         iter_count = 0
         while True:
             iter_count += 1
@@ -218,28 +227,34 @@ class Model(GraphProvider):
                 if node_indices:
                     break
             if not node_indices:
-                print(f"[{iter_count}] Loop finished: no more nodes to process.")
+                if self.debug_logging:
+                    print(f"[{iter_count}] Loop finished: no more nodes to process.")
                 break  # nothing left to process
 
-            print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
+            if self.debug_logging:
+                print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
 
             # Process all nodes in this depth bucket
             for node_idx in node_indices:
                 if node_idx in stopped:
-                    print(f"  - Node {node_idx}: SKIPPING (already stopped)")
+                    if self.debug_logging:
+                        print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                     continue
 
                 gss_node = values.pop(node_idx)
                 if gss_node is None:
-                    print(f"  - Node {node_idx}: SKIPPING (no value)")
+                    if self.debug_logging:
+                        print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
-                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={self.gss_from_ffi_node(gss_node)}")
+                if self.debug_logging:
+                    print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={self.gss_from_ffi_node(gss_node)}")
 
                 # End-node handling
                 if is_end(node_idx):
-                    print(f"    - END NODE found")
-                    print(f"      - final_mask before: {final_mask.to_ranges()}")
-                    print(self.constraint.state_with_nodes([(0, gss_node)]))
+                    if self.debug_logging:
+                        print(f"    - END NODE found")
+                        print(f"      - final_mask before: {final_mask.to_ranges()}")
+                        print(self.constraint.state_with_nodes([(0, gss_node)]))
 
                     # Clone the GSS node to avoid modifying it in place if it's shared
                     gss_node_copy = gss_node.clone_node()
@@ -247,47 +262,58 @@ class Model(GraphProvider):
                     # Get the final allowed tokens from the pruned GSS
                     final_allowed_tokens = gss_node_copy.allowed_llm_tokens()
 
-                    print(f"Allowed LLM tokens from pruned GSS: {final_allowed_tokens.to_ranges()}")
+                    if self.debug_logging:
+                        print(f"Allowed LLM tokens from pruned GSS: {final_allowed_tokens.to_ranges()}")
 
                     final_mask = final_mask.union(final_allowed_tokens)
-                    print(f"      - final_mask after:  {final_mask.to_ranges()}")
+                    if self.debug_logging:
+                        print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
                 if not gss_node.is_alive():
                     stopped.add(node_idx)
-                    print(f"    - STOPPING node {node_idx} (GSS not alive)")
+                    if self.debug_logging:
+                        print(f"    - STOPPING node {node_idx} (GSS not alive)")
                     continue
 
                 # Transitions grouped by (pop, llm_bv)
                 node_data = arena.get(node_idx, {})
                 children = node_data.get("children") or []
                 if not children:
-                    print(f"    - No children for node {node_idx}")
+                    if self.debug_logging:
+                        print(f"    - No children for node {node_idx}")
                 for (pop, llm_bv), dests in children:
-                    print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
+                    if self.debug_logging:
+                        print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                     # Collect all pops from GSS parents
                     peeks = ffi.gss_popn_collect(gss_node, pop)
-                    print(f"      - Found {len(peeks)} peeks from GSS set")
+                    if self.debug_logging:
+                        print(f"      - Found {len(peeks)} peeks from GSS set")
                     if not peeks:
                         continue
 
                     for dest_idx, state_bv in dests:
-                        print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
+                        if self.debug_logging:
+                            print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
                         # Filter peeks by destination state bitset
                         matched = []
                         if not state_bv.is_empty():
                             contains = state_bv.contains
                             for sid_val, parent_node in peeks:
                                 if contains(sid_val):
-                                    print(f"        - Matched parent state {sid_val} in dest state_bv, node={self.gss_from_ffi_node(parent_node)}")
+                                    if self.debug_logging:
+                                        print(f"        - Matched parent state {sid_val} in dest state_bv, node={self.gss_from_ffi_node(parent_node)}")
                                     matched.append(parent_node)
                         if not matched:
-                            print(f"        - No matched parent GSS nodes")
+                            if self.debug_logging:
+                                print(f"        - No matched parent GSS nodes")
                             continue
-                        print(f"        - Matched {len(matched)} parent GSS nodes")
+                        if self.debug_logging:
+                            print(f"        - Matched {len(matched)} parent GSS nodes")
 
                         # Merge matched parent GSS nodes
                         child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
-                        print(f"        - Child GSS: ptr={child_gss_node.ptr()} flat={self.gss_from_ffi_node(child_gss_node)}")
+                        if self.debug_logging:
+                            print(f"        - Child GSS: ptr={child_gss_node.ptr()} flat={self.gss_from_ffi_node(child_gss_node)}")
 
                         # Apply edge's LLM token mask to the new GSS node
                         ffi.gss_allow_only_llm_tokens_and_prune(child_gss_node, llm_bv)
@@ -298,20 +324,23 @@ class Model(GraphProvider):
                             existing_gss = existing
                             merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
                             values[d] = merged_gss
-                            print(f"        - MERGING with {self.gss_from_ffi_node(existing_gss)}\n...and {self.gss_from_ffi_node(child_gss_node)}")
-                            print(f"        - Merged GSS: ptr={merged_gss.ptr()} flat={self.gss_from_ffi_node(merged_gss)}")
-                            print(f"        - Full structure: Existing: {self.constraint.state_with_nodes([(0, existing_gss)])}")
-                            print(f"                          New:      {self.constraint.state_with_nodes([(0, child_gss_node)])}")
-                            print(f"        - Full structure: Merged:   {self.constraint.state_with_nodes([(0, merged_gss)])}")
-                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}")
+                            if self.debug_logging:
+                                print(f"        - MERGING with {self.gss_from_ffi_node(existing_gss)}\n...and {self.gss_from_ffi_node(child_gss_node)}")
+                                print(f"        - Merged GSS: ptr={merged_gss.ptr()} flat={self.gss_from_ffi_node(merged_gss)}")
+                                print(f"        - Full structure: Existing: {self.constraint.state_with_nodes([(0, existing_gss)])}")
+                                print(f"                          New:      {self.constraint.state_with_nodes([(0, child_gss_node)])}")
+                                print(f"        - Full structure: Merged:   {self.constraint.state_with_nodes([(0, merged_gss)])}")
+                                print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}")
                         else:
                             values[d] = child_gss_node
-                            print(f"        - Enqueue new node {self.gss_from_ffi_node(child_gss_node)} at idx {d}")
-                            print(f"        - Full structure: {self.constraint.state_with_nodes([(0, child_gss_node)])}")
+                            if self.debug_logging:
+                                print(f"        - Enqueue new node {self.gss_from_ffi_node(child_gss_node)} at idx {d}")
+                                print(f"        - Full structure: {self.constraint.state_with_nodes([(0, child_gss_node)])}")
 
                         enqueue(max_depth[d], d)
 
-        print("final internal mask:", final_mask)
+        if self.debug_logging:
+            print("final internal mask:", final_mask)
 
         original_mask = self.constraint.internal_bv_to_original(final_mask)
         return RangeSet.from_ranges(original_mask.to_ranges())

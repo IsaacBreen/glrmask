@@ -3,6 +3,7 @@ import _sep1 as ffi
 import time
 from functools import wraps
 from typing import Dict, List, Set, Tuple, Optional
+import os
 
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 from .precompute3_model_pure_python import Model as InnerModel, PyAcc
@@ -57,6 +58,7 @@ class Model(GraphProvider):
         # Profiling state
         _install_profiling_hooks()
         self.get_mask_calls = 0
+        self.debug_logging = os.environ.get("RUST_LOG") == "debug"
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -84,7 +86,8 @@ class Model(GraphProvider):
         - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
-        print("\n--- get_mask START ---")
+        if self.debug_logging:
+            print("\n--- get_mask START ---")
 
         state_map: Dict[int, GSS] = self.state
         t_start = time.perf_counter_ns()
@@ -156,10 +159,11 @@ class Model(GraphProvider):
             else:
                 b.add(r)
 
-        print("\nInitial GSS stats:")
-        print(GSS.merge_many(list(self.state.values())).stats())
-        print("Stats after seeding:")
-        print(GSS.merge_many(list(values.values())).stats())
+        if self.debug_logging:
+            print("\nInitial GSS stats:")
+            print(GSS.merge_many(list(self.state.values())).stats())
+            print("Stats after seeding:")
+            print(GSS.merge_many(list(values.values())).stats())
 
         def enqueue(d: int, n: int) -> None:
             b: Optional[Set[int]] = todo.get(d)
@@ -236,28 +240,31 @@ class Model(GraphProvider):
                         if d in values:
                             call_stats['main_loop_merge_calls'] += 1
 
-                            # --- GSS Merge Stats Logging ---
-                            existing_gss = values[d]
-                            new_gss = child_gss
-                            merged_gss = existing_gss.merge(new_gss)
+                            if self.debug_logging:
+                                # --- GSS Merge Stats Logging ---
+                                existing_gss = values[d]
+                                new_gss = child_gss
+                                merged_gss = existing_gss.merge(new_gss)
 
-                            stats_existing = existing_gss.stats()
-                            stats_new = new_gss.stats()
-                            stats_merged = merged_gss.stats()
+                                stats_existing = existing_gss.stats()
+                                stats_new = new_gss.stats()
+                                stats_merged = merged_gss.stats()
 
-                            def print_merge_stats(label, stats):
-                                print(f"MERGE_STATS: type={label} step={self.get_mask_calls} "
-                                      f"unique_accs={stats.unique_accumulators_count} "
-                                      f"total_acc_instances={stats.total_accumulator_instances} "
-                                      f"interfaces={stats.num_interface_nodes} "
-                                      f"upper={stats.num_upperbranch_nodes} "
-                                      f"lower={stats.num_lower_nodes}")
+                                def print_merge_stats(label, stats):
+                                    print(f"MERGE_STATS: type={label} step={self.get_mask_calls} "
+                                          f"unique_accs={stats.unique_accumulators_count} "
+                                          f"total_acc_instances={stats.total_accumulator_instances} "
+                                          f"interfaces={stats.num_interface_nodes} "
+                                          f"upper={stats.num_upperbranch_nodes} "
+                                          f"lower={stats.num_lower_nodes}")
 
-                            print_merge_stats("existing", stats_existing)
-                            print_merge_stats("new", stats_new)
-                            print_merge_stats("merged", stats_merged)
+                                print_merge_stats("existing", stats_existing)
+                                print_merge_stats("new", stats_new)
+                                print_merge_stats("merged", stats_merged)
 
-                            values[d] = merged_gss
+                                values[d] = merged_gss
+                            else:
+                                values[d] = values[d].merge(child_gss)
                         else:
                             values[d] = child_gss
                         enqueue(max_depth[d], d)
@@ -275,20 +282,21 @@ class Model(GraphProvider):
 
         t_end = time.perf_counter_ns()
 
-        print(f"\n--- get_mask() profiling stats for call #{self.get_mask_calls} ---")
-        print(f"Initialization time: {(t_init_done - t_start) / 1e6:.3f} ms")
-        print(f"Main loop time:      {(t_main_loop_done - t_init_done) / 1e6:.3f} ms")
-        print(f"Final conversion:    {(t_end - t_main_loop_done) / 1e6:.3f} ms")
-        print(f"Total time:          {(t_end - t_start) / 1e6:.3f} ms")
-        print(f"Nodes visited: {call_stats['nodes_visited']}")
-        print(f"Main loop iterations (depths): {call_stats['main_loop_iterations']}")
-        print(f"End nodes reached: {call_stats['end_nodes_reached']}")
-        print(f"Main loop GSS.apply calls: {call_stats['main_loop_apply_calls']}")
-        print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
-        print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
-        print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
-        for k, v in _PROFILING_STATS.items():
-            print(f"{k} calls: {v}")
-        print(f"--- get_mask END ---")
+        if self.debug_logging:
+            print(f"\n--- get_mask() profiling stats for call #{self.get_mask_calls} ---")
+            print(f"Initialization time: {(t_init_done - t_start) / 1e6:.3f} ms")
+            print(f"Main loop time:      {(t_main_loop_done - t_init_done) / 1e6:.3f} ms")
+            print(f"Final conversion:    {(t_end - t_main_loop_done) / 1e6:.3f} ms")
+            print(f"Total time:          {(t_end - t_start) / 1e6:.3f} ms")
+            print(f"Nodes visited: {call_stats['nodes_visited']}")
+            print(f"Main loop iterations (depths): {call_stats['main_loop_iterations']}")
+            print(f"End nodes reached: {call_stats['end_nodes_reached']}")
+            print(f"Main loop GSS.apply calls: {call_stats['main_loop_apply_calls']}")
+            print(f"Main loop GSS.merge calls: {call_stats['main_loop_merge_calls']}")
+            print(f"Main loop Bitset.union calls: {call_stats['main_loop_union_calls']}")
+            print(f"Main loop Bitset.intersection calls: {call_stats['main_loop_intersection_calls']}")
+            for k, v in _PROFILING_STATS.items():
+                print(f"{k} calls: {v}")
+            print(f"--- get_mask END ---")
 
         return RangeSet.from_ranges(original_mask.to_ranges())
