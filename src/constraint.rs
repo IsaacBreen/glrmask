@@ -534,7 +534,7 @@ impl GrammarConstraint {
         });
 
         // Initialize per-stage vocabularies (start identical to global)
-        let precompute_vocab = StageVocab {
+        let mut precompute_vocab = StageVocab {
             original_to_internal: llm_vocab.original_to_internal_id_bimap.clone(),
             internal_to_original: internal_to_original_.clone(),
             internal_max_llm_token: internal_max_llm_token,
