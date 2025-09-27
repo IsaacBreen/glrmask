@@ -136,7 +136,13 @@ class Model(GraphProvider):
         arena_json = data["trie3_god"]
         arena_values = arena_json.get("values", [])
         arena_dict = {int(k): v for k, v in arena_values}
- 
+
+        # Load these early for graph dumping and general use
+        id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+        constraint = ffi.GrammarConstraint.from_json_string(s)
+        tokenizer = constraint.tokenizer()
+        tokenizer_max_state = tokenizer.max_state()
+
         roots_map = {int(s): int(r) for s, r in roots_map_raw}
         max_depth: Dict[NodeID, int] = {}
         dumps = json.dumps
@@ -180,39 +186,78 @@ class Model(GraphProvider):
         }
         # Pretty-print the graph for debugging
         print("--- Precomputed Graph ---")
-        print(f"Roots map: {roots_map}")
-        print("\nArena nodes:")
-        # Sorting keys to have a consistent output
-        for node_id in sorted(arena.keys()):
-            node = arena[node_id]
-            print(f"\n- Node {node_id}:")
-            print(f"  - clean_end: {node.clean_end}")
 
-            llm_union_str = str(node.llm_bv_union)
-            if len(llm_union_str) > 80:
-                llm_union_str = llm_union_str[:77] + "..."
-            print(f"  - llm_bv_union: {llm_union_str}")
+        def get_token_examples_str(llm_bv: LLMTokenSet, limit=5) -> str:
+            indices = llm_bv.to_indices()
+            if not indices:
+                return ""
 
-            if not node.children:
-                print("  - children: []")
-            else:
-                print("  - children:")
-                for (pop, llm_bv), dests in node.children:
+            examples = []
+            count = 0
+            for i in indices:
+                if count >= limit:
+                    break
+                if i in id_to_token:
+                    try:
+                        examples.append(f'"{id_to_token[i].decode("utf-8")}"')
+                    except UnicodeDecodeError:
+                        examples.append(str(id_to_token[i]))
+                else:
+                    examples.append(f"id:{i}")
+                count += 1
+
+            example_str = ", ".join(examples)
+            if len(indices) > limit:
+                example_str += ", ..."
+            return f' (e.g., [{example_str}])'
+
+        def print_graph_recursive(node_id: NodeID, prefix: str, visited: Set[NodeID]):
+            node = arena.get(node_id)
+            if not node:
+                return
+
+            for i, ((pop, llm_bv), dests) in enumerate(node.children):
+                for j, (dest_idx, state_bv) in enumerate(dests):
                     llm_bv_str = str(llm_bv)
-                    MAX_STR_LEN = 200
-                    if len(llm_bv_str) > MAX_STR_LEN:
-                        llm_bv_str = llm_bv_str[:MAX_STR_LEN-3] + "..."
-                    print(f"    - Edge (pop={pop}, llm_bv={llm_bv_str}):")
-                    for dest_idx, state_bv in dests:
-                        state_bv_str = str(state_bv)
-                        if len(state_bv_str) > MAX_STR_LEN:
-                            state_bv_str = state_bv_str[:MAX_STR_LEN-3] + "..."
-                        print(f"      -> Dest Node {dest_idx} with states {state_bv_str}")
+                    if len(llm_bv_str) > 40:
+                        llm_bv_str = llm_bv_str[:37] + "..."
+
+                    token_examples = get_token_examples_str(llm_bv)
+
+                    state_bv_str = str(state_bv)
+                    if len(state_bv_str) > 40:
+                        state_bv_str = state_bv_str[:37] + "..."
+
+                    dest_node = arena.get(dest_idx)
+                    dest_end_marker = " [END]" if dest_node and dest_node.clean_end else ""
+
+                    print(f"{prefix}└── Edge (pop: {pop}, tokens: {llm_bv_str}{token_examples}): states {state_bv_str} -> Node Trie2Index({dest_idx}) (MaxDepth: {max_depth.get(dest_idx, 0)}){dest_end_marker}")
+
+                    if dest_idx not in visited:
+                        visited.add(dest_idx)
+                        print_graph_recursive(dest_idx, prefix + "   ", visited)
+
+        visited_roots = set()
+        for tsid in range(tokenizer_max_state + 1):
+            if tsid in roots_map:
+                print(f"\n--- Tokenizer State ID: {tsid} ---")
+                root_id = roots_map[tsid]
+
+                root_node = arena.get(root_id)
+                root_end_marker = " [END]" if root_node and root_node.clean_end else ""
+                print(f"Root Node Trie2Index({root_id}) (MaxDepth: {max_depth.get(root_id, 0)}){root_end_marker}")
+
+                if root_id in visited_roots:
+                    print("  (Root already visited)")
+                    continue
+
+                visited_roots.add(root_id)
+                visited_for_this_root = {root_id}
+
+                print_graph_recursive(root_id, "", visited_for_this_root)
+
         print("--- End Precomputed Graph ---")
         # Load tokenizer and parser table from the full constraint JSON
-        constraint = ffi.GrammarConstraint.from_json_string(s)
-        tokenizer = constraint.tokenizer()
-        tokenizer_max_state = tokenizer.max_state()
         glr_parser = constraint.glr_parser()
         ignore_terminal_id = glr_parser.ignore_terminal_id
         tokenizer_initial_state = tokenizer.initial_state_id()
@@ -275,7 +320,6 @@ class Model(GraphProvider):
         initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
         state = {tokenizer_initial_state: initial_gss}
 
-        id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         # Convert possible_matches_cache to RangeSet
         pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
         pmc_rs: Dict[int, Dict[int, LLMTokenSet]] = {}
