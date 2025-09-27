@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use ordered_hash_map::OrderedHashMap;
+use kdam::tqdm;
+use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::constraint::{StageVocab, PrecomputeNodeIndex, Trie1GodWrapper};
 use crate::datastructures::gss::LLMTokenBV;
 use crate::datastructures::trie::Trie;
@@ -31,6 +33,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
     trie1_god: &Trie1GodWrapper,
     stage_vocab: &mut StageVocab,
 ) {
+    crate::debug!(2, "Merging equivalent LLM tokens in Trie1...");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
     if all_nodes.is_empty() { return; }
@@ -55,7 +58,10 @@ pub fn merge_equivalent_llm_tokens_trie1(
     // 2) Build signature per token
     let max_tok = stage_vocab.internal_max_llm_token;
     let mut sig_map: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
-    for tok in 0..=max_tok {
+    #[cfg(not(rustrover))]
+    let it = tqdm!(0..=max_tok, desc = "Trie1 Merge Tokens (Sigs)", disable = !PROGRESS_BAR_ENABLED, leave=false);
+    #[cfg(rustrover)] let it = 0..=max_tok;
+    for tok in it {
         let mut sig: Vec<usize> = Vec::new();
         for (i, setv) in family.iter().enumerate() {
             if setv.contains(tok) { sig.push(i); }
@@ -66,14 +72,19 @@ pub fn merge_equivalent_llm_tokens_trie1(
 
     // 3) Build many-to-one mapping
     let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut merged_count = 0;
     for (_sig, group) in sig_map {
         if group.len() <= 1 { continue; }
         let rep = *group.iter().min().unwrap();
         for t in group {
-            old_to_new.insert(t, rep);
+            if t != rep {
+                old_to_new.insert(t, rep);
+                merged_count += 1;
+            }
         }
     }
-    if old_to_new.is_empty() { return; }
+    crate::debug!(2, "Trie1: merged {} LLM tokens into representatives.", merged_count);
+    if merged_count == 0 { return; }
 
     // 4) Apply mapping to trie
     for n in &all_nodes {
@@ -118,6 +129,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     trie1_god: &Trie1GodWrapper,
     stage_vocab: &mut StageVocab,
 ) {
+    crate::debug!(2, "Reordering LLM tokens in Trie1 for range minimization...");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
     if all_nodes.is_empty() { return; }
@@ -125,7 +137,10 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
 
     // Count frequencies
     let mut freq: Vec<usize> = vec![0; max_tok + 1];
-    for n in &all_nodes {
+    #[cfg(not(rustrover))]
+    let it = tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Freq)", total=all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+    #[cfg(rustrover)] let it = all_nodes.iter();
+    for n in it {
         let g = n.read(trie1_god).expect("read");
         for t in g.value.live_tokens.iter() {
             if t as usize <= max_tok { freq[t as usize] += 1; }
@@ -187,6 +202,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     }
     stage_vocab.original_to_internal = new_original_to_internal;
     stage_vocab.internal_max_llm_token = present.len().saturating_sub(1);
+    crate::debug!(2, "Trie1 reordering complete. New max internal token ID: {}", stage_vocab.internal_max_llm_token);
 }
 
 /// Conservative normalization pass for Trie1:

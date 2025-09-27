@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashMap, VecDeque, HashSet};
+use indicatif::{ProgressBar, ProgressStyle};
+use kdam::tqdm;
 use ordered_hash_map::OrderedHashMap;
 use crate::constraint::{GrammarConstraintConfig, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper, StageVocab};
 use crate::datastructures::EntryApi;
@@ -7,6 +9,7 @@ use crate::datastructures::gss::LLMTokenBV;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::tokenizer::TokenizerStateID;
 
+use crate::profiler::PROGRESS_BAR_ENABLED;
 pub fn optimize_trie3_size(
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
@@ -17,9 +20,11 @@ pub fn optimize_trie3_size(
 ) {
     crate::debug!(2, "Optimizing Trie 3 size...");
 
+    crate::debug!(2, "Step 1: Merging equivalent LLM tokens...");
     if config.optimize_trie3_merge_equivalent_llm_tokens {
         merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
     }
+    crate::debug!(2, "Step 2: Reordering LLM tokens...");
     if config.optimize_trie3_reorder_llm_tokens {
         reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
         max_llm_token_id = stage_vocab.internal_max_llm_token;
@@ -28,31 +33,39 @@ pub fn optimize_trie3_size(
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
 
+    crate::debug!(2, "Step 3: Constraining bitvectors...");
     if config.optimize_trie3_constrain_bitvecs {
         constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
     }
 
+    crate::debug!(2, "Step 4: Pruning dead paths...");
     if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
         prune_dead_paths_trie3(roots, &trie3_god);
     }
+    crate::debug!(2, "Step 5: Compressing edges...");
     if config.optimize_trie2_compress_edges {
         compress_trie3_edges(roots, &trie3_god);
     }
+    crate::debug!(2, "Step 6: Merging nodes...");
     if config.optimize_trie2_merge_nodes {
         merge_nodes_trie3(roots, &trie3_god);
     }
+    crate::debug!(2, "Step 7: Pruning dead paths (post-merge)...");
     if config.optimize_trie2_prune_dead_paths {
         prune_dead_paths_trie3(roots, &trie3_god);
     }
+    crate::debug!(2, "Step 8: Compressing edges (post-merge)...");
     if config.optimize_trie2_compress_edges {
         compress_trie3_edges(roots, &trie3_god);
     }
     if config.optimize_trie2_merge_nodes {
         merge_nodes_trie3(roots, &trie3_god);
     }
+    crate::debug!(2, "Step 10: Garbage collection...");
     if config.optimize_trie2_gc {
         Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
     }
+    crate::debug!(2, "Step 11: Recomputing max depths...");
     Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 }
 
@@ -83,6 +96,7 @@ pub fn merge_equivalent_llm_tokens_trie3(
     trie3_god: &Trie3GodWrapper,
     stage_vocab: &mut StageVocab,
 ) {
+    crate::debug!(2, "Merging equivalent LLM tokens in Trie3...");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
     if all_nodes.is_empty() { return; }
@@ -105,7 +119,10 @@ pub fn merge_equivalent_llm_tokens_trie3(
     // 2) Group tokens by signature
     let max_tok = stage_vocab.internal_max_llm_token;
     let mut sig_map: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
-    for tok in 0..=max_tok {
+    #[cfg(not(rustrover))]
+    let it = tqdm!(0..=max_tok, desc = "Trie3 Merge Tokens (Sigs)", disable = !PROGRESS_BAR_ENABLED, leave=false);
+    #[cfg(rustrover)] let it = 0..=max_tok;
+    for tok in it {
         let mut sig: Vec<usize> = Vec::new();
         for (i, setv) in family.iter().enumerate() {
             if setv.contains(tok) { sig.push(i); }
@@ -116,14 +133,19 @@ pub fn merge_equivalent_llm_tokens_trie3(
     if sig_map.is_empty() { return; }
 
     let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut merged_count = 0;
     for (_sig, group) in sig_map {
         if group.len() <= 1 { continue; }
         let rep = *group.iter().min().unwrap();
         for t in group {
-            old_to_new.insert(t, rep);
+            if t != rep {
+                old_to_new.insert(t, rep);
+                merged_count += 1;
+            }
         }
     }
-    if old_to_new.is_empty() { return; }
+    crate::debug!(2, "Trie3: merged {} LLM tokens into representatives.", merged_count);
+    if merged_count == 0 { return; }
 
     // 3) Remap trie
     for n in &all_nodes {
@@ -160,12 +182,17 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
     trie3_god: &Trie3GodWrapper,
     stage_vocab: &mut StageVocab,
 ) {
+    crate::debug!(2, "Reordering LLM tokens in Trie3 for range minimization...");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
     if all_nodes.is_empty() { return; }
     let max_tok = stage_vocab.internal_max_llm_token;
     let mut freq: Vec<usize> = vec![0; max_tok + 1];
-    for n in &all_nodes {
+
+    #[cfg(not(rustrover))]
+    let it = tqdm!(all_nodes.iter(), desc = "Trie3 Reorder (Freq)", total=all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+    #[cfg(rustrover)] let it = all_nodes.iter();
+    for n in it {
         let g = n.read(trie3_god).expect("read");
         for t in g.value.live_tokens.iter() {
             if t as usize <= max_tok { freq[t as usize] += 1; }
@@ -218,6 +245,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
     }
     stage_vocab.original_to_internal = new_original_to_internal;
     stage_vocab.internal_max_llm_token = present.len().saturating_sub(1);
+    crate::debug!(2, "Trie3 reordering complete. New max internal token ID: {}", stage_vocab.internal_max_llm_token);
 }
 
 fn constrain_bitvecs_trie3(
@@ -298,8 +326,21 @@ pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
         }
     }
 
+    let pb = ProgressBar::new(all_nodes.len() as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [Trie3 Prune] [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap(),
+    );
+    if !PROGRESS_BAR_ENABLED {
+        pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    }
+    pb.set_position(0);
+
     // 2. Propagate liveness until a fixed point is reached.
     while let Some(node_ptr) = worklist.pop_front() {
+        pb.inc(1);
+
         let live_at_node = live.get(&node_ptr).unwrap().clone();
         if let Some(preds) = predecessors.get(&node_ptr) {
             for (pred_ptr, edge_key) in preds {
@@ -317,6 +358,7 @@ pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
             }
         }
     }
+    pb.finish_and_clear();
 
     // 3. Prune the graph based on the computed live sets.
     for node_arc in &all_nodes {
@@ -492,7 +534,11 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
         if nodes.is_empty() { return false; }
         let mut changed_any = false;
 
-        for node_idx in nodes {
+        #[cfg(not(rustrover))]
+        let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Coalesce)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+        #[cfg(rustrover)]
+        let it = nodes.iter();
+        for node_idx in it {
             // Snapshot current children
             let old_children = {
                 let g = node_idx.read(trie3_god).expect("read");
@@ -625,7 +671,11 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
 
         let mut changed_any = false;
 
-        for u in &nodes {
+        #[cfg(not(rustrover))]
+        let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Pop-0 Chains)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+        #[cfg(rustrover)]
+        let it = nodes.iter();
+        for u in it {
             // Snapshot children (stable during this node's rewrite)
             let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
                 let g = u.read(trie3_god).expect("read");
@@ -720,7 +770,11 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
 
         let mut changed_any = false;
 
-        for u in &nodes {
+        #[cfg(not(rustrover))]
+        let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Universal Pop)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+        #[cfg(rustrover)]
+        let it = nodes.iter();
+        for u in it {
             // Snapshot children
             let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
                 let g = u.read(trie3_god).expect("read");
