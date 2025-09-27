@@ -278,6 +278,7 @@ class Model(GraphProvider):
                             contains = state_bv.contains
                             for sid_val, parent_node in peeks:
                                 if contains(sid_val):
+                                    print(f"        - Matched parent state {sid_val} in dest state_bv, node={self.gss_from_ffi_node(parent_node)}")
                                     matched.append(parent_node)
                         if not matched:
                             print(f"        - No matched parent GSS nodes")
