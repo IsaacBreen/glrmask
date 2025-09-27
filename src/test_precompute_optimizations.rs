@@ -46,7 +46,7 @@ fn make_llm_token_map(tokens: &[&str]) -> (LLMTokenMap, usize) {
 
 fn assert_optimized_equivalent(
     original_precomputed2: &Precomputed2,
-    original_to_internal_id_bimap: &BiBTreeMap<usize, usize>,
+    original_to_internal_id_bimap: &BTreeMap<usize, usize>,
     llm_token_map: &LLMTokenMap,
     trie2_god: Trie2GodWrapper,
 ) {
@@ -119,6 +119,10 @@ fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn E
         optimize_trie2_gc: true,
         skip_precomputation: false,
         optimize_trie3_constrain_bitvecs: true,
+        optimize_trie1_merge_equivalent_llm_tokens: false,
+        optimize_trie1_reorder_llm_tokens: false,
+        optimize_trie3_merge_equivalent_llm_tokens: false,
+        optimize_trie3_reorder_llm_tokens: false,
     };
     let gc = GrammarConstraint::from_compiled_grammar_with_config(
         compiled,
@@ -243,6 +247,10 @@ fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn s
             optimize_trie2_gc: true,
             skip_precomputation: false,
             optimize_trie3_constrain_bitvecs: true,
+            optimize_trie1_merge_equivalent_llm_tokens: false,
+            optimize_trie1_reorder_llm_tokens: false,
+            optimize_trie3_merge_equivalent_llm_tokens: false,
+            optimize_trie3_reorder_llm_tokens: false,
         };
         let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
             compiled_grammar.clone(),

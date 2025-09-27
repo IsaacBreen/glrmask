@@ -2243,7 +2243,7 @@ impl GLRParser {
     pub fn gss_forest_to_dot(
         &self,
         roots: &[(&str, &GSSNode)],
-        original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+        original_internal_bimap: Option<&BTreeMap<usize, usize>>,
         llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     ) -> String {
         let mut dot = String::new();
@@ -2365,7 +2365,7 @@ impl GLRParser {
 
     /// Generates a Graphviz DOT representation of the state transitions present in a GSS.
     /// This visualizes the portion of the state machine explored by the parser.
-    pub fn gss_to_dot(&self, root: &GSSNode, original_internal_bimap: Option<&BiBTreeMap<usize, usize>>, llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>) -> String {
+    pub fn gss_to_dot(&self, root: &GSSNode, original_internal_bimap: Option<&BTreeMap<usize, usize>>, llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>) -> String {
         self.gss_forest_to_dot(&[("Root", root)], original_internal_bimap, llm_token_map)
     }
 }

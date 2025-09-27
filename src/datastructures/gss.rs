@@ -2259,7 +2259,7 @@ pub fn popn_collect_isolated_parents(
 pub(crate) struct GSSPrintConfig<'a> {
     pub(crate) labels: Option<&'a [String]>,
     pub(crate) max_edges: usize,
-    pub(crate) original_internal_bimap: Option<&'a BiBTreeMap<usize, usize>>,
+    pub(crate) original_internal_bimap: Option<&'a BTreeMap<usize, usize>>,
     pub(crate) llm_token_map: Option<&'a BiBTreeMap<Vec<u8>, LLMTokenID>>,
     pub(crate) verbose: bool,
 }
@@ -2456,7 +2456,7 @@ impl GSSNode {
 pub(crate) fn format_acc(
     node: &GSSNode,
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-    original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+    original_internal_bimap: Option<&BTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     config: &GSSPrintConfig,
 ) -> String {

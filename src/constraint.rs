@@ -58,7 +58,6 @@ use crate::constraint_precompute3_utils::optimize_trie3_size;
 use crate::datastructures::trie::{God, GodWrapper};
 
 const MERGE_THRESHOLD: usize = 20;
-const STAGE_VOCAB_JSON_VERSION: usize = 1;
 
 pub type StateIDBV = HybridBitset;
 
@@ -131,7 +130,6 @@ pub struct StageVocab {
 impl JSONConvertible for StageVocab {
     fn to_json(&self) -> JSONNode {
         let mut m = StdMap::new();
-        m.insert("version".to_string(), JSONNode::Number((STAGE_VOCAB_JSON_VERSION as i64).into()));
         m.insert("original_to_internal".to_string(), self.original_to_internal.to_json());
         // Serialize internal_to_original as Vec<(usize, Vec<usize>)> to keep it compact
         let mut ito: Vec<(usize, Vec<usize>)> = Vec::new();
@@ -145,7 +143,6 @@ impl JSONConvertible for StageVocab {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let _ver = obj.remove("version").unwrap_or(JSONNode::Number(1.into()));
                 let original_to_internal = obj.remove("original_to_internal").ok_or("StageVocab: missing original_to_internal".to_string()).and_then(|n| BTreeMap::<usize, usize>::from_json(n))?;
                 let internal_max_llm_token = obj.remove("internal_max_llm_token").ok_or("StageVocab: missing internal_max_llm_token".to_string()).and_then(usize::from_json)?;
                 let ito_vec = obj.remove("internal_to_original").ok_or("StageVocab: missing internal_to_original".to_string()).and_then(|n| Vec::<(usize, Vec<usize>)>::from_json(n))?;
@@ -872,12 +869,12 @@ impl GrammarConstraint {
 
     #[inline]
     pub(crate) fn original_id_to_internal(&self, original_id: LLMTokenID) -> Option<LLMTokenID> {
-        self.llm_vocab.original_to_internal_id_bimap.get_by_left(&original_id.0).map(|internal_val| LLMTokenID(*internal_val))
+        self.llm_vocab.original_to_internal_id_bimap.get(&original_id.0).map(|internal_val| LLMTokenID(*internal_val))
     }
 
     #[inline]
     pub(crate) fn internal_id_to_original(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
-        self.llm_vocab.original_to_internal_id_bimap.get_by_right(&internal_id.0).map(|original_val| LLMTokenID(*original_val))
+        self.llm_vocab.original_to_internal_id_bimap.get(&internal_id.0).map(|original_val| LLMTokenID(*original_val))
     }
 
     #[allow(dead_code)]

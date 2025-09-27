@@ -45,7 +45,7 @@ fn format_hybrid_bitset_neatly(bv: &HybridBitset) -> String {
 /// and a sample of the corresponding LLM tokens.
 fn format_bv_with_tokens(
     bv: &LLMTokenBV,
-    original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+    original_internal_bimap: Option<&BTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     limit: usize,
 ) -> String {
@@ -58,7 +58,7 @@ fn format_bv_with_tokens(
 
     let mut token_samples = Vec::new();
     for internal_id in bv.iter().take(limit) {
-        if let Some(original_id) = bimap.get_by_right(&internal_id) {
+        if let Some(original_id) = bimap.get(&internal_id) {
             if let Some(token_bytes) = token_map.get_by_right(&LLMTokenID(*original_id)) {
                 token_samples.push(format!("{:?}", String::from_utf8_lossy(token_bytes)));
             }
@@ -80,7 +80,7 @@ pub fn dump_precompute_trie_recursive(
     node_arc: &PrecomputeNodeIndex,
     prefix: String,
     visited: &mut HashSet<PrecomputeNodeIndex>,
-    original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+    original_internal_bimap: Option<&BTreeMap<usize, usize>>,
     token_name_map: Option<&BiBTreeMap<Terminal, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     trie1_god: &Trie1GodWrapper,
@@ -171,7 +171,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
 
     pub fn _dump_precomputed(
         precomputed: &BTreeMap<TokenizerStateID, PrecomputeNodeIndex>,
-        original_to_internal_id_bimap: &BiBTreeMap<usize, usize>,
+        original_to_internal_id_bimap: &BTreeMap<usize, usize>,
         token_name_map: &BiBTreeMap<Terminal, usize>,
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         trie1_god: &Trie1GodWrapper,
@@ -214,7 +214,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         );
     }
 
-    pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, PrecomputeNode2Index>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, trie2_god: &Trie2GodWrapper) {
+    pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, PrecomputeNode2Index>, original_to_internal_id_bimap: &BTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, trie2_god: &Trie2GodWrapper) {
         println!("Dumping Precomputed Trie 2 Structure (showing original LLM Token IDs):");
         println!("===================================");
 
@@ -266,7 +266,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         print_precompute_stats3(&stats, &self.trie3_god);
     }
 
-    pub fn _dump_precomputed3(precomputed3: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>, original_to_internal_id_bimap: &BiBTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, trie3_god: &Trie3GodWrapper) {
+    pub fn _dump_precomputed3(precomputed3: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>, original_to_internal_id_bimap: &BTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, trie3_god: &Trie3GodWrapper) {
         println!("Dumping Precomputed Trie 3 Structure (showing original LLM Token IDs):");
         println!("===================================");
 
@@ -311,7 +311,7 @@ pub fn dump_precompute_trie2_recursive(
     node_arc: &Trie2Index,
     prefix: String,
     visited: &mut HashSet<PrecomputeNode2Index>,
-    original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+    original_internal_bimap: Option<&BTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     trie2_god: &Trie2GodWrapper,
 ) {
@@ -356,7 +356,7 @@ pub fn dump_precompute_trie3_recursive(
     node_arc: &Trie2Index,
     prefix: String,
     visited: &mut HashSet<Trie2Index>,
-    original_internal_bimap: Option<&BiBTreeMap<usize, usize>>,
+    original_internal_bimap: Option<&BTreeMap<usize, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     trie3_god: &Trie3GodWrapper,
 ) {
@@ -1012,7 +1012,7 @@ mod tests {
     #[test]
     fn test_format_bv_with_tokens_with_maps() {
         let bv = HybridBitset::from_iter(vec![0, 1]); // internal IDs
-        let mut bimap = BiBTreeMap::new();
+        let mut bimap = BTreeMap::new();
         bimap.insert(10, 0); // original 10 -> internal 0
         bimap.insert(20, 1); // original 20 -> internal 1
         let mut llm_map = BiBTreeMap::new();
@@ -1026,7 +1026,7 @@ mod tests {
     #[test]
     fn test_format_bv_with_tokens_limit_and_ellipsis() {
         let bv = HybridBitset::from_iter(0..10); // internal IDs 0-9
-        let mut bimap = BiBTreeMap::new();
+        let mut bimap = BTreeMap::new();
         let mut llm_map = BiBTreeMap::new();
         for i in 0..10 {
             bimap.insert(100 + i, i);
