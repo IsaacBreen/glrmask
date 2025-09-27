@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <boost/functional/hash.hpp>
 #include <boost/icl/interval_set.hpp>
+#include <boost/icl/closed_interval.hpp>
 #include "stats.hpp"
 
 class RangeSet {
@@ -136,5 +137,10 @@ public:
         return seed;
     }
 private:
-    boost::icl::interval_set<unsigned long long> set;
+    boost::icl::interval_set<
+        unsigned long long,
+        std::less,
+        boost::icl::closed_interval<unsigned long long>
+    > set;
 };
+
