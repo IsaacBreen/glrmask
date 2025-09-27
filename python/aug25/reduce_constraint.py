@@ -858,6 +858,7 @@ def main():
     trie = original.get("trie3_god") or {}
     values_list = trie.get("values") or []
     values_dict = values_list_to_dict(values_list)
+    accepted_values_dict = deepcopy(values_dict)
 
     # Initial sizes
     n0, c0, d0 = count_nodes_children_dests(values_dict)
@@ -877,6 +878,7 @@ def main():
             )
             if best_depth is not None:
                 values_dict = pruned_values
+                accepted_values_dict = deepcopy(values_dict)
                 n1, c1, d1 = count_nodes_children_dests(values_dict)
                 print(f"[Depth] Minimal depth {best_depth} keeps mismatch. Size now: {n1} nodes, {c1} children, {d1} dests. Took {time.time()-start:.1f}s")
             else:
@@ -890,6 +892,7 @@ def main():
                 original, values_dict, repo_root, tmpdir, code_file,
                 baseline_model, candidate_model, time_budget_deadline
             )
+            accepted_values_dict = deepcopy(values_dict)
             n2, c2, d2 = count_nodes_children_dests(values_dict)
             print(f"--- Phase 2 finished. Size: {n2} nodes, {c2} children, {d2} dests. Took {time.time()-start:.1f}s ---")
 
@@ -901,6 +904,7 @@ def main():
                 original, values_dict, repo_root, tmpdir, code_file,
                 baseline_model, candidate_model, time_budget_deadline
             )
+            accepted_values_dict = deepcopy(values_dict)
             n3, c3, d3 = count_nodes_children_dests(values_dict)
             print(f"--- Phase 3 finished. Size: {n3} nodes, {c3} children, {d3} dests. Took {time.time()-start:.1f}s ---")
 
@@ -912,6 +916,7 @@ def main():
                 original, values_dict, repo_root, tmpdir, code_file,
                 baseline_model, candidate_model, time_budget_deadline
             )
+            accepted_values_dict = deepcopy(values_dict)
             n4, c4, d4 = count_nodes_children_dests(values_dict)
             print(f"--- Phase 4 finished. Size: {n4} nodes, {c4} children, {d4} dests. Took {time.time()-start:.1f}s ---")
 
@@ -919,15 +924,30 @@ def main():
         if time.time() < time_budget_deadline:
             print("\n--- Phase 5: Sweeping unreachable tokens (forward/backward reachability) ---")
             start = time.time()
-            n_before, c_before, d_before = count_nodes_children_dests(values_dict)
-            values_dict, sweep_stats = sweep_prune_llm_tokens(original, values_dict)
-            n_after, c_after, d_after = count_nodes_children_dests(values_dict)
-            took = time.time() - start
-            print(f"--- Phase 5 finished. "
-                  f"Tokens removed: {sweep_stats.get('tokens_removed', 0)}, "
-                  f"Edges removed: {sweep_stats.get('edges_removed', 0)}. "
-                  f"Size: {n_after} nodes, {c_after} children, {d_after} dests. "
-                  f"Took {took:.1f}s ---")
+            swept_values_dict, sweep_stats = sweep_prune_llm_tokens(original, values_dict)
+            
+            # Verify this aggressive, un-checked reduction
+            sweep_cand_path = write_candidate_constraint(tmpdir, original, swept_values_dict)
+            ok, _, _ = run_benchmarks_and_has_mismatch(
+                repo_root, sweep_cand_path, code_file, baseline_model, candidate_model
+            )
+
+            if ok:
+                print("  Sweep reduction is valid and preserves mismatch.")
+                values_dict = swept_values_dict
+                accepted_values_dict = deepcopy(values_dict)
+                n_after, c_after, d_after = count_nodes_children_dests(values_dict)
+                took = time.time() - start
+                print(f"--- Phase 5 finished. "
+                      f"Tokens removed: {sweep_stats.get('tokens_removed', 0)}, "
+                      f"Edges removed: {sweep_stats.get('edges_removed', 0)}. "
+                      f"Size: {n_after} nodes, {c_after} children, {d_after} dests. "
+                      f"Took {took:.1f}s ---")
+            else:
+                print("  Sweep reduction was unsound (did not preserve mismatch). Discarding.")
+                n_after, c_after, d_after = count_nodes_children_dests(values_dict)
+                took = time.time() - start
+                print(f"--- Phase 5 finished. No changes applied. Size: {n_after} nodes, {c_after} children, {d_after} dests. Took {took:.1f}s ---")
 
         # Final write
         final_candidate_path = write_candidate_constraint(tmpdir, original, values_dict)
@@ -939,9 +959,7 @@ def main():
         )
         if not ok:
             print("Warning: final candidate unexpectedly does not mismatch. Reverting to last accepted state.", file=sys.stderr)
-            # This should be rare; fall back to original (which we know mismatches).
-            # In practice, we could keep the last accepted file in tmpdir.
-            # For now, just keep current minimized candidate even if mismatch wasn’t detected.
+            final_candidate_path = write_candidate_constraint(tmpdir, original, accepted_values_dict)
 
         # Copy to user-provided output path
         shutil.copyfile(final_candidate_path, out_path)
