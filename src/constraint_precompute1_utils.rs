@@ -87,27 +87,35 @@ pub fn merge_equivalent_llm_tokens_trie1(
     if merged_count == 0 { return; }
 
     // 4) Apply mapping to trie
-    for n in tqdm!(all_nodes.iter(), desc = "Remapping trie") {
-        let mut w = n.write(trie1_god).expect("write");
-        if !w.value.live_tokens.is_empty() {
-            w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new);
-        }
+    let mut new_states = Vec::with_capacity(all_nodes.len());
+    for n in tqdm!(all_nodes.iter(), desc = "Remapping trie (read)") {
+        let r = n.read(trie1_god).expect("read");
+        let new_live_tokens = if r.value.live_tokens.is_empty() {
+            r.value.live_tokens.clone()
+        } else {
+            remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new)
+        };
         let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
-        for (ek, dm) in w.children().clone() {
+        for (ek, dm) in r.children() {
             let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
             for (dst, bv) in dm {
                 let mapped = remap_llm_bv_many_to_one(&bv, &old_to_new);
                 if !mapped.is_empty() {
-                    new_dm.insert(dst, mapped);
+                    new_dm.insert(dst.clone(), mapped);
                 }
             }
             if !new_dm.is_empty() {
-                new_children.insert(ek, new_dm);
+                new_children.insert(ek.clone(), new_dm);
             }
         }
-        *w.children_mut() = new_children;
+        new_states.push((new_live_tokens, new_children));
     }
-
+    for (i, n) in all_nodes.iter().enumerate() {
+        let mut w = n.write(trie1_god).expect("write");
+        let (live_tokens, children) = &new_states[i];
+        w.value.live_tokens = live_tokens.clone();
+        *w.children_mut() = children.clone();
+    }
     // 5) Update stage vocab
     // Merge internal_to_original for tokens mapped into representatives
     for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Updating stage vocab") {
@@ -165,27 +173,35 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
         old_to_new.insert(*old_id, new_id);
     }
     // Apply mapping to trie
+    let mut new_states = Vec::with_capacity(all_nodes.len());
     for n in &all_nodes {
-        let mut w = n.write(trie1_god).expect("write");
-        if !w.value.live_tokens.is_empty() {
-            w.value.live_tokens = remap_llm_bv_permutation(&w.value.live_tokens, &old_to_new);
-        }
+        let r = n.read(trie1_god).expect("read");
+        let new_live_tokens = if r.value.live_tokens.is_empty() {
+            r.value.live_tokens.clone()
+        } else {
+            remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new)
+        };
         let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
-        for (ek, dm) in w.children().clone() {
+        for (ek, dm) in r.children() {
             let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
             for (dst, bv) in dm {
                 let mapped = remap_llm_bv_permutation(&bv, &old_to_new);
                 if !mapped.is_empty() {
-                    new_dm.insert(dst, mapped);
+                    new_dm.insert(dst.clone(), mapped);
                 }
             }
             if !new_dm.is_empty() {
-                new_children.insert(ek, new_dm);
+                new_children.insert(ek.clone(), new_dm);
             }
         }
-        *w.children_mut() = new_children;
+        new_states.push((new_live_tokens, new_children));
     }
-
+    for (i, n) in all_nodes.iter().enumerate() {
+        let mut w = n.write(trie1_god).expect("write");
+        let (live_tokens, children) = &new_states[i];
+        w.value.live_tokens = live_tokens.clone();
+        *w.children_mut() = children.clone();
+    }
     // Update stage vocab (pure permutation)
     let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
     for (old_id, setv) in stage_vocab.internal_to_original.clone() {

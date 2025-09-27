@@ -148,23 +148,31 @@ pub fn merge_equivalent_llm_tokens_trie3(
     if merged_count == 0 { return; }
 
     // 3) Remap trie
+    let mut new_states = Vec::with_capacity(all_nodes.len());
     for n in &all_nodes {
-        let mut w = n.write(trie3_god).expect("write");
-        if !w.value.live_tokens.is_empty() {
-            w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new);
-        }
+        let r = n.read(trie3_god).expect("read");
+        let new_live_tokens = if r.value.live_tokens.is_empty() {
+            r.value.live_tokens.clone()
+        } else {
+            remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new)
+        };
         let mut new_children = BTreeMap::new();
-        for ((pop, llm_bv), dm) in w.children().clone() {
+        for ((pop, llm_bv), dm) in r.children() {
             let mapped_key_bv = remap_llm_bv_many_to_one(&llm_bv, &old_to_new);
             if mapped_key_bv.is_empty() { continue; }
-            let entry = new_children.entry((pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
+            let entry = new_children.entry((*pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
             for (dst, sid_bv) in dm {
-                entry.entry(dst).and_modify(|e| *e |= &sid_bv).or_insert(sid_bv);
+                entry.entry(dst.clone()).and_modify(|e| *e |= sid_bv).or_insert_with(|| sid_bv.clone());
             }
         }
-        *w.children_mut() = new_children;
+        new_states.push((new_live_tokens, new_children));
     }
-
+    for (i, n) in all_nodes.iter().enumerate() {
+        let mut w = n.write(trie3_god).expect("write");
+        let (live_tokens, children) = &new_states[i];
+        w.value.live_tokens = live_tokens.clone();
+        *w.children_mut() = children.clone();
+    }
     // 4) Update StageVocab
     for (old, rep) in &old_to_new {
         if old == rep { continue; }
@@ -212,23 +220,31 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
         old_to_new.insert(*old_id, new_id);
     }
 
+    let mut new_states = Vec::with_capacity(all_nodes.len());
     for n in &all_nodes {
-        let mut w = n.write(trie3_god).expect("write");
-        if !w.value.live_tokens.is_empty() {
-            w.value.live_tokens = remap_llm_bv_permutation(&w.value.live_tokens, &old_to_new);
-        }
+        let r = n.read(trie3_god).expect("read");
+        let new_live_tokens = if r.value.live_tokens.is_empty() {
+            r.value.live_tokens.clone()
+        } else {
+            remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new)
+        };
         let mut new_children = BTreeMap::new();
-        for ((pop, llm_bv), dm) in w.children().clone() {
+        for ((pop, llm_bv), dm) in r.children() {
             let mapped_key_bv = remap_llm_bv_permutation(&llm_bv, &old_to_new);
             if mapped_key_bv.is_empty() { continue; }
-            let entry = new_children.entry((pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
+            let entry = new_children.entry((*pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
             for (dst, sid_bv) in dm {
-                entry.entry(dst).and_modify(|e| *e |= &sid_bv).or_insert(sid_bv);
+                entry.entry(dst.clone()).and_modify(|e| *e |= sid_bv).or_insert_with(|| sid_bv.clone());
             }
         }
-        *w.children_mut() = new_children;
+        new_states.push((new_live_tokens, new_children));
     }
-
+    for (i, n) in all_nodes.iter().enumerate() {
+        let mut w = n.write(trie3_god).expect("write");
+        let (live_tokens, children) = &new_states[i];
+        w.value.live_tokens = live_tokens.clone();
+        *w.children_mut() = children.clone();
+    }
     // Update StageVocab under permutation
     let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
     for (old_id, setv) in stage_vocab.internal_to_original.clone() {

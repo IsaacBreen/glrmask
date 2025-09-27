@@ -4,7 +4,7 @@ local_system:
     - src/constraint_precompute1_utils.rs
     - src/constraint_precompute3_utils.rs
     - python/aug25/models/precompute3_model_pure_python.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/constraint.rs: |
@@ -33,6 +33,7 @@ local_system:
       use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
       use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
+      use crate::constraint_precompute1_utils;
       use crate::constraint_precompute2_utils;
       use crate::datastructures::arc_wrapper::ArcPtrWrapper;
       use crate::datastructures::entry_api::EntryApi;
@@ -543,13 +544,13 @@ local_system:
               });
 
               // Initialize per-stage vocabularies (start identical to global)
-              let precompute_vocab = StageVocab {
+              let mut precompute_vocab = StageVocab {
                   original_to_internal: llm_vocab.original_to_internal_id_bimap.clone(),
                   internal_to_original: internal_to_original_.clone(),
                   internal_max_llm_token: internal_max_llm_token,
               };
-              let precompute2_vocab = precompute_vocab.clone();
-              let precompute3_vocab = precompute_vocab.clone();
+              let mut precompute2_vocab = precompute_vocab.clone();
+              let mut precompute3_vocab = precompute_vocab.clone();
 
               if config.skip_precomputation {
                   return Self {
@@ -582,13 +583,19 @@ local_system:
                   parser.ignore_terminal_id,
                   &mut computed_possible_matches,
               );
-              // Self::_dump_precomputed(
-              //     &precomputed,
-              //     &llm_vocab.original_to_internal_id_bimap,
-              //     &token_name_map,
-              //     &llm_vocab.llm_token_map,
-              //     &trie1_god,
-              // );
+
+              if config.optimize_trie1_merge_equivalent_llm_tokens {
+                  constraint_precompute1_utils::merge_equivalent_llm_tokens_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
+              }
+              if config.optimize_trie1_reorder_llm_tokens {
+                  constraint_precompute1_utils::reorder_llm_tokens_for_range_minimization_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
+              }
+              // Always run normalization pass after potential token changes.
+              constraint_precompute1_utils::optimize_state_masks_and_edges_trie1(&precomputed, &trie1_god);
+
+              // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
+              precompute2_vocab = precompute_vocab.clone();
+              precompute3_vocab = precompute_vocab.clone();
 
               let (precomputed2, trie2_god) = Self::precompute2(
                   &precomputed,
@@ -621,6 +628,7 @@ local_system:
                   &trie1_god,
                   &tokenizer, Some(&parser), Some(llm_vocab.clone()), &internal_llm_token_map_for_precompute, &token_name_map, internal_max_llm_token, &terminal_follow_map, parser.ignore_terminal_id, &mut computed_possible_matches,
                   config,
+                  &mut precompute3_vocab,
               );
 
               let mut stats3 = PrecomputeStats::default();
@@ -732,6 +740,7 @@ local_system:
               ignore_terminal_id: Option<TerminalID>,
               possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
               config: &GrammarConstraintConfig,
+              stage_vocab: &mut StageVocab,
           ) -> (Precomputed3, Trie3GodWrapper) {
               crate::debug!(2, "Precomputing Trie 3...");
               const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
@@ -862,7 +871,7 @@ local_system:
 
               crate::debug!(2, "Finished precomputing Trie 3.");
               let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
-              optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token);
+              optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
 
               (precomputed3, trie3_god)
           }
@@ -3073,6 +3082,8 @@ local_system:
     src/constraint_precompute1_utils.rs: |
       use std::collections::{BTreeMap, BTreeSet, HashMap};
       use ordered_hash_map::OrderedHashMap;
+      use kdam::tqdm;
+      use crate::profiler::PROGRESS_BAR_ENABLED;
       use crate::constraint::{StageVocab, PrecomputeNodeIndex, Trie1GodWrapper};
       use crate::datastructures::gss::LLMTokenBV;
       use crate::datastructures::trie::Trie;
@@ -3104,6 +3115,7 @@ local_system:
           trie1_god: &Trie1GodWrapper,
           stage_vocab: &mut StageVocab,
       ) {
+          crate::debug!(2, "Merging equivalent LLM tokens in Trie1...");
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
           if all_nodes.is_empty() { return; }
@@ -3128,7 +3140,10 @@ local_system:
           // 2) Build signature per token
           let max_tok = stage_vocab.internal_max_llm_token;
           let mut sig_map: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
-          for tok in 0..=max_tok {
+          #[cfg(not(rustrover))]
+          let it = tqdm!(0..=max_tok, desc = "Trie1 Merge Tokens (Sigs)", disable = !PROGRESS_BAR_ENABLED, leave=false);
+          #[cfg(rustrover)] let it = 0..=max_tok;
+          for tok in it {
               let mut sig: Vec<usize> = Vec::new();
               for (i, setv) in family.iter().enumerate() {
                   if setv.contains(tok) { sig.push(i); }
@@ -3139,17 +3154,22 @@ local_system:
 
           // 3) Build many-to-one mapping
           let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
-          for (_sig, group) in sig_map {
+          let mut merged_count = 0;
+          for (_sig, group) in tqdm!(sig_map.into_iter(), desc = "Building mapping") {
               if group.len() <= 1 { continue; }
               let rep = *group.iter().min().unwrap();
               for t in group {
-                  old_to_new.insert(t, rep);
+                  if t != rep {
+                      old_to_new.insert(t, rep);
+                      merged_count += 1;
+                  }
               }
           }
-          if old_to_new.is_empty() { return; }
+          crate::debug!(2, "Trie1: merged {} LLM tokens into representatives.", merged_count);
+          if merged_count == 0 { return; }
 
           // 4) Apply mapping to trie
-          for n in &all_nodes {
+          for n in tqdm!(all_nodes.iter(), desc = "Remapping trie") {
               let mut w = n.write(trie1_god).expect("write");
               if !w.value.live_tokens.is_empty() {
                   w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new);
@@ -3172,7 +3192,7 @@ local_system:
 
           // 5) Update stage vocab
           // Merge internal_to_original for tokens mapped into representatives
-          for (old, new_rep) in &old_to_new {
+          for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Updating stage vocab") {
               if old == new_rep { continue; }
               let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
               stage_vocab.internal_to_original.entry(*new_rep).or_default().extend(moved.clone());
@@ -3191,6 +3211,7 @@ local_system:
           trie1_god: &Trie1GodWrapper,
           stage_vocab: &mut StageVocab,
       ) {
+          crate::debug!(2, "Reordering LLM tokens in Trie1 for range minimization...");
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
           if all_nodes.is_empty() { return; }
@@ -3198,7 +3219,10 @@ local_system:
 
           // Count frequencies
           let mut freq: Vec<usize> = vec![0; max_tok + 1];
-          for n in &all_nodes {
+          #[cfg(not(rustrover))]
+          let it = tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Freq)", total=all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+          #[cfg(rustrover)] let it = all_nodes.iter();
+          for n in it {
               let g = n.read(trie1_god).expect("read");
               for t in g.value.live_tokens.iter() {
                   if t as usize <= max_tok { freq[t as usize] += 1; }
@@ -3260,6 +3284,7 @@ local_system:
           }
           stage_vocab.original_to_internal = new_original_to_internal;
           stage_vocab.internal_max_llm_token = present.len().saturating_sub(1);
+          crate::debug!(2, "Trie1 reordering complete. New max internal token ID: {}", stage_vocab.internal_max_llm_token);
       }
 
       /// Conservative normalization pass for Trie1:
@@ -3297,6 +3322,8 @@ local_system:
     src/constraint_precompute3_utils.rs: |
       use std::collections::BTreeSet;
       use std::collections::{BTreeMap, HashMap, VecDeque, HashSet};
+      use indicatif::{ProgressBar, ProgressStyle};
+      use kdam::tqdm;
       use ordered_hash_map::OrderedHashMap;
       use crate::constraint::{GrammarConstraintConfig, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper, StageVocab};
       use crate::datastructures::EntryApi;
@@ -3304,42 +3331,63 @@ local_system:
       use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
       use crate::tokenizer::TokenizerStateID;
 
+      use crate::profiler::PROGRESS_BAR_ENABLED;
       pub fn optimize_trie3_size(
           roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
           trie3_god: &Trie3GodWrapper,
           config: &GrammarConstraintConfig,
           max_state_id: usize,
-          max_llm_token_id: usize,
+          mut max_llm_token_id: usize,
+          stage_vocab: &mut StageVocab,
       ) {
           crate::debug!(2, "Optimizing Trie 3 size...");
+
+          crate::debug!(2, "Step 1: Merging equivalent LLM tokens...");
+          if config.optimize_trie3_merge_equivalent_llm_tokens {
+              merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
+          }
+          crate::debug!(2, "Step 2: Reordering LLM tokens...");
+          if config.optimize_trie3_reorder_llm_tokens {
+              reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
+              max_llm_token_id = stage_vocab.internal_max_llm_token;
+          }
+
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
 
+          crate::debug!(2, "Step 3: Constraining bitvectors...");
           if config.optimize_trie3_constrain_bitvecs {
               constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
           }
 
+          crate::debug!(2, "Step 4: Pruning dead paths...");
           if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
               prune_dead_paths_trie3(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 5: Compressing edges...");
           if config.optimize_trie2_compress_edges {
               compress_trie3_edges(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 6: Merging nodes...");
           if config.optimize_trie2_merge_nodes {
               merge_nodes_trie3(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 7: Pruning dead paths (post-merge)...");
           if config.optimize_trie2_prune_dead_paths {
               prune_dead_paths_trie3(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 8: Compressing edges (post-merge)...");
           if config.optimize_trie2_compress_edges {
               compress_trie3_edges(roots, &trie3_god);
           }
           if config.optimize_trie2_merge_nodes {
               merge_nodes_trie3(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 10: Garbage collection...");
           if config.optimize_trie2_gc {
               Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
           }
+          crate::debug!(2, "Step 11: Recomputing max depths...");
           Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
       }
 
@@ -3370,6 +3418,7 @@ local_system:
           trie3_god: &Trie3GodWrapper,
           stage_vocab: &mut StageVocab,
       ) {
+          crate::debug!(2, "Merging equivalent LLM tokens in Trie3...");
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
           if all_nodes.is_empty() { return; }
@@ -3392,7 +3441,10 @@ local_system:
           // 2) Group tokens by signature
           let max_tok = stage_vocab.internal_max_llm_token;
           let mut sig_map: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
-          for tok in 0..=max_tok {
+          #[cfg(not(rustrover))]
+          let it = tqdm!(0..=max_tok, desc = "Trie3 Merge Tokens (Sigs)", disable = !PROGRESS_BAR_ENABLED, leave=false);
+          #[cfg(rustrover)] let it = 0..=max_tok;
+          for tok in it {
               let mut sig: Vec<usize> = Vec::new();
               for (i, setv) in family.iter().enumerate() {
                   if setv.contains(tok) { sig.push(i); }
@@ -3403,14 +3455,19 @@ local_system:
           if sig_map.is_empty() { return; }
 
           let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
+          let mut merged_count = 0;
           for (_sig, group) in sig_map {
               if group.len() <= 1 { continue; }
               let rep = *group.iter().min().unwrap();
               for t in group {
-                  old_to_new.insert(t, rep);
+                  if t != rep {
+                      old_to_new.insert(t, rep);
+                      merged_count += 1;
+                  }
               }
           }
-          if old_to_new.is_empty() { return; }
+          crate::debug!(2, "Trie3: merged {} LLM tokens into representatives.", merged_count);
+          if merged_count == 0 { return; }
 
           // 3) Remap trie
           for n in &all_nodes {
@@ -3447,12 +3504,17 @@ local_system:
           trie3_god: &Trie3GodWrapper,
           stage_vocab: &mut StageVocab,
       ) {
+          crate::debug!(2, "Reordering LLM tokens in Trie3 for range minimization...");
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
           if all_nodes.is_empty() { return; }
           let max_tok = stage_vocab.internal_max_llm_token;
           let mut freq: Vec<usize> = vec![0; max_tok + 1];
-          for n in &all_nodes {
+
+          #[cfg(not(rustrover))]
+          let it = tqdm!(all_nodes.iter(), desc = "Trie3 Reorder (Freq)", total=all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+          #[cfg(rustrover)] let it = all_nodes.iter();
+          for n in it {
               let g = n.read(trie3_god).expect("read");
               for t in g.value.live_tokens.iter() {
                   if t as usize <= max_tok { freq[t as usize] += 1; }
@@ -3505,6 +3567,7 @@ local_system:
           }
           stage_vocab.original_to_internal = new_original_to_internal;
           stage_vocab.internal_max_llm_token = present.len().saturating_sub(1);
+          crate::debug!(2, "Trie3 reordering complete. New max internal token ID: {}", stage_vocab.internal_max_llm_token);
       }
 
       fn constrain_bitvecs_trie3(
@@ -3585,8 +3648,21 @@ local_system:
               }
           }
 
+          let pb = ProgressBar::new(all_nodes.len() as u64);
+          pb.set_style(
+              ProgressStyle::default_bar()
+                  .template("{spinner:.green} [Trie3 Prune] [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+                  .unwrap(),
+          );
+          if !PROGRESS_BAR_ENABLED {
+              pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+          }
+          pb.set_position(0);
+
           // 2. Propagate liveness until a fixed point is reached.
           while let Some(node_ptr) = worklist.pop_front() {
+              pb.inc(1);
+
               let live_at_node = live.get(&node_ptr).unwrap().clone();
               if let Some(preds) = predecessors.get(&node_ptr) {
                   for (pred_ptr, edge_key) in preds {
@@ -3604,6 +3680,7 @@ local_system:
                   }
               }
           }
+          pb.finish_and_clear();
 
           // 3. Prune the graph based on the computed live sets.
           for node_arc in &all_nodes {
@@ -3779,7 +3856,11 @@ local_system:
               if nodes.is_empty() { return false; }
               let mut changed_any = false;
 
-              for node_idx in nodes {
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Coalesce)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for node_idx in it {
                   // Snapshot current children
                   let old_children = {
                       let g = node_idx.read(trie3_god).expect("read");
@@ -3912,7 +3993,11 @@ local_system:
 
               let mut changed_any = false;
 
-              for u in &nodes {
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Pop-0 Chains)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for u in it {
                   // Snapshot children (stable during this node's rewrite)
                   let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
                       let g = u.read(trie3_god).expect("read");
@@ -4007,7 +4092,11 @@ local_system:
 
               let mut changed_any = false;
 
-              for u in &nodes {
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Universal Pop)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for u in it {
                   // Snapshot children
                   let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
                       let g = u.read(trie3_god).expect("read");
@@ -9265,7 +9354,7 @@ local_system:
           // 3) Build many-to-one mapping
           let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
           let mut merged_count = 0;
-          for (_sig, group) in sig_map {
+          for (_sig, group) in tqdm!(sig_map.into_iter(), desc = "Building mapping") {
               if group.len() <= 1 { continue; }
               let rep = *group.iter().min().unwrap();
               for t in group {
@@ -9279,30 +9368,38 @@ local_system:
           if merged_count == 0 { return; }
 
           // 4) Apply mapping to trie
-          for n in &all_nodes {
-              let mut w = n.write(trie1_god).expect("write");
-              if !w.value.live_tokens.is_empty() {
-                  w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new);
-              }
+          let mut new_states = Vec::with_capacity(all_nodes.len());
+          for n in tqdm!(all_nodes.iter(), desc = "Remapping trie (read)") {
+              let r = n.read(trie1_god).expect("read");
+              let new_live_tokens = if r.value.live_tokens.is_empty() {
+                  r.value.live_tokens.clone()
+              } else {
+                  remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new)
+              };
               let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
-              for (ek, dm) in w.children().clone() {
+              for (ek, dm) in r.children() {
                   let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
                   for (dst, bv) in dm {
                       let mapped = remap_llm_bv_many_to_one(&bv, &old_to_new);
                       if !mapped.is_empty() {
-                          new_dm.insert(dst, mapped);
+                          new_dm.insert(dst.clone(), mapped);
                       }
                   }
                   if !new_dm.is_empty() {
-                      new_children.insert(ek, new_dm);
+                      new_children.insert(ek.clone(), new_dm);
                   }
               }
-              *w.children_mut() = new_children;
+              new_states.push((new_live_tokens, new_children));
           }
-
+          for (i, n) in all_nodes.iter().enumerate() {
+              let mut w = n.write(trie1_god).expect("write");
+              let (live_tokens, children) = &new_states[i];
+              w.value.live_tokens = live_tokens.clone();
+              *w.children_mut() = children.clone();
+          }
           // 5) Update stage vocab
           // Merge internal_to_original for tokens mapped into representatives
-          for (old, new_rep) in &old_to_new {
+          for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Updating stage vocab") {
               if old == new_rep { continue; }
               let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
               stage_vocab.internal_to_original.entry(*new_rep).or_default().extend(moved.clone());
@@ -9357,27 +9454,35 @@ local_system:
               old_to_new.insert(*old_id, new_id);
           }
           // Apply mapping to trie
+          let mut new_states = Vec::with_capacity(all_nodes.len());
           for n in &all_nodes {
-              let mut w = n.write(trie1_god).expect("write");
-              if !w.value.live_tokens.is_empty() {
-                  w.value.live_tokens = remap_llm_bv_permutation(&w.value.live_tokens, &old_to_new);
-              }
+              let r = n.read(trie1_god).expect("read");
+              let new_live_tokens = if r.value.live_tokens.is_empty() {
+                  r.value.live_tokens.clone()
+              } else {
+                  remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new)
+              };
               let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
-              for (ek, dm) in w.children().clone() {
+              for (ek, dm) in r.children() {
                   let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
                   for (dst, bv) in dm {
                       let mapped = remap_llm_bv_permutation(&bv, &old_to_new);
                       if !mapped.is_empty() {
-                          new_dm.insert(dst, mapped);
+                          new_dm.insert(dst.clone(), mapped);
                       }
                   }
                   if !new_dm.is_empty() {
-                      new_children.insert(ek, new_dm);
+                      new_children.insert(ek.clone(), new_dm);
                   }
               }
-              *w.children_mut() = new_children;
+              new_states.push((new_live_tokens, new_children));
           }
-
+          for (i, n) in all_nodes.iter().enumerate() {
+              let mut w = n.write(trie1_god).expect("write");
+              let (live_tokens, children) = &new_states[i];
+              w.value.live_tokens = live_tokens.clone();
+              *w.children_mut() = children.clone();
+          }
           // Update stage vocab (pure permutation)
           let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
           for (old_id, setv) in stage_vocab.internal_to_original.clone() {
@@ -9432,6 +9537,8 @@ local_system:
     src/constraint_precompute3_utils.rs: |
       use std::collections::BTreeSet;
       use std::collections::{BTreeMap, HashMap, VecDeque, HashSet};
+      use indicatif::{ProgressBar, ProgressStyle};
+      use kdam::tqdm;
       use ordered_hash_map::OrderedHashMap;
       use crate::constraint::{GrammarConstraintConfig, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper, StageVocab};
       use crate::datastructures::EntryApi;
@@ -9439,6 +9546,7 @@ local_system:
       use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
       use crate::tokenizer::TokenizerStateID;
 
+      use crate::profiler::PROGRESS_BAR_ENABLED;
       pub fn optimize_trie3_size(
           roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
           trie3_god: &Trie3GodWrapper,
@@ -9449,9 +9557,11 @@ local_system:
       ) {
           crate::debug!(2, "Optimizing Trie 3 size...");
 
+          crate::debug!(2, "Step 1: Merging equivalent LLM tokens...");
           if config.optimize_trie3_merge_equivalent_llm_tokens {
               merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
           }
+          crate::debug!(2, "Step 2: Reordering LLM tokens...");
           if config.optimize_trie3_reorder_llm_tokens {
               reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
               max_llm_token_id = stage_vocab.internal_max_llm_token;
@@ -9460,31 +9570,39 @@ local_system:
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
 
+          crate::debug!(2, "Step 3: Constraining bitvectors...");
           if config.optimize_trie3_constrain_bitvecs {
               constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
           }
 
+          crate::debug!(2, "Step 4: Pruning dead paths...");
           if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
               prune_dead_paths_trie3(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 5: Compressing edges...");
           if config.optimize_trie2_compress_edges {
               compress_trie3_edges(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 6: Merging nodes...");
           if config.optimize_trie2_merge_nodes {
               merge_nodes_trie3(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 7: Pruning dead paths (post-merge)...");
           if config.optimize_trie2_prune_dead_paths {
               prune_dead_paths_trie3(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 8: Compressing edges (post-merge)...");
           if config.optimize_trie2_compress_edges {
               compress_trie3_edges(roots, &trie3_god);
           }
           if config.optimize_trie2_merge_nodes {
               merge_nodes_trie3(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 10: Garbage collection...");
           if config.optimize_trie2_gc {
               Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
           }
+          crate::debug!(2, "Step 11: Recomputing max depths...");
           Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
       }
 
@@ -9515,6 +9633,7 @@ local_system:
           trie3_god: &Trie3GodWrapper,
           stage_vocab: &mut StageVocab,
       ) {
+          crate::debug!(2, "Merging equivalent LLM tokens in Trie3...");
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
           if all_nodes.is_empty() { return; }
@@ -9537,7 +9656,10 @@ local_system:
           // 2) Group tokens by signature
           let max_tok = stage_vocab.internal_max_llm_token;
           let mut sig_map: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
-          for tok in 0..=max_tok {
+          #[cfg(not(rustrover))]
+          let it = tqdm!(0..=max_tok, desc = "Trie3 Merge Tokens (Sigs)", disable = !PROGRESS_BAR_ENABLED, leave=false);
+          #[cfg(rustrover)] let it = 0..=max_tok;
+          for tok in it {
               let mut sig: Vec<usize> = Vec::new();
               for (i, setv) in family.iter().enumerate() {
                   if setv.contains(tok) { sig.push(i); }
@@ -9548,33 +9670,46 @@ local_system:
           if sig_map.is_empty() { return; }
 
           let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
+          let mut merged_count = 0;
           for (_sig, group) in sig_map {
               if group.len() <= 1 { continue; }
               let rep = *group.iter().min().unwrap();
               for t in group {
-                  old_to_new.insert(t, rep);
-              }
-          }
-          if old_to_new.is_empty() { return; }
-
-          // 3) Remap trie
-          for n in &all_nodes {
-              let mut w = n.write(trie3_god).expect("write");
-              if !w.value.live_tokens.is_empty() {
-                  w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new);
-              }
-              let mut new_children = BTreeMap::new();
-              for ((pop, llm_bv), dm) in w.children().clone() {
-                  let mapped_key_bv = remap_llm_bv_many_to_one(&llm_bv, &old_to_new);
-                  if mapped_key_bv.is_empty() { continue; }
-                  let entry = new_children.entry((pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
-                  for (dst, sid_bv) in dm {
-                      entry.entry(dst).and_modify(|e| *e |= &sid_bv).or_insert(sid_bv);
+                  if t != rep {
+                      old_to_new.insert(t, rep);
+                      merged_count += 1;
                   }
               }
-              *w.children_mut() = new_children;
           }
+          crate::debug!(2, "Trie3: merged {} LLM tokens into representatives.", merged_count);
+          if merged_count == 0 { return; }
 
+          // 3) Remap trie
+          let mut new_states = Vec::with_capacity(all_nodes.len());
+          for n in &all_nodes {
+              let r = n.read(trie3_god).expect("read");
+              let new_live_tokens = if r.value.live_tokens.is_empty() {
+                  r.value.live_tokens.clone()
+              } else {
+                  remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new)
+              };
+              let mut new_children = BTreeMap::new();
+              for ((pop, llm_bv), dm) in r.children() {
+                  let mapped_key_bv = remap_llm_bv_many_to_one(&llm_bv, &old_to_new);
+                  if mapped_key_bv.is_empty() { continue; }
+                  let entry = new_children.entry((*pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
+                  for (dst, sid_bv) in dm {
+                      entry.entry(dst.clone()).and_modify(|e| *e |= sid_bv).or_insert_with(|| sid_bv.clone());
+                  }
+              }
+              new_states.push((new_live_tokens, new_children));
+          }
+          for (i, n) in all_nodes.iter().enumerate() {
+              let mut w = n.write(trie3_god).expect("write");
+              let (live_tokens, children) = &new_states[i];
+              w.value.live_tokens = live_tokens.clone();
+              *w.children_mut() = children.clone();
+          }
           // 4) Update StageVocab
           for (old, rep) in &old_to_new {
               if old == rep { continue; }
@@ -9592,12 +9727,17 @@ local_system:
           trie3_god: &Trie3GodWrapper,
           stage_vocab: &mut StageVocab,
       ) {
+          crate::debug!(2, "Reordering LLM tokens in Trie3 for range minimization...");
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
           if all_nodes.is_empty() { return; }
           let max_tok = stage_vocab.internal_max_llm_token;
           let mut freq: Vec<usize> = vec![0; max_tok + 1];
-          for n in &all_nodes {
+
+          #[cfg(not(rustrover))]
+          let it = tqdm!(all_nodes.iter(), desc = "Trie3 Reorder (Freq)", total=all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+          #[cfg(rustrover)] let it = all_nodes.iter();
+          for n in it {
               let g = n.read(trie3_god).expect("read");
               for t in g.value.live_tokens.iter() {
                   if t as usize <= max_tok { freq[t as usize] += 1; }
@@ -9617,23 +9757,31 @@ local_system:
               old_to_new.insert(*old_id, new_id);
           }
 
+          let mut new_states = Vec::with_capacity(all_nodes.len());
           for n in &all_nodes {
-              let mut w = n.write(trie3_god).expect("write");
-              if !w.value.live_tokens.is_empty() {
-                  w.value.live_tokens = remap_llm_bv_permutation(&w.value.live_tokens, &old_to_new);
-              }
+              let r = n.read(trie3_god).expect("read");
+              let new_live_tokens = if r.value.live_tokens.is_empty() {
+                  r.value.live_tokens.clone()
+              } else {
+                  remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new)
+              };
               let mut new_children = BTreeMap::new();
-              for ((pop, llm_bv), dm) in w.children().clone() {
+              for ((pop, llm_bv), dm) in r.children() {
                   let mapped_key_bv = remap_llm_bv_permutation(&llm_bv, &old_to_new);
                   if mapped_key_bv.is_empty() { continue; }
-                  let entry = new_children.entry((pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
+                  let entry = new_children.entry((*pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
                   for (dst, sid_bv) in dm {
-                      entry.entry(dst).and_modify(|e| *e |= &sid_bv).or_insert(sid_bv);
+                      entry.entry(dst.clone()).and_modify(|e| *e |= sid_bv).or_insert_with(|| sid_bv.clone());
                   }
               }
-              *w.children_mut() = new_children;
+              new_states.push((new_live_tokens, new_children));
           }
-
+          for (i, n) in all_nodes.iter().enumerate() {
+              let mut w = n.write(trie3_god).expect("write");
+              let (live_tokens, children) = &new_states[i];
+              w.value.live_tokens = live_tokens.clone();
+              *w.children_mut() = children.clone();
+          }
           // Update StageVocab under permutation
           let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
           for (old_id, setv) in stage_vocab.internal_to_original.clone() {
@@ -9650,6 +9798,7 @@ local_system:
           }
           stage_vocab.original_to_internal = new_original_to_internal;
           stage_vocab.internal_max_llm_token = present.len().saturating_sub(1);
+          crate::debug!(2, "Trie3 reordering complete. New max internal token ID: {}", stage_vocab.internal_max_llm_token);
       }
 
       fn constrain_bitvecs_trie3(
@@ -9730,8 +9879,21 @@ local_system:
               }
           }
 
+          let pb = ProgressBar::new(all_nodes.len() as u64);
+          pb.set_style(
+              ProgressStyle::default_bar()
+                  .template("{spinner:.green} [Trie3 Prune] [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+                  .unwrap(),
+          );
+          if !PROGRESS_BAR_ENABLED {
+              pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+          }
+          pb.set_position(0);
+
           // 2. Propagate liveness until a fixed point is reached.
           while let Some(node_ptr) = worklist.pop_front() {
+              pb.inc(1);
+
               let live_at_node = live.get(&node_ptr).unwrap().clone();
               if let Some(preds) = predecessors.get(&node_ptr) {
                   for (pred_ptr, edge_key) in preds {
@@ -9749,6 +9911,7 @@ local_system:
                   }
               }
           }
+          pb.finish_and_clear();
 
           // 3. Prune the graph based on the computed live sets.
           for node_arc in &all_nodes {
@@ -9924,7 +10087,11 @@ local_system:
               if nodes.is_empty() { return false; }
               let mut changed_any = false;
 
-              for node_idx in nodes {
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Coalesce)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for node_idx in it {
                   // Snapshot current children
                   let old_children = {
                       let g = node_idx.read(trie3_god).expect("read");
@@ -10057,7 +10224,11 @@ local_system:
 
               let mut changed_any = false;
 
-              for u in &nodes {
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Pop-0 Chains)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for u in it {
                   // Snapshot children (stable during this node's rewrite)
                   let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
                       let g = u.read(trie3_god).expect("read");
@@ -10152,7 +10323,11 @@ local_system:
 
               let mut changed_any = false;
 
-              for u in &nodes {
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Universal Pop)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for u in it {
                   // Snapshot children
                   let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
                       let g = u.read(trie3_god).expect("read");
@@ -12331,6 +12506,7 @@ messages:
       use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
       use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
+      use crate::constraint_precompute1_utils;
       use crate::constraint_precompute2_utils;
       use crate::datastructures::arc_wrapper::ArcPtrWrapper;
       use crate::datastructures::entry_api::EntryApi;
@@ -12841,13 +13017,13 @@ messages:
               });
 
               // Initialize per-stage vocabularies (start identical to global)
-              let precompute_vocab = StageVocab {
+              let mut precompute_vocab = StageVocab {
                   original_to_internal: llm_vocab.original_to_internal_id_bimap.clone(),
                   internal_to_original: internal_to_original_.clone(),
                   internal_max_llm_token: internal_max_llm_token,
               };
-              let precompute2_vocab = precompute_vocab.clone();
-              let precompute3_vocab = precompute_vocab.clone();
+              let mut precompute2_vocab = precompute_vocab.clone();
+              let mut precompute3_vocab = precompute_vocab.clone();
 
               if config.skip_precomputation {
                   return Self {
@@ -12880,13 +13056,19 @@ messages:
                   parser.ignore_terminal_id,
                   &mut computed_possible_matches,
               );
-              // Self::_dump_precomputed(
-              //     &precomputed,
-              //     &llm_vocab.original_to_internal_id_bimap,
-              //     &token_name_map,
-              //     &llm_vocab.llm_token_map,
-              //     &trie1_god,
-              // );
+
+              if config.optimize_trie1_merge_equivalent_llm_tokens {
+                  constraint_precompute1_utils::merge_equivalent_llm_tokens_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
+              }
+              if config.optimize_trie1_reorder_llm_tokens {
+                  constraint_precompute1_utils::reorder_llm_tokens_for_range_minimization_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
+              }
+              // Always run normalization pass after potential token changes.
+              constraint_precompute1_utils::optimize_state_masks_and_edges_trie1(&precomputed, &trie1_god);
+
+              // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
+              precompute2_vocab = precompute_vocab.clone();
+              precompute3_vocab = precompute_vocab.clone();
 
               let (precomputed2, trie2_god) = Self::precompute2(
                   &precomputed,
@@ -12919,6 +13101,7 @@ messages:
                   &trie1_god,
                   &tokenizer, Some(&parser), Some(llm_vocab.clone()), &internal_llm_token_map_for_precompute, &token_name_map, internal_max_llm_token, &terminal_follow_map, parser.ignore_terminal_id, &mut computed_possible_matches,
                   config,
+                  &mut precompute3_vocab,
               );
 
               let mut stats3 = PrecomputeStats::default();
@@ -13030,6 +13213,7 @@ messages:
               ignore_terminal_id: Option<TerminalID>,
               possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
               config: &GrammarConstraintConfig,
+              stage_vocab: &mut StageVocab,
           ) -> (Precomputed3, Trie3GodWrapper) {
               crate::debug!(2, "Precomputing Trie 3...");
               const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
@@ -13160,7 +13344,7 @@ messages:
 
               crate::debug!(2, "Finished precomputing Trie 3.");
               let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
-              optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token);
+              optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
 
               (precomputed3, trie3_god)
           }
@@ -15376,6 +15560,8 @@ messages:
       ```rust 'src/constraint_precompute1_utils.rs'
       use std::collections::{BTreeMap, BTreeSet, HashMap};
       use ordered_hash_map::OrderedHashMap;
+      use kdam::tqdm;
+      use crate::profiler::PROGRESS_BAR_ENABLED;
       use crate::constraint::{StageVocab, PrecomputeNodeIndex, Trie1GodWrapper};
       use crate::datastructures::gss::LLMTokenBV;
       use crate::datastructures::trie::Trie;
@@ -15407,6 +15593,7 @@ messages:
           trie1_god: &Trie1GodWrapper,
           stage_vocab: &mut StageVocab,
       ) {
+          crate::debug!(2, "Merging equivalent LLM tokens in Trie1...");
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
           if all_nodes.is_empty() { return; }
@@ -15431,7 +15618,10 @@ messages:
           // 2) Build signature per token
           let max_tok = stage_vocab.internal_max_llm_token;
           let mut sig_map: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
-          for tok in 0..=max_tok {
+          #[cfg(not(rustrover))]
+          let it = tqdm!(0..=max_tok, desc = "Trie1 Merge Tokens (Sigs)", disable = !PROGRESS_BAR_ENABLED, leave=false);
+          #[cfg(rustrover)] let it = 0..=max_tok;
+          for tok in it {
               let mut sig: Vec<usize> = Vec::new();
               for (i, setv) in family.iter().enumerate() {
                   if setv.contains(tok) { sig.push(i); }
@@ -15442,17 +15632,22 @@ messages:
 
           // 3) Build many-to-one mapping
           let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
-          for (_sig, group) in sig_map {
+          let mut merged_count = 0;
+          for (_sig, group) in tqdm!(sig_map.into_iter(), desc = "Building mapping") {
               if group.len() <= 1 { continue; }
               let rep = *group.iter().min().unwrap();
               for t in group {
-                  old_to_new.insert(t, rep);
+                  if t != rep {
+                      old_to_new.insert(t, rep);
+                      merged_count += 1;
+                  }
               }
           }
-          if old_to_new.is_empty() { return; }
+          crate::debug!(2, "Trie1: merged {} LLM tokens into representatives.", merged_count);
+          if merged_count == 0 { return; }
 
           // 4) Apply mapping to trie
-          for n in &all_nodes {
+          for n in tqdm!(all_nodes.iter(), desc = "Remapping trie") {
               let mut w = n.write(trie1_god).expect("write");
               if !w.value.live_tokens.is_empty() {
                   w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new);
@@ -15475,7 +15670,7 @@ messages:
 
           // 5) Update stage vocab
           // Merge internal_to_original for tokens mapped into representatives
-          for (old, new_rep) in &old_to_new {
+          for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Updating stage vocab") {
               if old == new_rep { continue; }
               let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
               stage_vocab.internal_to_original.entry(*new_rep).or_default().extend(moved.clone());
@@ -15494,6 +15689,7 @@ messages:
           trie1_god: &Trie1GodWrapper,
           stage_vocab: &mut StageVocab,
       ) {
+          crate::debug!(2, "Reordering LLM tokens in Trie1 for range minimization...");
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
           if all_nodes.is_empty() { return; }
@@ -15501,7 +15697,10 @@ messages:
 
           // Count frequencies
           let mut freq: Vec<usize> = vec![0; max_tok + 1];
-          for n in &all_nodes {
+          #[cfg(not(rustrover))]
+          let it = tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Freq)", total=all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+          #[cfg(rustrover)] let it = all_nodes.iter();
+          for n in it {
               let g = n.read(trie1_god).expect("read");
               for t in g.value.live_tokens.iter() {
                   if t as usize <= max_tok { freq[t as usize] += 1; }
@@ -15563,6 +15762,7 @@ messages:
           }
           stage_vocab.original_to_internal = new_original_to_internal;
           stage_vocab.internal_max_llm_token = present.len().saturating_sub(1);
+          crate::debug!(2, "Trie1 reordering complete. New max internal token ID: {}", stage_vocab.internal_max_llm_token);
       }
 
       /// Conservative normalization pass for Trie1:
@@ -15605,6 +15805,8 @@ messages:
       ```rust 'src/constraint_precompute3_utils.rs'
       use std::collections::BTreeSet;
       use std::collections::{BTreeMap, HashMap, VecDeque, HashSet};
+      use indicatif::{ProgressBar, ProgressStyle};
+      use kdam::tqdm;
       use ordered_hash_map::OrderedHashMap;
       use crate::constraint::{GrammarConstraintConfig, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper, StageVocab};
       use crate::datastructures::EntryApi;
@@ -15612,42 +15814,63 @@ messages:
       use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
       use crate::tokenizer::TokenizerStateID;
 
+      use crate::profiler::PROGRESS_BAR_ENABLED;
       pub fn optimize_trie3_size(
           roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
           trie3_god: &Trie3GodWrapper,
           config: &GrammarConstraintConfig,
           max_state_id: usize,
-          max_llm_token_id: usize,
+          mut max_llm_token_id: usize,
+          stage_vocab: &mut StageVocab,
       ) {
           crate::debug!(2, "Optimizing Trie 3 size...");
+
+          crate::debug!(2, "Step 1: Merging equivalent LLM tokens...");
+          if config.optimize_trie3_merge_equivalent_llm_tokens {
+              merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
+          }
+          crate::debug!(2, "Step 2: Reordering LLM tokens...");
+          if config.optimize_trie3_reorder_llm_tokens {
+              reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
+              max_llm_token_id = stage_vocab.internal_max_llm_token;
+          }
+
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
 
+          crate::debug!(2, "Step 3: Constraining bitvectors...");
           if config.optimize_trie3_constrain_bitvecs {
               constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
           }
 
+          crate::debug!(2, "Step 4: Pruning dead paths...");
           if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
               prune_dead_paths_trie3(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 5: Compressing edges...");
           if config.optimize_trie2_compress_edges {
               compress_trie3_edges(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 6: Merging nodes...");
           if config.optimize_trie2_merge_nodes {
               merge_nodes_trie3(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 7: Pruning dead paths (post-merge)...");
           if config.optimize_trie2_prune_dead_paths {
               prune_dead_paths_trie3(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 8: Compressing edges (post-merge)...");
           if config.optimize_trie2_compress_edges {
               compress_trie3_edges(roots, &trie3_god);
           }
           if config.optimize_trie2_merge_nodes {
               merge_nodes_trie3(roots, &trie3_god);
           }
+          crate::debug!(2, "Step 10: Garbage collection...");
           if config.optimize_trie2_gc {
               Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
           }
+          crate::debug!(2, "Step 11: Recomputing max depths...");
           Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
       }
 
@@ -15678,6 +15901,7 @@ messages:
           trie3_god: &Trie3GodWrapper,
           stage_vocab: &mut StageVocab,
       ) {
+          crate::debug!(2, "Merging equivalent LLM tokens in Trie3...");
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
           if all_nodes.is_empty() { return; }
@@ -15700,7 +15924,10 @@ messages:
           // 2) Group tokens by signature
           let max_tok = stage_vocab.internal_max_llm_token;
           let mut sig_map: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
-          for tok in 0..=max_tok {
+          #[cfg(not(rustrover))]
+          let it = tqdm!(0..=max_tok, desc = "Trie3 Merge Tokens (Sigs)", disable = !PROGRESS_BAR_ENABLED, leave=false);
+          #[cfg(rustrover)] let it = 0..=max_tok;
+          for tok in it {
               let mut sig: Vec<usize> = Vec::new();
               for (i, setv) in family.iter().enumerate() {
                   if setv.contains(tok) { sig.push(i); }
@@ -15711,14 +15938,19 @@ messages:
           if sig_map.is_empty() { return; }
 
           let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
+          let mut merged_count = 0;
           for (_sig, group) in sig_map {
               if group.len() <= 1 { continue; }
               let rep = *group.iter().min().unwrap();
               for t in group {
-                  old_to_new.insert(t, rep);
+                  if t != rep {
+                      old_to_new.insert(t, rep);
+                      merged_count += 1;
+                  }
               }
           }
-          if old_to_new.is_empty() { return; }
+          crate::debug!(2, "Trie3: merged {} LLM tokens into representatives.", merged_count);
+          if merged_count == 0 { return; }
 
           // 3) Remap trie
           for n in &all_nodes {
@@ -15755,12 +15987,17 @@ messages:
           trie3_god: &Trie3GodWrapper,
           stage_vocab: &mut StageVocab,
       ) {
+          crate::debug!(2, "Reordering LLM tokens in Trie3 for range minimization...");
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
           if all_nodes.is_empty() { return; }
           let max_tok = stage_vocab.internal_max_llm_token;
           let mut freq: Vec<usize> = vec![0; max_tok + 1];
-          for n in &all_nodes {
+
+          #[cfg(not(rustrover))]
+          let it = tqdm!(all_nodes.iter(), desc = "Trie3 Reorder (Freq)", total=all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+          #[cfg(rustrover)] let it = all_nodes.iter();
+          for n in it {
               let g = n.read(trie3_god).expect("read");
               for t in g.value.live_tokens.iter() {
                   if t as usize <= max_tok { freq[t as usize] += 1; }
@@ -15813,6 +16050,7 @@ messages:
           }
           stage_vocab.original_to_internal = new_original_to_internal;
           stage_vocab.internal_max_llm_token = present.len().saturating_sub(1);
+          crate::debug!(2, "Trie3 reordering complete. New max internal token ID: {}", stage_vocab.internal_max_llm_token);
       }
 
       fn constrain_bitvecs_trie3(
@@ -15893,8 +16131,21 @@ messages:
               }
           }
 
+          let pb = ProgressBar::new(all_nodes.len() as u64);
+          pb.set_style(
+              ProgressStyle::default_bar()
+                  .template("{spinner:.green} [Trie3 Prune] [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+                  .unwrap(),
+          );
+          if !PROGRESS_BAR_ENABLED {
+              pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+          }
+          pb.set_position(0);
+
           // 2. Propagate liveness until a fixed point is reached.
           while let Some(node_ptr) = worklist.pop_front() {
+              pb.inc(1);
+
               let live_at_node = live.get(&node_ptr).unwrap().clone();
               if let Some(preds) = predecessors.get(&node_ptr) {
                   for (pred_ptr, edge_key) in preds {
@@ -15912,6 +16163,7 @@ messages:
                   }
               }
           }
+          pb.finish_and_clear();
 
           // 3. Prune the graph based on the computed live sets.
           for node_arc in &all_nodes {
@@ -16087,7 +16339,11 @@ messages:
               if nodes.is_empty() { return false; }
               let mut changed_any = false;
 
-              for node_idx in nodes {
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Coalesce)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for node_idx in it {
                   // Snapshot current children
                   let old_children = {
                       let g = node_idx.read(trie3_god).expect("read");
@@ -16220,7 +16476,11 @@ messages:
 
               let mut changed_any = false;
 
-              for u in &nodes {
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Pop-0 Chains)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for u in it {
                   // Snapshot children (stable during this node's rewrite)
                   let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
                       let g = u.read(trie3_god).expect("read");
@@ -16315,7 +16575,11 @@ messages:
 
               let mut changed_any = false;
 
-              for u in &nodes {
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Universal Pop)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for u in it {
                   // Snapshot children
                   let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
                       let g = u.read(trie3_god).expect("read");
@@ -18432,9 +18696,10 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: Are `merge_equivalent_llm_tokens_trie1`, `reorder_llm_tokens_for_range_minimization_trie1`,
-      `merge_equivalent_llm_tokens_trie3`, and `reorder_llm_tokens_for_range_minimization_trie3`
-      ever actually called?
+  - user: 'Remapping trie:  13%|███████████████████▊                                                                                                                                      |  28/220
+      [00:00<00:00, 276.10it/s]'
+    metadata:
+  - user: It gets stuck here. Why?
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -18453,157 +18718,244 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      You are correct, those optimization functions were defined but not being called. They are intended to be used during the grammar constraint compilation process to reduce the size and improve the performance of the precomputed data structures. The Python implementation you've provided shows a similar optimization sequence during model loading, which confirms this intent.
+      It appears the progress bar is getting stuck in a loop that modifies a graph structure while holding a write lock. This can sometimes lead to deadlocks or hangs, especially when interacting with libraries that might have their own threading or complex iteration logic.
 
-      Here are the step-by-step instructions to integrate these optimization passes into the Rust code, followed by the corresponding git diffs.
+      A robust way to fix this is to separate the read/computation phase from the write phase. Instead of modifying nodes one by one in a single loop, we'll first iterate through all nodes to compute their new states (with read-only access), store these new states temporarily, and then perform a second, simple loop to apply the changes using write locks. This minimizes the duration of write locks and avoids complex operations while a lock is held.
+
+      Here are the step-by-step instructions to apply this fix across the relevant utility functions.
 
       ### Step-by-step Instructions
 
-      #### 1. File: `src/constraint.rs`
+      #### 1. Refactor `src/constraint_precompute1_utils.rs`
 
-      First, we'll enable the Trie1 optimizations after the initial precomputation (`precompute`) is complete. This involves adding the function calls and ensuring the stage-specific vocabularies are updated correctly for subsequent precomputation stages.
+      I'll apply the two-phase read/write pattern to both `merge_equivalent_llm_tokens_trie1` and `reorder_llm_tokens_for_range_minimization_trie1`.
 
-      1.  **Add `use` statement**: At the top of the file, add a `use` statement to import the necessary functions for Trie1 optimization.
-          ```rust
-          use crate::constraint_precompute1_utils;
-          ```
+      *   **In `merge_equivalent_llm_tokens_trie1`:**
+          1.  Locate the comment `// 4) Apply mapping to trie`.
+          2.  Replace the `for` loop under it with two new loops.
+          3.  The first loop will iterate over `all_nodes` with a progress bar, using read locks (`n.read(...)`) to compute the new `live_tokens` and `children` for each node and store them in a `Vec`.
+          4.  The second loop will iterate over `all_nodes` and the new states `Vec` simultaneously, using write locks (`n.write(...)`) to apply the stored changes.
 
-      2.  **Update `new_with_config`**:
-          *   Locate the `GrammarConstraint::new_with_config` function.
-          *   Make the `precompute2_vocab` and `precompute3_vocab` variables mutable.
-          *   After the call to `Self::precompute(...)`, insert the calls to `merge_equivalent_llm_tokens_trie1`, `reorder_llm_tokens_for_range_minimization_trie1`, and `optimize_state_masks_and_edges_trie1`. These will be guarded by the appropriate flags in `GrammarConstraintConfig`.
-          *   After these Trie1 optimizations, re-clone the modified `precompute_vocab` into `precompute2_vocab` and `precompute3_vocab` to ensure subsequent stages use the optimized vocabulary.
+      *   **In `reorder_llm_tokens_for_range_minimization_trie1`:**
+          1.  Locate the comment `// Apply mapping to trie`.
+          2.  Replace the `for` loop under it with the same two-phase read/write pattern as described above.
 
-      3.  **Update `precompute3`**:
-          *   Modify the function signature of `GrammarConstraint::precompute3` to accept a mutable `StageVocab` as a new parameter.
-          *   Update the call to `optimize_trie3_size` inside `precompute3` to pass along this new `stage_vocab` parameter.
+      #### 2. Refactor `src/constraint_precompute3_utils.rs`
 
-      4.  **Update `precompute3` call site**:
-          *   Back in `new_with_config`, update the call to `Self::precompute3` to pass `&mut precompute3_vocab` as the new last argument.
+      I'll apply the same pattern to `merge_equivalent_llm_tokens_trie3` and `reorder_llm_tokens_for_range_minimization_trie3`.
 
-      #### 2. File: `src/constraint_precompute3_utils.rs`
+      *   **In `merge_equivalent_llm_tokens_trie3`:**
+          1.  Locate the comment `// 3) Remap trie`.
+          2.  Replace the `for` loop with the two-phase read/write pattern.
 
-      Next, we'll integrate the Trie3 optimizations into the `optimize_trie3_size` function.
+      *   **In `reorder_llm_tokens_for_range_minimization_trie3`:**
+          1.  Find the `for n in &all_nodes` loop that applies the mapping.
+          2.  Replace this loop with the two-phase read/write pattern.
 
-      1.  **Update `optimize_trie3_size`**:
-          *   Modify the function signature to accept a mutable `StageVocab` as a new parameter.
-          *   Make the `max_llm_token_id` parameter mutable.
-          *   At the beginning of the function, insert the calls to `merge_equivalent_llm_tokens_trie3` and `reorder_llm_tokens_for_range_minimization_trie3`, guarded by their config flags.
-          *   After calling the reordering function, update the local `max_llm_token_id` variable from the (potentially changed) value in `stage_vocab`. This ensures subsequent optimization passes like `constrain_bitvecs_trie3` use the correct, compacted token range.
-
-      ---
+      These changes will make the graph update process more robust and should resolve the hanging issue.
 
       ### Git Diffs
 
-      Here are the git diffs that apply the changes described above.
+      Here are the git diffs to apply these changes.
 
       ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -22,6 +22,7 @@
-       use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+      diff --git a/src/constraint_precompute1_utils.rs b/src/constraint_precompute1_utils.rs
+      --- a/src/constraint_precompute1_utils.rs
+      +++ b/src/constraint_precompute1_utils.rs
+      @@ -100,28 +100,33 @@
+           if merged_count == 0 { return; }
        
-       use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
-      +use crate::constraint_precompute1_utils;
-       use crate::constraint_precompute2_utils;
-       use crate::datastructures::arc_wrapper::ArcPtrWrapper;
-       use crate::datastructures::entry_api::EntryApi;
-      @@ -598,8 +599,8 @@
-                   internal_to_original: internal_to_original_.clone(),
-                   internal_max_llm_token: internal_max_llm_token,
-               };
-      -        let precompute2_vocab = precompute_vocab.clone();
-      -        let precompute3_vocab = precompute_vocab.clone();
-      +        let mut precompute2_vocab = precompute_vocab.clone();
-      +        let mut precompute3_vocab = precompute_vocab.clone();
-       
-               if config.skip_precomputation {
-                   return Self {
-      @@ -629,13 +630,18 @@
-                   parser.ignore_terminal_id,
-                   &mut computed_possible_matches,
-               );
-      -        // Self::_dump_precomputed(
-      -        //     &precomputed,
-      -        //     &llm_vocab.original_to_internal_id_bimap,
-      -        //     &token_name_map,
-      -        //     &llm_vocab.llm_token_map,
-      -        //     &trie1_god,
-      -        // );
-      +
-      +        if config.optimize_trie1_merge_equivalent_llm_tokens {
-      +            constraint_precompute1_utils::merge_equivalent_llm_tokens_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
+           // 4) Apply mapping to trie
+      -    for n in tqdm!(all_nodes.iter(), desc = "Remapping trie") {
+      -        let mut w = n.write(trie1_god).expect("write");
+      -        if !w.value.live_tokens.is_empty() {
+      -            w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new);
+      -        }
+      +    let mut new_states = Vec::with_capacity(all_nodes.len());
+      +    for n in tqdm!(all_nodes.iter(), desc = "Remapping trie (read)") {
+      +        let r = n.read(trie1_god).expect("read");
+      +        let new_live_tokens = if r.value.live_tokens.is_empty() {
+      +            r.value.live_tokens.clone()
+      +        } else {
+      +            remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new)
+      +        };
+               let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
+      -        for (ek, dm) in w.children().clone() {
+      +        for (ek, dm) in r.children() {
+                   let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
+                   for (dst, bv) in dm {
+                       let mapped = remap_llm_bv_many_to_one(&bv, &old_to_new);
+                       if !mapped.is_empty() {
+      -                    new_dm.insert(dst, mapped);
+      +                    new_dm.insert(dst.clone(), mapped);
+                       }
+                   }
+                   if !new_dm.is_empty() {
+      -                new_children.insert(ek, new_dm);
+      -            }
+      -        }
+      -        *w.children_mut() = new_children;
+      -    }
+      -
+      +                new_children.insert(ek.clone(), new_dm);
+      +            }
       +        }
-      +        if config.optimize_trie1_reorder_llm_tokens {
-      +            constraint_precompute1_utils::reorder_llm_tokens_for_range_minimization_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
-      +        }
-      +        // Always run normalization pass after potential token changes.
-      +        constraint_precompute1_utils::optimize_state_masks_and_edges_trie1(&precomputed, &trie1_god);
-      +
-      +        // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
-      +        precompute2_vocab = precompute_vocab.clone();
-      +        precompute3_vocab = precompute_vocab.clone();
-       
-               let (precomputed2, trie2_god) = Self::precompute2(
-                   &precomputed,
-      @@ -664,6 +670,7 @@
-                   &trie1_god,
-                   &tokenizer, Some(&parser), Some(llm_vocab.clone()), &internal_llm_token_map_for_precompute, &token_name_map, internal_max_llm_token, &terminal_follow_map, parser.ignore_terminal_id, &mut computed_possible_matches,
-                   config,
-      +            &mut precompute3_vocab,
-               );
-       
-               let mut stats3 = PrecomputeStats::default();
-      @@ -759,6 +766,7 @@
-               ignore_terminal_id: Option<TerminalID>,
-               possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-               config: &GrammarConstraintConfig,
-      +        stage_vocab: &mut StageVocab,
-           ) -> (Precomputed3, Trie3GodWrapper) {
-               crate::debug!(2, "Precomputing Trie 3...");
-               const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
-      @@ -875,7 +883,7 @@
-       
-               crate::debug!(2, "Finished precomputing Trie 3.");
-               let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
-      -        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token);
-      +        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
-       
-               (precomputed3, trie3_god)
+      +        new_states.push((new_live_tokens, new_children));
+      +    }
+      +    for (i, n) in all_nodes.iter().enumerate() {
+      +        let mut w = n.write(trie1_god).expect("write");
+      +        let (live_tokens, children) = &new_states[i];
+      +        w.value.live_tokens = live_tokens.clone();
+      +        *w.children_mut() = children.clone();
+      +    }
+           // 5) Update stage vocab
+           // Merge internal_to_original for tokens mapped into representatives
+           for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Updating stage vocab") {
+      @@ -151,27 +156,33 @@
+               old_to_new.insert(*old_id, new_id);
            }
+           // Apply mapping to trie
+      -    for n in &all_nodes {
+      -        let mut w = n.write(trie1_god).expect("write");
+      -        if !w.value.live_tokens.is_empty() {
+      -            w.value.live_tokens = remap_llm_bv_permutation(&w.value.live_tokens, &old_to_new);
+      -        }
+      +    let mut new_states = Vec::with_capacity(all_nodes.len());
+      +    for n in &all_nodes {
+      +        let r = n.read(trie1_god).expect("read");
+      +        let new_live_tokens = if r.value.live_tokens.is_empty() {
+      +            r.value.live_tokens.clone()
+      +        } else {
+      +            remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new)
+      +        };
+               let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
+      -        for (ek, dm) in w.children().clone() {
+      +        for (ek, dm) in r.children() {
+                   let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
+                   for (dst, bv) in dm {
+                       let mapped = remap_llm_bv_permutation(&bv, &old_to_new);
+                       if !mapped.is_empty() {
+      -                    new_dm.insert(dst, mapped);
+      +                    new_dm.insert(dst.clone(), mapped);
+                       }
+                   }
+                   if !new_dm.is_empty() {
+      -                new_children.insert(ek, new_dm);
+      -            }
+      -        }
+      -        *w.children_mut() = new_children;
+      -    }
+      -
+      +                new_children.insert(ek.clone(), new_dm);
+      +            }
+      +        }
+      +        new_states.push((new_live_tokens, new_children));
+      +    }
+      +    for (i, n) in all_nodes.iter().enumerate() {
+      +        let mut w = n.write(trie1_god).expect("write");
+      +        let (live_tokens, children) = &new_states[i];
+      +        w.value.live_tokens = live_tokens.clone();
+      +        *w.children_mut() = children.clone();
+      +    }
+           // Update stage vocab (pure permutation)
+           let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+           for (old_id, setv) in stage_vocab.internal_to_original.clone() {
 
       ```
-
       ```diff
       diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
       --- a/src/constraint_precompute3_utils.rs
       +++ b/src/constraint_precompute3_utils.rs
-      @@ -10,13 +10,24 @@
-           trie3_god: &Trie3GodWrapper,
-           config: &GrammarConstraintConfig,
-           max_state_id: usize,
-      -    max_llm_token_id: usize,
-      +    mut max_llm_token_id: usize,
-      +    stage_vocab: &mut StageVocab,
-       ) {
-           crate::debug!(2, "Optimizing Trie 3 size...");
-      +
-      +    if config.optimize_trie3_merge_equivalent_llm_tokens {
-      +        merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
-      +    }
-      +    if config.optimize_trie3_reorder_llm_tokens {
-      +        reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
-      +        max_llm_token_id = stage_vocab.internal_max_llm_token;
-      +    }
-      +
-           let roots_vec: Vec<_> = roots.values().cloned().collect();
-           let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
+      @@ -111,23 +111,30 @@
+           if merged_count == 0 { return; }
        
-           if config.optimize_trie3_constrain_bitvecs {
-               constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
+           // 3) Remap trie
+      -    for n in &all_nodes {
+      -        let mut w = n.write(trie3_god).expect("write");
+      -        if !w.value.live_tokens.is_empty() {
+      -            w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new);
+      -        }
+      +    let mut new_states = Vec::with_capacity(all_nodes.len());
+      +    for n in &all_nodes {
+      +        let r = n.read(trie3_god).expect("read");
+      +        let new_live_tokens = if r.value.live_tokens.is_empty() {
+      +            r.value.live_tokens.clone()
+      +        } else {
+      +            remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new)
+      +        };
+               let mut new_children = BTreeMap::new();
+      -        for ((pop, llm_bv), dm) in w.children().clone() {
+      +        for ((pop, llm_bv), dm) in r.children() {
+                   let mapped_key_bv = remap_llm_bv_many_to_one(&llm_bv, &old_to_new);
+                   if mapped_key_bv.is_empty() { continue; }
+      -            let entry = new_children.entry((pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
+      +            let entry = new_children.entry((*pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
+                   for (dst, sid_bv) in dm {
+      -                entry.entry(dst).and_modify(|e| *e |= &sid_bv).or_insert(sid_bv);
+      -            }
+      -        }
+      -        *w.children_mut() = new_children;
+      -    }
+      -
+      +                entry.entry(dst.clone()).and_modify(|e| *e |= sid_bv).or_insert_with(|| sid_bv.clone());
+      +            }
+      +        }
+      +        new_states.push((new_live_tokens, new_children));
+      +    }
+      +    for (i, n) in all_nodes.iter().enumerate() {
+      +        let mut w = n.write(trie3_god).expect("write");
+      +        let (live_tokens, children) = &new_states[i];
+      +        w.value.live_tokens = live_tokens.clone();
+      +        *w.children_mut() = children.clone();
+      +    }
+           // 4) Update StageVocab
+           for (old, rep) in &old_to_new {
+               if old == rep { continue; }
+      @@ -166,23 +173,29 @@
+               old_to_new.insert(*old_id, new_id);
            }
        
+      -    for n in &all_nodes {
+      -        let mut w = n.write(trie3_god).expect("write");
+      -        if !w.value.live_tokens.is_empty() {
+      -            w.value.live_tokens = remap_llm_bv_permutation(&w.value.live_tokens, &old_to_new);
+      -        }
+      +    let mut new_states = Vec::with_capacity(all_nodes.len());
+      +    for n in &all_nodes {
+      +        let r = n.read(trie3_god).expect("read");
+      +        let new_live_tokens = if r.value.live_tokens.is_empty() {
+      +            r.value.live_tokens.clone()
+      +        } else {
+      +            remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new)
+      +        };
+               let mut new_children = BTreeMap::new();
+      -        for ((pop, llm_bv), dm) in w.children().clone() {
+      +        for ((pop, llm_bv), dm) in r.children() {
+                   let mapped_key_bv = remap_llm_bv_permutation(&llm_bv, &old_to_new);
+                   if mapped_key_bv.is_empty() { continue; }
+      -            let entry = new_children.entry((pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
+      +            let entry = new_children.entry((*pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
+                   for (dst, sid_bv) in dm {
+      -                entry.entry(dst).and_modify(|e| *e |= &sid_bv).or_insert(sid_bv);
+      -            }
+      -        }
+      -        *w.children_mut() = new_children;
+      -    }
+      -
+      +                entry.entry(dst.clone()).and_modify(|e| *e |= sid_bv).or_insert_with(|| sid_bv.clone());
+      +            }
+      +        }
+      +        new_states.push((new_live_tokens, new_children));
+      +    }
+      +    for (i, n) in all_nodes.iter().enumerate() {
+      +        let mut w = n.write(trie3_god).expect("write");
+      +        let (live_tokens, children) = &new_states[i];
+      +        w.value.live_tokens = live_tokens.clone();
+      +        *w.children_mut() = children.clone();
+      +    }
+           // Update StageVocab under permutation
+           let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+           for (old_id, setv) in stage_vocab.internal_to_original.clone() {
 
       ```
     metadata:
@@ -18612,656 +18964,16 @@ messages:
       Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
+      Identified target file: src/constraint_precompute1_utils.rs
+      Applying patch to 'src/constraint_precompute1_utils.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute1_utils.rs.
 
       --- Processing Diff Block 2 ---
       Identified target file: src/constraint_precompute3_utils.rs
       Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_utils.rs.
     metadata:
-  - user: 'Changes committed with message: "Integrate LLM token merging and reordering
-      optimizations for Trie1 and Trie3 precomputation stages"'
-    metadata:
-  - user: |-
-      Diff of src/constraint.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/constraint_precompute1_utils.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/constraint_precompute3_utils.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_model_pure_python.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=1 CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib test_js_constraint_integration --profile test -- --nocapture 2>&1 | tee .temp; cp .temp .temp3
-         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
-      error[E0596]: cannot borrow `precompute_vocab` as mutable, as it is not declared as mutable
-         --> src/constraint.rs:537:13
-          |
-      537 |         let precompute_vocab = StageVocab {
-          |             ^^^^^^^^^^^^^^^^ not mutable
-      ...
-      578 |             constraint_precompute1_utils::merge_equivalent_llm_tokens_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
-          |                                                                                                       --------------------- cannot borrow as mutable
-      ...
-      581 |             constraint_precompute1_utils::reorder_llm_tokens_for_range_minimization_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
-          |                                                                                                                     --------------------- cannot borrow as mutable
-          |
-      help: consider changing this to be mutable
-          |
-      537 |         let mut precompute_vocab = StageVocab {
-          |             +++
-
-      For more information about this error, try `rustc --explain E0596`.
-      error: could not compile `sep1` (lib test) due to 1 previous error
-    metadata:
-  - assistant: |-
-      You've hit a classic Rust compiler error. My apologies, I missed making `precompute_vocab` mutable in the previous step. The compiler has correctly identified the issue and even suggested the fix.
-
-      Here are the instructions to resolve it.
-
-      ### Step-by-step Instructions
-
-      #### 1. File: `src/constraint.rs`
-
-      1.  Navigate to the `new_with_config` function.
-      2.  Find the line where `precompute_vocab` is initialized (around line 537).
-      3.  Change `let precompute_vocab = ...` to `let mut precompute_vocab = ...` to allow it to be modified by the optimization functions.
-
-      ---
-
-      ### Git Diffs
-
-      Here is the git diff to apply the fix.
-
-      ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -534,7 +534,7 @@
-               });
-       
-               // Initialize per-stage vocabularies (start identical to global)
-      -        let precompute_vocab = StageVocab {
-      +        let mut precompute_vocab = StageVocab {
-                   original_to_internal: llm_vocab.original_to_internal_id_bimap.clone(),
-                   internal_to_original: internal_to_original_.clone(),
-                   internal_max_llm_token: internal_max_llm_token,
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
-    metadata:
-  - user: 'Changes committed with message: "Integrate LLM token merging and reordering
-      optimizations for Trie1 precomputation stage"'
-    metadata:
-  - user: |-
-      Diff of src/constraint.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/constraint_precompute1_utils.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/constraint_precompute3_utils.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of python/aug25/models/precompute3_model_pure_python.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: They're taking ages. Add progress bars and prints so we can see what's going
-      on.
-    metadata:
-  - assistant: |-
-      Of course. The optimization passes can be quite intensive, and adding progress indicators is a great way to monitor them. Here are the step-by-step instructions and diffs to add progress bars and logging to the optimization functions.
-
-      ### Step-by-step Instructions
-
-      #### 1. File: `src/constraint_precompute1_utils.rs`
-
-      We will add logging and progress bars to the Trie1 optimization functions.
-
-      1.  **Add `use` statements**: At the top of the file, import `tqdm` and `PROGRESS_BAR_ENABLED`.
-          ```rust
-          use kdam::tqdm;
-          use crate::profiler::PROGRESS_BAR_ENABLED;
-          ```
-
-      2.  **Update `merge_equivalent_llm_tokens_trie1`**:
-          *   Add a `debug!` message at the start of the function.
-          *   Wrap the loop over tokens (`for tok in 0..=max_tok`) with the `tqdm!` macro to create a progress bar for signature generation.
-          *   Add a `debug!` message at the end to report how many tokens were merged.
-
-      3.  **Update `reorder_llm_tokens_for_range_minimization_trie1`**:
-          *   Add a `debug!` message at the start of the function.
-          *   Wrap the loop over `all_nodes` (for frequency counting) with the `tqdm!` macro.
-          *   Add a `debug!` message at the end to confirm completion.
-
-      #### 2. File: `src/constraint_precompute3_utils.rs`
-
-      Similarly, we'll add logging and progress bars to the more complex Trie3 optimization functions.
-
-      1.  **Add `use` statements**: At the top of the file, import `tqdm`, `PROGRESS_BAR_ENABLED`, and `indicatif` components.
-          ```rust
-          use kdam::tqdm;
-          use crate::profiler::PROGRESS_BAR_ENABLED;
-          use indicatif::{ProgressBar, ProgressStyle};
-          ```
-
-      2.  **Update `optimize_trie3_size`**: Add `debug!` messages before each major optimization step (`prune`, `compress`, `merge`, `gc`) to provide a high-level view of the process.
-
-      3.  **Update `merge_equivalent_llm_tokens_trie3`**:
-          *   Add a `debug!` message at the start.
-          *   Wrap the token loop (`for tok in 0..=max_tok`) with `tqdm!`.
-          *   Add a `debug!` message at the end reporting the number of merged tokens.
-
-      4.  **Update `reorder_llm_tokens_for_range_minimization_trie3`**:
-          *   Add a `debug!` message at the start.
-          *   Wrap the `all_nodes` loop for frequency counting with `tqdm!`.
-          *   Add a `debug!` message at the end.
-
-      5.  **Update `prune_dead_paths_trie3`**: The propagation loop is not a simple iterator, so we'll use `indicatif::ProgressBar`.
-          *   Before the `while let Some(...) = worklist.pop_front()` loop, initialize a `ProgressBar`.
-          *   Inside the loop, call `pb.inc(1)`.
-          *   After the loop, call `pb.finish_and_clear()`.
-
-      6.  **Update `compress_trie3_edges`**: This function calls several helper functions. We'll add progress bars inside the helpers.
-          *   In `coalesce_edges_within_nodes`, wrap the `for node_idx in nodes` loop with `tqdm!`.
-          *   In `shortcut_zero_pop_chains`, wrap the `for u in &nodes` loop with `tqdm!`.
-          *   In `shortcut_universal_pop_step`, wrap the `for u in &nodes` loop with `tqdm!`.
-
-      ---
-
-      ### Git Diffs
-
-      Here are the git diffs that apply these changes.
-
-      ```diff
-      diff --git a/src/constraint_precompute1_utils.rs b/src/constraint_precompute1_utils.rs
-      --- a/src/constraint_precompute1_utils.rs
-      +++ b/src/constraint_precompute1_utils.rs
-      @@ -1,5 +1,7 @@
-       use std::collections::{BTreeMap, BTreeSet, HashMap};
-       use ordered_hash_map::OrderedHashMap;
-      +use kdam::tqdm;
-      +use crate::profiler::PROGRESS_BAR_ENABLED;
-       use crate::constraint::{StageVocab, PrecomputeNodeIndex, Trie1GodWrapper};
-       use crate::datastructures::gss::LLMTokenBV;
-       use crate::datastructures::trie::Trie;
-      @@ -26,6 +28,7 @@
-           trie1_god: &Trie1GodWrapper,
-           stage_vocab: &mut StageVocab,
-       ) {
-      +    crate::debug!(2, "Merging equivalent LLM tokens in Trie1...");
-           let roots_vec: Vec<_> = roots.values().cloned().collect();
-           let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-           if all_nodes.is_empty() { return; }
-      @@ -50,7 +53,10 @@
-           // 2) Build signature per token
-           let max_tok = stage_vocab.internal_max_llm_token;
-           let mut sig_map: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
-      -    for tok in 0..=max_tok {
-      +    #[cfg(not(rustrover))]
-      +    let it = tqdm!(0..=max_tok, desc = "Trie1 Merge Tokens (Sigs)", disable = !PROGRESS_BAR_ENABLED, leave=false);
-      +    #[cfg(rustrover)] let it = 0..=max_tok;
-      +    for tok in it {
-               let mut sig: Vec<usize> = Vec::new();
-               for (i, setv) in family.iter().enumerate() {
-                   if setv.contains(tok) { sig.push(i); }
-      @@ -61,13 +67,18 @@
-       
-           // 3) Build many-to-one mapping
-           let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
-      +    let mut merged_count = 0;
-           for (_sig, group) in sig_map {
-               if group.len() <= 1 { continue; }
-               let rep = *group.iter().min().unwrap();
-               for t in group {
-      -            old_to_new.insert(t, rep);
-      +            if t != rep {
-      +                old_to_new.insert(t, rep);
-      +                merged_count += 1;
-      +            }
-               }
-           }
-      -    if old_to_new.is_empty() { return; }
-      +    crate::debug!(2, "Trie1: merged {} LLM tokens into representatives.", merged_count);
-      +    if merged_count == 0 { return; }
-       
-           // 4) Apply mapping to trie
-           for n in &all_nodes {
-      @@ -107,6 +118,7 @@
-           trie1_god: &Trie1GodWrapper,
-           stage_vocab: &mut StageVocab,
-       ) {
-      +    crate::debug!(2, "Reordering LLM tokens in Trie1 for range minimization...");
-           let roots_vec: Vec<_ = roots.values().cloned().collect();
-           let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-           if all_nodes.is_empty() { return; }
-      @@ -114,7 +126,10 @@
-       
-           // Count frequencies
-           let mut freq: Vec<usize> = vec![0; max_tok + 1];
-      -    for n in &all_nodes {
-      +    #[cfg(not(rustrover))]
-      +    let it = tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Freq)", total=all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
-      +    #[cfg(rustrover)] let it = all_nodes.iter();
-      +    for n in it {
-               let g = n.read(trie1_god).expect("read");
-               for t in g.value.live_tokens.iter() {
-                   if t as usize <= max_tok { freq[t as usize] += 1; }
-      @@ -171,6 +186,7 @@
-           }
-           stage_vocab.original_to_internal = new_original_to_internal;
-           stage_vocab.internal_max_llm_token = present.len().saturating_sub(1);
-      +    crate::debug!(2, "Trie1 reordering complete. New max internal token ID: {}", stage_vocab.internal_max_llm_token);
-       }
-       
-       /// Conservative normalization pass for Trie1:
-
-      ```
-      ```diff
-      diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
-      --- a/src/constraint_precompute3_utils.rs
-      +++ b/src/constraint_precompute3_utils.rs
-      @@ -1,5 +1,7 @@
-       use std::collections::BTreeSet;
-       use std::collections::{BTreeMap, HashMap, VecDeque, HashSet};
-      +use indicatif::{ProgressBar, ProgressStyle};
-      +use kdam::tqdm;
-       use ordered_hash_map::OrderedHashMap;
-       use crate::constraint::{GrammarConstraintConfig, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper, StageVocab};
-       use crate::datastructures::EntryApi;
-      @@ -7,6 +9,7 @@
-       use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
-       use crate::tokenizer::TokenizerStateID;
-       
-      +use crate::profiler::PROGRESS_BAR_ENABLED;
-       pub fn optimize_trie3_size(
-           roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-           trie3_god: &Trie3GodWrapper,
-      @@ -17,32 +20,42 @@
-       ) {
-           crate::debug!(2, "Optimizing Trie 3 size...");
-       
-      +    crate::debug!(2, "Step 1: Merging equivalent LLM tokens...");
-           if config.optimize_trie3_merge_equivalent_llm_tokens {
-               merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
-           }
-      +    crate::debug!(2, "Step 2: Reordering LLM tokens...");
-           if config.optimize_trie3_reorder_llm_tokens {
-               reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
-               max_llm_token_id = stage_vocab.internal_max_llm_token;
-           }
-       
-           let roots_vec: Vec<_> = roots.values().cloned().collect();
-           let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
-       
-      +    crate::debug!(2, "Step 3: Constraining bitvectors...");
-           if config.optimize_trie3_constrain_bitvecs {
-               constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
-           }
-       
-      +    crate::debug!(2, "Step 4: Pruning dead paths...");
-           if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
-               prune_dead_paths_trie3(roots, &trie3_god);
-           }
-      +    crate::debug!(2, "Step 5: Compressing edges...");
-           if config.optimize_trie2_compress_edges {
-               compress_trie3_edges(roots, &trie3_god);
-           }
-      +    crate::debug!(2, "Step 6: Merging nodes...");
-           if config.optimize_trie2_merge_nodes {
-               merge_nodes_trie3(roots, &trie3_god);
-           }
-      +    crate::debug!(2, "Step 7: Pruning dead paths (post-merge)...");
-           if config.optimize_trie2_prune_dead_paths {
-               prune_dead_paths_trie3(roots, &trie3_god);
-           }
-      +    crate::debug!(2, "Step 8: Compressing edges (post-merge)...");
-           if config.optimize_trie2_compress_edges {
-               compress_trie3_edges(roots, &trie3_god);
-           }
-      @@ -50,8 +63,10 @@
-           if config.optimize_trie2_merge_nodes {
-               merge_nodes_trie3(roots, &trie3_god);
-           }
-      +    crate::debug!(2, "Step 10: Garbage collection...");
-           if config.optimize_trie2_gc {
-               Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-           }
-      +    crate::debug!(2, "Step 11: Recomputing max depths...");
-           Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-       }
-       
-      @@ -78,6 +93,7 @@
-           trie3_god: &Trie3GodWrapper,
-           stage_vocab: &mut StageVocab,
-       ) {
-      +    crate::debug!(2, "Merging equivalent LLM tokens in Trie3...");
-           let roots_vec: Vec<_> = roots.values().cloned().collect();
-           let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-           if all_nodes.is_empty() { return; }
-      @@ -100,7 +116,10 @@
-           // 2) Group tokens by signature
-           let max_tok = stage_vocab.internal_max_llm_token;
-           let mut sig_map: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
-      -    for tok in 0..=max_tok {
-      +    #[cfg(not(rustrover))]
-      +    let it = tqdm!(0..=max_tok, desc = "Trie3 Merge Tokens (Sigs)", disable = !PROGRESS_BAR_ENABLED, leave=false);
-      +    #[cfg(rustrover)] let it = 0..=max_tok;
-      +    for tok in it {
-               let mut sig: Vec<usize> = Vec::new();
-               for (i, setv) in family.iter().enumerate() {
-                   if setv.contains(tok) { sig.push(i); }
-      @@ -111,14 +130,19 @@
-           if sig_map.is_empty() { return; }
-       
-           let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
-      +    let mut merged_count = 0;
-           for (_sig, group) in sig_map {
-               if group.len() <= 1 { continue; }
-               let rep = *group.iter().min().unwrap();
-               for t in group {
-      -            old_to_new.insert(t, rep);
-      -        }
-      -    }
-      -    if old_to_new.is_empty() { return; }
-      +            if t != rep {
-      +                old_to_new.insert(t, rep);
-      +                merged_count += 1;
-      +            }
-      +        }
-      +    }
-      +    crate::debug!(2, "Trie3: merged {} LLM tokens into representatives.", merged_count);
-      +    if merged_count == 0 { return; }
-       
-           // 3) Remap trie
-           for n in &all_nodes {
-      @@ -152,13 +176,19 @@
-           trie3_god: &Trie3GodWrapper,
-           stage_vocab: &mut StageVocab,
-       ) {
-      +    crate::debug!(2, "Reordering LLM tokens in Trie3 for range minimization...");
-           let roots_vec: Vec<_> = roots.values().cloned().collect();
-           let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-           if all_nodes.is_empty() { return; }
-           let max_tok = stage_vocab.internal_max_llm_token;
-           let mut freq: Vec<usize> = vec![0; max_tok + 1];
-      -    for n in &all_nodes {
-      +
-      +    #[cfg(not(rustrover))]
-      +    let it = tqdm!(all_nodes.iter(), desc = "Trie3 Reorder (Freq)", total=all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
-      +    #[cfg(rustrover)] let it = all_nodes.iter();
-      +    for n in it {
-               let g = n.read(trie3_god).expect("read");
-               for t in g.value.live_tokens.iter() {
-                   if t as usize <= max_tok { freq[t as usize] += 1; }
-      @@ -211,6 +241,7 @@
-           }
-           stage_vocab.original_to_internal = new_original_to_internal;
-           stage_vocab.internal_max_llm_token = present.len().saturating_sub(1);
-      +    crate::debug!(2, "Trie3 reordering complete. New max internal token ID: {}", stage_vocab.internal_max_llm_token);
-       }
-       
-       fn constrain_bitvecs_trie3(
-      @@ -283,8 +314,21 @@
-               }
-           }
-       
-      +    let pb = ProgressBar::new(all_nodes.len() as u64);
-      +    pb.set_style(
-      +        ProgressStyle::default_bar()
-      +            .template("{spinner:.green} [Trie3 Prune] [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
-      +            .unwrap(),
-      +    );
-      +    if !PROGRESS_BAR_ENABLED {
-      +        pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
-      +    }
-      +    pb.set_position(0);
-      +
-           // 2. Propagate liveness until a fixed point is reached.
-           while let Some(node_ptr) = worklist.pop_front() {
-      +        pb.inc(1);
-      +
-               let live_at_node = live.get(&node_ptr).unwrap().clone();
-               if let Some(preds) = predecessors.get(&node_ptr) {
-                   for (pred_ptr, edge_key) in preds {
-      @@ -301,6 +345,7 @@
-                   }
-               }
-           }
-      +    pb.finish_and_clear();
-       
-           // 3. Prune the graph based on the computed live sets.
-           for node_arc in &all_nodes {
-      @@ -461,11 +506,18 @@
-           // Helper: is the StateIDBV "all states"?
-           fn is_all_sids(bv: &StateIDBV) -> bool {
-               bv == &StateIDBV::max_ones()
-           }
-       
-           // Pass 1: local coalesce within each node
-           fn coalesce_edges_within_nodes(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
-               let nodes = Trie::all_nodes(trie3_god, roots_vec);
-               if nodes.is_empty() { return false; }
-               let mut changed_any = false;
-       
-      -        for node_idx in nodes {
-      +        #[cfg(not(rustrover))]
-      +        let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Coalesce)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
-      +        #[cfg(rustrover)]
-      +        let it = nodes.iter();
-      +        for node_idx in it {
-                   // Snapshot current children
-                   let old_children = {
-                       let g = node_idx.read(trie3_god).expect("read");
-      @@ -547,7 +599,12 @@
-       
-               let mut changed_any = false;
-       
-      -        for u in &nodes {
-      +        #[cfg(not(rustrover))]
-      +        let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Pop-0 Chains)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
-      +        #[cfg(rustrover)]
-      +        let it = nodes.iter();
-      +        for u in it {
-                   // Snapshot children (stable during this node's rewrite)
-                   let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
-                       let g = u.read(trie3_god).expect("read");
-      @@ -636,7 +693,12 @@
-       
-               let mut changed_any = false;
-       
-      -        for u in &nodes {
-      +        #[cfg(not(rustrover))]
-      +        let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Universal Pop)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
-      +        #[cfg(rustrover)]
-      +        let it = nodes.iter();
-      +        for u in it {
-                   // Snapshot children
-                   let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
-                       let g = u.read(trie3_god).expect("read");
-
-      ```
-    metadata:
-  - user: |-
-      Failed Hunk:
-
-      ```diff
-      @@ -107,6 +118,7 @@
-           trie1_god: &Trie1GodWrapper,
-           stage_vocab: &mut StageVocab,
-       ) {
-      +    crate::debug!(2, "Reordering LLM tokens in Trie1 for range minimization...");
-           let roots_vec: Vec<_ = roots.values().cloned().collect();
-           let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-           if all_nodes.is_empty() { return; }
-      ```
-
-      Expected Context (from patch):
-
-      ```diff
-          trie1_god: &Trie1GodWrapper,
-          stage_vocab: &mut StageVocab,
-      ) {
-          let roots_vec: Vec<_ = roots.values().cloned().collect();
-          let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-          if all_nodes.is_empty() { return; }
-      ```
-
-      Nearest Match in `src/constraint_precompute1_utils.rs` (found at line 129 with 83.33% similarity, shown with padding):
-
-      ```rust
-
-      /// Reorder internal LLM tokens (permutation) to reduce ranges in masks by clustering co-occurring tokens.
-      /// Conservative heuristic: sort by (descending frequency, then by id).
-      pub fn reorder_llm_tokens_for_range_minimization_trie1(
-          roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNodeIndex>,
-          trie1_god: &Trie1GodWrapper,
-          stage_vocab: &mut StageVocab,
-      ) {
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-          if all_nodes.is_empty() { return; }
-          let max_tok = stage_vocab.internal_max_llm_token;
-
-          // Count frequencies
-          let mut freq: Vec<usize> = vec![0; max_tok + 1];
-          for n in &all_nodes {
-      ```
-
-      The git diff hunk above failed to apply to the file `src/constraint_precompute1_utils.rs`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
-      Do not include any other text or explanation outside the code block.
-    metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/src/constraint_precompute1_utils.rs b/src/constraint_precompute1_utils.rs
-      --- a/src/constraint_precompute1_utils.rs
-      +++ b/src/constraint_precompute1_utils.rs
-      @@ -1,5 +1,7 @@
-       use std::collections::{BTreeMap, BTreeSet, HashMap};
-       use ordered_hash_map::OrderedHashMap;
-      +use kdam::tqdm;
-      +use crate::profiler::PROGRESS_BAR_ENABLED;
-       use crate::constraint::{StageVocab, PrecomputeNodeIndex, Trie1GodWrapper};
-       use crate::datastructures::gss::LLMTokenBV;
-       use crate::datastructures::trie::Trie;
-      @@ -26,6 +28,7 @@
-           trie1_god: &Trie1GodWrapper,
-           stage_vocab: &mut StageVocab,
-       ) {
-      +    crate::debug!(2, "Merging equivalent LLM tokens in Trie1...");
-           let roots_vec: Vec<_> = roots.values().cloned().collect();
-           let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-           if all_nodes.is_empty() { return; }
-      @@ -50,7 +53,10 @@
-           // 2) Build signature per token
-           let max_tok = stage_vocab.internal_max_llm_token;
-           let mut sig_map: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
-      -    for tok in 0..=max_tok {
-      +    #[cfg(not(rustrover))]
-      +    let it = tqdm!(0..=max_tok, desc = "Trie1 Merge Tokens (Sigs)", disable = !PROGRESS_BAR_ENABLED, leave=false);
-      +    #[cfg(rustrover)] let it = 0..=max_tok;
-      +    for tok in it {
-               let mut sig: Vec<usize> = Vec::new();
-               for (i, setv) in family.iter().enumerate() {
-                   if setv.contains(tok) { sig.push(i); }
-      @@ -61,13 +67,18 @@
-       
-           // 3) Build many-to-one mapping
-           let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
-      +    let mut merged_count = 0;
-           for (_sig, group) in sig_map {
-               if group.len() <= 1 { continue; }
-               let rep = *group.iter().min().unwrap();
-               for t in group {
-      -            old_to_new.insert(t, rep);
-      +            if t != rep {
-      +                old_to_new.insert(t, rep);
-      +                merged_count += 1;
-      +            }
-               }
-           }
-      -    if old_to_new.is_empty() { return; }
-      +    crate::debug!(2, "Trie1: merged {} LLM tokens into representatives.", merged_count);
-      +    if merged_count == 0 { return; }
-       
-           // 4) Apply mapping to trie
-           for n in &all_nodes {
-      @@
-           stage_vocab: &mut StageVocab,
-       ) {
-      -    let roots_vec: Vec<_> = roots.values().cloned().collect();
-      +    crate::debug!(2, "Reordering LLM tokens in Trie1 for range minimization...");
-      +    let roots_vec: Vec<_> = roots.values().cloned().collect();
-           let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-      @@ -114,7 +126,10 @@
-       
-           // Count frequencies
-           let mut freq: Vec<usize> = vec![0; max_tok + 1];
-      -    for n in &all_nodes {
-      +    #[cfg(not(rustrover))]
-      +    let it = tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Freq)", total=all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
-      +    #[cfg(rustrover)] let it = all_nodes.iter();
-      +    for n in it {
-               let g = n.read(trie1_god).expect("read");
-               for t in g.value.live_tokens.iter() {
-                   if t as usize <= max_tok { freq[t as usize] += 1; }
-      @@ -171,6 +186,7 @@
-           }
-           stage_vocab.original_to_internal = new_original_to_internal;
-           stage_vocab.internal_max_llm_token = present.len().saturating_sub(1);
-      +    crate::debug!(2, "Trie1 reordering complete. New max internal token ID: {}", stage_vocab.internal_max_llm_token);
-       }
-       
-       /// Conservative normalization pass for Trie1:
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/constraint_precompute1_utils.rs
-      Applying patch to 'src/constraint_precompute1_utils.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint_precompute1_utils.rs.
-    metadata:
-  - user: 'Changes committed with message: "Add kdam progress bars and debug prints
-      to Trie1 LLM token optimization passes"'
+  - user: 'Changes committed with message: "Refactor Trie1/Trie3 token mapping updates
+      to use a two-phase read/write pattern to prevent hangs"'
     metadata:
 ...
