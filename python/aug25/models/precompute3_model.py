@@ -236,6 +236,7 @@ class Model(GraphProvider):
                 if is_end(node_idx):
                     print(f"    - END NODE found")
                     print(f"      - final_mask before: {final_mask.to_ranges()}")
+                    print(self.constraint.state_with_nodes([(0, gss_node)]))
 
                     # Clone the GSS node to avoid modifying it in place if it's shared
                     gss_node_copy = gss_node.clone_node()
@@ -288,8 +289,7 @@ class Model(GraphProvider):
                         print(f"        - Child GSS: ptr={child_gss_node.ptr()} flat={self.gss_from_ffi_node(child_gss_node)}")
 
                         # Apply edge's LLM token mask to the new GSS node
-                        if not llm_bv.is_empty():
-                            ffi.gss_allow_only_llm_tokens_and_prune(child_gss_node, llm_bv)
+                        ffi.gss_allow_only_llm_tokens_and_prune(child_gss_node, llm_bv)
 
                         d = int(dest_idx)
                         existing = values.get(d)
