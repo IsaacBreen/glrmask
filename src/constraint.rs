@@ -2583,6 +2583,13 @@ impl<'a> GrammarConstraintState<'a> {
             if glr_state.active_state.stack.is_empty() {
                 continue;
             }
+            let mut glr_state = glr_state.clone();
+            prune_llm_tokens_by_disallowed_terminals(
+                &mut glr_state.active_state.stack,
+                &self.parent.possible_matches,
+                &mut HashMap::new(),
+            );
+
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed3.get(&tokenizer_state_id) {
                 crate::debug!(10, "  SEED: sid={}, root_idx={}, gss_ptr={:p}", tokenizer_state_id.0, precomputed_trie_root_arc, glr_state.active_state.stack);
                 
@@ -2658,14 +2665,7 @@ impl<'a> GrammarConstraintState<'a> {
             // process_fn: (precomputed_node_data, final_state_for_this_path)
             |precomputed_node_data, glr_s| {
                 crate::debug!(10, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}", precomputed_node_data as *const _, glr_s.active_state.stack);
-
                 let mut glr_s_copy = glr_s.clone();
-                prune_llm_tokens_by_disallowed_terminals(
-                    &mut glr_s_copy.active_state.stack,
-                    &self.parent.possible_matches,
-                    &mut HashMap::new(),
-                );
-
                 let glr_active_tokens = glr_s_copy.active_state.stack.allowed_llm_tokens();
                 let keep_going = glr_s_copy.is_ok();
                 if precomputed_node_data.value.end {
