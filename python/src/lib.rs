@@ -912,6 +912,29 @@ fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_
 }
 
 #[pyfunction]
+fn gss_prune_llm_tokens_by_disallowed_terminals(node: &mut PyGSSNode, possible_matches: &Bound<'_, PyDict>) -> PyResult<()> {
+    let mut rust_possible_matches = BTreeMap::new();
+    for (k, v) in possible_matches.iter() {
+        let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+        let terminal_map_py = v.downcast::<PyDict>()?;
+        let mut terminal_map = BTreeMap::new();
+        for (term_k, term_v) in terminal_map_py.iter() {
+            let terminal_id = sep1::glr::table::TerminalID(term_k.extract::<usize>()?);
+            let llm_token_bv = term_v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
+            terminal_map.insert(terminal_id, llm_token_bv);
+        }
+        rust_possible_matches.insert(tokenizer_state_id, terminal_map);
+    }
+
+    let mut arc = node.inner.clone();
+    sep1::datastructures::gss::prune_llm_tokens_by_disallowed_terminals(
+        &mut arc, &rust_possible_matches, &mut std::collections::HashMap::new()
+    );
+    node.inner = arc;
+    Ok(())
+}
+
+#[pyfunction]
 fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &Bound<'_, PyDict>) -> PyResult<()> {
     let mut rust_state_map = BTreeMap::new();
     for (k, v) in state_map.iter() {
@@ -1096,6 +1119,7 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gss_allow_only_llm_tokens_and_prune, m)?)?;
     m.add_function(wrap_pyfunction!(gss_reset_llm_tokens, m)?)?;
     m.add_function(wrap_pyfunction!(gss_prune_disallowed_terminals, m)?)?;
+    m.add_function(wrap_pyfunction!(gss_prune_llm_tokens_by_disallowed_terminals, m)?)?;
     m.add_function(wrap_pyfunction!(gss_map_allowed_terminals_tokenizer_states, m)?)?;
     m.add_function(wrap_pyfunction!(gss_fuse_predecessors, m)?)?;
     m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;

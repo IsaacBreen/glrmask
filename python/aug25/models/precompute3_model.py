@@ -215,34 +215,19 @@ class Model(GraphProvider):
                 if is_end(node_idx):
                     print(f"    - END NODE found")
                     print(f"      - final_mask before: {final_mask.to_ranges()}")
-                    print(self.constraint.state_with_nodes([(0, gss_node)]))
 
-                    # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
-                    forbidden_llm_tokens = ffi.Bitset.zeros()
-                    disallowed_terminals_l2 = gss_node.disallowed_terminals()
-                    print(f"Disallowed Terminals L2 from GSS: {disallowed_terminals_l2}")
-                    possible_matches = self.possible_matches_cache
+                    # Clone the GSS node to avoid modifying it in place if it's shared
+                    gss_node_copy = gss_node.clone_node()
 
-                    for (start, end), disallowed_bv in disallowed_terminals_l2.range_values():
-                        if disallowed_bv.is_empty():
-                            continue
+                    # Prune LLM tokens based on disallowed terminals locally within the GSS
+                    ffi.gss_prune_llm_tokens_by_disallowed_terminals(gss_node_copy, self.possible_matches_cache)
 
-                        for tsid in range(start, end + 1):
-                            possible_matches_for_state = possible_matches.get(tsid)
-                            if not possible_matches_for_state:
-                                continue
+                    # Get the final allowed tokens from the pruned GSS
+                    final_allowed_tokens = gss_node_copy.allowed_llm_tokens()
 
-                            for terminal_id_str, llm_tokens_for_terminal in possible_matches_for_state.items():
-                                terminal_id = int(terminal_id_str)
-                                if disallowed_bv.contains(terminal_id):
-                                    forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
+                    print(f"Allowed LLM tokens from pruned GSS: {final_allowed_tokens.to_ranges()}")
 
-                    glr_active_tokens = gss_node.allowed_llm_tokens()
-                    print(f"Allowed LLM tokens from GSS heads: {glr_active_tokens.to_ranges()}")
-                    final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
-                    tokens_to_add = final_allowed_tokens
-
-                    final_mask = final_mask.union(tokens_to_add)
+                    final_mask = final_mask.union(final_allowed_tokens)
                     print(f"      - final_mask after:  {final_mask.to_ranges()}")
 
                 if not gss_node.is_alive():
