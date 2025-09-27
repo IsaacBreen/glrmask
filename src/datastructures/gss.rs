@@ -626,12 +626,6 @@ impl GSSNode {
         Self::new(Acc::new_fresh())
     }
 
-    pub fn new_dead() -> Self {
-        let mut acc = Acc::new_fresh();
-        acc.llm_tokens_union = LLMTokenBV::zeros();
-        Self::new(acc)
-    }
-
     /// Returns the aggregate Acc for this node.
     /// - If root: returns the node's Acc.
     /// - If internal: merges its childrens' Accs and narrows through its own local Acc.
@@ -1372,7 +1366,7 @@ pub(crate) fn allow_only_llm_tokens_and_prune_arc(
         }
     };
     memo.insert(node_ptr, new_arc_opt.clone());
-    *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
+    *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
 }
 
 pub(crate) fn disallow_llm_tokens_and_prune_arc(
@@ -1454,7 +1448,7 @@ pub(crate) fn disallow_terminals_and_prune_arc(
     *root_arc = new_arc;
 }
 
-pub(crate) fn prune_llm_tokens_by_disallowed_terminals(
+pub fn prune_llm_tokens_by_disallowed_terminals(
     root_arc: &mut Arc<GSSNode>,
     possible_matches: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     memo: &mut PruneAndTransformRecursiveMemo,
@@ -1503,7 +1497,7 @@ pub(crate) fn prune_llm_tokens_by_disallowed_terminals(
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
         *root_arc = new_root;
     } else {
-        *root_arc = Arc::new(GSSNode::new_dead());
+        *root_arc = Arc::new(GSSNode::new_fresh());
     }
 }
 
