@@ -365,14 +365,7 @@ local_system:
           }
 
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
-              if self.parent_arc.num_predecessors() == 1 {
-                  return self.parent_arc.clone();
-              }
-              Arc::new(GSSNode::new_with_single_predecessor(
-                  self.predecessor_node.clone(),
-                  self.edge_value.clone(),
-                  (*self.parent_arc.local_acc()).clone(),
-              ))
+              // ...
           }
       }
 
@@ -3185,6 +3178,39 @@ local_system:
                   "Allowed tokens should be restricted to only token 0 after filtering"
               );
           }
+
+          #[test]
+          fn test_popn_collect_isolated_parents_preserves_acc() {
+              // Setup: Root(acc42) -> Intermediate(empty) -> Leaf(empty)
+              let leaf = Arc::new(GSSNode::new(empty_acc()));
+              let intermediate = Arc::new(leaf.push(mock_edge(10)));
+              assert!(intermediate.local_acc().is_default());
+
+              let root_acc = mock_acc(42);
+              let root = Arc::new(GSSNode::new_with_single_predecessor(
+                  intermediate.clone(),
+                  mock_edge(20),
+                  root_acc.clone(),
+              ));
+              assert_eq!(*root.local_acc(), root_acc);
+
+              // Action: pop 1 level. We expect to get back a node representing the `intermediate`
+              // node, but with the path constraint from the root applied.
+              let result = popn_collect_isolated_parents(&root, 1);
+
+              assert_eq!(result.len(), 1);
+              let (_state_id, isolated_parent) = &result[0];
+
+              // Validation: The `isolated_parent` is a reconstruction of the `intermediate` node's
+              // path to its predecessor (`leaf`). The overall `acc()` of this new structure
+              // should reflect the constraint from the popped `root`.
+              let final_acc = isolated_parent.acc();
+
+              // The final acc should be the intersection of the root's acc and the rest of the path.
+              // Since the rest of the path is empty, it should just be the root's acc.
+              assert_eq!(*final_acc, root_acc);
+              assert!(!final_acc.llm_tokens_union.contains(42));
+          }
       }
   prev_file_contents:
     src/datastructures/gss.rs: |
@@ -3548,23 +3574,15 @@ local_system:
           }
 
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
-              let effective_parent_acc = Acc::narrow(self.path_acc, &self.parent_arc.local_acc());
+              if self.parent_arc.num_predecessors() == 1 {
+                  return self.parent_arc.clone();
+              }
 
-              let new_node = if self.parent_arc.num_predecessors() == 1 {
-                  // Rebuild the node with the combined acc, keeping all predecessors.
-                  match self.parent_arc.as_ref() {
-                      GSSNode::Internal(i) => GSSNode::new_with_map(Arc::new(effective_parent_acc), i.predecessors.clone()),
-                      GSSNode::Root(_) => GSSNode::new(effective_parent_acc),
-                  }
-              } else {
-                  // Isolate this specific predecessor, and apply the combined acc.
-                  GSSNode::new_with_single_predecessor(
-                      self.predecessor_node.clone(),
-                      self.edge_value.clone(),
-                      effective_parent_acc,
-                  )
-              };
-              Arc::new(new_node)
+              Arc::new(GSSNode::new_with_single_predecessor(
+                  self.predecessor_node.clone(),
+                  self.edge_value.clone(),
+                  (*self.parent_arc.local_acc()).clone(),
+              ))
           }
       }
 
@@ -6816,14 +6834,7 @@ messages:
           }
 
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
-              if self.parent_arc.num_predecessors() == 1 {
-                  return self.parent_arc.clone();
-              }
-              Arc::new(GSSNode::new_with_single_predecessor(
-                  self.predecessor_node.clone(),
-                  self.edge_value.clone(),
-                  (*self.parent_arc.local_acc()).clone(),
-              ))
+              // ...
           }
       }
 
@@ -9636,14 +9647,45 @@ messages:
                   "Allowed tokens should be restricted to only token 0 after filtering"
               );
           }
+
+          #[test]
+          fn test_popn_collect_isolated_parents_preserves_acc() {
+              // Setup: Root(acc42) -> Intermediate(empty) -> Leaf(empty)
+              let leaf = Arc::new(GSSNode::new(empty_acc()));
+              let intermediate = Arc::new(leaf.push(mock_edge(10)));
+              assert!(intermediate.local_acc().is_default());
+
+              let root_acc = mock_acc(42);
+              let root = Arc::new(GSSNode::new_with_single_predecessor(
+                  intermediate.clone(),
+                  mock_edge(20),
+                  root_acc.clone(),
+              ));
+              assert_eq!(*root.local_acc(), root_acc);
+
+              // Action: pop 1 level. We expect to get back a node representing the `intermediate`
+              // node, but with the path constraint from the root applied.
+              let result = popn_collect_isolated_parents(&root, 1);
+
+              assert_eq!(result.len(), 1);
+              let (_state_id, isolated_parent) = &result[0];
+
+              // Validation: The `isolated_parent` is a reconstruction of the `intermediate` node's
+              // path to its predecessor (`leaf`). The overall `acc()` of this new structure
+              // should reflect the constraint from the popped `root`.
+              let final_acc = isolated_parent.acc();
+
+              // The final acc should be the intersection of the root's acc and the rest of the path.
+              // Since the rest of the path is empty, it should just be the root's acc.
+              assert_eq!(*final_acc, root_acc);
+              assert!(!final_acc.llm_tokens_union.contains(42));
+          }
       }
 
       ```
     metadata:
       filename: src/datastructures/gss.rs
-  - user: Write a test that does `popn_collect_isolated_parents` with pop 1, in a
-      case where the root node has a distinct local acc and the node below it does
-      not. Then validate that the acc() of the result contains that distinct value.
+  - user: Implement `isolated_parent`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9662,108 +9704,62 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions and the corresponding git diff to add the requested test and fix the related logic.
+      Of course. Here are the step-by-step instructions to implement `isolated_parent`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Modify `src/datastructures/gss.rs` to fix `isolated_parent`:**
+      1.  **Open the file `src/datastructures/gss.rs`**.
 
-          In the file `src/datastructures/gss.rs`, locate the `isolated_parent` method inside the `impl<'a> GSSPopperItemPeek<'a>` block. The current implementation loses constraint information (`path_acc`) when a node is popped. You will replace it with a new implementation that correctly propagates these constraints.
+      2.  **Navigate to the `isolated_parent` method** within the `impl<'a> GSSPopperItemPeek<'a>` block, which is around line 432.
 
-          The updated method will calculate an `effective_parent_acc` by combining the `path_acc` from the popped path with the `local_acc` of the parent node. It will then use this effective `acc` to construct a new GSS node, ensuring that constraints are preserved.
+      3.  **Replace the placeholder implementation**. The current method is empty:
+          ```rust
+          pub fn isolated_parent(&self) -> Arc<GSSNode> {
+              // ...
+          }
+          ```
+          You will replace the `// ...` comment with the logic to create an isolated parent node. This logic first checks if the parent node already has only one predecessor; if so, it can be returned directly. Otherwise, it constructs a new parent node that represents only the single path segment of the current `peek`.
 
-      2.  **Add a new test case in `src/datastructures/gss.rs`:**
+          Update the function to be:
+          ```rust
+          pub fn isolated_parent(&self) -> Arc<GSSNode> {
+              if self.parent_arc.num_predecessors() == 1 {
+                  return self.parent_arc.clone();
+              }
 
-          At the end of `src/datastructures/gss.rs`, inside the `#[cfg(test)] mod tests { ... }` block, add a new test function named `test_popn_collect_isolated_parents_preserves_acc`.
-
-          This test will:
-          *   Construct a simple GSS where a root node has a specific local `Acc` (disallowing token 42), and its predecessor has a default `Acc`.
-          *   Call `popn_collect_isolated_parents` on this GSS with `n=1` to pop the root node.
-          *   Validate that the aggregate `acc()` of the resulting "isolated parent" node correctly reflects the constraints from the original, popped root node.
+              Arc::new(GSSNode::new_with_single_predecessor(
+                  self.predecessor_node.clone(),
+                  self.edge_value.clone(),
+                  (*self.parent_arc.local_acc()).clone(),
+              ))
+          }
+          ```
 
       ### Git Diff
 
-      Here is the git patch to apply these changes.
+      Here is the git patch to apply these changes:
 
       ```diff
       diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -433,14 +433,26 @@
+      @@ -432,7 +432,15 @@
            }
        
            pub fn isolated_parent(&self) -> Arc<GSSNode> {
-      +        let effective_parent_acc = Acc::narrow(self.path_acc, &self.parent_arc.local_acc());
+      -        // ...
+      +        if self.parent_arc.num_predecessors() == 1 {
+      +            return self.parent_arc.clone();
+      +        }
       +
-      +        let new_node = if self.parent_arc.num_predecessors() == 1 {
-      +            // Rebuild the node with the combined acc, keeping all predecessors.
-      +            match self.parent_arc.as_ref() {
-      +                GSSNode::Internal(i) => GSSNode::new_with_map(Arc::new(effective_parent_acc), i.predecessors.clone()),
-      +                GSSNode::Root(_) => GSSNode::new(effective_parent_acc),
-      +            }
-      +        } else {
-      +            // Isolate this specific predecessor, and apply the combined acc.
-      +            GSSNode::new_with_single_predecessor(
-      +                self.predecessor_node.clone(),
-      +                self.edge_value.clone(),
-      +                effective_parent_acc,
-      +            )
-      +        };
-      +        Arc::new(new_node)
-      +    }
-      +}
-      -        if self.parent_arc.num_predecessors() == 1 {
-      -            return self.parent_arc.clone();
-      -        }
-      -        Arc::new(GSSNode::new_with_single_predecessor(
-      -            self.predecessor_node.clone(),
-      -            self.edge_value.clone(),
-      -            (*self.parent_arc.local_acc()).clone(),
-      -        ))
-      -    }
-      -}
-       
-       // Static empty NodeMap for roots
-       fn empty_nodemap() -> &'static NodeMap {
-      @@ -2012,4 +2024,32 @@
-                   "Allowed tokens should be restricted to only token 0 after filtering"
-               );
+      +        Arc::new(GSSNode::new_with_single_predecessor(
+      +            self.predecessor_node.clone(),
+      +            self.edge_value.clone(),
+      +            (*self.parent_arc.local_acc()).clone(),
+      +        ))
            }
-      -}
-      +
-      +    #[test]
-      +    fn test_popn_collect_isolated_parents_preserves_acc() {
-      +        // Setup: Root(acc42) -> Intermediate(empty) -> Leaf(empty)
-      +        let leaf = Arc::new(GSSNode::new(empty_acc()));
-      +        let intermediate = Arc::new(leaf.push(mock_edge(10)));
-      +        assert!(intermediate.local_acc().is_default());
-      +
-      +        let root_acc = mock_acc(42);
-      +        let root = Arc::new(GSSNode::new_with_single_predecessor(
-      +            intermediate.clone(),
-      +            mock_edge(20),
-      +            root_acc.clone(),
-      +        ));
-      +        assert_eq!(*root.local_acc(), root_acc);
-      +
-      +        // Action: pop 1 level. We expect to get back a node representing the `intermediate`
-      +        // node, but with the path constraint from the root applied.
-      +        let result = popn_collect_isolated_parents(&root, 1);
-      +
-      +        assert_eq!(result.len(), 1);
-      +        let (_state_id, isolated_parent) = &result[0];
-      +
-      +        // Validation: The `isolated_parent` is a reconstruction of the `intermediate` node's
-      +        // path to its predecessor (`leaf`). The overall `acc()` of this new structure
-      +        // should reflect the constraint from the popped `root`.
-      +        let final_acc = isolated_parent.acc();
-      +
-      +        // The final acc should be the intersection of the root's acc and the rest of the path.
-      +        // Since the rest of the path is empty, it should just be the root's acc.
-      +        assert_eq!(*final_acc, root_acc);
-      +        assert!(!final_acc.llm_tokens_union.contains(42));
-      +    }
-      +}
+       }
+       
 
       ```
     metadata:
@@ -9776,7 +9772,6 @@ messages:
       Applying patch to 'src/datastructures/gss.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/gss.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Correctly propagate path constraints
-      in isolated_parent and add test for acc preservation"'
+  - user: 'Changes committed with message: "Implement isolated_parent for GSSPopperItemPeek"'
     metadata:
 ...
