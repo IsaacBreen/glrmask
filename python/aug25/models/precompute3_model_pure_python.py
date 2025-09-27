@@ -1267,6 +1267,7 @@ class Model(GraphProvider):
             int(n): bool(self.arena[n].clean_end) for n in all_nodes
         }
         working_tokens = sorted(t for t in tokens_in_graph if t in edges_by_token)
+        edges_before = sum(len(pd_map) for out_map in edges_by_token.values() for pd_map in out_map.values())
         total_full_masks = 0
         total_repl1 = 0
         total_repl2 = 0
@@ -1371,6 +1372,7 @@ class Model(GraphProvider):
                     continue
             total_repl1 += repl1_this_tok
             total_repl2 += repl2_this_tok
+        edges_after = sum(len(pd_map) for out_map in edges_by_token.values() for pd_map in out_map.values())
         # -----------------------------------------------------------------
         # Re‑assemble arena children, grouping tokens with identical signatures
         # -----------------------------------------------------------------
@@ -1424,7 +1426,8 @@ class Model(GraphProvider):
         self._recompute_llm_bv_unions()
         self.max_depth = self._recompute_max_depth_from_arena()
         print(
-            f" - Optimisation complete. Full‑mask edges set: {total_full_masks}, "
+            f" - Optimisation complete. Edges reduced from {edges_before} to {edges_after}. "
+            f"Full‑mask edges set: {total_full_masks}, "
             f"Replacement 1: {total_repl1}, Replacement 2: {total_repl2}.",
             flush=True,
         )
