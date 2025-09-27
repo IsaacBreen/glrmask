@@ -358,15 +358,7 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 
     pub fn isolated_parent(&self) -> Arc<GSSNode> {
-        if self.parent_arc.num_predecessors() == 1 {
-            return self.parent_arc.clone();
-        }
-
-        Arc::new(GSSNode::new_with_single_predecessor(
-            self.predecessor_node.clone(),
-            self.edge_value.clone(),
-            (*self.parent_arc.local_acc()).clone(),
-        ))
+        
     }
 }
 
@@ -1117,15 +1109,7 @@ impl<'a> GSSPeek<'a> {
 
     /// Creates a new `GSSNode` that represents only the path segment of this peek.
     pub fn isolated_parent(&self) -> Arc<GSSNode> {
-        if self.parent_arc.num_predecessors() == 1 {
-            return self.parent_arc.clone();
-        }
 
-        Arc::new(GSSNode::new_with_single_predecessor(
-            self.predecessor_node.clone(),
-            self.edge_value.clone(),
-            (*self.parent_arc.local_acc()).clone(),
-        ))
     }
 }
 
