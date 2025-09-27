@@ -6,8 +6,6 @@
 #include <algorithm>
 #include <boost/functional/hash.hpp>
 #include <boost/icl/interval_set.hpp>
-#include <boost/icl/interval.hpp>
-#include <boost/icl/interval_bounds.hpp>
 #include "stats.hpp"
 
 class RangeSet {
@@ -88,8 +86,8 @@ public:
     std::vector<std::pair<unsigned long long, unsigned long long>> to_ranges() const {
         std::vector<std::pair<unsigned long long, unsigned long long>> ranges;
         for (const auto& interval : set) {
-            auto bounds = inclusive_bounds(interval);
-            ranges.emplace_back(bounds.first, bounds.second);
+            // .first() and .last() give inclusive bounds for discrete intervals
+            ranges.emplace_back(interval.first(), interval.last());
         }
         return ranges;
     }
@@ -97,13 +95,10 @@ public:
     std::vector<unsigned long long> to_indices() const {
         std::vector<unsigned long long> indices;
         for (const auto& interval : set) {
-            auto bounds = inclusive_bounds(interval);
-            unsigned long long start = bounds.first;
-            unsigned long long end_inclusive = bounds.second;
-            if (start > end_inclusive) continue; // safety, though should not happen
-            for (unsigned long long i = start;; ++i) {
+            // .last() is inclusive for discrete intervals
+            for (unsigned long long i = interval.first(); ; ++i) {
                 indices.push_back(i);
-                if (i == end_inclusive) break; // handle overflow for max ull
+                if (i == interval.last()) break; // handle overflow for max ull
             }
         }
         return indices;
@@ -118,11 +113,10 @@ public:
         ss << "[";
         bool first = true;
         for (const auto& interval : set) {
-            auto bounds = inclusive_bounds(interval);
             if (!first) {
                 ss << ", ";
             }
-            ss << "(" << bounds.first << ", " << bounds.second << ")";
+            ss << "(" << interval.first() << ", " << interval.last() << ")";
             first = false;
         }
         ss << "]";
@@ -144,30 +138,6 @@ public:
         return seed;
     }
 private:
-    // Normalize any Boost.ICL interval to inclusive [start, end] bounds.
-    // This handles cases where the underlying interval is right-open/left-open.
-    template <typename IntervalT>
-    static std::pair<unsigned long long, unsigned long long>
-    inclusive_bounds(const IntervalT& iv) {
-        using namespace boost::icl;
-        unsigned long long l = iv.lower();
-        unsigned long long r = iv.upper();
-        // Adjust for open bounds to get inclusive [l, r_inclusive]
-        if (is_left_open(iv)) {
-            // For discrete domains, advance the start by one
-            ++l;
-        }
-        if (is_right_open(iv)) {
-            // For discrete domains, step back the end by one if possible
-            if (r > 0) {
-                --r;
-            } else {
-                // Degenerate: empty after normalization; let caller handle l > r
-            }
-        }
-        return {l, r};
-    }
-
     boost::icl::interval_set<unsigned long long> set;
 };
 
