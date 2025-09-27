@@ -2,6 +2,7 @@ import json
 import time
 import heapq
 import collections
+from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
 from ..common_interface import GraphProvider, RangeSet
@@ -9,6 +10,18 @@ import _sep1 as ffi  # the compiled module
 from tqdm.auto import tqdm
 
 from python.gss_tester.implementations.reference_impl import ReferenceGSS as GSS
+
+
+@dataclass(frozen=True, eq=False)
+class PyAcc:
+    llm_mask: ffi.Bitset
+    terminals: ffi.HybridL2Bitset
+
+    def merge(self, other: 'PyAcc') -> 'PyAcc':
+        return PyAcc(
+            llm_mask=self.llm_mask.union(other.llm_mask),
+            terminals=self.terminals.union(other.terminals),
+        )
 
 
 class Model(GraphProvider):
@@ -63,6 +76,14 @@ class Model(GraphProvider):
             node["children"] = new_children
 
     @staticmethod
+    def gss_from_ffi_node(gss_node: ffi.GSSNode) -> GSS:
+        flat = gss_node.flatten()
+        stacks = []
+        for stack, (llm_mask, terminals) in flat:
+            stacks.append((stack, PyAcc(llm_mask, terminals)))
+        return GSS.from_stacks(stacks)
+
+    @staticmethod
     def from_json_string(s: str) -> 'Model':
         data = json.loads(s)
         roots_map = data["precomputed3"]
@@ -112,7 +133,7 @@ class Model(GraphProvider):
 
         print("states in get_mask:")
         for k, v in state_map.items():
-            print(f"state {k}: gss_ptr={v.ptr()} flat={GSS.from_stacks(v.flatten())}")
+            print(f"state {k}: gss_ptr={v.ptr()} flat={self.gss_from_ffi_node(v)}")
 
 
         # t0 = time.time()
@@ -145,8 +166,8 @@ class Model(GraphProvider):
             if existing is not None:
                 existing_gss = existing
                 print(f"  - MERGING into root {root_idx}:")
-                print(f"    - Existing GSS: ptr={existing_gss.ptr()} flat={GSS.from_stacks(existing_gss.flatten())}")
-                print(f"    - New GSS:      ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}")
+                print(f"    - Existing GSS: ptr={existing_gss.ptr()} flat={self.gss_from_ffi_node(existing_gss)}")
+                print(f"    - New GSS:      ptr={gss.ptr()} flat={self.gss_from_ffi_node(gss)}")
 
                 merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
                 values[root_idx] = merged_gss
@@ -163,7 +184,7 @@ class Model(GraphProvider):
 
         print("--- After Seeding ---")
         for node_idx, gss in values.items():
-            print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}")
+            print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={self.gss_from_ffi_node(gss)}")
 
 
         # Main scheduler
@@ -209,7 +230,7 @@ class Model(GraphProvider):
                 if gss_node is None:
                     print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
-                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}")
+                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={self.gss_from_ffi_node(gss_node)}")
 
                 # End-node handling
                 if is_end(node_idx):
@@ -264,7 +285,7 @@ class Model(GraphProvider):
 
                         # Merge matched parent GSS nodes
                         child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
-                        print(f"        - Child GSS: ptr={child_gss_node.ptr()} flat={GSS.from_stacks(child_gss_node.flatten())}")
+                        print(f"        - Child GSS: ptr={child_gss_node.ptr()} flat={self.gss_from_ffi_node(child_gss_node)}")
 
                         # Apply edge's LLM token mask to the new GSS node
                         if not llm_bv.is_empty():
