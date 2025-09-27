@@ -2619,7 +2619,7 @@ impl<'a> GrammarConstraintState<'a> {
             return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
         }
 
-        let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, (GLRParserState<'a>, LLMTokenBV)> = BTreeMap::new();
+        let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, GLRParserState<'a>> = BTreeMap::new();
         crate::debug!(10, "\n--- Seeding work queue ---");
 
         for (&tokenizer_state_id, glr_state) in &self.state {
@@ -2627,15 +2627,13 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed3.get(&tokenizer_state_id) {
-                let allowed_bv = self.parent.all_internal_llm_tokens_bitset();
-                crate::debug!(10, "  SEED: sid={}, root_idx={}, gss_ptr={:p}, mask={}", tokenizer_state_id.0, precomputed_trie_root_arc, glr_state.active_state.stack, format_bv(&allowed_bv));
+                crate::debug!(10, "  SEED: sid={}, root_idx={}, gss_ptr={:p}", tokenizer_state_id.0, precomputed_trie_root_arc, glr_state.active_state.stack);
                 
                 initial_values_by_trie_node.entry(precomputed_trie_root_arc.clone())
-                    .and_modify(|(existing_glr, existing_bv)| {
+                    .and_modify(|existing_glr| {
                         existing_glr.merge_with(glr_state.clone());
-                        *existing_bv |= &allowed_bv;
                     })
-                    .or_insert((glr_state.clone(), allowed_bv));
+                    .or_insert(glr_state.clone());
             } else {
                 panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
             }
@@ -2659,9 +2657,8 @@ impl<'a> GrammarConstraintState<'a> {
             &self.parent.trie3_god,
             initial_values_for_map,
             // step_fn: (current_state, (pop, llm_token_bv), destinations_map)
-            |state, (pop, llm_token_bv_from_edge), dest_map| {
-                let (glr_s, allowed_bv) = state;
-                crate::debug!(10, "  - STEP: gss_ptr={:p}, allowed_bv={}, edge=(pop={}, llm_bv={})", glr_s.active_state.stack, format_bv(allowed_bv), pop, format_bv(llm_token_bv_from_edge));
+            |glr_s, (pop, llm_token_bv_from_edge), dest_map| {
+                crate::debug!(10, "  - STEP: gss_ptr={:p}, edge=(pop={}, llm_bv={})", glr_s.active_state.stack, pop, format_bv(llm_token_bv_from_edge));
                 let popped = glr_s.active_state.stack.popn(*pop);
                 let num_peeks: usize = popped.iter().map(|p| p.peek_iter().count()).sum();
                 if num_peeks > 0 {
@@ -2687,27 +2684,23 @@ impl<'a> GrammarConstraintState<'a> {
                     let mut new_glr_s = glr_s.clone();
                     new_glr_s.active_state.stack = merged_gss;
 
-                    let new_allowed_bv = allowed_bv & llm_token_bv_from_edge;
+                    allow_only_llm_tokens_and_prune_arc(&mut new_glr_s.active_state.stack, llm_token_bv_from_edge, &mut HashMap::new());
 
-                    if new_glr_s.is_ok() && !new_allowed_bv.is_empty() {
-                        crate::debug!(10, "      - Dest: idx={}, state_bv={}, matched={}, child_mask={}, new_gss_ptr={:p}", dest_idx, format_bv(state_id_bv), valid_gss_nodes.len(), format_bv(&new_allowed_bv), new_glr_s.active_state.stack);
-                        results.push((dest_idx.clone(), (new_glr_s, new_allowed_bv)));
+                    if new_glr_s.is_ok() {
+                        crate::debug!(10, "      - Dest: idx={}, state_bv={}, matched={}, new_gss_ptr={:p}", dest_idx, format_bv(state_id_bv), valid_gss_nodes.len(), new_glr_s.active_state.stack);
+                        results.push((dest_idx.clone(), new_glr_s));
                     }
                 }
                 results
             },
             // merge_fn
-            |state1, state2| {
-                let (glr_s1, allowed_bv1) = state1;
-                let (glr_s2, allowed_bv2) = state2;
-                crate::debug!(10, "    - MERGE: gss1(ptr={:p}, mask={}) WITH gss2(ptr={:p}, mask={})", glr_s1.active_state.stack, format_bv(allowed_bv1), glr_s2.active_state.stack, format_bv(&allowed_bv2));
+            |glr_s1, glr_s2| {
+                crate::debug!(10, "    - MERGE: gss1(ptr={:p}) WITH gss2(ptr={:p})", glr_s1.active_state.stack, glr_s2.active_state.stack);
                 glr_s1.merge_with(glr_s2);
-                *allowed_bv1 |= allowed_bv2;
             },
             // process_fn: (precomputed_node_data, final_state_for_this_path)
-            |precomputed_node_data, state| {
-                let (glr_s, allowed_bv) = state;
-                crate::debug!(10, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}, mask={}", precomputed_node_data as *const _, glr_s.active_state.stack, format_bv(allowed_bv));
+            |precomputed_node_data, glr_s| {
+                crate::debug!(10, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}", precomputed_node_data as *const _, glr_s.active_state.stack);
 
                 let mut forbidden_llm_tokens = LLMTokenBV::zeros();
                 let disallowed_terminals_l2 = glr_s.active_state.stack.disallowed_terminals();
@@ -2728,9 +2721,9 @@ impl<'a> GrammarConstraintState<'a> {
                     }
                 }
 
-                let glr_active_tokens = &glr_s.active_state.stack.allowed_llm_tokens() & allowed_bv;
+                let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
                 let final_allowed_tokens = glr_active_tokens - &forbidden_llm_tokens;
-                let keep_going = glr_s.is_ok() && !allowed_bv.is_empty();
+                let keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
                     if !final_allowed_tokens.is_empty() {
                         let before = final_mask_internal.borrow().len();

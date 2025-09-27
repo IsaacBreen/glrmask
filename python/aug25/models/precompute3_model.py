@@ -109,7 +109,6 @@ class Model(GraphProvider):
         GSS nodes. This is the performance-critical routine.
         """
         state_map: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
-        all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
 
         print("states in get_mask:")
         for k, v in state_map.items():
@@ -120,8 +119,8 @@ class Model(GraphProvider):
 
         final_mask = ffi.Bitset.zeros()
 
-        # node_idx -> (GSSNode, Bitset)
-        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+        # node_idx -> GSSNode
+        values: Dict[int, ffi.GSSNode] = {}
 
         stopped: set[int] = set()  # nodes that stopped (no gss parents)
         todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
@@ -135,25 +134,24 @@ class Model(GraphProvider):
 
         print("\n--- Seeding work queue ---")
         for sid, gss in state_map.items():
-            new_mask = all_ones_mask
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
             root_idx = int(root_idx)
             
-            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
+            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}")
 
             existing = values.get(root_idx)
             if existing is not None:
-                existing_gss, existing_mask = existing
+                existing_gss = existing
                 print(f"  - MERGING into root {root_idx}:")
                 print(f"    - Existing GSS: ptr={existing_gss.ptr()} flat={GSS.from_stacks(existing_gss.flatten())}")
                 print(f"    - New GSS:      ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}")
 
                 merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
-                values[root_idx] = (merged_gss, existing_mask.union(new_mask))
+                values[root_idx] = merged_gss
             else:
-                values[root_idx] = (gss, new_mask)
+                values[root_idx] = gss
 
             depth = max_depth[root_idx]
             bucket = todo.get(depth)
@@ -164,8 +162,8 @@ class Model(GraphProvider):
                 bucket.add(root_idx)
 
         print("--- After Seeding ---")
-        for node_idx, (gss, mask) in values.items():
-            print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}, mask={mask.to_ranges()}")
+        for node_idx, gss in values.items():
+            print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}")
 
 
         # Main scheduler
@@ -207,12 +205,12 @@ class Model(GraphProvider):
                     print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                     continue
 
-                item = values.pop(node_idx, None)
-                if item is None:
+                gss_node = values.pop(node_idx, None)
+                if gss_node is None:
                     print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
-                gss_node, llm_mask = item
-                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}, mask={llm_mask.to_ranges()}")
+
+                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}")
 
                 # End-node handling
                 if is_end(node_idx):
@@ -241,8 +239,7 @@ class Model(GraphProvider):
                                     forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
                     glr_active_tokens = gss_node.allowed_llm_tokens()
-                    glr_active_tokens = llm_mask.intersection(glr_active_tokens)
-                    print(f"Allowed LLM tokens from GSS heads (after llm_mask intersection): {glr_active_tokens.to_ranges()}")
+                    print(f"Allowed LLM tokens from GSS heads: {glr_active_tokens.to_ranges()}")
                     final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
                     tokens_to_add = final_allowed_tokens
 
@@ -267,8 +264,6 @@ class Model(GraphProvider):
                     if not peeks:
                         continue
 
-                    llm_empty = llm_bv.is_empty()
-
                     for dest_idx, state_bv in dests:
                         print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
                         # Filter peeks by destination state bitset
@@ -285,23 +280,19 @@ class Model(GraphProvider):
 
                         # Merge matched parent GSS nodes
                         child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+                        ffi.gss_allow_only_llm_tokens_and_prune(child_gss_node, llm_bv)
                         print(f"        - Child GSS: ptr={child_gss_node.ptr()} flat={GSS.from_stacks(child_gss_node.flatten())}")
-
-                        # Compute child mask (intersection with llm_bv when present)
-                        child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
-                        print(f"        - Child mask: {child_llm_mask.to_ranges()}")
 
                         d = int(dest_idx)
                         existing = values.get(d)
                         if existing is not None:
-                            existing_gss, existing_mask = existing
+                            existing_gss = existing
                             merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
-                            combined_mask = existing_mask.union(child_llm_mask)
-                            values[d] = (merged_gss, combined_mask)
-                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
+                            values[d] = merged_gss
+                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}")
                         else:
-                            values[d] = (child_gss_node, child_llm_mask)
-                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
+                            values[d] = child_gss_node
+                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}")
 
                         enqueue(max_depth[d], d)
 
