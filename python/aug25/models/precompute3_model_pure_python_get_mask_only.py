@@ -17,7 +17,7 @@ class Model(GraphProvider):
         self.possible_matches_cache: Optional[Dict[int, Dict[int, RangeSet]]] = im.possible_matches_cache
         self.tokenizer_max_state: int = im.tokenizer.max_state()
         self.all_internal_llm_tokens_bitset: Optional[RangeSet] = im.all_internal_llm_tokens_bitset
-        self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
+        self.internal_to_original_map: Dict[int, Set[int]] = im.internal_to_original_map
         self.all_terminals_bitset: Optional[RangeSet] = im.all_terminals_bitset
 
     @staticmethod
@@ -188,6 +188,6 @@ class Model(GraphProvider):
         original_indices: List[int] = []
         for i in final_mask.to_indices():
             if i in self.internal_to_original_map:
-                original_indices.append(self.internal_to_original_map[i])
+                original_indices.extend(list(self.internal_to_original_map[i]))
 
         return RangeSet.from_indices(original_indices)

@@ -233,10 +233,19 @@ class Model(GraphProvider):
                 mapped[int(term_id)] = RangeSet.from_ranges(bit.to_ranges())
             pmc_rs[int(tsid)] = mapped
         model.possible_matches_cache = pmc_rs
-        model.internal_to_original_map = constraint.internal_to_original_map()
-        # Convert universe LLM tokens bitset to RangeSet
-        all_internal = constraint.all_internal_llm_tokens_bitset()
-        model.all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
+
+        vocab = data.get('precompute3_vocab') or data.get('precompute2_vocab') or data.get('precompute_vocab')
+        if vocab:
+            model.internal_to_original_map = {int(k): v for k, v in vocab['internal_to_original']}
+            internal_max = vocab['internal_max_llm_token']
+            model.all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, internal_max)])
+        else:
+            # Fallback for old format: one-to-one mapping
+            i2o_map_one_to_one = constraint.internal_to_original_map()
+            model.internal_to_original_map = {k: [v] for k, v in i2o_map_one_to_one.items()}
+            all_internal = constraint.all_internal_llm_tokens_bitset()
+            model.all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
+
         return model
 
     @profile
@@ -697,7 +706,7 @@ class Model(GraphProvider):
         stats.inc('get_mask.final_mask.internal_indices', len(final_indices))
         for i in final_indices:
             if i in self.internal_to_original_map:
-                original_indices.append(self.internal_to_original_map[i])
+                original_indices.extend(self.internal_to_original_map[i])
         stats.inc('get_mask.final_mask.original_indices', len(original_indices))
 
         stats.start('get_mask.final_conversion.from_indices')

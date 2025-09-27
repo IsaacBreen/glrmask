@@ -24,7 +24,7 @@ class Model(GraphProvider):
 
         # Interface-visible fields
         self.id_to_token: Dict[int, bytes] = {}
-        self.internal_to_original_map: Dict[int, int] = {}
+        self.internal_to_original_map: Dict[int, List[int]] = {}
 
         # Tokenizer/parser
         self.tokenizer = None
@@ -62,8 +62,16 @@ class Model(GraphProvider):
         # Build id_to_token mapping (original LLM token map)
         model.id_to_token = {int(v): bytes(k) for k, v in data['llm_token_map']}
 
-        # Keep internal->original token id map for final mask conversion (engine uses it too)
-        model.internal_to_original_map = constraint.internal_to_original_map()
+        vocab = data.get('precompute3_vocab') or data.get('precompute2_vocab') or data.get('precompute_vocab')
+        if vocab:
+            model.internal_to_original_map = {int(k): v for k, v in vocab['internal_to_original']}
+            internal_max = vocab['internal_max_llm_token']
+            all_internal_tokens_bitset = ffi.Bitset.from_ranges([(0, internal_max)])
+        else:
+            # Fallback for old format: one-to-one mapping
+            i2o_map_one_to_one = constraint.internal_to_original_map()
+            model.internal_to_original_map = {k: [v] for k, v in i2o_map_one_to_one.items()}
+            all_internal_tokens_bitset = constraint.all_internal_llm_tokens_bitset()
 
         # Create the C++ Engine (self-contained algorithm in C++)
         # Pass raw structures; the engine will parse/normalize as needed.
@@ -76,8 +84,8 @@ class Model(GraphProvider):
             dict(model.roots_map),
             model.arena,
             constraint.possible_matches(),                 # tsid -> term_id -> _sep1.Bitset
-            constraint.all_internal_llm_tokens_bitset(),  # _sep1.Bitset universe
-            model.internal_to_original_map                # int -> int
+            all_internal_tokens_bitset,                    # _sep1.Bitset universe
+            model.internal_to_original_map                 # int -> list[int]
         )
         model._engine.reset_stats()
 

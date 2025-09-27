@@ -14,6 +14,7 @@ class Model(GraphProvider):
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
         self.arena = arena
         self.max_depth: Dict[int, int] = {}
+        self.internal_to_original_map: Dict[int, List[int]] = {}
         self.debug_logging = os.environ.get("RUST_LOG") == "debug"
 
         # Convert precompute3 graph structure to precompute2-like structure
@@ -65,6 +66,15 @@ class Model(GraphProvider):
         model = Model(roots_map, arena, max_state_id)
         model.constraint = ffi.GrammarConstraint.from_json_string(s)
         model.constraint_state = ffi.GrammarConstraintState(model.constraint)
+
+        vocab = data.get('precompute2_vocab') or data.get('precompute_vocab')
+        if vocab:
+            model.internal_to_original_map = {int(k): v for k, v in vocab['internal_to_original']}
+        else:
+            # Fallback for old format: one-to-one mapping
+            i2o_map_one_to_one = model.constraint.internal_to_original_map()
+            model.internal_to_original_map = {k: [v] for k, v in i2o_map_one_to_one.items()}
+
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -228,7 +238,13 @@ class Model(GraphProvider):
         if self.debug_logging:
             print("\n--- get_mask END ---")
             print(f"Final mask internal: {final_mask.to_ranges()}")
-        original_mask = self.constraint.internal_bv_to_original(final_mask)
+
+        original_mask = ffi.Bitset.zeros()
+        for i in final_mask.to_indices():
+            if i in self.internal_to_original_map:
+                for orig_id in self.internal_to_original_map[i]:
+                    original_mask.insert(orig_id)
+
         if self.debug_logging:
             print(f"Final mask mapped: {original_mask.to_ranges()}")
         return RangeSet.from_ranges(original_mask.to_ranges())

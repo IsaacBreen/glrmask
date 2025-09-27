@@ -307,13 +307,20 @@ class Model(GraphProvider):
                 mapped[int(term_id)] = RangeSet.from_ranges(bit.to_ranges())
             pmc_rs[int(tsid)] = mapped
         possible_matches_cache = pmc_rs
-        internal_to_original_map_raw = constraint.internal_to_original_map()
-        internal_to_original_map = {
-            k: {v} for k, v in internal_to_original_map_raw.items()
-        }
-        # Convert universe LLM tokens bitset to RangeSet
-        all_internal = constraint.all_internal_llm_tokens_bitset()
-        all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
+
+        vocab = data.get('precompute3_vocab') or data.get('precompute2_vocab') or data.get('precompute_vocab')
+        if vocab:
+            internal_to_original_map_raw = dict(vocab['internal_to_original'])
+            internal_to_original_map = {
+                int(k): set(v) for k, v in internal_to_original_map_raw.items()
+            }
+            internal_max = vocab['internal_max_llm_token']
+            all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, internal_max)])
+        else:
+            internal_to_original_map_raw = constraint.internal_to_original_map()
+            internal_to_original_map = {k: {v} for k, v in internal_to_original_map_raw.items()}
+            all_internal = constraint.all_internal_llm_tokens_bitset()
+            all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
 
         if debug_logging:
             print(possible_matches_cache)

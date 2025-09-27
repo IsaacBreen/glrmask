@@ -40,6 +40,7 @@ class Model(GraphProvider):
         self.constraint_state: Optional[ffi.GrammarConstraintState] = None
         self.id_to_token: Dict[int, bytes] = {}
         self.max_depth: Dict[int, int] = {}
+        self.internal_to_original_map: Dict[int, List[int]] = {}
         self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
         self.debug_logging = os.environ.get("RUST_LOG") == "debug"
 
@@ -101,6 +102,15 @@ class Model(GraphProvider):
         model.possible_matches_cache = model.constraint.possible_matches()
         if model.debug_logging:
             print("model.possible_matches_cache", model.possible_matches_cache)
+
+        vocab = data.get('precompute3_vocab') or data.get('precompute2_vocab') or data.get('precompute_vocab')
+        if vocab:
+            model.internal_to_original_map = {int(k): v for k, v in vocab['internal_to_original']}
+        else:
+            # Fallback for old format: one-to-one mapping
+            i2o_map_one_to_one = model.constraint.internal_to_original_map()
+            model.internal_to_original_map = {k: [v] for k, v in i2o_map_one_to_one.items()}
+
         return model
 
     def get_root(self, state_id: int) -> int:
@@ -343,5 +353,10 @@ class Model(GraphProvider):
         if self.debug_logging:
             print("final internal mask:", final_mask)
 
-        original_mask = self.constraint.internal_bv_to_original(final_mask)
+        original_mask = ffi.Bitset.zeros()
+        for i in final_mask.to_indices():
+            if i in self.internal_to_original_map:
+                for orig_id in self.internal_to_original_map[i]:
+                    original_mask.insert(orig_id)
+
         return RangeSet.from_ranges(original_mask.to_ranges())

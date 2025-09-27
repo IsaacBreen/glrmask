@@ -54,7 +54,7 @@ class Model(GraphProvider):
         self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = im.possible_matches_cache
         self.tokenizer_max_state: int = im.tokenizer.max_state()
         self.all_internal_llm_tokens_bitset: Optional[ffi.Bitset] = im.all_internal_llm_tokens_bitset
-        self.internal_to_original_map: Dict[int, int] = im.internal_to_original_map
+        self.internal_to_original_map: Dict[int, Set[int]] = im.internal_to_original_map
         # Profiling state
         _install_profiling_hooks()
         self.get_mask_calls = 0
@@ -278,7 +278,8 @@ class Model(GraphProvider):
         original_mask: ffi.Bitset = ffi.Bitset.zeros()
         for i in final_mask.to_indices():
             if i in self.internal_to_original_map:
-                original_mask.insert(self.internal_to_original_map[i])
+                for orig_id in self.internal_to_original_map[i]:
+                    original_mask.insert(orig_id)
 
         t_end = time.perf_counter_ns()
 
