@@ -626,6 +626,12 @@ impl GSSNode {
         Self::new(Acc::new_fresh())
     }
 
+    pub fn new_dead() -> Self {
+        let mut acc = Acc::new_fresh();
+        acc.llm_tokens_union = LLMTokenBV::zeros();
+        Self::new(acc)
+    }
+
     /// Returns the aggregate Acc for this node.
     /// - If root: returns the node's Acc.
     /// - If internal: merges its childrens' Accs and narrows through its own local Acc.
@@ -1366,7 +1372,7 @@ pub(crate) fn allow_only_llm_tokens_and_prune_arc(
         }
     };
     memo.insert(node_ptr, new_arc_opt.clone());
-    *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+    *root_arc = new_arc_opt.unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
 }
 
 pub(crate) fn disallow_llm_tokens_and_prune_arc(
@@ -1446,6 +1452,59 @@ pub(crate) fn disallow_terminals_and_prune_arc(
     let new_arc = Arc::new(new_node);
     memo.insert(node_ptr, Some(new_arc.clone()));
     *root_arc = new_arc;
+}
+
+pub(crate) fn prune_llm_tokens_by_disallowed_terminals(
+    root_arc: &mut Arc<GSSNode>,
+    possible_matches: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+    memo: &mut PruneAndTransformRecursiveMemo,
+) {
+    let transform_acc = |acc: &Arc<Acc>| -> Option<Arc<Acc>> {
+        if acc.terminals_union == HybridL2Bitset::all() {
+            return Some(acc.clone());
+        }
+
+        let mut forbidden_llm_tokens = LLMTokenBV::zeros();
+        let disallowed_terminals_l2 = acc.terminals_union.complement();
+
+        for (tokenizer_state_range, disallowed_terminals_for_range) in disallowed_terminals_l2.range_values() {
+            if disallowed_terminals_for_range.is_empty() {
+                continue;
+            }
+
+            let relevant_possible_matches = possible_matches.range(TokenizerStateID(*tokenizer_state_range.start())..=TokenizerStateID(*tokenizer_state_range.end()));
+
+            for (_tokenizer_state_id, possible_matches_for_state) in relevant_possible_matches {
+                for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
+                    if disallowed_terminals_for_range.contains(terminal_id.0) {
+                        forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
+                    }
+                }
+            }
+        }
+
+        if forbidden_llm_tokens.is_empty() {
+            return Some(acc.clone());
+        }
+
+        let mut new_acc = (**acc).clone();
+        new_acc.llm_tokens_union -= &forbidden_llm_tokens;
+
+        if new_acc.llm_tokens_union.is_empty() {
+            None // Prune this path
+        } else {
+            Some(Arc::new(new_acc))
+        }
+    };
+
+    let mut internal_closure = |internal: &GSSInternal| transform_acc(&internal.acc).map(|new_acc| (new_acc, true));
+    let mut root_closure = |root: &GSSRoot| transform_acc(&root.acc);
+
+    if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
+        *root_arc = new_root;
+    } else {
+        *root_arc = Arc::new(GSSNode::new_dead());
+    }
 }
 
 pub fn prune_disallowed_terminals(

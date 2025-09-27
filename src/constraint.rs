@@ -1,7 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, reset_terminals, sample_path, simplify, simplify_roots_in_place};
+use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use crate::datastructures::ordered_hash_map::Retain;
 use ordered_hash_map::OrderedHashMap;
@@ -1974,32 +1974,12 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
-                let mut forbidden_llm_tokens = LLMTokenBV::zeros();
-                let disallowed_terminals_l2 = glr_state.active_state.stack.disallowed_terminals();
-
-                // Iterate over ranges of tokenizer states that have the same set of disallowed terminals.
-                for (tokenizer_state_range, disallowed_terminals_for_range) in disallowed_terminals_l2.range_values() {
-                    if disallowed_terminals_for_range.is_empty() {
-                        continue;
-                    }
-
-                    // Get a sub-view of possible_matches that covers this range of tokenizer states.
-                    let relevant_possible_matches = self.parent.possible_matches.range(TokenizerStateID(*tokenizer_state_range.start())..=TokenizerStateID(*tokenizer_state_range.end()));
-
-                    for (_tokenizer_state_id, possible_matches_for_state) in relevant_possible_matches {
-                        for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                            if disallowed_terminals_for_range.contains(terminal_id.0) {
-                                forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
-                            }
-                        }
-                    }
-                }
                 let mut glr_state = glr_state.clone();
-                if !forbidden_llm_tokens.is_empty() {
-                    // glr_state.log_gss(format!("Subtracting forbidden LLM tokens: {:?}", forbidden_llm_tokens).as_str(), TerminalID(0));
-                    disallow_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
-                    // glr_state.log_gss("Done subtracting forbidden LLM tokens.", TerminalID(0));
-                }
+                prune_llm_tokens_by_disallowed_terminals(
+                    &mut glr_state.active_state.stack,
+                    &self.parent.possible_matches,
+                    &mut HashMap::new(),
+                );
                 initial_values_for_map.push((precomputed_trie_root_arc.clone(), glr_state));
             } else {
                 panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
@@ -2341,32 +2321,12 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed2.get(tokenizer_state_id) {
-                let mut forbidden_llm_tokens = LLMTokenBV::zeros();
-                let disallowed_terminals_l2 = glr_state.active_state.stack.disallowed_terminals();
-
-                // Iterate over ranges of tokenizer states that have the same set of disallowed terminals.
-                for (tokenizer_state_range, disallowed_terminals_for_range) in disallowed_terminals_l2.range_values() {
-                    if disallowed_terminals_for_range.is_empty() {
-                        continue;
-                    }
-
-                    // Get a sub-view of possible_matches that covers this range of tokenizer states.
-                    let relevant_possible_matches = self.parent.possible_matches.range(TokenizerStateID(*tokenizer_state_range.start())..=TokenizerStateID(*tokenizer_state_range.end()));
-
-                    for (_tokenizer_state_id, possible_matches_for_state) in relevant_possible_matches {
-                        for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                            if disallowed_terminals_for_range.contains(terminal_id.0) {
-                                forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
-                            }
-                        }
-                    }
-                }
                 let mut glr_state = glr_state.clone();
-                if !forbidden_llm_tokens.is_empty() {
-                    // glr_state.log_gss(format!("Subtracting forbidden LLM tokens: {:?}", forbidden_llm_tokens).as_str(), TerminalID(0));
-                    disallow_llm_tokens_and_prune_arc(&mut glr_state.active_state.stack, &forbidden_llm_tokens, &mut HashMap::new());
-                    // glr_state.log_gss("Done subtracting forbidden LLM tokens.", TerminalID(0));
-                }
+                prune_llm_tokens_by_disallowed_terminals(
+                    &mut glr_state.active_state.stack,
+                    &self.parent.possible_matches,
+                    &mut HashMap::new(),
+                );
                 initial_values_for_map.push((precomputed_trie_root_arc.clone(), glr_state));
             } else {
                 panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
@@ -2699,35 +2659,22 @@ impl<'a> GrammarConstraintState<'a> {
             |precomputed_node_data, glr_s| {
                 crate::debug!(10, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}", precomputed_node_data as *const _, glr_s.active_state.stack);
 
-                let mut forbidden_llm_tokens = LLMTokenBV::zeros();
-                let disallowed_terminals_l2 = glr_s.active_state.stack.disallowed_terminals();
+                let mut glr_s_copy = glr_s.clone();
+                prune_llm_tokens_by_disallowed_terminals(
+                    &mut glr_s_copy.active_state.stack,
+                    &self.parent.possible_matches,
+                    &mut HashMap::new(),
+                );
 
-                for (tokenizer_state_range, disallowed_terminals_for_range) in disallowed_terminals_l2.range_values() {
-                    if disallowed_terminals_for_range.is_empty() {
-                        continue;
-                    }
-
-                    let relevant_possible_matches = self.parent.possible_matches.range(TokenizerStateID(*tokenizer_state_range.start())..=TokenizerStateID(*tokenizer_state_range.end()));
-
-                    for (_tokenizer_state_id, possible_matches_for_state) in relevant_possible_matches {
-                        for (terminal_id, llm_tokens_that_match_this_terminal) in possible_matches_for_state {
-                            if disallowed_terminals_for_range.contains(terminal_id.0) {
-                                forbidden_llm_tokens |= llm_tokens_that_match_this_terminal;
-                            }
-                        }
-                    }
-                }
-
-                let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
-                let final_allowed_tokens = glr_active_tokens - &forbidden_llm_tokens;
-                let keep_going = glr_s.is_ok();
+                let glr_active_tokens = glr_s_copy.active_state.stack.allowed_llm_tokens();
+                let keep_going = glr_s_copy.is_ok();
                 if precomputed_node_data.value.end {
-                    if !final_allowed_tokens.is_empty() {
+                    if !glr_active_tokens.is_empty() {
                         let before = final_mask_internal.borrow().len();
-                        *final_mask_internal.borrow_mut() |= &final_allowed_tokens;
+                        *final_mask_internal.borrow_mut() |= &glr_active_tokens;
                         let after = final_mask_internal.borrow().len();
                         if after > before {
-                            crate::debug!(10, "    - END NODE. final_mask len: {} -> {} (+{}) with tokens {}", before, after, after - before, format_bv(&final_allowed_tokens));
+                            crate::debug!(10, "    - END NODE. final_mask len: {} -> {} (+{}) with tokens {}", before, after, after - before, format_bv(&glr_active_tokens));
                         }
                     }
                 }
