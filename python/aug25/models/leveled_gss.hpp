@@ -874,8 +874,18 @@ public:
         return LeveledGSS(try_promote<T, Acc>(new_root));
     }
 
-    LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
+    LeveledGSS isolate_many(const std::unordered_set<T>& values, bool keep_empty) const {
         std::shared_ptr<Acc> new_empty = nullptr;
+        if (keep_empty) {
+            if (!inner->is_interface()) {
+                auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+                new_empty = ub->empty;
+            } else {
+                auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+                new_empty = it->empty;
+            }
+        }
+
         if (!inner->is_interface()) {
             auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
             auto filtered_children = std::make_shared<UpperChildren<T, Acc>>();

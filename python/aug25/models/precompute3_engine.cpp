@@ -593,7 +593,7 @@ public:
                     if (keep.empty()) continue;
 
                     stats.start("get_mask.main_loop.edge.isolate_many");
-                    Leveled child2 = popped_limited.isolate_many(keep);
+                    Leveled child2 = popped_limited.isolate_many(keep, false);
                     stats.stop("get_mask.main_loop.edge.isolate_many");
 
                     if (child2.is_empty()) {

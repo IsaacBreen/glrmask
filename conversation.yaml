@@ -2694,6 +2694,8 @@ local_system:
               auto& stats = Stats::get();
               stats.start("get_mask.main_loop.edge.apply_and_prune");
 
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> acc_memo;
+
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   stats.inc("get_mask.intersect_and_prune.calls");
 
@@ -2708,9 +2710,10 @@ local_system:
                   }
                   auto na = std::make_shared<Acc>();
                   na->llm_mask = new_mask;
+                  na->terminals_union = a->terminals_union;
                   return na;
               };
-              auto result = g.apply_and_prune(mutator);
+              auto result = g.apply_and_prune(mutator, &acc_memo);
               stats.stop("get_mask.main_loop.edge.apply_and_prune");
               return result;
           }
@@ -5743,12 +5746,7 @@ local_system:
                   }
               }
               
-              CppGSS result_gss = gss.isolate_many(values_set);
-              if (has_none) {
-                  CppGSS none_gss = gss.isolate_none();
-                  result_gss = result_gss.merge(none_gss);
-              }
-              return LeveledGssPyWrapper(result_gss);
+              return LeveledGssPyWrapper(gss.isolate_many(values_set, has_none));
           }
 
           LeveledGssPyWrapper apply(const py::function& func) const {
@@ -6424,7 +6422,7 @@ local_system:
                           if (keep.empty()) continue;
 
                           stats.start("get_mask.main_loop.edge.isolate_many");
-                          Leveled child2 = popped_limited.isolate_many(keep);
+                          Leveled child2 = popped_limited.isolate_many(keep, false);
                           stats.stop("get_mask.main_loop.edge.isolate_many");
 
                           if (child2.is_empty()) {
@@ -8034,8 +8032,18 @@ local_system:
               return LeveledGSS(try_promote<T, Acc>(new_root));
           }
 
-          LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
+          LeveledGSS isolate_many(const std::unordered_set<T>& values, bool keep_empty) const {
               std::shared_ptr<Acc> new_empty = nullptr;
+              if (keep_empty) {
+                  if (!inner->is_interface()) {
+                      auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+                      new_empty = ub->empty;
+                  } else {
+                      auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+                      new_empty = it->empty;
+                  }
+              }
+
               if (!inner->is_interface()) {
                   auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
                   auto filtered_children = std::make_shared<UpperChildren<T, Acc>>();
@@ -11305,6 +11313,8 @@ messages:
               auto& stats = Stats::get();
               stats.start("get_mask.main_loop.edge.apply_and_prune");
 
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> acc_memo;
+
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   stats.inc("get_mask.intersect_and_prune.calls");
 
@@ -11319,9 +11329,10 @@ messages:
                   }
                   auto na = std::make_shared<Acc>();
                   na->llm_mask = new_mask;
+                  na->terminals_union = a->terminals_union;
                   return na;
               };
-              auto result = g.apply_and_prune(mutator);
+              auto result = g.apply_and_prune(mutator, &acc_memo);
               stats.stop("get_mask.main_loop.edge.apply_and_prune");
               return result;
           }
@@ -14057,6 +14068,8 @@ messages:
               auto& stats = Stats::get();
               stats.start("get_mask.main_loop.edge.apply_and_prune");
 
+              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> acc_memo;
+
               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
                   stats.inc("get_mask.intersect_and_prune.calls");
 
@@ -14071,9 +14084,10 @@ messages:
                   }
                   auto na = std::make_shared<Acc>();
                   na->llm_mask = new_mask;
+                  na->terminals_union = a->terminals_union;
                   return na;
               };
-              auto result = g.apply_and_prune(mutator);
+              auto result = g.apply_and_prune(mutator, &acc_memo);
               stats.stop("get_mask.main_loop.edge.apply_and_prune");
               return result;
           }
@@ -14107,7 +14121,7 @@ messages:
       filename: python/aug25/models/precompute3_engine.cpp
   - user: |-
       CONSTRAINT_FILE="reduced_js_grammar_constraint10.json.gz" CODE_FILE=./src/example_code5.js bash python/run_benchmarks.sh python/aug25/models/precompute3_model_pure_python_standalone.py python/aug25/models/precompute3_model_cpp.py
-      Benchmark results will be saved in: benchmark_results/2025-09-27_13-50-15
+      Benchmark results will be saved in: benchmark_results/2025-09-27_13-55-46
       ---
       Baseline Model: python/aug25/models/precompute3_model_pure_python_standalone.py
       Other Models: python/aug25/models/precompute3_model_cpp.py
@@ -14126,34 +14140,34 @@ messages:
       Starting benchmark runs...
 
       >>> Running benchmark for: precompute3_model_pure_python_standalone.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code5.js --constraint-file reduced_js_grammar_constraint10.json.gz --model python/aug25/models/precompute3_model_pure_python_standalone.py --output benchmark_results/2025-09-27_13-50-15
+      python -m python.aug25.benchmark_runner --code ./src/example_code5.js --constraint-file reduced_js_grammar_constraint10.json.gz --model python/aug25/models/precompute3_model_pure_python_standalone.py --output benchmark_results/2025-09-27_13-55-46
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: reduced_js_grammar_constraint10.json.gz
       Loading model from: python/aug25/models/precompute3_model_pure_python_standalone.py
-      Model loaded in 0.0865 seconds.
+      Model loaded in 0.0315 seconds.
       Loading and tokenizing code from: src/example_code5.js
       Tokenized into 2 tokens.
 
       --- Running benchmark (2 steps) ---
-      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 761.91it/s, commit]
+      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 766.57it/s, commit]
       --- Benchmark finished ---
 
-      Benchmark results saved to: benchmark_results/2025-09-27_13-50-15/precompute3_model_pure_python_standalone_results.json
+      Benchmark results saved to: benchmark_results/2025-09-27_13-55-46/precompute3_model_pure_python_standalone_results.json
       >>> Finished benchmark for: precompute3_model_pure_python_standalone.py
 
       >>> Running benchmark for: precompute3_model_cpp.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code5.js --constraint-file reduced_js_grammar_constraint10.json.gz --model python/aug25/models/precompute3_model_cpp.py --output benchmark_results/2025-09-27_13-50-15
+      python -m python.aug25.benchmark_runner --code ./src/example_code5.js --constraint-file reduced_js_grammar_constraint10.json.gz --model python/aug25/models/precompute3_model_cpp.py --output benchmark_results/2025-09-27_13-55-46
       >>> Running with AddressSanitizer...
-      python(72923,0x1f1024800) malloc: nano zone abandoned due to inability to reserve vm space.
+      python(76519,0x1f1024800) malloc: nano zone abandoned due to inability to reserve vm space.
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: reduced_js_grammar_constraint10.json.gz
       Loading model from: python/aug25/models/precompute3_model_cpp.py
-      Model loaded in 0.0559 seconds.
+      Model loaded in 0.0420 seconds.
       Loading and tokenizing code from: src/example_code5.js
       Tokenized into 2 tokens.
 
       --- Running benchmark (2 steps) ---
-      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 274.61it/s, commit]
+      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 486.61it/s, commit]
       --- Benchmark finished ---
       --- Finalizing model ---
 
@@ -14199,43 +14213,43 @@ messages:
         get_mask.zombie_check.skipped_nodes_no_potential            : 22
 
       Timers (ms):
-        _process_token.total                                        : 0.033
-        commit.build_tokenizer_maps                                 : 0.112
-        commit.main_loop                                            : 0.094
-        commit.merge_states                                         : 0.127
-        commit.prune_and_map_gss                                    : 0.049
-        commit.total                                                : 0.410
-        get_mask.final_conversion                                   : 0.503
-        get_mask.final_conversion.from_indices                      : 0.235
-        get_mask.final_conversion.to_indices                        : 0.199
-        get_mask.initial_stats                                      : 0.355
-        get_mask.initialize_acc.difference                          : 0.037
+        _process_token.total                                        : 0.025
+        commit.build_tokenizer_maps                                 : 0.065
+        commit.main_loop                                            : 0.071
+        commit.merge_states                                         : 0.025
+        commit.prune_and_map_gss                                    : 0.048
+        commit.total                                                : 0.229
+        get_mask.final_conversion                                   : 0.231
+        get_mask.final_conversion.from_indices                      : 0.074
+        get_mask.final_conversion.to_indices                        : 0.104
+        get_mask.initial_stats                                      : 0.200
+        get_mask.initialize_acc.difference                          : 0.019
         get_mask.initialize_acc.to_indices                          : 0.001
-        get_mask.initialize_acc.total                               : 0.105
-        get_mask.initialize_acc.union                               : 0.004
-        get_mask.intersect_and_prune.intersection                   : 0.419
-        get_mask.main_loop                                          : 4.070
-        get_mask.main_loop.edge.apply_and_prune                     : 1.061
-        get_mask.main_loop.edge.gss_merge                           : 0.153
-        get_mask.main_loop.edge.isolate_many                        : 0.080
-        get_mask.main_loop.edge.peek_and_filter                     : 0.156
-        get_mask.main_loop.edge.popn                                : 0.042
-        get_mask.main_loop.end_node.final_mask_union                : 0.031
-        get_mask.main_loop.end_node.reduce_acc                      : 0.028
-        get_mask.seeding                                            : 0.420
-        get_mask.seeding.gss.apply                                  : 0.350
-        get_mask.total                                              : 5.414
-        get_mask.zombie_check                                       : 0.387
+        get_mask.initialize_acc.total                               : 0.068
+        get_mask.initialize_acc.union                               : 0.002
+        get_mask.intersect_and_prune.intersection                   : 0.247
+        get_mask.main_loop                                          : 2.198
+        get_mask.main_loop.edge.apply_and_prune                     : 0.542
+        get_mask.main_loop.edge.gss_merge                           : 0.124
+        get_mask.main_loop.edge.isolate_many                        : 0.047
+        get_mask.main_loop.edge.peek_and_filter                     : 0.040
+        get_mask.main_loop.edge.popn                                : 0.030
+        get_mask.main_loop.end_node.final_mask_union                : 0.025
+        get_mask.main_loop.end_node.reduce_acc                      : 0.027
+        get_mask.seeding                                            : 0.252
+        get_mask.seeding.gss.apply                                  : 0.217
+        get_mask.total                                              : 3.023
+        get_mask.zombie_check                                       : 0.243
       ---------------------------------
 
 
-      Benchmark results saved to: benchmark_results/2025-09-27_13-50-15/precompute3_model_cpp_results.json
+      Benchmark results saved to: benchmark_results/2025-09-27_13-55-46/precompute3_model_cpp_results.json
       >>> Finished benchmark for: precompute3_model_cpp.py
 
       All benchmark runs completed.
       ---
       Analyzing results and generating plots...
-      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-27_13-50-15/precompute3_model_cpp_results.json benchmark_results/2025-09-27_13-50-15/precompute3_model_pure_python_standalone_results.json --baseline precompute3_model_pure_python_standalone --output-dir benchmark_results/2025-09-27_13-50-15/analysis
+      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-27_13-55-46/precompute3_model_cpp_results.json benchmark_results/2025-09-27_13-55-46/precompute3_model_pure_python_standalone_results.json --baseline precompute3_model_pure_python_standalone --output-dir benchmark_results/2025-09-27_13-55-46/analysis
       Selected baseline: precompute3_model_pure_python_standalone
       Mask mismatch at token index 1 for model precompute3_model_cpp
       Baseline: ((0, 1055), (1060, 1060), (1062, 1713), (1715, 1871))
@@ -14243,29 +14257,29 @@ messages:
       --- Benchmark Summary ---
                                                equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
       model                                                                                                                                                 
-      precompute3_model_cpp                             ❌                    1      2     2.9142    1.0474    2.1735    2.9142    3.5067    3.6400    3.6548
-      precompute3_model_pure_python_standalone          ✅                    0      2     0.9017    0.0742    0.8493    0.9017    0.9436    0.9531    0.9541
+      precompute3_model_cpp                             ❌                    1      2     1.7159    0.5698    1.3130    1.7159    2.0382    2.1107    2.1188
+      precompute3_model_pure_python_standalone          ✅                    0      2     0.9219    0.0294    0.9011    0.9219    0.9386    0.9423    0.9427
 
       Baseline: precompute3_model_pure_python_standalone
       ✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch
 
-      Saving plots to benchmark_results/2025-09-27_13-50-15/analysis...
-      Saved linear scale plot to benchmark_results/2025-09-27_13-50-15/analysis/timings_per_token_linear.png
-      Saved log scale plot to benchmark_results/2025-09-27_13-50-15/analysis/timings_per_token_log.png
-      Saved box plot to benchmark_results/2025-09-27_13-50-15/analysis/timings_distribution_boxplot.png
-      Saved commit linear scale plot to benchmark_results/2025-09-27_13-50-15/analysis/commit_timings_per_token_linear.png
-      Saved commit log scale plot to benchmark_results/2025-09-27_13-50-15/analysis/commit_timings_per_token_log.png
-      Saved combined linear scale plot to benchmark_results/2025-09-27_13-50-15/analysis/combined_timings_per_token_linear.png
-      Saved combined log scale plot to benchmark_results/2025-09-27_13-50-15/analysis/combined_timings_per_token_log.png
-      Saved stacked area plot to benchmark_results/2025-09-27_13-50-15/analysis/timings_stacked_area.png
-      Saved total time linear scale plot to benchmark_results/2025-09-27_13-50-15/analysis/total_timings_per_token_linear.png
-      Saved total time log scale plot to benchmark_results/2025-09-27_13-50-15/analysis/total_timings_per_token_log.png
+      Saving plots to benchmark_results/2025-09-27_13-55-46/analysis...
+      Saved linear scale plot to benchmark_results/2025-09-27_13-55-46/analysis/timings_per_token_linear.png
+      Saved log scale plot to benchmark_results/2025-09-27_13-55-46/analysis/timings_per_token_log.png
+      Saved box plot to benchmark_results/2025-09-27_13-55-46/analysis/timings_distribution_boxplot.png
+      Saved commit linear scale plot to benchmark_results/2025-09-27_13-55-46/analysis/commit_timings_per_token_linear.png
+      Saved commit log scale plot to benchmark_results/2025-09-27_13-55-46/analysis/commit_timings_per_token_log.png
+      Saved combined linear scale plot to benchmark_results/2025-09-27_13-55-46/analysis/combined_timings_per_token_linear.png
+      Saved combined log scale plot to benchmark_results/2025-09-27_13-55-46/analysis/combined_timings_per_token_log.png
+      Saved stacked area plot to benchmark_results/2025-09-27_13-55-46/analysis/timings_stacked_area.png
+      Saved total time linear scale plot to benchmark_results/2025-09-27_13-55-46/analysis/total_timings_per_token_linear.png
+      Saved total time log scale plot to benchmark_results/2025-09-27_13-55-46/analysis/total_timings_per_token_log.png
 
       ---
       Benchmark analysis complete.
       Baseline: precompute3_model_pure_python_standalone
-      Summary printed above. Plots are saved in: benchmark_results/2025-09-27_13-50-15/analysis
-      Full JSON results are in: benchmark_results/2025-09-27_13-50-15
+      Summary printed above. Plots are saved in: benchmark_results/2025-09-27_13-55-46/analysis
+      Full JSON results are in: benchmark_results/2025-09-27_13-55-46
     metadata:
   - user: Fix this discrepency
     metadata:
@@ -14286,83 +14300,140 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      I've analyzed the benchmark results and found a discrepancy in the C++ implementation that causes both the performance degradation and the mask mismatch you're seeing. The issue lies in the `get_mask` function, specifically in how it applies LLM token masks during the trie traversal. The C++ code was missing a critical memoization step for accumulator transformations that is present in the Python version. This leads to re-computing transformations for the same accumulator object multiple times, slowing down the process and potentially altering the structure of the Generalized Symbol Stack (GSS) in a way that leads to an incorrect final mask.
+      I've identified a discrepancy in how `isolate_many` is implemented and used in the C++ code compared to the Python reference. The C++ version was incorrectly discarding the "empty stack" accumulator when filtering, leading to the mask mismatch.
 
-      Here are the steps to apply the fix:
+      Here are the step-by-step instructions to fix the issue, followed by the corresponding git diffs.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `python/aug25/models/precompute3_engine.cpp`**.
+      1.  **Update the C++ LeveledGSS Header (`leveled_gss.hpp`)**
+          -   Open the file `python/aug25/models/leveled_gss.hpp`.
+          -   Locate the `isolate_many` method within the `LeveledGSS` class.
+          -   Change its signature to accept a boolean flag, `keep_empty`, which will control whether to preserve the accumulator for empty stacks, just like the Python version does.
+          -   Replace the entire body of the function with the corrected implementation that uses this flag.
 
-      2.  **Locate the `intersect_llm_mask` method.** It should be near the end of the file.
+      2.  **Update the Python Wrapper for LeveledGSS (`leveled_gss_py.cpp`)**
+          -   Open the file `python/aug25/models/leveled_gss_py.cpp`.
+          -   Find the `isolate_many` method in the `LeveledGssPyWrapper` class.
+          -   Modify its implementation to call the updated C++ `isolate_many` method in a single pass. This removes the previous, incorrect logic of splitting the operation and merging the results.
 
-      3.  **Modify the method to add memoization and correctly copy accumulator fields.** You will add a memoization cache, pass it to the `apply_and_prune` call, and ensure the new accumulator preserves all necessary data.
-
-          *   **Before** the `mutator` lambda definition, add the following line to create the cache:
-              ```cpp
-              std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> acc_memo;
-              ```
-
-          *   **Inside** the `mutator` lambda, after the line `na->llm_mask = new_mask;`, add this line to copy the `terminals_union` field, ensuring the new accumulator is a faithful transformation of the old one:
-              ```cpp
-              na->terminals_union = a->terminals_union;
-              ```
-
-          *   **Change** the line that calls `g.apply_and_prune` to pass a pointer to the memoization cache.
-              *   **From:**
-                  ```cpp
-                  auto result = g.apply_and_prune(mutator);
-                  ```
-              *   **To:**
-                  ```cpp
-                  auto result = g.apply_and_prune(mutator, &acc_memo);
-                  ```
-
-      These changes will align the C++ engine's behavior with the Python reference, resolving both the performance and correctness issues.
+      3.  **Update the C++ Engine (`precompute3_engine.cpp`)**
+          -   Open the file `python/aug25/models/precompute3_engine.cpp`.
+          -   Inside the `get_mask` method, find the call to `popped_limited.isolate_many(keep)`.
+          -   Update this call to pass `false` as the second argument (`keep_empty`). This is correct because this specific call site is only filtering by parser state IDs and should not be preserving empty stacks.
 
       ### Git Diffs
 
-      Here is the git diff for the required changes.
+      Here are the git diffs to apply the changes.
+
+      ```diff
+      diff --git a/python/aug25/models/leveled_gss.hpp b/python/aug25/models/leveled_gss.hpp
+      --- a/python/aug25/models/leveled_gss.hpp
+      +++ b/python/aug25/models/leveled_gss.hpp
+      @@ -1000,35 +1000,46 @@
+               return LeveledGSS(try_promote<T, Acc>(new_root));
+           }
+       
+      -    LeveledGSS isolate_many(const std::unordered_set<T>& values) const {
+      +    LeveledGSS isolate_many(const std::unordered_set<T>& values, bool keep_empty) const {
+               std::shared_ptr<Acc> new_empty = nullptr;
+      +        if (keep_empty) {
+      +            if (!inner->is_interface()) {
+      +                auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+      +                new_empty = ub->empty;
+      +            } else {
+      +                auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+      +                new_empty = it->empty;
+      +            }
+      +        }
+      +
+               if (!inner->is_interface()) {
+                   auto ub = std::static_pointer_cast<UpperBranch<T, Acc>>(inner);
+                   auto filtered_children = std::make_shared<UpperChildren<T, Acc>>();
+                   for (auto &kv : *ub->_children) {
+                       if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
+                   }
+                   auto res = std::make_shared<UpperBranch<T, Acc>>(std::move(filtered_children), new_empty);
+                   return LeveledGSS(try_promote<T, Acc>(res));
+               } else {
+                   auto it = std::static_pointer_cast<Interface<T, Acc>>(inner);
+                   auto filtered_children = std::make_shared<LowerChildren<T>>();
+                   for (auto &kv : *it->_children) {
+                       if (values.count(kv.first)) (*filtered_children)[kv.first] = kv.second;
+                   }
+                   if (!filtered_children->empty()) {
+                       auto res = std::make_shared<Interface<T, Acc>>(std::move(filtered_children), it->acc, new_empty);
+                       return LeveledGSS(res);
+                   } else {
+                       auto res = std::make_shared<UpperBranch<T, Acc>>(UpperChildren<T, Acc>{}, new_empty);
+                       return LeveledGSS(try_promote<T, Acc>(res));
+                   }
+               }
+           }
+       
+           // Apply: Acc -> NewAcc (but we keep Acc type same for simplicity here)
+           LeveledGSS apply(
+
+      ```
+
+      ```diff
+      diff --git a/python/aug25/models/leveled_gss_py.cpp b/python/aug25/models/leveled_gss_py.cpp
+      --- a/python/aug25/models/leveled_gss_py.cpp
+      +++ b/python/aug25/models/leveled_gss_py.cpp
+      @@ -100,14 +100,7 @@
+                   }
+               }
+               
+      -        CppGSS result_gss = gss.isolate_many(values_set);
+      -        if (has_none) {
+      -            CppGSS none_gss = gss.isolate_none();
+      -            result_gss = result_gss.merge(none_gss);
+      -        }
+      -        return LeveledGssPyWrapper(result_gss);
+      +        return LeveledGssPyWrapper(gss.isolate_many(values_set, has_none));
+           }
+       
+           LeveledGssPyWrapper apply(const py::function& func) const {
+
+      ```
 
       ```diff
       diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
-      index 9611111..009600c 100644
       --- a/python/aug25/models/precompute3_engine.cpp
       +++ b/python/aug25/models/precompute3_engine.cpp
-      @@ -1403,6 +1403,8 @@
-               auto& stats = Stats::get();
-               stats.start("get_mask.main_loop.edge.apply_and_prune");
+      @@ -680,7 +680,7 @@
+                           if (keep.empty()) continue;
        
-      +        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> acc_memo;
-      +
-               auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
-                   stats.inc("get_mask.intersect_and_prune.calls");
+                           stats.start("get_mask.main_loop.edge.isolate_many");
+      -                    Leveled child2 = popped_limited.isolate_many(keep);
+      +                    Leveled child2 = popped_limited.isolate_many(keep, false);
+                           stats.stop("get_mask.main_loop.edge.isolate_many");
        
-      @@ -1417,9 +1419,11 @@
-                   }
-                   auto na = std::make_shared<Acc>();
-                   na->llm_mask = new_mask;
-      +            na->terminals_union = a->terminals_union;
-                   return na;
-               };
-      -        auto result = g.apply_and_prune(mutator);
-      +        auto result = g.apply_and_prune(mutator, &acc_memo);
-               stats.stop("get_mask.main_loop.edge.apply_and_prune");
-               return result;
-           }
+                           if (child2.is_empty()) {
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 3 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/leveled_gss.hpp
+      Applying patch to 'python/aug25/models/leveled_gss.hpp' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/leveled_gss.hpp.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/aug25/models/leveled_gss_py.cpp
+      Applying patch to 'python/aug25/models/leveled_gss_py.cpp' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/leveled_gss_py.cpp.
+
+      --- Processing Diff Block 3 ---
       Identified target file: python/aug25/models/precompute3_engine.cpp
       Applying patch to 'python/aug25/models/precompute3_engine.cpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_engine.cpp.
     metadata:
-  - user: 'Changes committed with message: "Fix: Add memoization to apply_and_prune
-      in get_mask to ensure correctness and performance"'
+  - user: 'Changes committed with message: "Fix: Correct LeveledGSS::isolate_many
+      to handle empty accumulator and update Python wrapper/usage to resolve mask
+      mismatch"'
     metadata:
 ...
