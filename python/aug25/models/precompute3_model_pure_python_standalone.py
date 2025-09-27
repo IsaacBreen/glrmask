@@ -1155,9 +1155,7 @@ class Model(GraphProvider):
                 shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
 
             def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
-                popped_gss = gss_to_reduce
-                for _ in range(reduce_action.len):
-                    popped_gss = popped_gss.pop()
+                popped_gss = gss_to_reduce.popn(reduce_action.len)
                 for from_state_id in popped_gss.peek():
                     goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
                     goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
