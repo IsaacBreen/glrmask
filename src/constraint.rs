@@ -109,9 +109,10 @@ pub type Precomputed3 = BTreeMap<TokenizerStateID, PrecomputeNode3Index>;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMVocab {
     pub llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
-    pub(crate) max_original_llm_token_id: usize,
-    pub original_to_internal_id_bimap: BiBTreeMap<usize, usize>,
-    pub(crate) internal_max_llm_token: usize
+    pub max_original_llm_token_id: usize,
+    pub original_to_internal_id_bimap: BTreeMap<usize, usize>,
+    pub internal_to_original_: BTreeMap<usize, BTreeSet<usize>>,
+    pub internal_max_llm_token: usize
 }
 
 #[derive(Debug, Clone)]
