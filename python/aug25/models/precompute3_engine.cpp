@@ -429,14 +429,14 @@ public:
         stats.inc("commit.tokenizer_states_out", state_.size());
 
         if (debug_logging_) {
-            std::cout << "\n--- CPP: State after commit ---" << std::endl;
+            std::cout << "\n--- State after commit ---" << std::endl;
             std::vector<int> keys;
             for(auto const& [key, val] : state_) keys.push_back(key);
             std::sort(keys.begin(), keys.end());
             for (int tsid : keys) {
                 std::cout << "  TSID " << tsid << ": " << gss_to_string(state_.at(tsid)) << std::endl;
             }
-            std::cout << "-------------------------------" << std::endl << std::endl;
+            std::cout << "--------------------------" << std::endl << std::endl;
         }
         stats.stop("commit.total");
     }
@@ -507,14 +507,14 @@ public:
         stats.stop("get_mask.seeding");
 
         if (debug_logging_) {
-            std::cout << "\n--- CPP: get_mask initial values ---" << std::endl;
+            std::cout << "\n--- get_mask initial values ---" << std::endl;
             std::vector<int> keys;
             for(auto const& [key, val] : values) keys.push_back(key);
             std::sort(keys.begin(), keys.end());
             for (int node_id : keys) {
                 std::cout << "  Node " << node_id << ": " << gss_to_string(values.at(node_id)) << std::endl;
             }
-            std::cout << "--------------------------------------" << std::endl << std::endl;
+            std::cout << "---------------------------------" << std::endl << std::endl;
         }
 
 
@@ -539,7 +539,7 @@ public:
             Leveled gss_node = std::move(itv->second);
 
             if (debug_logging_) {
-                std::cout << "\n--- CPP: get_mask processing node " << node << " ---" << std::endl;
+                std::cout << "\n--- get_mask processing node " << node << " ---" << std::endl;
                 std::cout << "  GSS: " << gss_to_string(gss_node) << std::endl;
                 std::cout << "  Current final_mask: " << final_mask.repr() << std::endl;
             }
@@ -684,9 +684,9 @@ public:
         stats.stop("get_mask.total");
 
         if (debug_logging_) {
-            std::cout << "\n--- CPP: get_mask final internal mask ---" << std::endl;
+            std::cout << "\n--- get_mask final internal mask ---" << std::endl;
             std::cout << "  Mask: " << final_mask.repr() << std::endl;
-            std::cout << "-----------------------------------------" << std::endl << std::endl;
+            std::cout << "------------------------------------" << std::endl << std::endl;
         }
 
         py::gil_scoped_acquire acquire; // Re-acquire GIL before returning to Python

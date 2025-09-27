@@ -811,7 +811,7 @@ class PyAcc:
 
     def __repr__(self):
         # to_indices is slow, but this is for debug.
-        mask_size = len(self.llm_mask.to_indices())
+        mask_size = len(self.llm_mask)
         return (
             f"PyAcc(terminals_union_size={len(self.terminals_union)}, "
             f"llm_mask_size={mask_size})"
@@ -1128,10 +1128,10 @@ class Model(GraphProvider):
         self.state = merged_states
 
         if os.environ.get("RUST_LOG") == "debug":
-            print("\n--- PY: State after commit ---")
+            print("\n--- State after commit ---")
             for tsid, gss in sorted(self.state.items()):
                 print(f"  TSID {tsid}: {gss.to_stacks()}")
-            print("------------------------------\n")
+            print("--------------------------\n")
 
 
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
@@ -1241,10 +1241,10 @@ class Model(GraphProvider):
                 hp(depth_heap, (-d, r))
 
         if os.environ.get("RUST_LOG") == "debug":
-            print("\n--- PY: get_mask initial values ---")
+            print("\n--- get_mask initial values ---")
             for node_id, gss in sorted(values.items()):
                 print(f"  Node {node_id}: {gss.to_stacks()}")
-            print("-------------------------------------\n")
+            print("---------------------------------\n")
 
         def enqueue(d: int, n: int) -> None:
             if n not in enqueued_nodes:
@@ -1258,7 +1258,7 @@ class Model(GraphProvider):
             enqueued_nodes.remove(node)
 
             if os.environ.get("RUST_LOG") == "debug":
-                print(f"\n--- PY: get_mask processing node {node} ---")
+                print(f"\n--- get_mask processing node {node} ---")
                 print(f"  GSS: {gss_node.to_stacks()}")
                 print(f"  Current final_mask: {final_mask.to_ranges()}")
 
@@ -1344,9 +1344,9 @@ class Model(GraphProvider):
                 original_indices.append(self.internal_to_original_map[i])
 
         if os.environ.get("RUST_LOG") == "debug":
-            print(f"\n--- PY: get_mask final internal mask ---")
+            print(f"\n--- get_mask final internal mask ---")
             print(f"  Mask: {final_mask.to_ranges()}")
-            print("----------------------------------------\n")
+            print("------------------------------------\n")
 
 
         return RangeSet.from_indices(original_indices)

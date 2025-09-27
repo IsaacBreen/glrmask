@@ -108,16 +108,16 @@ public:
 
     std::string repr() const {
         std::stringstream ss;
-        ss << "RangeSet({";
+        ss << "[";
         bool first = true;
         for (const auto& interval : set) {
             if (!first) {
                 ss << ", ";
             }
-            ss << "[" << interval.lower() << ", " << interval.upper() << "]";
+            ss << "(" << interval.lower() << ", " << interval.upper() << ")";
             first = false;
         }
-        ss << "})";
+        ss << "]";
         return ss.str();
     }
 
