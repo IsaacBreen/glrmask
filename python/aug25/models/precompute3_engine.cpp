@@ -1053,20 +1053,14 @@ private:
             auto na = std::make_shared<Acc>();
             na->llm_mask = acc->llm_mask;
             RangeSet rs_empty = RangeSet::empty();
-            // This logic must mirror the Python version to ensure terminals_union is pruned
-            // and does not grow indefinitely. We iterate over the small state_map, not the
-            // potentially large terminals_union.
+
             for (auto const& [old_sid, new_sid] : state_map) {
                 auto it = acc->terminals_union.find(old_sid);
-                if (it != acc->terminals_union.end()) {
-                    const RangeSet& bv_source = it->second;
-                    auto it_new = na->terminals_union.find(new_sid);
-                    if (it_new != na->terminals_union.end()) {
-                        it_new->second = it_new->second.union_with(bv_source);
-                    } else {
-                        na->terminals_union.emplace(new_sid, bv_source);
-                    }
-                }
+                const RangeSet& bv_source = (it != acc->terminals_union.end()) ? it->second : rs_empty;
+                
+                // operator[] ensures the key exists, default-constructing an empty RangeSet if needed.
+                // This correctly mirrors Python's defaultdict behavior.
+                na->terminals_union[new_sid] = na->terminals_union[new_sid].union_with(bv_source);
             }
             return na;
         };
