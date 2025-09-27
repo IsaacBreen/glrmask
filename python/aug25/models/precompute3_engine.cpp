@@ -564,9 +564,16 @@ public:
                 auto reduced = gss_node.reduce_acc();
                 stats.stop("get_mask.main_loop.end_node.reduce_acc");
                 if (reduced) {
+                    if (debug_logging_) {
+                        std::cout << "    -> Is end node. Reduced acc mask: " << reduced->llm_mask.repr() << std::endl;
+                        std::cout << "       final_mask before union: " << final_mask.repr() << std::endl;
+                    }
                     stats.start("get_mask.main_loop.end_node.final_mask_union");
                     final_mask = final_mask.union_with(reduced->llm_mask);
                     stats.stop("get_mask.main_loop.end_node.final_mask_union");
+                    if (debug_logging_) {
+                        std::cout << "       final_mask after union:  " << final_mask.repr() << std::endl;
+                    }
                 }
             }
 
@@ -574,16 +581,33 @@ public:
             stats.start("get_mask.zombie_check");
             // Use the precomputed union of edge masks for this node.
             RangeSet potential_new_tokens = info.llm_bv_union.difference_with(final_mask);
+            if (debug_logging_) {
+                std::cout << "  Zombie check: potential_new_tokens=" << potential_new_tokens.repr() << std::endl;
+            }
             if (potential_new_tokens.is_empty()) {
+                if (debug_logging_) {
+                    std::cout << "    -> Skipping node (no potential new tokens)" << std::endl;
+                }
                 stats.inc("get_mask.zombie_check.skipped_nodes_no_potential");
                 stats.stop("get_mask.zombie_check");
                 continue;
             }
             auto gss_mask_acc = gss_node.reduce_acc();
-            if (gss_mask_acc && gss_mask_acc->llm_mask.intersection_with(potential_new_tokens).is_empty()) {
-                stats.inc("get_mask.zombie_check.skipped_nodes_no_overlap");
-                stats.stop("get_mask.zombie_check");
-                continue;
+            if (gss_mask_acc) {
+                RangeSet gss_potential_overlap = gss_mask_acc->llm_mask.intersection_with(potential_new_tokens);
+                if (debug_logging_) {
+                    std::cout << "  Zombie check: gss_potential_overlap=" << gss_potential_overlap.repr() << std::endl;
+                }
+                if (gss_potential_overlap.is_empty()) {
+                    if (debug_logging_) {
+                        std::cout << "    -> Skipping node (gss has no overlap with potential)" << std::endl;
+                    }
+                    stats.inc("get_mask.zombie_check.skipped_nodes_no_overlap");
+                    stats.stop("get_mask.zombie_check");
+                    continue;
+                }
+            } else if (debug_logging_) {
+                std::cout << "  Zombie check: gss_mask_acc is null" << std::endl;
             }
             stats.stop("get_mask.zombie_check");
 

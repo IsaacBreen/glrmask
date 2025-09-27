@@ -1265,17 +1265,34 @@ class Model(GraphProvider):
             if is_end(node):
                 reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                 if reduced_acc:
+                    if os.environ.get("RUST_LOG") == "debug":
+                        print(f"    -> Is end node. Reduced acc mask: {reduced_acc.llm_mask.to_ranges()}")
+                        print(f"       final_mask before union: {final_mask.to_ranges()}")
                     final_mask = final_mask.union(reduced_acc.llm_mask)
+                    if os.environ.get("RUST_LOG") == "debug":
+                        print(f"       final_mask after union:  {final_mask.to_ranges()}")
 
             # Zombie traversal avoidance
             node_llm_bv_union = arena.get(node, {}).get("llm_bv_union", RangeSet.empty())
             potential_new_tokens = node_llm_bv_union.difference(final_mask)
+            if os.environ.get("RUST_LOG") == "debug":
+                print(f"  Zombie check: potential_new_tokens={potential_new_tokens.to_ranges()}")
             if potential_new_tokens.is_empty():
+                if os.environ.get("RUST_LOG") == "debug":
+                    print("    -> Skipping node (no potential new tokens)")
                 continue
 
             gss_mask_acc = gss_node.reduce_acc()
-            if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
-                continue
+            if gss_mask_acc:
+                gss_potential_overlap = gss_mask_acc.llm_mask.intersection(potential_new_tokens)
+                if os.environ.get("RUST_LOG") == "debug":
+                    print(f"  Zombie check: gss_potential_overlap={gss_potential_overlap.to_ranges()}")
+                if gss_potential_overlap.is_empty():
+                    if os.environ.get("RUST_LOG") == "debug":
+                        print("    -> Skipping node (gss has no overlap with potential)")
+                    continue
+            elif os.environ.get("RUST_LOG") == "debug":
+                print("  Zombie check: gss_mask_acc is None")
 
             # Traverse edges and propagate masks
             edges = arena.get(node, {}).get("children") or []
