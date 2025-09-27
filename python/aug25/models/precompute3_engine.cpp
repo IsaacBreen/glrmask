@@ -53,7 +53,7 @@ struct Acc : public std::enable_shared_from_this<Acc> {
         // Union llm masks
         n->llm_mask = llm_mask.union_with(other->llm_mask);
 
-        // Merge terminals_union by RangeSet union per key
+        // Merge terminals_union by RangeSet intersection per key, to match Python impl
         // Optimization: copy the larger map, iterate the smaller one.
         if (terminals_union.size() < other->terminals_union.size()) {
             n->terminals_union = other->terminals_union;
@@ -62,7 +62,7 @@ struct Acc : public std::enable_shared_from_this<Acc> {
                 if (it == n->terminals_union.end()) {
                     n->terminals_union.emplace(key, val);
                 } else {
-                    it->second = it->second.union_with(val);
+                    it->second = it->second.intersection_with(val);
                 }
             }
         } else {
@@ -72,7 +72,7 @@ struct Acc : public std::enable_shared_from_this<Acc> {
                 if (it == n->terminals_union.end()) {
                     n->terminals_union.emplace(key, val);
                 } else {
-                    it->second = it->second.union_with(val);
+                    it->second = it->second.intersection_with(val);
                 }
             }
         }
@@ -973,7 +973,7 @@ private:
                     const RangeSet& bv_source = it->second;
                     auto it_new = na->terminals_union.find(new_sid);
                     if (it_new != na->terminals_union.end()) {
-                        it_new->second = it_new->second.union_with(bv_source);
+                        it_new->second = it_new->second.intersection_with(bv_source);
                     } else {
                         na->terminals_union.emplace(new_sid, bv_source);
                     }
