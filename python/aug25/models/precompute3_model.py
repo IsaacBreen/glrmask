@@ -3,7 +3,7 @@ import time
 import heapq
 import collections
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 
 from ..common_interface import GraphProvider, RangeSet
 import _sep1 as ffi  # the compiled module
@@ -124,19 +124,27 @@ class Model(GraphProvider):
     def commit(self, token_id: int):
         self.constraint_state.commit(token_id)
 
-    def get_mask(self) -> RangeSet:
+    def get_mask(self, time_budget: Optional[Union[float, Tuple[float, float]]] = None) -> RangeSet:
         """
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. This is the performance-critical routine.
         """
+        if time_budget is None:
+            phase1_budget = phase2_budget = float('inf')
+        elif isinstance(time_budget, (int, float)):
+            phase1_budget = phase2_budget = float(time_budget)
+        else:
+            try:
+                phase1_budget, phase2_budget = map(float, time_budget)
+            except (TypeError, ValueError):
+                raise ValueError("time_budget must be a number or a sequence of two numbers")
+
         state_map: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
 
         print("states in get_mask:")
         for k, v in state_map.items():
             print(f"state {k}: gss_ptr={v.ptr()} flat={self.gss_from_ffi_node(v)}")
 
-
-        # t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
 
@@ -153,8 +161,12 @@ class Model(GraphProvider):
         roots_map = self.roots_map
         max_depth = self.max_depth
 
+        t_start_phase1 = time.time()
         print("\n--- Seeding work queue ---")
         for sid, gss in state_map.items():
+            if time.time() - t_start_phase1 > phase1_budget:
+                print("Phase 1 time budget exceeded.")
+                break
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
@@ -204,7 +216,14 @@ class Model(GraphProvider):
 
         print("\n--- Main loop ---")
         iter_count = 0
+        t_start_phase2 = time.time()
         while True:
+            if time.time() - t_start_phase2 > phase2_budget:
+                if phase2_budget > 0:
+                    print("Phase 2 time budget exceeded.")
+                else:
+                    print("Phase 2 skipped due to time budget <= 0.")
+                break
             iter_count += 1
             # Pop the smallest depth bucket (skip stale heap entries)
             node_indices: Optional[set[int]] = None
