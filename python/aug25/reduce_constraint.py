@@ -487,24 +487,48 @@ def ddmin_dests(
             node = values_dict.get(nid)
             if not node:
                 continue
-            children = node.get("children") or []
-            for ci in range(len(children)):
-                if time.time() >= time_budget_deadline:
+            # Iterate over children using a dynamic while loop so we can handle mutations safely.
+            ci = 0
+            while time.time() < time_budget_deadline:
+                node = values_dict.get(nid)
+                if not node:
                     break
-                child = children[ci]
-                edge_key, dests = child
+                children = node.get("children") or []
+                if ci >= len(children):
+                    break
+
+                # We will repeatedly try to remove destinations from child at index ci.
                 di = 0
-                # Try removing each destination
-                while di < len(dests) and time.time() < time_budget_deadline:
+                child_disappeared = False
+
+                while time.time() < time_budget_deadline:
+                    # Re-sync current node/children/dests on every attempt to avoid stale indices.
+                    node_now = values_dict.get(nid)
+                    if not node_now:
+                        child_disappeared = True
+                        break
+                    children_now = node_now.get("children") or []
+                    if ci >= len(children_now):
+                        # The child at ci was removed by a prior accepted reduction.
+                        child_disappeared = True
+                        break
+
+                    edge_key_now, dests_now = children_now[ci]
+                    if di >= len(dests_now):
+                        # Exhausted all dests for this child
+                        break
+
                     dests_checked_in_pass += 1
                     print(f"    - Checks: {dests_checked_in_pass}, Reductions: {dests_removed_in_pass}", end='\r')
+
+                    # Build a trial that removes dests_now[di]
                     trial_values = {k: dict(v) for k, v in values_dict.items()}
                     trial_children = list((trial_values[nid].get("children") or []))
                     ekey, dlist = trial_children[ci]
                     new_dlist = list(dlist)
                     new_dlist.pop(di)
                     if not new_dlist:
-                        # If removing this dest empties the child, drop the whole child
+                        # If removing this dest empties the child, drop the whole child.
                         trial_children.pop(ci)
                     else:
                         trial_children[ci] = [ekey, new_dlist]
@@ -519,23 +543,22 @@ def ddmin_dests(
                         repo_root, cand_path, code_file, baseline_model, candidate_model
                     )
                     if ok:
-                        # Accept deletion
+                        # Accept deletion and keep working on the same di position
                         values_dict = pruned_values
-                        node = values_dict.get(nid)  # may be gone; refresh
                         improved = True
                         dests_removed_in_pass += 1
-                        # Keep same di (next element shifted into this position)
-                        # Also refresh children reference
-                        if not node:
-                            break
-                        children = node.get("children") or []
-                        if ci < len(children):
-                            edge_key, dests = children[ci]
-                        else:
-                            break
+                        # Don't increment di: the next element (if any) has shifted into di
                         continue
                     else:
+                        # Try the next destination
                         di += 1
+
+                if child_disappeared:
+                    # The child at index ci was removed; do not advance ci so the next child shifts into this index.
+                    continue
+                else:
+                    # Move to the next child
+                    ci += 1
         
         print() # Newline for the \r progress
         if dests_removed_in_pass > 0:
