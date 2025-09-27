@@ -295,6 +295,8 @@ class Model(GraphProvider):
         model._reorder_llm_tokens_for_range_minimization()
         # Run graph optimization after LLM token reorder, as requested
         model._optimize_state_masks_and_edges()
+        # Additional compaction: merge equivalent subgraphs and coalesce edges
+        model._post_optimize_merge_subgraphs_and_edges()
         model._merge_equivalent_llm_tokens()
         model._reorder_llm_tokens_for_range_minimization()
         return model
@@ -1734,3 +1736,275 @@ class Model(GraphProvider):
               f"edges +{repl_stats['edges_added']}/-{repl_stats['edges_removed']}, "
               f"nodes removed: {repl_stats['nodes_removed']}")
 
+    # =====================================================
+    # Post-optimization: subtree merging and edge coalescing
+    # =====================================================
+    def _rs_key(self, rs: RangeSet) -> Tuple[Tuple[int, int], ...]:
+        """
+        Canonical key for a RangeSet: tuple of (start, end) int pairs.
+        Robust against different RangeSet implementations.
+        """
+        try:
+            return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+        except Exception:
+            return ()
+
+    def _normalize_all_nodes(self) -> Dict[str, int]:
+        """
+        For each node:
+          - Coalesce duplicate dest entries to the same dest_id by unioning masks.
+          - Merge parallel edge groups that share the same (pop, dests) by unioning their LLM masks.
+          - Recompute node.llm_bv_union.
+        Returns simple stats.
+        """
+        stats = {
+            "groups_before": 0,
+            "groups_after": 0,
+            "edges_before": self._count_edges(),
+            "edges_after": 0,
+        }
+        for node in self.arena.values():
+            children = node.children
+            stats["groups_before"] += len(children)
+            if not children:
+                node.llm_bv_union = RangeSet.empty()
+                continue
+
+            # Group by (pop, dest signature)
+            # dest signature = sorted((dest_id, rs_key(state_bv))) pairs
+            grouped: Dict[
+                Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]],
+                Dict[str, Any]
+            ] = {}
+
+            for (pop, llm_bv), dests in children:
+                # 1) Union duplicate dest entries per dest_id for this group
+                dest_union: Dict[int, StateIDSet] = {}
+                for dest_id, state_bv in dests:
+                    di = int(dest_id)
+                    if di in dest_union:
+                        dest_union[di] = dest_union[di].union(state_bv)
+                    else:
+                        dest_union[di] = state_bv
+
+                # 2) Canonical dest signature
+                # Keep actual dest list sorted by dest_id for reconstruction
+                dest_items_sorted = sorted(dest_union.items(), key=lambda x: int(x[0]))
+                dest_sig = tuple(
+                    (int(did), self._rs_key(sbv)) for did, sbv in dest_items_sorted
+                )
+                key = (int(pop), dest_sig)
+
+                # 3) Accumulate by unioning LLM masks across parallel groups
+                entry = grouped.get(key)
+                if entry is None:
+                    grouped[key] = {
+                        "llm": llm_bv,
+                        "dests": [(int(did), sbv) for did, sbv in dest_items_sorted],
+                    }
+                else:
+                    grouped[key]["llm"] = entry["llm"].union(llm_bv)
+
+            # 4) Rebuild children deterministically
+            new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+            llm_union = RangeSet.empty()
+            for (pop, _dest_sig), data in grouped.items():
+                llm = data["llm"]
+                if llm.is_empty():
+                    # If the unioned LLM mask is empty, drop the group
+                    continue
+                llm_union = llm_union.union(llm)
+                # Dests are already deduplicated and sorted
+                new_children.append(((int(pop), llm), data["dests"]))
+
+            def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+                try:
+                    return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+                except Exception:
+                    return ()
+
+            new_children.sort(
+                key=lambda item: (
+                    int(item[0][0]),
+                    _ranges_key(item[0][1]),
+                    tuple(sorted(int(d[0]) for d in item[1])),
+                )
+            )
+
+            node.children = new_children
+            node.llm_bv_union = llm_union
+            stats["groups_after"] += len(new_children)
+
+        stats["edges_after"] = self._count_edges()
+        return stats
+
+    def _compute_node_signatures(self, max_rounds: int = 8) -> Dict[int, Tuple]:
+        """
+        Compute WL-like iterative signatures to detect equivalent subgraphs.
+        Signature of a node is a tuple:
+          (is_end, sorted list of (pop, llm_key, state_key, child_color))
+        Iteratively refines child_color; stable when colors stop changing, or
+        after max_rounds.
+        Returns node_id -> signature tuple (last iteration).
+        """
+        if not self.arena:
+            return {}
+        node_ids = sorted(int(n) for n in self.arena.keys())
+
+        # Initial coarse signatures using local structure without child colors
+        init_sigs: Dict[int, Tuple] = {}
+        sig_intern: Dict[Tuple, int] = {}
+        next_id = 0
+        for nid in node_ids:
+            node = self.arena[nid]
+            group_summaries = []
+            for (pop, llm_bv), dests in node.children:
+                state_keys = [self._rs_key(sbv) for (_d, sbv) in dests]
+                state_keys.sort()
+                group_summaries.append((int(pop), self._rs_key(llm_bv), tuple(state_keys), int(len(dests))))
+            group_summaries.sort()
+            sig0 = (bool(node.clean_end), tuple(group_summaries))
+            init_sigs[nid] = sig0
+            if sig0 not in sig_intern:
+                sig_intern[sig0] = next_id
+                next_id += 1
+        colors: Dict[int, int] = {nid: sig_intern[init_sigs[nid]] for nid in node_ids}
+        sig_by_node = init_sigs
+
+        # Refinement
+        for _round in range(max(1, int(max_rounds))):
+            new_sig_by_node: Dict[int, Tuple] = {}
+            interner: Dict[Tuple, int] = {}
+            next_c = 0
+            for nid in node_ids:
+                node = self.arena[nid]
+                edges = []
+                for (pop, llm_bv), dests in node.children:
+                    llm_key = self._rs_key(llm_bv)
+                    for dest_id, state_bv in dests:
+                        edges.append((int(pop), llm_key, self._rs_key(state_bv), int(colors.get(int(dest_id), -1))))
+                edges.sort()
+                sig = (bool(node.clean_end), tuple(edges))
+                new_sig_by_node[nid] = sig
+                if sig not in interner:
+                    interner[sig] = next_c
+                    next_c += 1
+            new_colors = {nid: interner[new_sig_by_node[nid]] for nid in node_ids}
+            if new_colors == colors:
+                sig_by_node = new_sig_by_node
+                break
+            colors = new_colors
+            sig_by_node = new_sig_by_node
+
+        return sig_by_node
+
+    def _merge_equivalent_subgraphs_and_edges(self) -> Dict[str, int]:
+        """
+        Merge nodes that are structurally equivalent (same signature) by:
+          - Choosing a representative per signature (smallest node id).
+          - Rewiring all edges and roots_map to representatives.
+          - Normalizing all nodes (merge parallel edges).
+          - GC unreachable nodes.
+          - Recompute llm_bv_union and max_depth.
+        Returns stats about the compaction.
+        """
+        stats = {
+            "nodes_before": len(self.arena),
+            "edges_before": self._count_edges(),
+            "ranges_before": self._count_total_ranges(),
+            "nodes_merged": 0,
+            "edges_after_rewire": 0,
+            "gc_removed": 0,
+        }
+
+        # Normalize first to maximize merge opportunities
+        self._normalize_all_nodes()
+
+        sig_by_node = self._compute_node_signatures(max_rounds=8)
+        if not sig_by_node:
+            stats["edges_after_rewire"] = self._count_edges()
+            return stats
+
+        # Group by signature and choose representatives
+        sig_groups: Dict[Tuple, List[int]] = collections.defaultdict(list)
+        for nid, sig in sig_by_node.items():
+            sig_groups[sig].append(int(nid))
+
+        rep_of: Dict[int, int] = {}
+        merged_count = 0
+        for _sig, ids in sig_groups.items():
+            ids_sorted = sorted(int(x) for x in ids)
+            rep = ids_sorted[0]
+            for x in ids_sorted:
+                rep_of[int(x)] = int(rep)
+            merged_count += max(0, len(ids_sorted) - 1)
+        stats["nodes_merged"] = merged_count
+
+        if merged_count == 0:
+            stats["edges_after_rewire"] = self._count_edges()
+            return stats
+
+        # Rewire roots to representatives
+        new_roots_map: Dict[int, int] = {}
+        for k, v in self.roots_map.items():
+            vv = int(v)
+            new_roots_map[int(k)] = int(rep_of.get(vv, vv))
+        self.roots_map = new_roots_map
+
+        # Rewire edges to representatives and coalesce duplicate dests
+        for node in self.arena.values():
+            children = node.children
+            if not children:
+                continue
+            new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+            for (pop, llm_bv), dests in children:
+                dest_union: Dict[int, StateIDSet] = {}
+                for dest_id, state_bv in dests:
+                    rid = int(rep_of.get(int(dest_id), int(dest_id)))
+                    if rid in dest_union:
+                        dest_union[rid] = dest_union[rid].union(state_bv)
+                    else:
+                        dest_union[rid] = state_bv
+                # Add group with remapped/unioned destinations
+                merged_dests = sorted(((int(d), bv) for d, bv in dest_union.items()), key=lambda x: int(x[0]))
+                new_children.append(((int(pop), llm_bv), merged_dests))
+            node.children = new_children
+
+        # Normalize again (merge parallel edges) and recompute unions/depths
+        self._normalize_all_nodes()
+        stats["edges_after_rewire"] = self._count_edges()
+
+        # GC unreachable nodes
+        stats["gc_removed"] = self._gc_unreachable_nodes()
+        self._recompute_llm_bv_unions()
+        self.max_depth = self._recompute_max_depth_from_arena()
+
+        return stats
+
+    def _post_optimize_merge_subgraphs_and_edges(self) -> None:
+        """
+        Orchestrates additional compaction after _optimize_state_masks_and_edges:
+          - Normalize nodes (dedupe/merge parallel edges)
+          - Merge equivalent subgraphs via signatures
+          - Report concrete improvements
+        """
+        print("Post-optimizing graph (merge equivalent subgraphs and edges)...", end="", flush=True)
+        t0 = time.perf_counter()
+        before_nodes = len(self.arena)
+        before_edges = self._count_edges()
+        before_ranges = self._count_total_ranges()
+
+        compaction_stats = self._merge_equivalent_subgraphs_and_edges()
+
+        after_nodes = len(self.arena)
+        after_edges = self._count_edges()
+        after_ranges = self._count_total_ranges()
+        t1 = time.perf_counter()
+        print(" done.")
+        print("Post-optimization report:")
+        print(f"- Time: {t1 - t0:.3f}s")
+        print(f"- Ranges: {before_ranges} -> {after_ranges} ({before_ranges - after_ranges} fewer)")
+        print(f"- Edges:  {before_edges} -> {after_edges} ({before_edges - after_edges} fewer)")
+        print(f"- Nodes:  {before_nodes} -> {after_nodes} ({before_nodes - after_nodes} fewer, {compaction_stats.get('gc_removed', 0)} GC removed)")
+        print(f"- Nodes merged (equiv signatures): {compaction_stats.get('nodes_merged', 0)}")
+        print(f"- Normalization: groups before/after not tracked across stages here")
