@@ -205,7 +205,7 @@ class Model(GraphProvider):
                     print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                     continue
 
-                gss_node = values.pop(node_idx, None)
+                gss_node = values.pop(node_idx)
                 if gss_node is None:
                     print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
