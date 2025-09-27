@@ -109,7 +109,6 @@ class Model(GraphProvider):
         GSS nodes. This is the performance-critical routine.
         """
         state_map: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
-        all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
 
         print("states in get_mask:")
         for k, v in state_map.items():
