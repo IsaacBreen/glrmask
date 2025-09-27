@@ -162,6 +162,9 @@ class Model(GraphProvider):
             
             print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}")
 
+            # gss = gss.clone_node()
+            # ffi.gss_prune_llm_tokens_by_disallowed_terminals(gss, self.possible_matches_cache)
+
             existing = values.get(root_idx)
             if existing is not None:
                 existing_gss = existing
@@ -297,11 +300,13 @@ class Model(GraphProvider):
                         if existing is not None:
                             existing_gss = existing
                             merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+                            print(f"        - MERGING with {self.gss_from_ffi_node(existing_gss)}\n...and {self.gss_from_ffi_node(child_gss_node)}")
                             values[d] = merged_gss
+                            print(f"        - Merged GSS: ptr={merged_gss.ptr()} flat={self.gss_from_ffi_node(merged_gss)}")
                             print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}")
                         else:
                             values[d] = child_gss_node
-                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}")
+                            print(f"        - Enqueue new node {self.gss_from_ffi_node(child_gss_node)} at idx {d}")
 
                         enqueue(max_depth[d], d)
 
