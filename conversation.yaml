@@ -686,8 +686,18 @@ local_system:
 
               // values: node_id -> GSS
               std::unordered_map<int, Leveled> values;
+
+              struct GmaskHeapCmp {
+                  bool operator()(const std::pair<int, int>& a, const std::pair<int, int>& b) const {
+                      if (a.first != b.first) {
+                          return a.first < b.first; // max-heap on depth
+                      }
+                      return a.second > b.second; // min-heap on node_id for tie-breaking
+                  }
+              };
+
               // priority queue storing {depth, node_id}
-              std::priority_queue<std::pair<int, int>> depth_heap;
+              std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>, GmaskHeapCmp> depth_heap;
               std::unordered_set<int> enqueued_nodes;
 
               auto enqueue = [&](int d, int n) {
@@ -1289,20 +1299,16 @@ local_system:
               auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
                   auto na = std::make_shared<Acc>();
                   na->llm_mask = acc->llm_mask;
-                  RangeSet rs_empty = RangeSet::empty();
-                  // This logic must mirror the Python version to ensure terminals_union is pruned
-                  // and does not grow indefinitely. We iterate over the small state_map, not the
-                  // potentially large terminals_union.
-                  for (auto const& [old_sid, new_sid] : state_map) {
+
+                  for (const auto& [old_sid, new_sid] : state_map) {
                       auto it = acc->terminals_union.find(old_sid);
-                      if (it != acc->terminals_union.end()) {
-                          const RangeSet& bv_source = it->second;
-                          auto it_new = na->terminals_union.find(new_sid);
-                          if (it_new != na->terminals_union.end()) {
-                              it_new->second = it_new->second.union_with(bv_source);
-                          } else {
-                              na->terminals_union.emplace(new_sid, bv_source);
-                          }
+                      const RangeSet& bv_source = (it != acc->terminals_union.end()) ? it->second : RangeSet::empty();
+
+                      auto it_new = na->terminals_union.find(new_sid);
+                      if (it_new != na->terminals_union.end()) {
+                          it_new->second = it_new->second.union_with(bv_source);
+                      } else {
+                          na->terminals_union.emplace(new_sid, bv_source);
                       }
                   }
                   return na;
@@ -5229,7 +5235,8 @@ local_system:
                   for (const Edge &e : info.edges) dests_blocks_sum += e.dests.size();
                   stats.inc("get_mask.traversal.dests_blocks.sum", dests_blocks_sum);
                   for (const Edge &e : info.edges) {
-                      RangeSet llm_bv = e.llm_bv_rangeset.difference_with(final_mask);
+                      RangeSet llm_bv_edge = e.llm_bv_rangeset;
+                      RangeSet llm_bv = llm_bv_edge.difference_with(final_mask);
                       if (llm_bv.is_empty()) {
                           stats.inc("get_mask.traversal.edge.llm_bv_empty");
                           continue;
@@ -5247,6 +5254,13 @@ local_system:
                       // expensive apply_and_prune work. The value-based acc_memo is critical
                       // for performance, replicating the Python version's key optimization.
                       Leveled popped_limited = intersect_llm_mask(popped, llm_bv);
+
+                      if (debug_logging_) {
+                          std::cout << "  - Edge from " << node << ": pop=" << e.pop << ", llm_bv=" << llm_bv_edge.repr() << ", limited_llm_bv=" << llm_bv.repr() << std::endl;
+                          std::cout << "    popped GSS: " << gss_to_string(popped) << std::endl;
+                          std::cout << "    limited GSS: " << gss_to_string(popped_limited) << std::endl;
+                      }
+
                       if (popped_limited.is_empty()) {
                           stats.inc("get_mask.traversal.edge.popped_pruned_empty");
                           continue;
@@ -5281,6 +5295,20 @@ local_system:
                           if (child2.is_empty()) {
                               stats.inc("get_mask.traversal.edge.child_gss_pruned_empty");
                               continue;
+                          }
+
+                          if (debug_logging_) {
+                              std::stringstream ss;
+                              ss << "[";
+                              bool first = true;
+                              for(const auto& p : de.state_ranges) {
+                                  if (!first) ss << ", ";
+                                  ss << "(" << p.first << ", " << p.second << ")";
+                                  first = false;
+                              }
+                              ss << "]";
+                              std::cout << "    -> Dest " << de.dest_idx << " (states: " << ss.str() << ")" << std::endl;
+                              std::cout << "       Child GSS: " << gss_to_string(child2) << std::endl;
                           }
 
                           auto reduced_child = child2.reduce_acc();
@@ -8619,9 +8647,7 @@ local_system:
                       shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
 
                   def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
-                      popped_gss = gss_to_reduce
-                      for _ in range(reduce_action.len):
-                          popped_gss = popped_gss.pop()
+                      popped_gss = gss_to_reduce.popn(reduce_action.len)
                       for from_state_id in popped_gss.peek():
                           goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
                           goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
@@ -8745,13 +8771,13 @@ local_system:
 
                   # Traverse edges and propagate masks
                   edges = arena.get(node, {}).get("children") or []
-                  for (pop, llm_bv), dests in edges:
-                      llm_bv = llm_bv.difference(final_mask)
+                  for (pop, llm_bv_edge), dests in edges:
+                      llm_bv = llm_bv_edge.difference(final_mask)
                       if llm_bv.is_empty():
                           continue
 
-                      popped: GSS = gss_node.popn(pop)
-                      if popped.is_empty():
+                      popped_before_limit: GSS = gss_node.popn(pop)
+                      if popped_before_limit.is_empty():
                           continue
 
                       # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
@@ -8771,7 +8797,12 @@ local_system:
                           acc_memo[acc] = result
                           return result
 
-                      popped = popped.apply_and_prune(intersect_and_prune)
+                      popped = popped_before_limit.apply_and_prune(intersect_and_prune)
+                      if os.environ.get("RUST_LOG") == "debug":
+                          print(f"  - Edge from {node}: pop={pop}, llm_bv={llm_bv_edge.to_ranges()}, limited_llm_bv={llm_bv.to_ranges()}")
+                          print(f"    popped GSS: {popped_before_limit.to_stacks()}")
+                          print(f"    limited GSS: {popped.to_stacks()}")
+
                       if popped.is_empty():
                           continue
 
@@ -8789,6 +8820,10 @@ local_system:
                           child_gss: GSS = popped.isolate_many(values_to_keep)
                           if child_gss.is_empty():
                               continue
+
+                          if os.environ.get("RUST_LOG") == "debug":
+                              print(f"    -> Dest {dest_idx} (states: {state_bv.to_ranges()})")
+                              print(f"       Child GSS: {child_gss.to_stacks()}")
 
                           reduced_child = child_gss.reduce_acc()
                           if not reduced_child or reduced_child.is_empty():
@@ -9543,8 +9578,18 @@ messages:
 
               // values: node_id -> GSS
               std::unordered_map<int, Leveled> values;
+
+              struct GmaskHeapCmp {
+                  bool operator()(const std::pair<int, int>& a, const std::pair<int, int>& b) const {
+                      if (a.first != b.first) {
+                          return a.first < b.first; // max-heap on depth
+                      }
+                      return a.second > b.second; // min-heap on node_id for tie-breaking
+                  }
+              };
+
               // priority queue storing {depth, node_id}
-              std::priority_queue<std::pair<int, int>> depth_heap;
+              std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>, GmaskHeapCmp> depth_heap;
               std::unordered_set<int> enqueued_nodes;
 
               auto enqueue = [&](int d, int n) {
@@ -10146,20 +10191,16 @@ messages:
               auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
                   auto na = std::make_shared<Acc>();
                   na->llm_mask = acc->llm_mask;
-                  RangeSet rs_empty = RangeSet::empty();
-                  // This logic must mirror the Python version to ensure terminals_union is pruned
-                  // and does not grow indefinitely. We iterate over the small state_map, not the
-                  // potentially large terminals_union.
-                  for (auto const& [old_sid, new_sid] : state_map) {
+
+                  for (const auto& [old_sid, new_sid] : state_map) {
                       auto it = acc->terminals_union.find(old_sid);
-                      if (it != acc->terminals_union.end()) {
-                          const RangeSet& bv_source = it->second;
-                          auto it_new = na->terminals_union.find(new_sid);
-                          if (it_new != na->terminals_union.end()) {
-                              it_new->second = it_new->second.union_with(bv_source);
-                          } else {
-                              na->terminals_union.emplace(new_sid, bv_source);
-                          }
+                      const RangeSet& bv_source = (it != acc->terminals_union.end()) ? it->second : RangeSet::empty();
+
+                      auto it_new = na->terminals_union.find(new_sid);
+                      if (it_new != na->terminals_union.end()) {
+                          it_new->second = it_new->second.union_with(bv_source);
+                      } else {
+                          na->terminals_union.emplace(new_sid, bv_source);
                       }
                   }
                   return na;
@@ -12385,8 +12426,18 @@ messages:
 
               // values: node_id -> GSS
               std::unordered_map<int, Leveled> values;
+
+              struct GmaskHeapCmp {
+                  bool operator()(const std::pair<int, int>& a, const std::pair<int, int>& b) const {
+                      if (a.first != b.first) {
+                          return a.first < b.first; // max-heap on depth
+                      }
+                      return a.second > b.second; // min-heap on node_id for tie-breaking
+                  }
+              };
+
               // priority queue storing {depth, node_id}
-              std::priority_queue<std::pair<int, int>> depth_heap;
+              std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>, GmaskHeapCmp> depth_heap;
               std::unordered_set<int> enqueued_nodes;
 
               auto enqueue = [&](int d, int n) {
@@ -12988,20 +13039,16 @@ messages:
               auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
                   auto na = std::make_shared<Acc>();
                   na->llm_mask = acc->llm_mask;
-                  RangeSet rs_empty = RangeSet::empty();
-                  // This logic must mirror the Python version to ensure terminals_union is pruned
-                  // and does not grow indefinitely. We iterate over the small state_map, not the
-                  // potentially large terminals_union.
-                  for (auto const& [old_sid, new_sid] : state_map) {
+
+                  for (const auto& [old_sid, new_sid] : state_map) {
                       auto it = acc->terminals_union.find(old_sid);
-                      if (it != acc->terminals_union.end()) {
-                          const RangeSet& bv_source = it->second;
-                          auto it_new = na->terminals_union.find(new_sid);
-                          if (it_new != na->terminals_union.end()) {
-                              it_new->second = it_new->second.union_with(bv_source);
-                          } else {
-                              na->terminals_union.emplace(new_sid, bv_source);
-                          }
+                      const RangeSet& bv_source = (it != acc->terminals_union.end()) ? it->second : RangeSet::empty();
+
+                      auto it_new = na->terminals_union.find(new_sid);
+                      if (it_new != na->terminals_union.end()) {
+                          it_new->second = it_new->second.union_with(bv_source);
+                      } else {
+                          na->terminals_union.emplace(new_sid, bv_source);
                       }
                   }
                   return na;
@@ -14571,6 +14618,34 @@ messages:
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_standalone.py
   - user: |-
+      RUST_LOG=debug CONSTRAINT_FILE="reduced_js_grammar_constraint10.json.gz" CODE_FILE=./src/example_code5.js bash python/run_benchmarks.sh python/aug25/models/precompute3_model_pure_python_standalone.py python/aug25/models/precompute3_model_cpp.py
+      Benchmark results will be saved in: benchmark_results/2025-09-27_14-37-37
+      ---
+      Baseline Model: python/aug25/models/precompute3_model_pure_python_standalone.py
+      Other Models: python/aug25/models/precompute3_model_cpp.py
+      Constraint File: reduced_js_grammar_constraint10.json.gz
+      Code: ./src/example_code5.js
+      ---
+      Ensuring C++ extensions are built...
+      Installing pybind11...
+
+      [notice] A new release of pip is available: 25.0.1 -> 25.2
+      [notice] To update, run: pip install --upgrade pip
+      Building C++ extensions...
+      Building C++ with stats enabled (ENABLE_CPP_STATS=1)
+      Build complete.
+      ---
+      Starting benchmark runs...
+
+      >>> Running benchmark for: precompute3_model_pure_python_standalone.py
+      python -m python.aug25.benchmark_runner --code ./src/example_code5.js --constraint-file reduced_js_grammar_constraint10.json.gz --model python/aug25/models/precompute3_model_pure_python_standalone.py --output benchmark_results/2025-09-27_14-37-37
+      --- Setting up benchmark environment ---
+      Loading pre-compiled grammar constraint from: reduced_js_grammar_constraint10.json.gz
+      Loading model from: python/aug25/models/precompute3_model_pure_python_standalone.py
+      Model loaded in 0.0472 seconds.
+      Loading and tokenizing code from: src/example_code5.js
+      Tokenized into 2 tokens.
+
       --- Running benchmark (2 steps) ---
       Benchmarking steps:   0%|                                                                                                                                                                | 0/2 [00:00<?, ?it/s, get_mask]
       --- get_mask initial values ---
@@ -14749,20 +14824,20 @@ messages:
         TSID 28: [([41], PyAcc(terminals_union_size=2, llm_mask_size=0))]
       --------------------------
 
-      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 586.53it/s, commit]
+      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 463.15it/s, commit]
       --- Benchmark finished ---
 
-      Benchmark results saved to: benchmark_results/2025-09-27_14-29-31/precompute3_model_pure_python_standalone_results.json
+      Benchmark results saved to: benchmark_results/2025-09-27_14-37-37/precompute3_model_pure_python_standalone_results.json
       >>> Finished benchmark for: precompute3_model_pure_python_standalone.py
 
       >>> Running benchmark for: precompute3_model_cpp.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code5.js --constraint-file reduced_js_grammar_constraint10.json.gz --model python/aug25/models/precompute3_model_cpp.py --output benchmark_results/2025-09-27_14-29-31
+      python -m python.aug25.benchmark_runner --code ./src/example_code5.js --constraint-file reduced_js_grammar_constraint10.json.gz --model python/aug25/models/precompute3_model_cpp.py --output benchmark_results/2025-09-27_14-37-37
       >>> Running with AddressSanitizer...
-      python(2009,0x1f1024800) malloc: nano zone abandoned due to inability to reserve vm space.
+      python(7466,0x1f1024800) malloc: nano zone abandoned due to inability to reserve vm space.
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: reduced_js_grammar_constraint10.json.gz
       Loading model from: python/aug25/models/precompute3_model_cpp.py
-      Model loaded in 0.0722 seconds.
+      Model loaded in 0.1200 seconds.
       Loading and tokenizing code from: src/example_code5.js
       Tokenized into 2 tokens.
 
@@ -14785,56 +14860,56 @@ messages:
         GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
         Current final_mask: []
 
-      --- get_mask processing node 5966 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=6))]
-        Current final_mask: [(0, 1870)]
-
-      --- get_mask processing node 5506 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=9))]
-        Current final_mask: [(0, 1870)]
-
-      --- get_mask processing node 5290 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=10))]
-        Current final_mask: [(0, 1870)]
-
-      --- get_mask processing node 5073 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1380))]
-        Current final_mask: [(0, 1870)]
-
-      --- get_mask processing node 4819 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=3))]
-        Current final_mask: [(0, 1870)]
-
-      --- get_mask processing node 4635 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=4))]
-        Current final_mask: [(0, 1870)]
-
-      --- get_mask processing node 4451 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=2))]
-        Current final_mask: [(0, 1870)]
-
-      --- get_mask processing node 4191 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=2))]
+      --- get_mask processing node 3759 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
         Current final_mask: [(0, 1870)]
 
       --- get_mask processing node 3975 ---
         GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=120))]
         Current final_mask: [(0, 1870)]
 
-      --- get_mask processing node 3759 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
+      --- get_mask processing node 4191 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=2))]
         Current final_mask: [(0, 1870)]
 
-      --- get_mask processing node 2281 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=34))]
+      --- get_mask processing node 4451 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=2))]
+        Current final_mask: [(0, 1870)]
+
+      --- get_mask processing node 4635 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=4))]
+        Current final_mask: [(0, 1870)]
+
+      --- get_mask processing node 4819 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=3))]
+        Current final_mask: [(0, 1870)]
+
+      --- get_mask processing node 5073 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1380))]
+        Current final_mask: [(0, 1870)]
+
+      --- get_mask processing node 5290 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=10))]
+        Current final_mask: [(0, 1870)]
+
+      --- get_mask processing node 5506 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=9))]
+        Current final_mask: [(0, 1870)]
+
+      --- get_mask processing node 5966 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=6))]
+        Current final_mask: [(0, 1870)]
+
+      --- get_mask processing node 1037 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
         Current final_mask: [(0, 1870)]
 
       --- get_mask processing node 1179 ---
         GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
         Current final_mask: [(0, 1870)]
 
-      --- get_mask processing node 1037 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
+      --- get_mask processing node 2281 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=34))]
         Current final_mask: [(0, 1870)]
 
       --- get_mask final internal mask ---
@@ -14844,7 +14919,7 @@ messages:
       Benchmarking steps:   0%|                                                                                                                                                                  | 0/2 [00:00<?, ?it/s, commit]
       --- State after commit ---
         TSID 0: [([41, 32], PyAcc(terminals_union_size=1, llm_mask_size=0))]
-        TSID 11: [([41], PyAcc(terminals_union_size=0, llm_mask_size=0))]
+        TSID 11: [([41], PyAcc(terminals_union_size=1, llm_mask_size=0))]
       --------------------------
 
       Benchmarking steps:   0%|                                                                                                                                                                | 0/2 [00:00<?, ?it/s, get_mask]
@@ -14854,69 +14929,85 @@ messages:
       ---------------------------------
 
 
-      --- get_mask processing node 11 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: []
-
-      --- get_mask processing node 1480 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1414))]
-        Current final_mask: []
-
-      --- get_mask processing node 5073 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1380))]
-        Current final_mask: []
-
-      --- get_mask processing node 45 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1380))]
-        Current final_mask: []
-
-      --- get_mask processing node 2281 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=34))]
-        Current final_mask: [(35, 60), (65, 65), (67, 92), (266, 375), (434, 1117), (1152, 1152), (1157, 1157), (1163, 1693)]
-
-      --- get_mask processing node 45 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=23))]
-        Current final_mask: [(35, 60), (65, 65), (67, 92), (266, 375), (434, 1117), (1152, 1152), (1157, 1157), (1163, 1693)]
-
       --- get_mask processing node 0 ---
         GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
-        Current final_mask: [(12, 13), (29, 29), (31, 31), (35, 60), (65, 65), (67, 92), (118, 118), (168, 168), (180, 181), (187, 188), (196, 196), (198, 198), (201, 201), (203, 203), (206, 206), (209, 209), (224, 224), (266, 375), (389, 389), (391, 391), (397, 397), (404, 405), (434, 1117), (1152, 1152), (1157, 1157), (1163, 1693), (1706, 1706)]
+        Current final_mask: []
 
       --- get_mask processing node 46 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=463))]
-        Current final_mask: [(12, 13), (29, 29), (31, 31), (35, 60), (65, 65), (67, 92), (118, 118), (168, 168), (180, 181), (187, 188), (196, 196), (198, 198), (201, 201), (203, 203), (206, 206), (209, 209), (224, 224), (266, 375), (389, 389), (391, 391), (397, 397), (404, 405), (434, 1117), (1152, 1152), (1157, 1157), (1163, 1693), (1706, 1706)]
+        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
+        Current final_mask: []
 
       --- get_mask processing node 45 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=463))]
-        Current final_mask: [(12, 13), (29, 29), (31, 31), (35, 60), (65, 65), (67, 92), (118, 118), (168, 168), (180, 181), (187, 188), (196, 196), (198, 198), (201, 201), (203, 203), (206, 206), (209, 209), (224, 224), (266, 375), (389, 389), (391, 391), (397, 397), (404, 405), (434, 1117), (1152, 1152), (1157, 1157), (1163, 1693), (1706, 1706)]
+        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
+        Current final_mask: []
 
-      --- get_mask processing node 5506 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=4))]
-        Current final_mask: [(0, 1152), (1157, 1157), (1158, 1870)]
-
-      --- get_mask processing node 4819 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=3))]
-        Current final_mask: [(0, 1152), (1157, 1157), (1158, 1870)]
+      --- get_mask processing node 3759 ---
+        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
 
       --- get_mask processing node 3975 ---
         GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=10))]
-        Current final_mask: [(0, 1152), (1157, 1157), (1158, 1870)]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
 
-      --- get_mask processing node 3759 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=463))]
-        Current final_mask: [(0, 1152), (1157, 1157), (1158, 1870)]
+      --- get_mask processing node 4191 ---
+        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=2))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
 
-      --- get_mask processing node 883 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=463))]
-        Current final_mask: [(0, 1152), (1157, 1157), (1158, 1870)]
+      --- get_mask processing node 4451 ---
+        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=1))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
+
+      --- get_mask processing node 4635 ---
+        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=1))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
+
+      --- get_mask processing node 4819 ---
+        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=3))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
+
+      --- get_mask processing node 5073 ---
+        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=53))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
+
+      --- get_mask processing node 5290 ---
+        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=1))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
+
+      --- get_mask processing node 5506 ---
+        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=4))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
+
+      --- get_mask processing node 5966 ---
+        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=1))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
+
+      --- get_mask processing node 421 ---
+        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
 
       --- get_mask processing node 745 ---
         GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=5))]
-        Current final_mask: [(0, 1152), (1157, 1157), (1158, 1870)]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
 
-      --- get_mask processing node 421 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=463))]
-        Current final_mask: [(0, 1152), (1157, 1157), (1158, 1870)]
+      --- get_mask processing node 883 ---
+        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
+
+      --- get_mask processing node 11 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
+
+      --- get_mask processing node 1480 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1327))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
+
+      --- get_mask processing node 5073 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1327))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
+
+      --- get_mask processing node 45 ---
+        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1327))]
+        Current final_mask: [(0, 266), (375, 434), (1117, 1152), (1158, 1163), (1693, 1870)]
 
       --- get_mask final internal mask ---
         Mask: [(0, 1152), (1157, 1157), (1158, 1870)]
@@ -14924,15 +15015,123 @@ messages:
 
       Benchmarking steps:   0%|                                                                                                                                                                  | 0/2 [00:00<?, ?it/s, commit]
       --- State after commit ---
-        TSID 0: [([41, 31], PyAcc(terminals_union_size=0, llm_mask_size=0)), ([41, 32], PyAcc(terminals_union_size=1, llm_mask_size=0))]
-        TSID 28: [([41], PyAcc(terminals_union_size=0, llm_mask_size=0))]
+        TSID 0: [([41, 31], PyAcc(terminals_union_size=2, llm_mask_size=0)), ([41, 32], PyAcc(terminals_union_size=2, llm_mask_size=0))]
+        TSID 28: [([41], PyAcc(terminals_union_size=2, llm_mask_size=0))]
       --------------------------
 
-      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 196.28it/s, commit]
+      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 121.81it/s, commit]
       --- Benchmark finished ---
       --- Finalizing model ---
 
       --- Final Stats Report from Model ---
+
+      --- C++ Engine Stats Report ---
+
+      Counters:
+        _process_token.calls                                        : 3
+        _process_token.final_heads                                  : 3
+        _process_token.initial_heads                                : 3
+        _process_token.loop_iterations                              : 3
+        _process_token.shifts                                       : 3
+        bitset.intersection.calls                                   : 64
+        bitset.union.calls                                          : 11
+        commit.tokenizer_states_in                                  : 3
+        commit.tokenizer_states_out                                 : 4
+        get_mask.data.llm_bv_on_edge.len.sum                        : 16064
+        get_mask.data.llm_mask_after_intersect.len.sum              : 11938
+        get_mask.final_mask.internal_indices                        : 3738
+        get_mask.final_mask.original_indices                        : 3738
+        get_mask.gss.at_node.accs.sum                               : 36
+        get_mask.initial.gss_heads.sum                              : 3
+        get_mask.initial.terminals_union_size.sum                   : 2
+        get_mask.initial.unique_accs                                : 3
+        get_mask.initialize_acc.calls                               : 3
+        get_mask.initialize_acc.disallowed_terminals_count.sum      : 1
+        get_mask.initialize_acc.disallowed_terminals_inner_loops    : 1
+        get_mask.intersect_and_prune.calls                          : 44
+        get_mask.traversal.depth_heap.pops                          : 36
+        get_mask.traversal.dests_blocks.sum                         : 206
+        get_mask.traversal.dests_traversed                          : 196
+        get_mask.traversal.edge.gss_merges                          : 2
+        get_mask.traversal.edge.llm_bv_empty                        : 2
+        get_mask.traversal.edge_blocks.sum                          : 46
+        get_mask.traversal.edge_pop_val.0                           : 44
+        get_mask.traversal.edges_traversed                          : 44
+        get_mask.traversal.end_nodes                                : 3
+        get_mask.traversal.max_depth_reached                        : 34
+        get_mask.traversal.nodes_processed                          : 36
+        get_mask.traversal.nodes_visited.unique                     : 34
+        get_mask.zombie_check.skipped_nodes_no_overlap              : 9
+        get_mask.zombie_check.skipped_nodes_no_potential            : 20
+
+      Timers (ms):
+        _process_token.total                                        : 0.749
+        commit.build_tokenizer_maps                                 : 0.120
+        commit.main_loop                                            : 0.927
+        commit.merge_states                                         : 0.831
+        commit.prune_and_map_gss                                    : 0.079
+        commit.total                                                : 2.067
+        get_mask.final_conversion                                   : 0.544
+        get_mask.final_conversion.from_indices                      : 0.080
+        get_mask.final_conversion.to_indices                        : 0.371
+        get_mask.initial_stats                                      : 4.221
+        get_mask.initialize_acc.difference                          : 0.022
+        get_mask.initialize_acc.to_indices                          : 0.004
+        get_mask.initialize_acc.total                               : 0.072
+        get_mask.initialize_acc.union                               : 0.002
+        get_mask.intersect_and_prune.intersection                   : 0.110
+        get_mask.main_loop                                          : 7.590
+        get_mask.main_loop.edge.apply_and_prune                     : 0.366
+        get_mask.main_loop.edge.gss_merge                           : 0.101
+        get_mask.main_loop.edge.isolate_many                        : 0.071
+        get_mask.main_loop.edge.peek_and_filter                     : 0.033
+        get_mask.main_loop.edge.popn                                : 0.027
+        get_mask.main_loop.end_node.final_mask_union                : 0.068
+        get_mask.main_loop.end_node.reduce_acc                      : 0.023
+        get_mask.seeding                                            : 0.327
+        get_mask.seeding.gss.apply                                  : 0.272
+        get_mask.total                                              : 12.853
+        get_mask.zombie_check                                       : 0.243
+      ---------------------------------
+
+
+      Benchmark results saved to: benchmark_results/2025-09-27_14-37-37/precompute3_model_cpp_results.json
+      >>> Finished benchmark for: precompute3_model_cpp.py
+
+      All benchmark runs completed.
+      ---
+      Analyzing results and generating plots...
+      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-27_14-37-37/precompute3_model_cpp_results.json benchmark_results/2025-09-27_14-37-37/precompute3_model_pure_python_standalone_results.json --baseline precompute3_model_pure_python_standalone --output-dir benchmark_results/2025-09-27_14-37-37/analysis
+      Selected baseline: precompute3_model_pure_python_standalone
+      Mask mismatch at token index 1 for model precompute3_model_cpp
+      Baseline: ((0, 1055), (1060, 1060), (1062, 1713), (1715, 1871))
+      Current:  ((0, 1055), (1060, 1713), (1715, 1871))
+      --- Benchmark Summary ---
+                                               equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
+      model                                                                                                                                                 
+      precompute3_model_cpp                             ❌                    1      2     6.7121    0.4924    6.3639    6.7121    6.9907    7.0534    7.0603
+      precompute3_model_pure_python_standalone          ✅                    0      2     1.4988    0.0306    1.4772    1.4988    1.5161    1.5200    1.5205
+
+      Baseline: precompute3_model_pure_python_standalone
+      ✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch
+
+      Saving plots to benchmark_results/2025-09-27_14-37-37/analysis...
+      Saved linear scale plot to benchmark_results/2025-09-27_14-37-37/analysis/timings_per_token_linear.png
+      Saved log scale plot to benchmark_results/2025-09-27_14-37-37/analysis/timings_per_token_log.png
+      Saved box plot to benchmark_results/2025-09-27_14-37-37/analysis/timings_distribution_boxplot.png
+      Saved commit linear scale plot to benchmark_results/2025-09-27_14-37-37/analysis/commit_timings_per_token_linear.png
+      Saved commit log scale plot to benchmark_results/2025-09-27_14-37-37/analysis/commit_timings_per_token_log.png
+      Saved combined linear scale plot to benchmark_results/2025-09-27_14-37-37/analysis/combined_timings_per_token_linear.png
+      Saved combined log scale plot to benchmark_results/2025-09-27_14-37-37/analysis/combined_timings_per_token_log.png
+      Saved stacked area plot to benchmark_results/2025-09-27_14-37-37/analysis/timings_stacked_area.png
+      Saved total time linear scale plot to benchmark_results/2025-09-27_14-37-37/analysis/total_timings_per_token_linear.png
+      Saved total time log scale plot to benchmark_results/2025-09-27_14-37-37/analysis/total_timings_per_token_log.png
+
+      ---
+      Benchmark analysis complete.
+      Baseline: precompute3_model_pure_python_standalone
+      Summary printed above. Plots are saved in: benchmark_results/2025-09-27_14-37-37/analysis
+      Full JSON results are in: benchmark_results/2025-09-27_14-37-37
     metadata:
   - user: Why aren't the prints exactly the same? Ensure they are. The same nodes
       should be processed in the same order in the same way.
@@ -14954,165 +15153,159 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The discrepancies you're seeing between the Python and C++ benchmark runs stem from two subtle differences in implementation. The C++ code for the priority queue in `get_mask` has different tie-breaking behavior, and the logic for re-mapping tokenizer states in `commit` doesn't correctly handle all cases.
+      Of course. The benchmark output indicates a mask mismatch between the Python and C++ implementations. The existing debug logs show that the divergence happens during the `get_mask` traversal. To pinpoint the exact cause, we'll add more detailed logging inside the edge traversal loop in both implementations. This will let us compare the state at each step of the graph traversal.
 
-      Here are the step-by-step instructions to align the C++ implementation with the Python reference, followed by the corresponding git diff.
+      Here are the step-by-step instructions to add the necessary logging:
 
       ### Step-by-step Instructions
 
-      #### File: `python/aug25/models/precompute3_engine.cpp`
+      1.  **Modify `python/aug25/models/precompute3_model_pure_python_standalone.py`:**
+          *   Open the file `python/aug25/models/precompute3_model_pure_python_standalone.py`.
+          *   Navigate to the `get_mask` method.
+          *   Find the edge traversal loop, which starts with `for (pop, llm_bv), dests in edges:`.
+          *   We will modify this loop to log more details about the GSS transformations.
+              *   Change the loop variable from `(pop, llm_bv)` to `(pop, llm_bv_edge)`.
+              *   Change the variable `popped` to `popped_before_limit` before the call to `apply_and_prune`.
+              *   Assign the result of `apply_and_prune` to a new variable named `popped`.
+              *   Add a print block guarded by `if os.environ.get("RUST_LOG") == "debug":` to log the edge details, the GSS before limiting (`popped_before_limit`), and the GSS after limiting (`popped`).
+              *   In the inner loop over destinations (`for dest_idx, state_bv in dests:`), add another debug print block to log the destination node, its state ranges, and the `child_gss` being propagated to it.
 
-      1.  **Fix Priority Queue Tie-Breaking in `get_mask`**:
-          The C++ `std::priority_queue` and Python's `heapq` have different default tie-breaking rules. To make them identical, we'll introduce a custom comparator for the priority queue in `get_mask`. This ensures that when two nodes have the same depth, the one with the smaller `node_id` is processed first, matching Python's behavior.
+      2.  **Modify `python/aug25/models/precompute3_engine.cpp`:**
+          *   Open the file `python/aug25/models/precompute3_engine.cpp`.
+          *   Navigate to the `get_mask` method.
+          *   Find the edge traversal loop, which starts with `for (const Edge &e : info.edges)`.
+          *   We will add logging here to mirror the changes in the Python version.
+              *   Just after the line `Leveled popped_limited = intersect_llm_mask(popped, llm_bv);`, add an `if (debug_logging_)` block. Inside this block, print the edge details (pop value, original `llm_bv`, and the limited `llm_bv`), the `popped` GSS, and the `popped_limited` GSS.
+              *   In the inner loop over destinations (`for (const DestEdge &de : e.dests)`), after the line `Leveled child2 = popped_limited.isolate_many(keep);`, add another `if (debug_logging_)` block. Inside, print the destination index, its state ranges, and the `child2` GSS. You'll need to format the `state_ranges` vector into a readable string.
 
-          -   Locate the `get_mask` method.
-          -   Just before the declaration of `depth_heap`, insert the following `struct` definition for the custom comparator:
-              ```cpp
-              struct GmaskHeapCmp {
-                  bool operator()(const std::pair<int, int>& a, const std::pair<int, int>& b) const {
-                      if (a.first != b.first) {
-                          return a.first < b.first; // max-heap on depth
-                      }
-                      return a.second > b.second; // min-heap on node_id for tie-breaking
-                  }
-              };
-              ```
-          -   Modify the declaration of `depth_heap` to use this new comparator:
-              ```cpp
-              // FROM:
-              std::priority_queue<std::pair<int, int>> depth_heap;
-
-              // TO:
-              std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>, GmaskHeapCmp> depth_heap;
-              ```
-
-      2.  **Correct State Mapping Logic in `apply_state_map_to_gss`**:
-          The C++ implementation of `apply_state_map_to_gss` incorrectly skips tokenizer state mappings if the old state ID isn't present in the accumulator's `terminals_union`. The Python version correctly creates entries for all new states, even if they are empty. We need to adjust the C++ logic to match.
-
-          -   Locate the `apply_state_map_to_gss` helper method.
-          -   Replace the body of the `mapper` lambda function with the corrected logic.
-              ```cpp
-              // FROM:
-              auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
-                  auto na = std::make_shared<Acc>();
-                  na->llm_mask = acc->llm_mask;
-                  RangeSet rs_empty = RangeSet::empty();
-                  // This logic must mirror the Python version to ensure terminals_union is pruned
-                  // and does not grow indefinitely. We iterate over the small state_map, not the
-                  // potentially large terminals_union.
-                  for (auto const& [old_sid, new_sid] : state_map) {
-                      auto it = acc->terminals_union.find(old_sid);
-                      if (it != acc->terminals_union.end()) {
-                          const RangeSet& bv_source = it->second;
-                          auto it_new = na->terminals_union.find(new_sid);
-                          if (it_new != na->terminals_union.end()) {
-                              it_new->second = it_new->second.union_with(bv_source);
-                          } else {
-                              na->terminals_union.emplace(new_sid, bv_source);
-                          }
-                      }
-                  }
-                  return na;
-              };
-
-              // TO:
-              auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
-                  auto na = std::make_shared<Acc>();
-                  na->llm_mask = acc->llm_mask;
-
-                  for (const auto& [old_sid, new_sid] : state_map) {
-                      auto it = acc->terminals_union.find(old_sid);
-                      const RangeSet& bv_source = (it != acc->terminals_union.end()) ? it->second : RangeSet::empty();
-
-                      auto it_new = na->terminals_union.find(new_sid);
-                      if (it_new != na->terminals_union.end()) {
-                          it_new->second = it_new->second.union_with(bv_source);
-                      } else {
-                          na->terminals_union.emplace(new_sid, bv_source);
-                      }
-                  }
-                  return na;
-              };
-              ```
-
-      These two changes will synchronize the behavior of the C++ engine with the Python reference implementation, ensuring identical processing order and state transitions.
+      Below are the git diffs to apply these changes.
 
       ### Git Diffs
 
-      Here is the git diff for the required changes.
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python_standalone.py b/python/aug25/models/precompute3_model_pure_python_standalone.py
+      index 2261111..1111111 100644
+      --- a/python/aug25/models/precompute3_model_pure_python_standalone.py
+      +++ b/python/aug25/models/precompute3_model_pure_python_standalone.py
+      @@ -1281,16 +1281,16 @@
+       
+                   # Traverse edges and propagate masks
+                   edges = arena.get(node, {}).get("children") or []
+      -            for (pop, llm_bv), dests in edges:
+      -                llm_bv = llm_bv.difference(final_mask)
+      +            for (pop, llm_bv_edge), dests in edges:
+      +                llm_bv = llm_bv_edge.difference(final_mask)
+                       if llm_bv.is_empty():
+                           continue
+       
+      -                popped: GSS = gss_node.popn(pop)
+      -                if popped.is_empty():
+      +                popped_before_limit: GSS = gss_node.popn(pop)
+      +                if popped_before_limit.is_empty():
+                           continue
+       
+                       # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                       acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
+       
+                       def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+      @@ -1307,7 +1307,13 @@
+                           acc_memo[acc] = result
+                           return result
+       
+      -                popped = popped.apply_and_prune(intersect_and_prune)
+      +                popped = popped_before_limit.apply_and_prune(intersect_and_prune)
+      +                if os.environ.get("RUST_LOG") == "debug":
+      +                    print(f"  - Edge from {node}: pop={pop}, llm_bv={llm_bv_edge.to_ranges()}, limited_llm_bv={llm_bv.to_ranges()}")
+      +                    print(f"    popped GSS: {popped_before_limit.to_stacks()}")
+      +                    print(f"    limited GSS: {popped.to_stacks()}")
+      +
+                       if popped.is_empty():
+                           continue
+       
+      @@ -1323,6 +1329,11 @@
+                           child_gss: GSS = popped.isolate_many(values_to_keep)
+                           if child_gss.is_empty():
+                               continue
+      +
+      +                    if os.environ.get("RUST_LOG") == "debug":
+      +                        print(f"    -> Dest {dest_idx} (states: {state_bv.to_ranges()})")
+      +                        print(f"       Child GSS: {child_gss.to_stacks()}")
+       
+                           reduced_child = child_gss.reduce_acc()
+                           if not reduced_child or reduced_child.is_empty():
 
+      ```
       ```diff
       diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
-      index 311111e..118511c 100644
+      index 2222222..3333333 100644
       --- a/python/aug25/models/precompute3_engine.cpp
       +++ b/python/aug25/models/precompute3_engine.cpp
-      @@ -511,8 +511,19 @@
-       
-               // values: node_id -> GSS
-               std::unordered_map<int, Leveled> values;
+      @@ -660,8 +660,9 @@
+                   size_t dests_blocks_sum = 0;
+                   for (const Edge &e : info.edges) dests_blocks_sum += e.dests.size();
+                   stats.inc("get_mask.traversal.dests_blocks.sum", dests_blocks_sum);
+                   for (const Edge &e : info.edges) {
+      -                RangeSet llm_bv = e.llm_bv_rangeset.difference_with(final_mask);
+      +                RangeSet llm_bv_edge = e.llm_bv_rangeset;
+      +                RangeSet llm_bv = llm_bv_edge.difference_with(final_mask);
+                       if (llm_bv.is_empty()) {
+                           stats.inc("get_mask.traversal.edge.llm_bv_empty");
+                           continue;
+      @@ -678,6 +679,13 @@
+                       // Apply LLM limiter once per edge (not per destination) to avoid repeated
+                       // expensive apply_and_prune work. The value-based acc_memo is critical
+                       // for performance, replicating the Python version's key optimization.
+                       Leveled popped_limited = intersect_llm_mask(popped, llm_bv);
       +
-      +        struct GmaskHeapCmp {
-      +            bool operator()(const std::pair<int, int>& a, const std::pair<int, int>& b) const {
-      +                if (a.first != b.first) {
-      +                    return a.first < b.first; // max-heap on depth
+      +                if (debug_logging_) {
+      +                    std::cout << "  - Edge from " << node << ": pop=" << e.pop << ", llm_bv=" << llm_bv_edge.repr() << ", limited_llm_bv=" << llm_bv.repr() << std::endl;
+      +                    std::cout << "    popped GSS: " << gss_to_string(popped) << std::endl;
+      +                    std::cout << "    limited GSS: " << gss_to_string(popped_limited) << std::endl;
       +                }
-      +                return a.second > b.second; // min-heap on node_id for tie-breaking
-      +            }
-      +        };
       +
-               // priority queue storing {depth, node_id}
-      -        std::priority_queue<std::pair<int, int>> depth_heap;
-      +        std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>, GmaskHeapCmp> depth_heap;
-               std::unordered_set<int> enqueued_nodes;
+                       if (popped_limited.is_empty()) {
+                           stats.inc("get_mask.traversal.edge.popped_pruned_empty");
+                           continue;
+      @@ -707,6 +715,20 @@
+                               continue;
+                           }
        
-               auto enqueue = [&](int d, int n) {
-      @@ -1218,24 +1229,19 @@
-           Leveled apply_state_map_to_gss(const Leveled& g, const std::unordered_map<int, int>& state_map) {
-               auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
-                   auto na = std::make_shared<Acc>();
-                   na->llm_mask = acc->llm_mask;
-      -            RangeSet rs_empty = RangeSet::empty();
-      -            // This logic must mirror the Python version to ensure terminals_union is pruned
-      -            // and does not grow indefinitely. We iterate over the small state_map, not the
-      -            // potentially large terminals_union.
-      -            for (auto const& [old_sid, new_sid] : state_map) {
-      -                auto it = acc->terminals_union.find(old_sid);
-      -                if (it != acc->terminals_union.end()) {
-      -                    const RangeSet& bv_source = it->second;
-      -                    auto it_new = na->terminals_union.find(new_sid);
-      -                    if (it_new != na->terminals_union.end()) {
-      -                        it_new->second = it_new->second.union_with(bv_source);
-      -                    } else {
-      -                        na->terminals_union.emplace(new_sid, bv_source);
-      -                    }
+      +                    if (debug_logging_) {
+      +                        std::stringstream ss;
+      +                        ss << "[";
+      +                        bool first = true;
+      +                        for(const auto& p : de.state_ranges) {
+      +                            if (!first) ss << ", ";
+      +                            ss << "(" << p.first << ", " << p.second << ")";
+      +                            first = false;
+      +                        }
+      +                        ss << "]";
+      +                        std::cout << "    -> Dest " << de.dest_idx << " (states: " << ss.str() << ")" << std::endl;
+      +                        std::cout << "       Child GSS: " << gss_to_string(child2) << std::endl;
+      +                    }
       +
-      +            for (const auto& [old_sid, new_sid] : state_map) {
-      +                auto it = acc->terminals_union.find(old_sid);
-      +                const RangeSet& bv_source = (it != acc->terminals_union.end()) ? it->second : RangeSet::empty();
-      +
-      +                auto it_new = na->terminals_union.find(new_sid);
-      +                if (it_new != na->terminals_union.end()) {
-      +                    it_new->second = it_new->second.union_with(bv_source);
-      +                } else {
-      +                    na->terminals_union.emplace(new_sid, bv_source);
-                       }
-                   }
-                   return na;
-               };
-               return g.apply(mapper);
+                           auto reduced_child = child2.reduce_acc();
+                           if (!reduced_child || reduced_child->llm_mask.is_empty()) {
+                               continue;
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python_standalone.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python_standalone.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_standalone.py.
+
+      --- Processing Diff Block 2 ---
       Identified target file: python/aug25/models/precompute3_engine.cpp
       Applying patch to 'python/aug25/models/precompute3_engine.cpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_engine.cpp.
     metadata:
-  - user: 'Changes committed with message: "Sync C++ precompute engine with Python
-      reference: fix get_mask tie-breaking and correct state mapping in apply_state_map_to_gss"'
+  - user: 'Changes committed with message: "Add detailed debug logging to get_mask
+      in Python and C++ to trace GSS state propagation and fix minor pop logic in
+      Python."'
     metadata:
 ...

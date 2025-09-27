@@ -593,7 +593,8 @@ public:
             for (const Edge &e : info.edges) dests_blocks_sum += e.dests.size();
             stats.inc("get_mask.traversal.dests_blocks.sum", dests_blocks_sum);
             for (const Edge &e : info.edges) {
-                RangeSet llm_bv = e.llm_bv_rangeset.difference_with(final_mask);
+                RangeSet llm_bv_edge = e.llm_bv_rangeset;
+                RangeSet llm_bv = llm_bv_edge.difference_with(final_mask);
                 if (llm_bv.is_empty()) {
                     stats.inc("get_mask.traversal.edge.llm_bv_empty");
                     continue;
@@ -611,6 +612,13 @@ public:
                 // expensive apply_and_prune work. The value-based acc_memo is critical
                 // for performance, replicating the Python version's key optimization.
                 Leveled popped_limited = intersect_llm_mask(popped, llm_bv);
+
+                if (debug_logging_) {
+                    std::cout << "  - Edge from " << node << ": pop=" << e.pop << ", llm_bv=" << llm_bv_edge.repr() << ", limited_llm_bv=" << llm_bv.repr() << std::endl;
+                    std::cout << "    popped GSS: " << gss_to_string(popped) << std::endl;
+                    std::cout << "    limited GSS: " << gss_to_string(popped_limited) << std::endl;
+                }
+
                 if (popped_limited.is_empty()) {
                     stats.inc("get_mask.traversal.edge.popped_pruned_empty");
                     continue;
@@ -645,6 +653,20 @@ public:
                     if (child2.is_empty()) {
                         stats.inc("get_mask.traversal.edge.child_gss_pruned_empty");
                         continue;
+                    }
+
+                    if (debug_logging_) {
+                        std::stringstream ss;
+                        ss << "[";
+                        bool first = true;
+                        for(const auto& p : de.state_ranges) {
+                            if (!first) ss << ", ";
+                            ss << "(" << p.first << ", " << p.second << ")";
+                            first = false;
+                        }
+                        ss << "]";
+                        std::cout << "    -> Dest " << de.dest_idx << " (states: " << ss.str() << ")" << std::endl;
+                        std::cout << "       Child GSS: " << gss_to_string(child2) << std::endl;
                     }
 
                     auto reduced_child = child2.reduce_acc();

@@ -1279,13 +1279,13 @@ class Model(GraphProvider):
 
             # Traverse edges and propagate masks
             edges = arena.get(node, {}).get("children") or []
-            for (pop, llm_bv), dests in edges:
-                llm_bv = llm_bv.difference(final_mask)
+            for (pop, llm_bv_edge), dests in edges:
+                llm_bv = llm_bv_edge.difference(final_mask)
                 if llm_bv.is_empty():
                     continue
 
-                popped: GSS = gss_node.popn(pop)
-                if popped.is_empty():
+                popped_before_limit: GSS = gss_node.popn(pop)
+                if popped_before_limit.is_empty():
                     continue
 
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
@@ -1305,7 +1305,12 @@ class Model(GraphProvider):
                     acc_memo[acc] = result
                     return result
 
-                popped = popped.apply_and_prune(intersect_and_prune)
+                popped = popped_before_limit.apply_and_prune(intersect_and_prune)
+                if os.environ.get("RUST_LOG") == "debug":
+                    print(f"  - Edge from {node}: pop={pop}, llm_bv={llm_bv_edge.to_ranges()}, limited_llm_bv={llm_bv.to_ranges()}")
+                    print(f"    popped GSS: {popped_before_limit.to_stacks()}")
+                    print(f"    limited GSS: {popped.to_stacks()}")
+
                 if popped.is_empty():
                     continue
 
@@ -1323,6 +1328,10 @@ class Model(GraphProvider):
                     child_gss: GSS = popped.isolate_many(values_to_keep)
                     if child_gss.is_empty():
                         continue
+
+                    if os.environ.get("RUST_LOG") == "debug":
+                        print(f"    -> Dest {dest_idx} (states: {state_bv.to_ranges()})")
+                        print(f"       Child GSS: {child_gss.to_stacks()}")
 
                     reduced_child = child_gss.reduce_acc()
                     if not reduced_child or reduced_child.is_empty():
