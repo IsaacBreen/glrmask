@@ -1152,6 +1152,7 @@ private:
             }
             auto na = std::make_shared<Acc>();
             na->llm_mask = new_mask;
+            na->terminals_union = a->terminals_union;
             return na;
         };
         auto result = g.apply_and_prune(mutator);
