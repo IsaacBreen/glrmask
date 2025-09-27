@@ -88,17 +88,27 @@ pub fn merge_equivalent_llm_tokens_trie1(
 
     // 4) Apply mapping to trie
     let mut new_states = Vec::with_capacity(all_nodes.len());
-    for n in tqdm!(all_nodes.iter(), desc = "Remapping trie (read)") {
+    eprintln!("[DEBUG] merge_equivalent_llm_tokens_trie1: Remapping trie (read) for {} nodes", all_nodes.len());
+    for (i, n) in tqdm!(all_nodes.iter().enumerate(), desc = "Remapping trie (read)") {
+        eprintln!("[DEBUG] Remapping node {}/{}: {:?}", i, all_nodes.len(), n);
         let r = n.read(trie1_god).expect("read");
+        eprintln!("[DEBUG]   - Acquired read lock for node {}", i);
         let new_live_tokens = if r.value.live_tokens.is_empty() {
+            eprintln!("[DEBUG]   - live_tokens is empty");
             r.value.live_tokens.clone()
         } else {
-            remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new)
+            eprintln!("[DEBUG]   - remapping live_tokens (len={})", r.value.live_tokens.len());
+            let result = remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new);
+            eprintln!("[DEBUG]   - remapped live_tokens (new_len={})", result.len());
+            result
         };
         let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
-        for (ek, dm) in r.children() {
+        eprintln!("[DEBUG]   - Processing {} child edge keys", r.children().len());
+        for (ek_idx, (ek, dm)) in r.children().iter().enumerate() {
+            eprintln!("[DEBUG]     - Edge key {}/{}: {:?}", ek_idx, r.children().len(), ek);
             let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
-            for (dst, bv) in dm {
+            for (dst_idx, (dst, bv)) in dm.iter().enumerate() {
+                eprintln!("[DEBUG]       - Dest {}/{}: {:?}, bv_len={}", dst_idx, dm.len(), dst, bv.len());
                 let mapped = remap_llm_bv_many_to_one(&bv, &old_to_new);
                 if !mapped.is_empty() {
                     new_dm.insert(dst.clone(), mapped);
@@ -108,8 +118,12 @@ pub fn merge_equivalent_llm_tokens_trie1(
                 new_children.insert(ek.clone(), new_dm);
             }
         }
+        eprintln!("[DEBUG]   - Processed children for node {}", i);
         new_states.push((new_live_tokens, new_children));
+        eprintln!("[DEBUG]   - Pushed new state for node {}", i);
+        eprintln!("[DEBUG]   - Releasing read lock for node {}", i);
     }
+    eprintln!("[DEBUG] merge_equivalent_llm_tokens_trie1: Applying changes to trie");
     for (i, n) in all_nodes.iter().enumerate() {
         let mut w = n.write(trie1_god).expect("write");
         let (live_tokens, children) = &new_states[i];
@@ -174,17 +188,27 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     }
     // Apply mapping to trie
     let mut new_states = Vec::with_capacity(all_nodes.len());
-    for n in &all_nodes {
+    eprintln!("[DEBUG] reorder_llm_tokens_for_range_minimization_trie1: Remapping trie (read) for {} nodes", all_nodes.len());
+    for (i, n) in all_nodes.iter().enumerate() {
+        eprintln!("[DEBUG] Remapping node {}/{}: {:?}", i, all_nodes.len(), n);
         let r = n.read(trie1_god).expect("read");
+        eprintln!("[DEBUG]   - Acquired read lock for node {}", i);
         let new_live_tokens = if r.value.live_tokens.is_empty() {
+            eprintln!("[DEBUG]   - live_tokens is empty");
             r.value.live_tokens.clone()
         } else {
-            remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new)
+            eprintln!("[DEBUG]   - remapping live_tokens (len={})", r.value.live_tokens.len());
+            let result = remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new);
+            eprintln!("[DEBUG]   - remapped live_tokens (new_len={})", result.len());
+            result
         };
         let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
-        for (ek, dm) in r.children() {
+        eprintln!("[DEBUG]   - Processing {} child edge keys", r.children().len());
+        for (ek_idx, (ek, dm)) in r.children().iter().enumerate() {
+            eprintln!("[DEBUG]     - Edge key {}/{}: {:?}", ek_idx, r.children().len(), ek);
             let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
-            for (dst, bv) in dm {
+            for (dst_idx, (dst, bv)) in dm.iter().enumerate() {
+                eprintln!("[DEBUG]       - Dest {}/{}: {:?}, bv_len={}", dst_idx, dm.len(), dst, bv.len());
                 let mapped = remap_llm_bv_permutation(&bv, &old_to_new);
                 if !mapped.is_empty() {
                     new_dm.insert(dst.clone(), mapped);
@@ -194,8 +218,12 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
                 new_children.insert(ek.clone(), new_dm);
             }
         }
+        eprintln!("[DEBUG]   - Processed children for node {}", i);
         new_states.push((new_live_tokens, new_children));
+        eprintln!("[DEBUG]   - Pushed new state for node {}", i);
+        eprintln!("[DEBUG]   - Releasing read lock for node {}", i);
     }
+    eprintln!("[DEBUG] reorder_llm_tokens_for_range_minimization_trie1: Applying changes to trie");
     for (i, n) in all_nodes.iter().enumerate() {
         let mut w = n.write(trie1_god).expect("write");
         let (live_tokens, children) = &new_states[i];
