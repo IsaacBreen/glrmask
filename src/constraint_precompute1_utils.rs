@@ -73,7 +73,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
     // 3) Build many-to-one mapping
     let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
     let mut merged_count = 0;
-    for (_sig, group) in sig_map {
+    for (_sig, group) in tqdm!(sig_map.into_iter(), desc = "Building mapping") {
         if group.len() <= 1 { continue; }
         let rep = *group.iter().min().unwrap();
         for t in group {
@@ -87,7 +87,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
     if merged_count == 0 { return; }
 
     // 4) Apply mapping to trie
-    for n in &all_nodes {
+    for n in tqdm!(all_nodes.iter(), desc = "Remapping trie") {
         let mut w = n.write(trie1_god).expect("write");
         if !w.value.live_tokens.is_empty() {
             w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new);
@@ -110,7 +110,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
 
     // 5) Update stage vocab
     // Merge internal_to_original for tokens mapped into representatives
-    for (old, new_rep) in &old_to_new {
+    for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Updating stage vocab") {
         if old == new_rep { continue; }
         let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
         stage_vocab.internal_to_original.entry(*new_rep).or_default().extend(moved.clone());
