@@ -367,8 +367,6 @@ public:
             bool has_end_state = !end_state_obj.is_none();
             int end_state = has_end_state ? py::cast<int>(end_state_obj) : -1;
 
-            Leveled gss_for_end_state = cur.gss;
-
             // collect matches
             std::vector<std::pair<int,int>> matches; // (terminal_id, width)
             for (auto tm : matches_obj) {
@@ -391,7 +389,7 @@ public:
                     // Immediate re-match disallow
                     const auto& accessible_set = get_accessible_tokens(end_state);
                     if (accessible_set.count(terminal_id)) {
-                        gss_for_end_state = disallow_in_state(gss_for_end_state, end_state, terminal_id);
+                        processed = disallow_in_state(processed, end_state, terminal_id);
                     }
                 }
 
@@ -407,7 +405,7 @@ public:
             }
 
             if (has_end_state) {
-                new_states_vec[end_state].push_back(std::move(gss_for_end_state));
+                new_states_vec[end_state].push_back(cur.gss);
             }
         }
         stats.stop("commit.main_loop");
