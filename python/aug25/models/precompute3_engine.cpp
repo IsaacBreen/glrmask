@@ -449,8 +449,18 @@ public:
 
         // values: node_id -> GSS
         std::unordered_map<int, Leveled> values;
+
+        struct GmaskHeapCmp {
+            bool operator()(const std::pair<int, int>& a, const std::pair<int, int>& b) const {
+                if (a.first != b.first) {
+                    return a.first < b.first; // max-heap on depth
+                }
+                return a.second > b.second; // min-heap on node_id for tie-breaking
+            }
+        };
+
         // priority queue storing {depth, node_id}
-        std::priority_queue<std::pair<int, int>> depth_heap;
+        std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>, GmaskHeapCmp> depth_heap;
         std::unordered_set<int> enqueued_nodes;
 
         auto enqueue = [&](int d, int n) {
@@ -1052,20 +1062,16 @@ private:
         auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
             auto na = std::make_shared<Acc>();
             na->llm_mask = acc->llm_mask;
-            RangeSet rs_empty = RangeSet::empty();
-            // This logic must mirror the Python version to ensure terminals_union is pruned
-            // and does not grow indefinitely. We iterate over the small state_map, not the
-            // potentially large terminals_union.
-            for (auto const& [old_sid, new_sid] : state_map) {
+
+            for (const auto& [old_sid, new_sid] : state_map) {
                 auto it = acc->terminals_union.find(old_sid);
-                if (it != acc->terminals_union.end()) {
-                    const RangeSet& bv_source = it->second;
-                    auto it_new = na->terminals_union.find(new_sid);
-                    if (it_new != na->terminals_union.end()) {
-                        it_new->second = it_new->second.union_with(bv_source);
-                    } else {
-                        na->terminals_union.emplace(new_sid, bv_source);
-                    }
+                const RangeSet& bv_source = (it != acc->terminals_union.end()) ? it->second : RangeSet::empty();
+
+                auto it_new = na->terminals_union.find(new_sid);
+                if (it_new != na->terminals_union.end()) {
+                    it_new->second = it_new->second.union_with(bv_source);
+                } else {
+                    na->terminals_union.emplace(new_sid, bv_source);
                 }
             }
             return na;
