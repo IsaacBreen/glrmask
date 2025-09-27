@@ -633,7 +633,30 @@ impl GSSNode {
         match self {
             GSSNode::Root(r) => r.acc.clone(),
             GSSNode::Internal(i) => {
-                todo!()
+                // This is a recursive method that can be slow. It computes the aggregated
+                // Acc for the entire subgraph rooted at this node. For performance-critical
+                // checks like `is_alive`, a custom traversal is used instead.
+
+                // 1. Merge the aggregated Accs of all children (predecessors).
+                let mut merged_children_acc: Option<Acc> = None;
+
+                for predecessor_arc in i.predecessors.values().flat_map(|m| m.values()).flatten() {
+                    let child_acc = predecessor_arc.acc();
+                    if let Some(merged) = merged_children_acc.as_mut() {
+                        *merged = Acc::merge(merged, &child_acc);
+                    } else {
+                        merged_children_acc = Some((*child_acc).clone());
+                    }
+                }
+
+                // 2. Narrow the merged children's Acc with this node's local Acc.
+                if let Some(acc) = merged_children_acc {
+                    Arc::new(Acc::narrow(&i.acc, &acc))
+                } else {
+                    // An internal node must have predecessors. If it somehow doesn't,
+                    // its aggregated Acc is just its local Acc.
+                    i.acc.clone()
+                }
             }
         }
     }
