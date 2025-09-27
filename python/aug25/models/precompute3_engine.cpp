@@ -596,6 +596,9 @@ public:
             if (gss_mask_acc) {
                 RangeSet gss_potential_overlap = gss_mask_acc->llm_mask.intersection_with(potential_new_tokens);
                 if (debug_logging_) {
+                    std::cout << "  Zombie check: gss_mask_acc.llm_mask=" << gss_mask_acc->llm_mask.repr() << std::endl;
+                }
+                if (debug_logging_) {
                     std::cout << "  Zombie check: gss_potential_overlap=" << gss_potential_overlap.repr() << std::endl;
                 }
                 if (gss_potential_overlap.is_empty()) {
@@ -869,7 +872,25 @@ private:
         if (!acc) return "Acc(null)";
         std::stringstream ss;
         ss << "PyAcc(terminals_union_size=" << acc->terminals_union.size()
-            << ", llm_mask_size=" << acc->llm_mask.size() << ")";
+            << ", llm_mask_size=" << acc->llm_mask.size();
+        if (debug_logging_ && !acc->terminals_union.empty()) {
+            ss << ", terminals_union={";
+            bool first = true;
+            // sort keys for deterministic output
+            std::vector<int> keys;
+            for(const auto& [k, v] : acc->terminals_union) keys.push_back(k);
+            std::sort(keys.begin(), keys.end());
+            for (int k : keys) {
+                if (!first) ss << ", ";
+                ss << k << ": " << acc->terminals_union.at(k).repr();
+                first = false;
+            }
+            ss << "}";
+        }
+        if (debug_logging_ && !acc->llm_mask.is_empty()) {
+            ss << ", llm_mask=" << acc->llm_mask.repr();
+        }
+        ss << ")";
         return ss.str();
     }
 
@@ -1231,6 +1252,11 @@ private:
         auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
             stats.inc("get_mask.initialize_acc.calls");
             stats.start("get_mask.initialize_acc.total");
+
+            if (debug_logging_) {
+                std::cout << "    -> Initializing Acc: " << acc_to_string(a) << std::endl;
+            }
+
             // Build disallowed mask as RangeSet
             RangeSet disallowed_llm_mask = RangeSet::empty();
 
@@ -1262,6 +1288,11 @@ private:
             stats.start("get_mask.initialize_acc.difference");
             RangeSet allowed_mask = universe_rangeset_.difference_with(disallowed_llm_mask);
             stats.stop("get_mask.initialize_acc.difference");
+
+            if (debug_logging_) {
+                std::cout << "       disallowed_llm_mask: " << disallowed_llm_mask.repr() << std::endl;
+                std::cout << "       allowed_mask: " << allowed_mask.repr() << std::endl;
+            }
 
             auto na = std::make_shared<Acc>();
             na->llm_mask = allowed_mask;

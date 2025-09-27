@@ -812,9 +812,19 @@ class PyAcc:
     def __repr__(self):
         # to_indices is slow, but this is for debug.
         mask_size = len(self.llm_mask)
+        terminals_repr = ""
+        if os.environ.get("RUST_LOG") == "debug" and self.terminals_union:
+            # Sort for deterministic output
+            sorted_terminals = sorted(self.terminals_union.items())
+            terminals_repr = f", terminals_union={{ {', '.join(f'{k}: {v.to_ranges()}' for k, v in sorted_terminals)} }}"
+
+        llm_mask_repr = ""
+        if os.environ.get("RUST_LOG") == "debug" and not self.llm_mask.is_empty():
+            llm_mask_repr = f", llm_mask={self.llm_mask.to_ranges()}"
+
         return (
             f"PyAcc(terminals_union_size={len(self.terminals_union)}, "
-            f"llm_mask_size={mask_size})"
+            f"llm_mask_size={mask_size}{terminals_repr}{llm_mask_repr})"
         )
 
     def __eq__(self, other):
@@ -1209,6 +1219,9 @@ class Model(GraphProvider):
             disallowed_llm_mask = RangeSet.empty()
             disallowed_map = acc.terminals_union
 
+            if os.environ.get("RUST_LOG") == "debug":
+                print(f"    -> Initializing Acc: {acc}")
+
             for tsid, disallowed_terminals in disallowed_map.items():
                 if tsid > max_state or tsid not in pmc:
                     continue
@@ -1220,6 +1233,11 @@ class Model(GraphProvider):
                         )
 
             allowed_mask = (all_ones if all_ones is not None else RangeSet.empty()).difference(disallowed_llm_mask)
+
+            if os.environ.get("RUST_LOG") == "debug":
+                print(f"       disallowed_llm_mask: {disallowed_llm_mask.to_ranges()}")
+                print(f"       allowed_mask: {allowed_mask.to_ranges()}")
+
             return PyAcc(
                 terminals_union={},  # consume
                 llm_mask=allowed_mask,
@@ -1284,6 +1302,8 @@ class Model(GraphProvider):
 
             gss_mask_acc = gss_node.reduce_acc()
             if gss_mask_acc:
+                if os.environ.get("RUST_LOG") == "debug":
+                    print(f"  Zombie check: gss_mask_acc.llm_mask={gss_mask_acc.llm_mask.to_ranges()}")
                 gss_potential_overlap = gss_mask_acc.llm_mask.intersection(potential_new_tokens)
                 if os.environ.get("RUST_LOG") == "debug":
                     print(f"  Zombie check: gss_potential_overlap={gss_potential_overlap.to_ranges()}")
