@@ -628,53 +628,12 @@ impl GSSNode {
 
     /// Returns the aggregate Acc for this node.
     /// - If root: returns the node's Acc.
-    /// - If internal: walks to all reachable roots and merges their Accs.
+    /// - If internal: merges its childrens' Accs and narrows through its own local Acc.
     fn acc(&self) -> Arc<Acc> {
         match self {
             GSSNode::Root(r) => r.acc.clone(),
             GSSNode::Internal(i) => {
-                // Aggregate over reachable roots (does not include local acc here).
-                // Collect all root Accs reachable from this node.
-                let mut visited_nodes: HashSet<*const GSSNode> = HashSet::new();
-                let mut queue: VecDeque<Arc<GSSNode>> = VecDeque::new();
-                for preds_by_depth in i.predecessors.values() {
-                    for pred_vec in preds_by_depth.values() {
-                        for pred in pred_vec {
-                            queue.push_back(pred.clone());
-                        }
-                    }
-                }
-
-                let mut accs: Vec<Arc<Acc>> = Vec::new();
-                while let Some(node) = queue.pop_front() {
-                    let ptr = Arc::as_ptr(&node);
-                    if !visited_nodes.insert(ptr) {
-                        continue;
-                    }
-                    match node.as_ref() {
-                        GSSNode::Root(r) => accs.push(r.acc.clone()),
-                        GSSNode::Internal(ii) => {
-                            for preds_by_depth in ii.predecessors.values() {
-                                for pred_vec in preds_by_depth.values() {
-                                    for pred in pred_vec {
-                                        queue.push_back(pred.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if accs.is_empty() {
-                    Arc::new(Acc::new_fresh())
-                } else {
-                    let mut iter = accs.into_iter();
-                    let first = (*iter.next().unwrap()).clone();
-                    let mut merged = first;
-                    for next in iter {
-                        merged = Acc::merge(&merged, &next);
-                    }
-                    Arc::new(merged)
-                }
+                todo!()
             }
         }
     }
