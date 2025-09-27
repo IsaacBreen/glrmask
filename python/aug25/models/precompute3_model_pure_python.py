@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import heapq
 import collections
 import time
@@ -9,6 +10,7 @@ from dataclasses import dataclass, field
 
 from ..common_interface import GraphProvider
 from ..range_set.py_range_set import PyRangeSet as RangeSet
+from typing import DefaultDict
 import _sep1 as ffi
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
@@ -29,6 +31,13 @@ try:
 except NameError:
     # If not running under kernprof, create a dummy decorator.
     def profile(func): return func
+
+
+# tqdm (progress bars) with a safe fallback
+try:
+    from tqdm import tqdm
+except Exception:  # pragma: no cover
+    def tqdm(iterable, **kwargs): return iterable
 
 
 @dataclass(frozen=True)
@@ -268,6 +277,7 @@ class Model(GraphProvider):
         model = Model(
             arena=arena,
             roots_map=roots_map,
+            # max_depth computed from JSON already (cache), but will be refreshed after optimizations
             max_depth=max_depth,
             parser_table=parser_table,
             glr_parser=glr_parser,
@@ -286,6 +296,7 @@ class Model(GraphProvider):
 
         model._merge_equivalent_llm_tokens()
         model._reorder_llm_tokens_for_range_minimization()
+        model.optimize_graph()
         return model
 
     @profile
@@ -1106,6 +1117,364 @@ class Model(GraphProvider):
                     new_internal_to_original_map[old_to_new_map[old_tok]] = set(orig_set)
             self.internal_to_original_map = new_internal_to_original_map
 
+
+    # ===========================
+    # Graph optimization pipeline
+    # ===========================
+    def optimize_graph(self) -> None:
+        """
+        Two-phase optimizer:
+        1) Goal 1, Alt 6: make as many per-destination masks equal to the full LR-state universe as possible,
+           without changing behavior. We use the terminality notion per token:
+             - For token t and destination node d, if T_t[d] (terminal states at d for t) is a subset of the
+               existing mask M, then we can set M := Universe (we only add non-terminal states).
+           This is executed token-by-token and we rebuild node children by grouping tokens that share identical
+           (pop, dest->mask) signatures.
+        2) Goal 2, Alt 2: Reduce the number of edges by applying Replacement 1 conservatively:
+             - For A -(n, M=Universe)-> B and B -(m, y)-> C (B has exactly one outgoing (to C) and exactly one incoming),
+               and B is not an end node, replace with A -(n+m, y)-> C (llm_bv is the intersection of both edges' llm_bv).
+               Remove node B entirely (and remove A->B and B->C). Iterate until no more changes.
+        """
+        print("Optimizing graph: Goal 1 (Alt 6) mask fill, then Goal 2 (Alt 2) safe edge replacement...", flush=True)
+        arena = self.arena
+        if not arena:
+            return
+
+        # -------------------------------
+        # Helper: state universe (LR states)
+        # -------------------------------
+        reverse_map: Dict[int, Set[int]] = self.reverse_state_map or {}
+        all_lr_states: Set[int] = set(reverse_map.keys())
+        for vs in reverse_map.values():
+            all_lr_states.update(int(x) for x in vs)
+        if not all_lr_states:
+            # Fallback: derive from parser table (keys + gotos + shifts)
+            for sid, row in self.parser_table.table.items():
+                all_lr_states.add(int(sid))
+                for act in row.actions.values():
+                    if isinstance(act, int):
+                        all_lr_states.add(int(act))
+                    elif isinstance(act, Split):
+                        if act.shift is not None:
+                            all_lr_states.add(int(act.shift))
+                for to_state in row.gotos.values():
+                    all_lr_states.add(int(to_state))
+
+        # Prefer a single-interval universe if contiguous from 0..max_state, else fallback to explicit indices.
+        if all_lr_states:
+            mn = min(all_lr_states)
+            mx = max(all_lr_states)
+            contiguous_zero_based = (mn == 0) and (len(all_lr_states) == (mx - mn + 1))
+        else:
+            contiguous_zero_based = True
+        if all_lr_states and contiguous_zero_based:
+            state_universe_rs: StateIDSet = RangeSet.from_ranges([(0, max(all_lr_states))])
+        else:
+            state_universe_rs = RangeSet.from_indices(sorted(all_lr_states))
+
+        # Quick RangeSet helpers
+        def rs_subset(a: StateIDSet, b: StateIDSet) -> bool:
+            # a ⊆ b  <=>  a - b == ∅
+            return a.difference(b).is_empty()
+
+        def rs_equal(a: StateIDSet, b: StateIDSet) -> bool:
+            return a.difference(b).is_empty() and b.difference(a).is_empty()
+
+        def pre_R_once(Y: StateIDSet) -> StateIDSet:
+            if Y.is_empty():
+                return Y
+            srcs: Set[int] = set()
+            for y in Y.to_indices():
+                srcs.update(reverse_map.get(int(y), set()))
+            if not srcs:
+                return RangeSet.empty()
+            return RangeSet.from_indices(sorted(srcs))
+
+        def pre_R_pow(Y: StateIDSet, steps: int) -> StateIDSet:
+            Z = Y
+            for _ in range(int(steps)):
+                if Z.is_empty():
+                    break
+                Z = pre_R_once(Z)
+            return Z
+
+        # Gather internal tokens to iterate
+        all_tokens_list = list(self.all_internal_llm_tokens_bitset.to_indices())
+        if not all_tokens_list:
+            # No tokens -> nothing to optimize in mask dimension; still try Replacement 1 (rare)
+            self._recompute_llm_bv_unions()
+            self.max_depth = self._recompute_max_depth_from_arena()
+            self._apply_safe_edge_replacements(state_universe_rs, rs_equal)
+            return
+
+        # --------------------------------------
+        # Phase 1: per-token terminality and fill
+        # --------------------------------------
+        print("Phase 1/2: per-token terminality fixpoint and mask fill...", flush=True)
+        # Aggregator: For each node, collect signatures and the set of tokens that share them.
+        # signature := (pop, tuple(sorted((dest_id, tuple(range_pairs)), ...)))
+        Aggregator = Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]]
+        SignatureData = Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Tuple[int, List[Tuple[int, Tuple[Tuple[int, int], ...]]]]]
+
+        signatures_by_node: Dict[int, Aggregator] = collections.defaultdict(lambda: collections.defaultdict(set))
+        signature_data_by_node: Dict[int, SignatureData] = collections.defaultdict(dict)
+
+        # We will reuse these structures per token
+        all_node_ids: List[int] = list(arena.keys())
+
+        for t in tqdm(all_tokens_list, desc="Token mask fixpoint & fill"):
+            token = int(t)
+            # Build incoming_by_dest for this token: dest_node -> list of (src_node, pop, mask)
+            incoming_by_dest: Dict[int, List[Tuple[int, int, StateIDSet]]] = collections.defaultdict(list)
+            # Also: build per-source collections (group by pop) to form signatures later
+            out_by_src_pop: Dict[int, Dict[int, Dict[int, StateIDSet]]] = collections.defaultdict(lambda: collections.defaultdict(dict))
+
+            for src_id, node in arena.items():
+                children = node.children
+                if not children:
+                    continue
+                for (pop, llm_bv), dests in children:
+                    if llm_bv.is_empty():
+                        continue
+                    if not llm_bv.contains(token):
+                        continue
+                    for (dest_id, mask) in dests:
+                        dest_i = int(dest_id)
+                        incoming_by_dest[dest_i].append((int(src_id), int(pop), mask))
+                        # build out_by_src_pop to later build signatures for this token
+                        out_by_src_pop[int(src_id)][int(pop)][dest_i] = mask
+
+            # Terminal sets T per node for this token
+            T: Dict[int, StateIDSet] = {}
+            queue: collections.deque[int] = collections.deque()
+            # Initialize: end nodes get Universe; others empty
+            for nid, n in arena.items():
+                if n.clean_end:
+                    T[int(nid)] = state_universe_rs
+                    queue.append(int(nid))
+                else:
+                    T[int(nid)] = RangeSet.empty()
+
+            # Worklist fixpoint: propagate backwards via incoming_by_dest and reverse_state_map
+            while queue:
+                dest_node = queue.popleft()
+                T_dest = T[dest_node]
+                preds = incoming_by_dest.get(dest_node, [])
+                if not preds:
+                    continue
+                for (src_node, pop, mask) in preds:
+                    Y = mask.intersection(T_dest)
+                    if Y.is_empty():
+                        continue
+                    pre = pre_R_pow(Y, pop)
+                    if pre.is_empty():
+                        continue
+                    # If pre brings new states to T[src_node], update and enqueue
+                    if not pre.difference(T[src_node]).is_empty():
+                        T[src_node] = T[src_node].union(pre)
+                        queue.append(int(src_node))
+
+            # With T computed, build the per-node signatures for this token (and apply Alt 6 fill)
+            for src_node, pop_map in out_by_src_pop.items():
+                for pop, dest_map in pop_map.items():
+                    # For this (src, pop) group, compute new masks with Alt 6 fill rule per destination
+                    sig_parts: List[Tuple[int, Tuple[Tuple[int, int], ...]]] = []
+                    for dest_id, original_mask in dest_map.items():
+                        # If all terminal states at dest are already allowed in the mask, fill with Universe
+                        new_mask: StateIDSet
+                        if rs_subset(T.get(int(dest_id), RangeSet.empty()), original_mask):
+                            new_mask = state_universe_rs
+                        else:
+                            new_mask = original_mask
+                        sig_parts.append((int(dest_id), tuple((int(a), int(b)) for (a, b) in new_mask.to_ranges())))
+                    # Canonicalize by sorting destinations by id
+                    sig_parts.sort(key=lambda x: x[0])
+                    signature = (int(pop), tuple(sig_parts))
+                    signatures_by_node[src_node][signature].add(token)
+                    # Keep signature data to reconstruct RangeSets later
+                    if signature not in signature_data_by_node[src_node]:
+                        signature_data_by_node[src_node][signature] = (int(pop), sig_parts)
+
+        # Rebuild node.children from signatures aggregated across tokens
+        for src_node, sig_dict in signatures_by_node.items():
+            new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+            for signature, tokens_set in sig_dict.items():
+                pop, sig_parts = signature_data_by_node[src_node][signature]
+                llm_bv = RangeSet.from_indices(sorted(tokens_set))
+                dests_list: List[Tuple[int, StateIDSet]] = []
+                for (dest_id, ranges_tuple) in sig_parts:
+                    dests_list.append((int(dest_id), RangeSet.from_ranges(list(ranges_tuple))))
+                new_children.append(((int(pop), llm_bv), dests_list))
+
+            # Deterministic sort as in other routines
+            def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+                try:
+                    return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+                except Exception:
+                    return ()
+            new_children.sort(
+                key=lambda item: (
+                    int(item[0][0]),
+                    _ranges_key(item[0][1]),
+                    tuple(sorted(int(d[0]) for d in item[1])),
+                )
+            )
+            arena[src_node].children = new_children
+
+        # Refresh llm_bv_union and depth estimates after Phase 1 modifications
+        self._recompute_llm_bv_unions()
+        self.max_depth = self._recompute_max_depth_from_arena()
+
+        # ------------------------------------------
+        # Phase 2: safe Replacement 1 to reduce edges
+        # ------------------------------------------
+        print("Phase 2/2: conservative edge replacement (Replacement 1)...", flush=True)
+        self._apply_safe_edge_replacements(state_universe_rs, rs_equal)
+
+    def _apply_safe_edge_replacements(self, state_universe_rs: StateIDSet, rs_equal_fn) -> None:
+        """
+        Apply Replacement 1 conservatively to actually reduce the number of edges:
+        We only collapse A->B->C into A->C and remove B entirely when:
+          - B is not an end node
+          - B has exactly one outgoing child edge group with exactly one destination (B->C)
+          - B has exactly one incoming edge-destination across the whole graph (unique incoming)
+          - The mask on A->B for that dest equals the Universe set (state_universe_rs)
+          - The resulting llm_bv for A->C is L_chain = L_AB ∩ L_BC (must be non-empty)
+
+        After a change, recompute llm_bv_union and depth, iterate until no changes.
+        """
+        arena = self.arena
+        changed_any = True
+        while changed_any:
+            # Build incoming edges map: dest_node -> list of (parent_id, parent_group_index, dest_index_in_group)
+            incoming_edges: Dict[int, List[Tuple[int, int, int]]] = collections.defaultdict(list)
+            for parent_id, parent_node in arena.items():
+                for gi, ((pop, llm_bv), dests) in enumerate(parent_node.children):
+                    for di, (dst, _mask) in enumerate(dests):
+                        incoming_edges[int(dst)].append((int(parent_id), int(gi), int(di)))
+
+            # Compute candidate B nodes
+            candidates: List[int] = []
+            for nid, node in arena.items():
+                if node.clean_end:
+                    continue
+                # exactly 1 outgoing group and exactly 1 destination in that group
+                if len(node.children) != 1:
+                    continue
+                ((pop_b, llm_bv_b), dests_b) = node.children[0]
+                if len(dests_b) != 1:
+                    continue
+                # exactly one incoming destination overall
+                in_list = incoming_edges.get(int(nid), [])
+                if len(in_list) != 1:
+                    continue
+                candidates.append(int(nid))
+
+            if not candidates:
+                break
+
+            changed_in_iteration = False
+            for B in tqdm(candidates, desc="Replacement scan"):
+                if B not in arena:
+                    continue
+                node_b = arena[B]
+                # Recheck conditions in case of previous modifications within this iteration
+                if node_b.clean_end or len(node_b.children) != 1 or len(node_b.children[0][1]) != 1:
+                    continue
+                in_list = []
+                # rebuild incoming for this B to be safe
+                for parent_id, parent_node in arena.items():
+                    for gi, ((pop, llm_bv), dests) in enumerate(parent_node.children):
+                        for di, (dst, _mask) in enumerate(dests):
+                            if int(dst) == int(B):
+                                in_list.append((int(parent_id), int(gi), int(di)))
+                if len(in_list) != 1:
+                    continue
+
+                # Unique incoming
+                A, gi, di = in_list[0]
+                parent = arena.get(A)
+                if parent is None:
+                    continue
+                # A -> B details
+                (pop_a, llm_bv_a), dests_a = parent.children[gi]
+                dest_b_id, mask_ab = dests_a[di]
+                if int(dest_b_id) != int(B):
+                    continue
+                # Require Universe mask on A->B for this dest to allow Replacement 1
+                if not rs_equal_fn(mask_ab, state_universe_rs):
+                    continue
+
+                # B -> C details
+                (pop_b, llm_bv_b), dests_b = node_b.children[0]
+                (C, mask_bc) = dests_b[0]
+
+                # L_chain = intersection of tokens present on both edges
+                llm_chain = llm_bv_a.intersection(llm_bv_b)
+                if llm_chain.is_empty():
+                    # No token traverses both; cannot construct A->C for any token safely
+                    continue
+
+                # Remove dest B from A's group (and delete group if empty)
+                new_dests_a = list(dests_a)
+                del new_dests_a[di]
+                if not new_dests_a:
+                    # remove entire group
+                    new_children_parent = list(parent.children)
+                    del new_children_parent[gi]
+                    parent.children = new_children_parent
+                else:
+                    parent.children[gi] = ((pop_a, llm_bv_a), new_dests_a)
+
+                # Remove B node entirely
+                del arena[B]
+                if B in self.max_depth:
+                    del self.max_depth[B]
+
+                # Add/merge new A -> C with pop = pop_a + pop_b, mask = mask_bc, llm_bv = llm_chain
+                new_pop = int(pop_a) + int(pop_b)
+                merged = False
+                # Try to merge into an existing group with identical (pop, dest list single (C, mask_bc))
+                for idx, ((p, llm), dests_list) in enumerate(parent.children):
+                    if int(p) != new_pop:
+                        continue
+                    if len(dests_list) != 1:
+                        continue
+                    if int(dests_list[0][0]) != int(C):
+                        continue
+                    # Compare masks using rs_equal
+                    if rs_equal_fn(dests_list[0][1], mask_bc):
+                        # Merge tokens
+                        parent.children[idx] = ((p, llm.union(llm_chain)), dests_list)
+                        merged = True
+                        break
+                if not merged:
+                    parent.children.append(((new_pop, llm_chain), [(int(C), mask_bc)]))
+
+                # Deterministic sort for parent
+                def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+                    try:
+                        return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+                    except Exception:
+                        return ()
+                parent.children.sort(
+                    key=lambda item: (
+                        int(item[0][0]),
+                        _ranges_key(item[0][1]),
+                        tuple(sorted(int(d[0]) for d in item[1])),
+                    )
+                )
+
+                changed_in_iteration = True
+
+            if not changed_in_iteration:
+                break
+            changed_any = True
+            # Refresh unions and depths after changes
+            self._recompute_llm_bv_unions()
+            self.max_depth = self._recompute_max_depth_from_arena()
+
+        print("Optimization complete.", flush=True)
 
     def _remap_llm_tokens_many_to_one(self, old_to_new_map: Dict[int, int]) -> None:
         """
