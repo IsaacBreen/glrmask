@@ -3178,4 +3178,37 @@ mod tests {
             "Allowed tokens should be restricted to only token 0 after filtering"
         );
     }
+
+    #[test]
+    fn test_popn_collect_isolated_parents_preserves_acc() {
+        // Setup: Root(acc42) -> Intermediate(empty) -> Leaf(empty)
+        let leaf = Arc::new(GSSNode::new(empty_acc()));
+        let intermediate = Arc::new(leaf.push(mock_edge(10)));
+        assert!(intermediate.local_acc().is_default());
+
+        let root_acc = mock_acc(42);
+        let root = Arc::new(GSSNode::new_with_single_predecessor(
+            intermediate.clone(),
+            mock_edge(20),
+            root_acc.clone(),
+        ));
+        assert_eq!(*root.local_acc(), root_acc);
+
+        // Action: pop 1 level. We expect to get back a node representing the `intermediate`
+        // node, but with the path constraint from the root applied.
+        let result = popn_collect_isolated_parents(&root, 1);
+
+        assert_eq!(result.len(), 1);
+        let (_state_id, isolated_parent) = &result[0];
+
+        // Validation: The `isolated_parent` is a reconstruction of the `intermediate` node's
+        // path to its predecessor (`leaf`). The overall `acc()` of this new structure
+        // should reflect the constraint from the popped `root`.
+        let final_acc = isolated_parent.acc();
+
+        // The final acc should be the intersection of the root's acc and the rest of the path.
+        // Since the rest of the path is empty, it should just be the root's acc.
+        assert_eq!(*final_acc, root_acc);
+        assert!(!final_acc.llm_tokens_union.contains(42));
+    }
 }
