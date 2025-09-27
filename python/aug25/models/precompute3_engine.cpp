@@ -593,7 +593,7 @@ public:
                     if (keep.empty()) continue;
 
                     stats.start("get_mask.main_loop.edge.isolate_many");
-                    Leveled child2 = popped_limited.isolate_many(keep, false);
+                    Leveled child2 = popped_limited.isolate_many(keep);
                     stats.stop("get_mask.main_loop.edge.isolate_many");
 
                     if (child2.is_empty()) {
@@ -1138,8 +1138,6 @@ private:
         auto& stats = Stats::get();
         stats.start("get_mask.main_loop.edge.apply_and_prune");
 
-        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> acc_memo;
-
         auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
             stats.inc("get_mask.intersect_and_prune.calls");
 
@@ -1154,10 +1152,9 @@ private:
             }
             auto na = std::make_shared<Acc>();
             na->llm_mask = new_mask;
-            na->terminals_union = a->terminals_union;
             return na;
         };
-        auto result = g.apply_and_prune(mutator, &acc_memo);
+        auto result = g.apply_and_prune(mutator);
         stats.stop("get_mask.main_loop.edge.apply_and_prune");
         return result;
     }

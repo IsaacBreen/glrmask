@@ -98,7 +98,12 @@ public:
             }
         }
         
-        return LeveledGssPyWrapper(gss.isolate_many(values_set, has_none));
+        CppGSS result_gss = gss.isolate_many(values_set);
+        if (has_none) {
+            CppGSS none_gss = gss.isolate_none();
+            result_gss = result_gss.merge(none_gss);
+        }
+        return LeveledGssPyWrapper(result_gss);
     }
 
     LeveledGssPyWrapper apply(const py::function& func) const {
