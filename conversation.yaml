@@ -14,7 +14,6 @@ local_system:
     python/aug25/models/precompute3_model_pure_python_standalone.py: |
       from __future__ import annotations
 
-      import os
       import json
       import heapq
       import collections
@@ -823,14 +822,6 @@ local_system:
           terminals_union: Dict[int, RangeSet]
           llm_mask: RangeSet
 
-          def __repr__(self):
-              # to_indices is slow, but this is for debug.
-              mask_size = len(self.llm_mask.to_indices())
-              return (
-                  f"PyAcc(terminals_union_size={len(self.terminals_union)}, "
-                  f"llm_mask_size={mask_size})"
-              )
-
           def __eq__(self, other):
               if not isinstance(other, PyAcc):
                   return NotImplemented
@@ -1141,13 +1132,6 @@ local_system:
 
               self.state = merged_states
 
-              if os.environ.get("RUST_LOG") == "debug":
-                  print("\n--- PY: State after commit ---")
-                  for tsid, gss in sorted(self.state.items()):
-                      print(f"  TSID {tsid}: {gss.to_stacks()}")
-                  print("------------------------------\n")
-
-
           def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
               heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
               for state_id in gss.peek():
@@ -1254,12 +1238,6 @@ local_system:
                       enqueued_nodes.add(r)
                       hp(depth_heap, (-d, r))
 
-              if os.environ.get("RUST_LOG") == "debug":
-                  print("\n--- PY: get_mask initial values ---")
-                  for node_id, gss in sorted(values.items()):
-                      print(f"  Node {node_id}: {gss.to_stacks()}")
-                  print("-------------------------------------\n")
-
               def enqueue(d: int, n: int) -> None:
                   if n not in enqueued_nodes:
                       enqueued_nodes.add(n)
@@ -1270,12 +1248,6 @@ local_system:
                   neg_depth, node = hpop(depth_heap)
                   gss_node: GSS = values.pop(node)
                   enqueued_nodes.remove(node)
-
-                  if os.environ.get("RUST_LOG") == "debug":
-                      print(f"\n--- PY: get_mask processing node {node} ---")
-                      print(f"  GSS: {gss_node.to_stacks()}")
-                      print(f"  Current final_mask: {final_mask.to_ranges()}")
-
 
                   # End-node handling: just union the allowed LLM tokens
                   if is_end(node):
@@ -1356,12 +1328,6 @@ local_system:
               for i in final_mask.to_indices():
                   if i in self.internal_to_original_map:
                       original_indices.append(self.internal_to_original_map[i])
-
-              if os.environ.get("RUST_LOG") == "debug":
-                  print(f"\n--- PY: get_mask final internal mask ---")
-                  print(f"  Mask: {final_mask.to_ranges()}")
-                  print("----------------------------------------\n")
-
 
               return RangeSet.from_indices(original_indices)
     python/aug25/models/icl_rangeset.cpp: |
@@ -1601,8 +1567,6 @@ local_system:
       #include <string>
       #include <utility>
       #include <tuple>
-      #include <iostream>
-      #include <cstdlib>
       #include <sstream>
       #include <deque>
       #include <algorithm>
@@ -1736,11 +1700,6 @@ local_system:
                 tokenizer_execute_from_state_(tokenizer_.attr("execute_from_state")),
                 tokenizer_tokens_accessible_from_state_(tokenizer_.attr("tokens_accessible_from_state"))
                 {
-
-              const char* rust_log = std::getenv("RUST_LOG");
-              if (rust_log && std::string(rust_log) == "debug") {
-                  debug_logging_ = true;
-              }
 
               if (!ignore_terminal_id_or_none.is_none()) {
                   ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
@@ -2017,17 +1976,6 @@ local_system:
               // Update internal state
               state_ = std::move(merged_states);
               stats.inc("commit.tokenizer_states_out", state_.size());
-
-              if (debug_logging_) {
-                  std::cout << "\n--- CPP: State after commit ---" << std::endl;
-                  std::vector<int> keys;
-                  for(auto const& [key, val] : state_) keys.push_back(key);
-                  std::sort(keys.begin(), keys.end());
-                  for (int tsid : keys) {
-                      std::cout << "  TSID " << tsid << ": " << gss_to_string(state_.at(tsid)) << std::endl;
-                  }
-                  std::cout << "-------------------------------" << std::endl << std::endl;
-              }
               stats.stop("commit.total");
           }
 
@@ -2096,18 +2044,6 @@ local_system:
               }
               stats.stop("get_mask.seeding");
 
-              if (debug_logging_) {
-                  std::cout << "\n--- CPP: get_mask initial values ---" << std::endl;
-                  std::vector<int> keys;
-                  for(auto const& [key, val] : values) keys.push_back(key);
-                  std::sort(keys.begin(), keys.end());
-                  for (int node_id : keys) {
-                      std::cout << "  Node " << node_id << ": " << gss_to_string(values.at(node_id)) << std::endl;
-                  }
-                  std::cout << "--------------------------------------" << std::endl << std::endl;
-              }
-
-
               RangeSet final_mask = RangeSet::empty();
 
               stats.start("get_mask.main_loop");
@@ -2127,12 +2063,6 @@ local_system:
                   auto itv = values.find(node);
                   if (itv == values.end()) continue;
                   Leveled gss_node = std::move(itv->second);
-
-                  if (debug_logging_) {
-                      std::cout << "\n--- CPP: get_mask processing node " << node << " ---" << std::endl;
-                      std::cout << "  GSS: " << gss_to_string(gss_node) << std::endl;
-                      std::cout << "  Current final_mask: " << final_mask.repr() << std::endl;
-                  }
                   values.erase(itv);
                   stats.inc("get_mask.gss.at_node.accs.sum", gss_node.get_all_accs().size());
 
@@ -2272,13 +2202,6 @@ local_system:
               stats.stop("get_mask.final_conversion.from_indices");
               stats.stop("get_mask.final_conversion");
               stats.stop("get_mask.total");
-
-              if (debug_logging_) {
-                  std::cout << "\n--- CPP: get_mask final internal mask ---" << std::endl;
-                  std::cout << "  Mask: " << final_mask.repr() << std::endl;
-                  std::cout << "-----------------------------------------" << std::endl << std::endl;
-              }
-
               py::gil_scoped_acquire acquire; // Re-acquire GIL before returning to Python
               return py::cast(result);
           }
@@ -2360,8 +2283,6 @@ local_system:
           // Cache for tokens_accessible_from_state (cleared per commit)
           std::unordered_map<int, std::unordered_set<int>> accessible_cache_;
 
-          bool debug_logging_ = false;
-
           // Check membership in a vector of inclusive ranges (sorted, non-overlapping).
           static bool contains_in_ranges(const std::vector<std::pair<int,int>>& ranges, int v) {
               // Binary search by upper_bound on end values
@@ -2397,50 +2318,6 @@ local_system:
 
               auto [inserted_it, success] = accessible_cache_.emplace(state_id, std::move(accessible_set));
               return inserted_it->second;
-          }
-
-          std::string acc_to_string(const std::shared_ptr<Acc>& acc) {
-              if (!acc) return "Acc(null)";
-              std::stringstream ss;
-              ss << "PyAcc(terminals_union_size=" << acc->terminals_union.size()
-                  << ", llm_mask_size=" << acc->llm_mask.size() << ")";
-              return ss.str();
-          }
-
-          std::string gss_to_string(const Leveled& gss) {
-              std::stringstream ss;
-              auto stacks = gss.to_stacks();
-
-              // Sort stacks for canonical representation, matching Python's ReferenceGSS
-              std::sort(stacks.begin(), stacks.end(),
-                  [](const auto& a, const auto& b) {
-                      if (a.first.size() != b.first.size()) {
-                          return a.first.size() < b.first.size();
-                      }
-                      return a.first < b.first; // relies on std::vector::operator<
-                  });
-
-              ss << "[";
-              bool first_stack = true;
-              for (const auto& stack_pair : stacks) {
-                  if (!first_stack) ss << ", ";
-                  first_stack = false;
-
-                  ss << "([";
-                  bool first_val = true;
-                  for (const auto& val : stack_pair.first) {
-                      if (!first_val) ss << ", ";
-                      first_val = false;
-                      ss << val;
-                  }
-                  ss << "], ";
-
-                  ss << acc_to_string(stack_pair.second);
-
-                  ss << ")";
-              }
-              ss << "]";
-              return ss.str();
           }
 
           // -----------------------------
@@ -7042,14 +6919,20 @@ local_system:
                   auto na = std::make_shared<Acc>();
                   na->llm_mask = acc->llm_mask;
                   RangeSet rs_empty = RangeSet::empty();
-
+                  // This logic must mirror the Python version to ensure terminals_union is pruned
+                  // and does not grow indefinitely. We iterate over the small state_map, not the
+                  // potentially large terminals_union.
                   for (auto const& [old_sid, new_sid] : state_map) {
                       auto it = acc->terminals_union.find(old_sid);
-                      const RangeSet& bv_source = (it != acc->terminals_union.end()) ? it->second : rs_empty;
-                      
-                      // operator[] ensures the key exists, default-constructing an empty RangeSet if needed.
-                      // This correctly mirrors Python's defaultdict behavior.
-                      na->terminals_union[new_sid] = na->terminals_union[new_sid].union_with(bv_source);
+                      if (it != acc->terminals_union.end()) {
+                          const RangeSet& bv_source = it->second;
+                          auto it_new = na->terminals_union.find(new_sid);
+                          if (it_new != na->terminals_union.end()) {
+                              it_new->second = it_new->second.union_with(bv_source);
+                          } else {
+                              na->terminals_union.emplace(new_sid, bv_source);
+                          }
+                      }
                   }
                   return na;
               };
@@ -8849,7 +8732,6 @@ messages:
       ```python 'python/aug25/models/precompute3_model_pure_python_standalone.py'
       from __future__ import annotations
 
-      import os
       import json
       import heapq
       import collections
@@ -9658,14 +9540,6 @@ messages:
           terminals_union: Dict[int, RangeSet]
           llm_mask: RangeSet
 
-          def __repr__(self):
-              # to_indices is slow, but this is for debug.
-              mask_size = len(self.llm_mask.to_indices())
-              return (
-                  f"PyAcc(terminals_union_size={len(self.terminals_union)}, "
-                  f"llm_mask_size={mask_size})"
-              )
-
           def __eq__(self, other):
               if not isinstance(other, PyAcc):
                   return NotImplemented
@@ -9976,13 +9850,6 @@ messages:
 
               self.state = merged_states
 
-              if os.environ.get("RUST_LOG") == "debug":
-                  print("\n--- PY: State after commit ---")
-                  for tsid, gss in sorted(self.state.items()):
-                      print(f"  TSID {tsid}: {gss.to_stacks()}")
-                  print("------------------------------\n")
-
-
           def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
               heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
               for state_id in gss.peek():
@@ -10089,12 +9956,6 @@ messages:
                       enqueued_nodes.add(r)
                       hp(depth_heap, (-d, r))
 
-              if os.environ.get("RUST_LOG") == "debug":
-                  print("\n--- PY: get_mask initial values ---")
-                  for node_id, gss in sorted(values.items()):
-                      print(f"  Node {node_id}: {gss.to_stacks()}")
-                  print("-------------------------------------\n")
-
               def enqueue(d: int, n: int) -> None:
                   if n not in enqueued_nodes:
                       enqueued_nodes.add(n)
@@ -10105,12 +9966,6 @@ messages:
                   neg_depth, node = hpop(depth_heap)
                   gss_node: GSS = values.pop(node)
                   enqueued_nodes.remove(node)
-
-                  if os.environ.get("RUST_LOG") == "debug":
-                      print(f"\n--- PY: get_mask processing node {node} ---")
-                      print(f"  GSS: {gss_node.to_stacks()}")
-                      print(f"  Current final_mask: {final_mask.to_ranges()}")
-
 
                   # End-node handling: just union the allowed LLM tokens
                   if is_end(node):
@@ -10191,12 +10046,6 @@ messages:
               for i in final_mask.to_indices():
                   if i in self.internal_to_original_map:
                       original_indices.append(self.internal_to_original_map[i])
-
-              if os.environ.get("RUST_LOG") == "debug":
-                  print(f"\n--- PY: get_mask final internal mask ---")
-                  print(f"  Mask: {final_mask.to_ranges()}")
-                  print("----------------------------------------\n")
-
 
               return RangeSet.from_indices(original_indices)
 
@@ -10451,8 +10300,6 @@ messages:
       #include <string>
       #include <utility>
       #include <tuple>
-      #include <iostream>
-      #include <cstdlib>
       #include <sstream>
       #include <deque>
       #include <algorithm>
@@ -10586,11 +10433,6 @@ messages:
                 tokenizer_execute_from_state_(tokenizer_.attr("execute_from_state")),
                 tokenizer_tokens_accessible_from_state_(tokenizer_.attr("tokens_accessible_from_state"))
                 {
-
-              const char* rust_log = std::getenv("RUST_LOG");
-              if (rust_log && std::string(rust_log) == "debug") {
-                  debug_logging_ = true;
-              }
 
               if (!ignore_terminal_id_or_none.is_none()) {
                   ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
@@ -10867,17 +10709,6 @@ messages:
               // Update internal state
               state_ = std::move(merged_states);
               stats.inc("commit.tokenizer_states_out", state_.size());
-
-              if (debug_logging_) {
-                  std::cout << "\n--- CPP: State after commit ---" << std::endl;
-                  std::vector<int> keys;
-                  for(auto const& [key, val] : state_) keys.push_back(key);
-                  std::sort(keys.begin(), keys.end());
-                  for (int tsid : keys) {
-                      std::cout << "  TSID " << tsid << ": " << gss_to_string(state_.at(tsid)) << std::endl;
-                  }
-                  std::cout << "-------------------------------" << std::endl << std::endl;
-              }
               stats.stop("commit.total");
           }
 
@@ -10946,18 +10777,6 @@ messages:
               }
               stats.stop("get_mask.seeding");
 
-              if (debug_logging_) {
-                  std::cout << "\n--- CPP: get_mask initial values ---" << std::endl;
-                  std::vector<int> keys;
-                  for(auto const& [key, val] : values) keys.push_back(key);
-                  std::sort(keys.begin(), keys.end());
-                  for (int node_id : keys) {
-                      std::cout << "  Node " << node_id << ": " << gss_to_string(values.at(node_id)) << std::endl;
-                  }
-                  std::cout << "--------------------------------------" << std::endl << std::endl;
-              }
-
-
               RangeSet final_mask = RangeSet::empty();
 
               stats.start("get_mask.main_loop");
@@ -10977,12 +10796,6 @@ messages:
                   auto itv = values.find(node);
                   if (itv == values.end()) continue;
                   Leveled gss_node = std::move(itv->second);
-
-                  if (debug_logging_) {
-                      std::cout << "\n--- CPP: get_mask processing node " << node << " ---" << std::endl;
-                      std::cout << "  GSS: " << gss_to_string(gss_node) << std::endl;
-                      std::cout << "  Current final_mask: " << final_mask.repr() << std::endl;
-                  }
                   values.erase(itv);
                   stats.inc("get_mask.gss.at_node.accs.sum", gss_node.get_all_accs().size());
 
@@ -11122,13 +10935,6 @@ messages:
               stats.stop("get_mask.final_conversion.from_indices");
               stats.stop("get_mask.final_conversion");
               stats.stop("get_mask.total");
-
-              if (debug_logging_) {
-                  std::cout << "\n--- CPP: get_mask final internal mask ---" << std::endl;
-                  std::cout << "  Mask: " << final_mask.repr() << std::endl;
-                  std::cout << "-----------------------------------------" << std::endl << std::endl;
-              }
-
               py::gil_scoped_acquire acquire; // Re-acquire GIL before returning to Python
               return py::cast(result);
           }
@@ -11210,8 +11016,6 @@ messages:
           // Cache for tokens_accessible_from_state (cleared per commit)
           std::unordered_map<int, std::unordered_set<int>> accessible_cache_;
 
-          bool debug_logging_ = false;
-
           // Check membership in a vector of inclusive ranges (sorted, non-overlapping).
           static bool contains_in_ranges(const std::vector<std::pair<int,int>>& ranges, int v) {
               // Binary search by upper_bound on end values
@@ -11247,50 +11051,6 @@ messages:
 
               auto [inserted_it, success] = accessible_cache_.emplace(state_id, std::move(accessible_set));
               return inserted_it->second;
-          }
-
-          std::string acc_to_string(const std::shared_ptr<Acc>& acc) {
-              if (!acc) return "Acc(null)";
-              std::stringstream ss;
-              ss << "PyAcc(terminals_union_size=" << acc->terminals_union.size()
-                  << ", llm_mask_size=" << acc->llm_mask.size() << ")";
-              return ss.str();
-          }
-
-          std::string gss_to_string(const Leveled& gss) {
-              std::stringstream ss;
-              auto stacks = gss.to_stacks();
-
-              // Sort stacks for canonical representation, matching Python's ReferenceGSS
-              std::sort(stacks.begin(), stacks.end(),
-                  [](const auto& a, const auto& b) {
-                      if (a.first.size() != b.first.size()) {
-                          return a.first.size() < b.first.size();
-                      }
-                      return a.first < b.first; // relies on std::vector::operator<
-                  });
-
-              ss << "[";
-              bool first_stack = true;
-              for (const auto& stack_pair : stacks) {
-                  if (!first_stack) ss << ", ";
-                  first_stack = false;
-
-                  ss << "([";
-                  bool first_val = true;
-                  for (const auto& val : stack_pair.first) {
-                      if (!first_val) ss << ", ";
-                      first_val = false;
-                      ss << val;
-                  }
-                  ss << "], ";
-
-                  ss << acc_to_string(stack_pair.second);
-
-                  ss << ")";
-              }
-              ss << "]";
-              return ss.str();
           }
 
           // -----------------------------
@@ -13293,8 +13053,6 @@ messages:
       #include <string>
       #include <utility>
       #include <tuple>
-      #include <iostream>
-      #include <cstdlib>
       #include <sstream>
       #include <deque>
       #include <algorithm>
@@ -13428,11 +13186,6 @@ messages:
                 tokenizer_execute_from_state_(tokenizer_.attr("execute_from_state")),
                 tokenizer_tokens_accessible_from_state_(tokenizer_.attr("tokens_accessible_from_state"))
                 {
-
-              const char* rust_log = std::getenv("RUST_LOG");
-              if (rust_log && std::string(rust_log) == "debug") {
-                  debug_logging_ = true;
-              }
 
               if (!ignore_terminal_id_or_none.is_none()) {
                   ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
@@ -13709,17 +13462,6 @@ messages:
               // Update internal state
               state_ = std::move(merged_states);
               stats.inc("commit.tokenizer_states_out", state_.size());
-
-              if (debug_logging_) {
-                  std::cout << "\n--- CPP: State after commit ---" << std::endl;
-                  std::vector<int> keys;
-                  for(auto const& [key, val] : state_) keys.push_back(key);
-                  std::sort(keys.begin(), keys.end());
-                  for (int tsid : keys) {
-                      std::cout << "  TSID " << tsid << ": " << gss_to_string(state_.at(tsid)) << std::endl;
-                  }
-                  std::cout << "-------------------------------" << std::endl << std::endl;
-              }
               stats.stop("commit.total");
           }
 
@@ -13788,18 +13530,6 @@ messages:
               }
               stats.stop("get_mask.seeding");
 
-              if (debug_logging_) {
-                  std::cout << "\n--- CPP: get_mask initial values ---" << std::endl;
-                  std::vector<int> keys;
-                  for(auto const& [key, val] : values) keys.push_back(key);
-                  std::sort(keys.begin(), keys.end());
-                  for (int node_id : keys) {
-                      std::cout << "  Node " << node_id << ": " << gss_to_string(values.at(node_id)) << std::endl;
-                  }
-                  std::cout << "--------------------------------------" << std::endl << std::endl;
-              }
-
-
               RangeSet final_mask = RangeSet::empty();
 
               stats.start("get_mask.main_loop");
@@ -13819,12 +13549,6 @@ messages:
                   auto itv = values.find(node);
                   if (itv == values.end()) continue;
                   Leveled gss_node = std::move(itv->second);
-
-                  if (debug_logging_) {
-                      std::cout << "\n--- CPP: get_mask processing node " << node << " ---" << std::endl;
-                      std::cout << "  GSS: " << gss_to_string(gss_node) << std::endl;
-                      std::cout << "  Current final_mask: " << final_mask.repr() << std::endl;
-                  }
                   values.erase(itv);
                   stats.inc("get_mask.gss.at_node.accs.sum", gss_node.get_all_accs().size());
 
@@ -13964,13 +13688,6 @@ messages:
               stats.stop("get_mask.final_conversion.from_indices");
               stats.stop("get_mask.final_conversion");
               stats.stop("get_mask.total");
-
-              if (debug_logging_) {
-                  std::cout << "\n--- CPP: get_mask final internal mask ---" << std::endl;
-                  std::cout << "  Mask: " << final_mask.repr() << std::endl;
-                  std::cout << "-----------------------------------------" << std::endl << std::endl;
-              }
-
               py::gil_scoped_acquire acquire; // Re-acquire GIL before returning to Python
               return py::cast(result);
           }
@@ -14052,8 +13769,6 @@ messages:
           // Cache for tokens_accessible_from_state (cleared per commit)
           std::unordered_map<int, std::unordered_set<int>> accessible_cache_;
 
-          bool debug_logging_ = false;
-
           // Check membership in a vector of inclusive ranges (sorted, non-overlapping).
           static bool contains_in_ranges(const std::vector<std::pair<int,int>>& ranges, int v) {
               // Binary search by upper_bound on end values
@@ -14089,50 +13804,6 @@ messages:
 
               auto [inserted_it, success] = accessible_cache_.emplace(state_id, std::move(accessible_set));
               return inserted_it->second;
-          }
-
-          std::string acc_to_string(const std::shared_ptr<Acc>& acc) {
-              if (!acc) return "Acc(null)";
-              std::stringstream ss;
-              ss << "PyAcc(terminals_union_size=" << acc->terminals_union.size()
-                  << ", llm_mask_size=" << acc->llm_mask.size() << ")";
-              return ss.str();
-          }
-
-          std::string gss_to_string(const Leveled& gss) {
-              std::stringstream ss;
-              auto stacks = gss.to_stacks();
-
-              // Sort stacks for canonical representation, matching Python's ReferenceGSS
-              std::sort(stacks.begin(), stacks.end(),
-                  [](const auto& a, const auto& b) {
-                      if (a.first.size() != b.first.size()) {
-                          return a.first.size() < b.first.size();
-                      }
-                      return a.first < b.first; // relies on std::vector::operator<
-                  });
-
-              ss << "[";
-              bool first_stack = true;
-              for (const auto& stack_pair : stacks) {
-                  if (!first_stack) ss << ", ";
-                  first_stack = false;
-
-                  ss << "([";
-                  bool first_val = true;
-                  for (const auto& val : stack_pair.first) {
-                      if (!first_val) ss << ", ";
-                      first_val = false;
-                      ss << val;
-                  }
-                  ss << "], ";
-
-                  ss << acc_to_string(stack_pair.second);
-
-                  ss << ")";
-              }
-              ss << "]";
-              return ss.str();
           }
 
           // -----------------------------
@@ -14559,378 +14230,54 @@ messages:
     metadata:
       filename: python/aug25/models/precompute3_engine.cpp
   - user: |-
-      RUST_LOG=debug CONSTRAINT_FILE="reduced_js_grammar_constraint10.json.gz" CODE_FILE=./src/example_code5.js bash python/run_benchmarks.sh python/aug25/models/precompute3_model_pure_python_standalone.py python/aug25/models/precompute3_model_cpp.py
+      CONSTRAINT_FILE="reduced_js_grammar_constraint10.json.gz" CODE_FILE=./src/example_code5.js bash python/run_benchmarks.sh python/aug25/models/precompute3_model_pure_python_standalone.py python/aug25/models/precompute3_model_cpp.py
+      Benchmark results will be saved in: benchmark_results/2025-09-27_13-59-39
+      ---
+      Baseline Model: python/aug25/models/precompute3_model_pure_python_standalone.py
+      Other Models: python/aug25/models/precompute3_model_cpp.py
+      Constraint File: reduced_js_grammar_constraint10.json.gz
+      Code: ./src/example_code5.js
+      ---
+      Ensuring C++ extensions are built...
+      Installing pybind11...
+
+      [notice] A new release of pip is available: 25.0.1 -> 25.2
+      [notice] To update, run: pip install --upgrade pip
+      Building C++ extensions...
+      Building C++ with stats enabled (ENABLE_CPP_STATS=1)
       Build complete.
       ---
       Starting benchmark runs...
 
       >>> Running benchmark for: precompute3_model_pure_python_standalone.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code5.js --constraint-file reduced_js_grammar_constraint10.json.gz --model python/aug25/models/precompute3_model_pure_python_standalone.py --output benchmark_results/2025-09-27_14-05-21
+      python -m python.aug25.benchmark_runner --code ./src/example_code5.js --constraint-file reduced_js_grammar_constraint10.json.gz --model python/aug25/models/precompute3_model_pure_python_standalone.py --output benchmark_results/2025-09-27_13-59-39
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: reduced_js_grammar_constraint10.json.gz
       Loading model from: python/aug25/models/precompute3_model_pure_python_standalone.py
-      Model loaded in 0.0344 seconds.
+      Model loaded in 0.0725 seconds.
       Loading and tokenizing code from: src/example_code5.js
       Tokenized into 2 tokens.
 
       --- Running benchmark (2 steps) ---
-      Benchmarking steps:   0%|                                                                                                                                                                | 0/2 [00:00<?, ?it/s, get_mask]
-      --- PY: get_mask initial values ---
-        Node 0: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-      -------------------------------------
-
-
-      --- PY: get_mask processing node 0 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: []
-
-      --- PY: get_mask processing node 46 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: []
-
-      --- PY: get_mask processing node 45 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: []
-
-      --- PY: get_mask processing node 3759 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: [(0, 1870)]
-
-      --- PY: get_mask processing node 3975 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=120))]
-        Current final_mask: [(0, 1870)]
-
-      --- PY: get_mask processing node 4191 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=2))]
-        Current final_mask: [(0, 1870)]
-
-      --- PY: get_mask processing node 4451 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=2))]
-        Current final_mask: [(0, 1870)]
-
-      --- PY: get_mask processing node 4635 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=4))]
-        Current final_mask: [(0, 1870)]
-
-      --- PY: get_mask processing node 4819 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=3))]
-        Current final_mask: [(0, 1870)]
-
-      --- PY: get_mask processing node 5073 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1380))]
-        Current final_mask: [(0, 1870)]
-
-      --- PY: get_mask processing node 5290 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=10))]
-        Current final_mask: [(0, 1870)]
-
-      --- PY: get_mask processing node 5506 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=9))]
-        Current final_mask: [(0, 1870)]
-
-      --- PY: get_mask processing node 5966 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=6))]
-        Current final_mask: [(0, 1870)]
-
-      --- PY: get_mask processing node 1037 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: [(0, 1870)]
-
-      --- PY: get_mask processing node 1179 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: [(0, 1870)]
-
-      --- PY: get_mask processing node 2281 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=34))]
-        Current final_mask: [(0, 1870)]
-
-      --- PY: get_mask final internal mask ---
-        Mask: [(0, 1870)]
-      ----------------------------------------
-
-      Benchmarking steps:   0%|                                                                                                                                                                  | 0/2 [00:00<?, ?it/s, commit]
-      --- PY: State after commit ---
-        TSID 0: [([41, 32], PyAcc(terminals_union_size=1, llm_mask_size=0))]
-        TSID 11: [([41], PyAcc(terminals_union_size=1, llm_mask_size=0))]
-      ------------------------------
-
-      Benchmarking steps:   0%|                                                                                                                                                                | 0/2 [00:00<?, ?it/s, get_mask]
-      --- PY: get_mask initial values ---
-        Node 0: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
-        Node 11: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-      -------------------------------------
-
-
-      --- PY: get_mask processing node 0 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
-        Current final_mask: []
-
-      --- PY: get_mask processing node 46 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
-        Current final_mask: []
-
-      --- PY: get_mask processing node 45 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
-        Current final_mask: []
-
-      --- PY: get_mask processing node 3759 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 3975 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=10))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 4191 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=2))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 4451 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=1))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 4635 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=1))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 4819 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=3))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 5073 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=53))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 5290 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=1))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 5506 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=4))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 5966 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=1))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 421 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 745 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=5))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 883 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 11 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 1480 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1327))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 5073 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1327))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask processing node 45 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1327))]
-        Current final_mask: [(0, 265), (376, 433), (1118, 1151), (1159, 1162), (1694, 1870)]
-
-      --- PY: get_mask final internal mask ---
-        Mask: [(0, 1152), (1157, 1157), (1159, 1870)]
-      ----------------------------------------
-
-      Benchmarking steps:   0%|                                                                                                                                                                  | 0/2 [00:00<?, ?it/s, commit]
-      --- PY: State after commit ---
-        TSID 0: [([41, 31], PyAcc(terminals_union_size=2, llm_mask_size=0)), ([41, 32], PyAcc(terminals_union_size=2, llm_mask_size=0))]
-        TSID 28: [([41], PyAcc(terminals_union_size=2, llm_mask_size=0))]
-      ------------------------------
-
-      Benchmarking steps: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 71.87it/s, commit]
+      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 686.58it/s, commit]
       --- Benchmark finished ---
 
-      Benchmark results saved to: benchmark_results/2025-09-27_14-05-21/precompute3_model_pure_python_standalone_results.json
+      Benchmark results saved to: benchmark_results/2025-09-27_13-59-39/precompute3_model_pure_python_standalone_results.json
       >>> Finished benchmark for: precompute3_model_pure_python_standalone.py
 
       >>> Running benchmark for: precompute3_model_cpp.py
-      python -m python.aug25.benchmark_runner --code ./src/example_code5.js --constraint-file reduced_js_grammar_constraint10.json.gz --model python/aug25/models/precompute3_model_cpp.py --output benchmark_results/2025-09-27_14-05-21
+      python -m python.aug25.benchmark_runner --code ./src/example_code5.js --constraint-file reduced_js_grammar_constraint10.json.gz --model python/aug25/models/precompute3_model_cpp.py --output benchmark_results/2025-09-27_13-59-39
       >>> Running with AddressSanitizer...
-      python(83921,0x1f1024800) malloc: nano zone abandoned due to inability to reserve vm space.
+      python(79734,0x1f1024800) malloc: nano zone abandoned due to inability to reserve vm space.
       --- Setting up benchmark environment ---
       Loading pre-compiled grammar constraint from: reduced_js_grammar_constraint10.json.gz
       Loading model from: python/aug25/models/precompute3_model_cpp.py
-      Model loaded in 0.0422 seconds.
+      Model loaded in 0.0618 seconds.
       Loading and tokenizing code from: src/example_code5.js
       Tokenized into 2 tokens.
 
       --- Running benchmark (2 steps) ---
-      Benchmarking steps:   0%|                                                                                                                                                                | 0/2 [00:00<?, ?it/s, get_mask]
-      --- CPP: get_mask initial values ---
-        Node 0: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-      --------------------------------------
-
-
-      --- CPP: get_mask processing node 0 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: RangeSet({})
-
-      --- CPP: get_mask processing node 46 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: RangeSet({})
-
-      --- CPP: get_mask processing node 45 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: RangeSet({})
-
-      --- CPP: get_mask processing node 5966 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=6))]
-        Current final_mask: RangeSet({[0, 1870]})
-
-      --- CPP: get_mask processing node 5506 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=9))]
-        Current final_mask: RangeSet({[0, 1870]})
-
-      --- CPP: get_mask processing node 5290 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=10))]
-        Current final_mask: RangeSet({[0, 1870]})
-
-      --- CPP: get_mask processing node 5073 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1380))]
-        Current final_mask: RangeSet({[0, 1870]})
-
-      --- CPP: get_mask processing node 4819 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=3))]
-        Current final_mask: RangeSet({[0, 1870]})
-
-      --- CPP: get_mask processing node 4635 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=4))]
-        Current final_mask: RangeSet({[0, 1870]})
-
-      --- CPP: get_mask processing node 4451 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=2))]
-        Current final_mask: RangeSet({[0, 1870]})
-
-      --- CPP: get_mask processing node 4191 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=2))]
-        Current final_mask: RangeSet({[0, 1870]})
-
-      --- CPP: get_mask processing node 3975 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=120))]
-        Current final_mask: RangeSet({[0, 1870]})
-
-      --- CPP: get_mask processing node 3759 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: RangeSet({[0, 1870]})
-
-      --- CPP: get_mask processing node 2281 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=34))]
-        Current final_mask: RangeSet({[0, 1870]})
-
-      --- CPP: get_mask processing node 1179 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: RangeSet({[0, 1870]})
-
-      --- CPP: get_mask processing node 1037 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: RangeSet({[0, 1870]})
-
-      --- CPP: get_mask final internal mask ---
-        Mask: RangeSet({[0, 1870]})
-      -----------------------------------------
-
-      Benchmarking steps:   0%|                                                                                                                                                                  | 0/2 [00:00<?, ?it/s, commit]
-      --- CPP: State after commit ---
-        TSID 0: [([41, 32], PyAcc(terminals_union_size=1, llm_mask_size=0))]
-        TSID 11: [([41], PyAcc(terminals_union_size=0, llm_mask_size=0))]
-      -------------------------------
-
-      Benchmarking steps:   0%|                                                                                                                                                                | 0/2 [00:00<?, ?it/s, get_mask]
-      --- CPP: get_mask initial values ---
-        Node 0: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
-        Node 11: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-      --------------------------------------
-
-
-      --- CPP: get_mask processing node 11 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1871))]
-        Current final_mask: RangeSet({})
-
-      --- CPP: get_mask processing node 1480 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1414))]
-        Current final_mask: RangeSet({})
-
-      --- CPP: get_mask processing node 5073 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1380))]
-        Current final_mask: RangeSet({})
-
-      --- CPP: get_mask processing node 45 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=1380))]
-        Current final_mask: RangeSet({})
-
-      --- CPP: get_mask processing node 2281 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=34))]
-        Current final_mask: RangeSet({[35, 60], [65, 65], [67, 92], [266, 375], [434, 1117], [1152, 1152], [1157, 1157], [1163, 1693]})
-
-      --- CPP: get_mask processing node 45 ---
-        GSS: [([41], PyAcc(terminals_union_size=0, llm_mask_size=23))]
-        Current final_mask: RangeSet({[35, 60], [65, 65], [67, 92], [266, 375], [434, 1117], [1152, 1152], [1157, 1157], [1163, 1693]})
-
-      --- CPP: get_mask processing node 0 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=539))]
-        Current final_mask: RangeSet({[12, 13], [29, 29], [31, 31], [35, 60], [65, 65], [67, 92], [118, 118], [168, 168], [180, 181], [187, 188], [196, 196], [198, 198], [201, 201], [203, 203], [206, 206], [209, 209], [224, 224], [266, 375], [389, 389], [391, 391], [397, 397], [404, 405], [434, 1117], [1152, 1152], [1157, 1157], [1163, 1693], [1706, 1706]})
-
-      --- CPP: get_mask processing node 46 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=463))]
-        Current final_mask: RangeSet({[12, 13], [29, 29], [31, 31], [35, 60], [65, 65], [67, 92], [118, 118], [168, 168], [180, 181], [187, 188], [196, 196], [198, 198], [201, 201], [203, 203], [206, 206], [209, 209], [224, 224], [266, 375], [389, 389], [391, 391], [397, 397], [404, 405], [434, 1117], [1152, 1152], [1157, 1157], [1163, 1693], [1706, 1706]})
-
-      --- CPP: get_mask processing node 45 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=463))]
-        Current final_mask: RangeSet({[12, 13], [29, 29], [31, 31], [35, 60], [65, 65], [67, 92], [118, 118], [168, 168], [180, 181], [187, 188], [196, 196], [198, 198], [201, 201], [203, 203], [206, 206], [209, 209], [224, 224], [266, 375], [389, 389], [391, 391], [397, 397], [404, 405], [434, 1117], [1152, 1152], [1157, 1157], [1163, 1693], [1706, 1706]})
-
-      --- CPP: get_mask processing node 5506 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=4))]
-        Current final_mask: RangeSet({[0, 1152], [1157, 1157], [1158, 1870]})
-
-      --- CPP: get_mask processing node 4819 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=3))]
-        Current final_mask: RangeSet({[0, 1152], [1157, 1157], [1158, 1870]})
-
-      --- CPP: get_mask processing node 3975 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=10))]
-        Current final_mask: RangeSet({[0, 1152], [1157, 1157], [1158, 1870]})
-
-      --- CPP: get_mask processing node 3759 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=463))]
-        Current final_mask: RangeSet({[0, 1152], [1157, 1157], [1158, 1870]})
-
-      --- CPP: get_mask processing node 883 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=463))]
-        Current final_mask: RangeSet({[0, 1152], [1157, 1157], [1158, 1870]})
-
-      --- CPP: get_mask processing node 745 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=5))]
-        Current final_mask: RangeSet({[0, 1152], [1157, 1157], [1158, 1870]})
-
-      --- CPP: get_mask processing node 421 ---
-        GSS: [([41, 32], PyAcc(terminals_union_size=0, llm_mask_size=463))]
-        Current final_mask: RangeSet({[0, 1152], [1157, 1157], [1158, 1870]})
-
-      --- CPP: get_mask final internal mask ---
-        Mask: RangeSet({[0, 1152], [1157, 1157], [1158, 1870]})
-      -----------------------------------------
-
-      Benchmarking steps:   0%|                                                                                                                                                                  | 0/2 [00:00<?, ?it/s, commit]
-      --- CPP: State after commit ---
-        TSID 0: [([41, 31], PyAcc(terminals_union_size=0, llm_mask_size=0)), ([41, 32], PyAcc(terminals_union_size=1, llm_mask_size=0))]
-        TSID 28: [([41], PyAcc(terminals_union_size=0, llm_mask_size=0))]
-      -------------------------------
-
-      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 353.67it/s, commit]
+      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 190.12it/s, commit]
       --- Benchmark finished ---
       --- Finalizing model ---
 
@@ -14976,43 +14323,43 @@ messages:
         get_mask.zombie_check.skipped_nodes_no_potential            : 22
 
       Timers (ms):
-        _process_token.total                                        : 0.036
-        commit.build_tokenizer_maps                                 : 0.128
-        commit.main_loop                                            : 0.101
-        commit.merge_states                                         : 0.029
-        commit.prune_and_map_gss                                    : 0.280
-        commit.total                                                : 0.614
-        get_mask.final_conversion                                   : 0.231
-        get_mask.final_conversion.from_indices                      : 0.074
-        get_mask.final_conversion.to_indices                        : 0.096
-        get_mask.initial_stats                                      : 0.132
-        get_mask.initialize_acc.difference                          : 0.013
-        get_mask.initialize_acc.to_indices                          : 0.003
-        get_mask.initialize_acc.total                               : 0.066
-        get_mask.initialize_acc.union                               : 0.004
-        get_mask.intersect_and_prune.intersection                   : 0.294
-        get_mask.main_loop                                          : 3.361
-        get_mask.main_loop.edge.apply_and_prune                     : 0.629
-        get_mask.main_loop.edge.gss_merge                           : 0.095
-        get_mask.main_loop.edge.isolate_many                        : 0.070
-        get_mask.main_loop.edge.peek_and_filter                     : 0.061
-        get_mask.main_loop.edge.popn                                : 0.051
-        get_mask.main_loop.end_node.final_mask_union                : 0.033
-        get_mask.main_loop.end_node.reduce_acc                      : 0.047
-        get_mask.seeding                                            : 0.312
-        get_mask.seeding.gss.apply                                  : 0.237
-        get_mask.total                                              : 4.285
-        get_mask.zombie_check                                       : 0.241
+        _process_token.total                                        : 0.030
+        commit.build_tokenizer_maps                                 : 0.278
+        commit.main_loop                                            : 0.086
+        commit.merge_states                                         : 0.033
+        commit.prune_and_map_gss                                    : 0.047
+        commit.total                                                : 0.701
+        get_mask.final_conversion                                   : 0.537
+        get_mask.final_conversion.from_indices                      : 0.191
+        get_mask.final_conversion.to_indices                        : 0.230
+        get_mask.initial_stats                                      : 0.366
+        get_mask.initialize_acc.difference                          : 0.012
+        get_mask.initialize_acc.to_indices                          : 0.002
+        get_mask.initialize_acc.total                               : 0.044
+        get_mask.initialize_acc.union                               : 0.002
+        get_mask.intersect_and_prune.intersection                   : 0.435
+        get_mask.main_loop                                          : 4.420
+        get_mask.main_loop.edge.apply_and_prune                     : 1.602
+        get_mask.main_loop.edge.gss_merge                           : 0.149
+        get_mask.main_loop.edge.isolate_many                        : 0.116
+        get_mask.main_loop.edge.peek_and_filter                     : 0.099
+        get_mask.main_loop.edge.popn                                : 0.044
+        get_mask.main_loop.end_node.final_mask_union                : 0.050
+        get_mask.main_loop.end_node.reduce_acc                      : 0.037
+        get_mask.seeding                                            : 0.613
+        get_mask.seeding.gss.apply                                  : 0.587
+        get_mask.total                                              : 6.005
+        get_mask.zombie_check                                       : 0.301
       ---------------------------------
 
 
-      Benchmark results saved to: benchmark_results/2025-09-27_14-05-21/precompute3_model_cpp_results.json
+      Benchmark results saved to: benchmark_results/2025-09-27_13-59-39/precompute3_model_cpp_results.json
       >>> Finished benchmark for: precompute3_model_cpp.py
 
       All benchmark runs completed.
       ---
       Analyzing results and generating plots...
-      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-27_14-05-21/precompute3_model_cpp_results.json benchmark_results/2025-09-27_14-05-21/precompute3_model_pure_python_standalone_results.json --baseline precompute3_model_pure_python_standalone --output-dir benchmark_results/2025-09-27_14-05-21/analysis
+      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-27_13-59-39/precompute3_model_cpp_results.json benchmark_results/2025-09-27_13-59-39/precompute3_model_pure_python_standalone_results.json --baseline precompute3_model_pure_python_standalone --output-dir benchmark_results/2025-09-27_13-59-39/analysis
       Selected baseline: precompute3_model_pure_python_standalone
       Mask mismatch at token index 1 for model precompute3_model_cpp
       Baseline: ((0, 1055), (1060, 1060), (1062, 1713), (1715, 1871))
@@ -15020,31 +14367,34 @@ messages:
       --- Benchmark Summary ---
                                                equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
       model                                                                                                                                                 
-      precompute3_model_cpp                             ❌                    1      2     2.3149    0.5613    1.9180    2.3149    2.6324    2.7039    2.7118
-      precompute3_model_pure_python_standalone          ✅                    0      2    11.6650    0.4114   11.3741   11.6650   11.8978   11.9501   11.9560
+      precompute3_model_cpp                             ❌                    1      2     3.3767    1.5643    2.2705    3.3767    4.2616    4.4607    4.4828
+      precompute3_model_pure_python_standalone          ✅                    0      2     0.9836    0.1490    0.8782    0.9836    1.0679    1.0868    1.0889
 
       Baseline: precompute3_model_pure_python_standalone
       ✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch
 
-      Saving plots to benchmark_results/2025-09-27_14-05-21/analysis...
-      Saved linear scale plot to benchmark_results/2025-09-27_14-05-21/analysis/timings_per_token_linear.png
-      Saved log scale plot to benchmark_results/2025-09-27_14-05-21/analysis/timings_per_token_log.png
-      Saved box plot to benchmark_results/2025-09-27_14-05-21/analysis/timings_distribution_boxplot.png
-      Saved commit linear scale plot to benchmark_results/2025-09-27_14-05-21/analysis/commit_timings_per_token_linear.png
-      Saved commit log scale plot to benchmark_results/2025-09-27_14-05-21/analysis/commit_timings_per_token_log.png
-      Saved combined linear scale plot to benchmark_results/2025-09-27_14-05-21/analysis/combined_timings_per_token_linear.png
-      Saved combined log scale plot to benchmark_results/2025-09-27_14-05-21/analysis/combined_timings_per_token_log.png
-      Saved stacked area plot to benchmark_results/2025-09-27_14-05-21/analysis/timings_stacked_area.png
-      Saved total time linear scale plot to benchmark_results/2025-09-27_14-05-21/analysis/total_timings_per_token_linear.png
-      Saved total time log scale plot to benchmark_results/2025-09-27_14-05-21/analysis/total_timings_per_token_log.png
+      Saving plots to benchmark_results/2025-09-27_13-59-39/analysis...
+      Saved linear scale plot to benchmark_results/2025-09-27_13-59-39/analysis/timings_per_token_linear.png
+      Saved log scale plot to benchmark_results/2025-09-27_13-59-39/analysis/timings_per_token_log.png
+      Saved box plot to benchmark_results/2025-09-27_13-59-39/analysis/timings_distribution_boxplot.png
+      Saved commit linear scale plot to benchmark_results/2025-09-27_13-59-39/analysis/commit_timings_per_token_linear.png
+      Saved commit log scale plot to benchmark_results/2025-09-27_13-59-39/analysis/commit_timings_per_token_log.png
+      Saved combined linear scale plot to benchmark_results/2025-09-27_13-59-39/analysis/combined_timings_per_token_linear.png
+      Saved combined log scale plot to benchmark_results/2025-09-27_13-59-39/analysis/combined_timings_per_token_log.png
+      Saved stacked area plot to benchmark_results/2025-09-27_13-59-39/analysis/timings_stacked_area.png
+      Saved total time linear scale plot to benchmark_results/2025-09-27_13-59-39/analysis/total_timings_per_token_linear.png
+      Saved total time log scale plot to benchmark_results/2025-09-27_13-59-39/analysis/total_timings_per_token_log.png
 
       ---
       Benchmark analysis complete.
       Baseline: precompute3_model_pure_python_standalone
-      Summary printed above. Plots are saved in: benchmark_results/2025-09-27_14-05-21/analysis
-      Full JSON results are in: benchmark_results/2025-09-27_14-05-21
+      Summary printed above. Plots are saved in: benchmark_results/2025-09-27_13-59-39/analysis
+      Full JSON results are in: benchmark_results/2025-09-27_13-59-39
     metadata:
-  - user: Fix this discrepency
+  - user: We're getting a bunch of discrepencies. Right now it's really tricky to
+      narrow down the issue because we can't really see what's going on in either
+      implementation. Add print statements so we can see exactly where the discrepency
+      occurs. Think about what info we'd want to know.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -15063,104 +14413,279 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Hello! As a helpful assistant, I've analyzed the benchmark results and identified a discrepancy between the Python and C++ implementations. The issue stems from a subtle difference in how the `terminals_union` map is updated during tokenizer state transitions in the `commit` step. The C++ version was not correctly creating entries for new tokenizer states, leading to an incorrect final token mask.
-
-      Here are the step-by-step instructions to fix the bug, followed by the corresponding git diff.
+      To help diagnose the discrepancy between the Python and C++ implementations, I will add detailed logging to both. This will allow us to trace the internal state of the model after each `commit` and at key points during `get_mask` execution. The logging will be activated by setting the environment variable `RUST_LOG=debug`.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file:** `python/aug25/models/precompute3_engine.cpp`.
+      1.  **File: `python/aug25/models/precompute3_model_pure_python_standalone.py`**
+          *   Add `import os` at the top of the file.
+          *   Add a `__repr__` method to the `PyAcc` class. This will provide a consistent, readable string representation for logging, showing the size of `terminals_union` and `llm_mask`.
+          *   In the `commit` method, add a logging block at the end to print the full state (all GSSs) after it has been updated.
+          *   In the `get_mask` method, add three logging blocks:
+              1.  After the initial `values` dictionary is populated, to see the GSSs at the trie roots.
+              2.  Inside the main `while` loop, to trace the GSS being processed at each node and the growth of the `final_mask`.
+              3.  Before the final `return`, to log the computed internal mask before it's converted to original token IDs.
 
-      2.  **Locate the function:** Find the `apply_state_map_to_gss` method within the `Engine` class. It's around line 1210.
+      2.  **File: `python/aug25/models/precompute3_engine.cpp`**
+          *   Add includes for `iostream`, `cstdlib`, and `sstream` to support console output, environment variables, and string manipulation.
+          *   Add a private `bool debug_logging_ = false;` member to the `Engine` class.
+          *   In the `Engine` constructor, check for the `RUST_LOG` environment variable and set `debug_logging_` to `true` if it's equal to `"debug"`.
+          *   Add two private helper methods, `acc_to_string` and `gss_to_string`, to create string representations of the internal `Acc` and `LeveledGSS` types, matching the format of the Python logging. The `gss_to_string` method will sort stacks to ensure the output is canonical and comparable with the Python version.
+          *   Add logging blocks to the `commit` and `get_mask` methods in the same locations as the Python changes, controlled by the `debug_logging_` flag.
 
-      3.  **Identify the issue:** The loop inside the `mapper` lambda function does not correctly replicate the behavior of Python's `collections.defaultdict`. The C++ code only creates a new entry in the `terminals_union` map if the corresponding old tokenizer state already had some disallowed terminals. This is incorrect. An entry should be created for every new tokenizer state present in the `state_map`.
-
-      4.  **Apply the fix:** Replace the body of the `for` loop inside the `mapper` lambda with a corrected version that uses `operator[]` on the `std::unordered_map`. This will ensure an entry is created for each new state ID, correctly mirroring the Python implementation and fixing the logic bug.
-
-          You will be replacing this block of code:
-          ```cpp
-                      // This logic must mirror the Python version to ensure terminals_union is pruned
-                      // and does not grow indefinitely. We iterate over the small state_map, not the
-                      // potentially large terminals_union.
-                      for (auto const& [old_sid, new_sid] : state_map) {
-                          auto it = acc->terminals_union.find(old_sid);
-                          if (it != acc->terminals_union.end()) {
-                              const RangeSet& bv_source = it->second;
-                              auto it_new = na->terminals_union.find(new_sid);
-                              if (it_new != na->terminals_union.end()) {
-                                  it_new->second = it_new->second.union_with(bv_source);
-                              } else {
-                                  na->terminals_union.emplace(new_sid, bv_source);
-                              }
-                          }
-                      }
-          ```
-          with this corrected logic:
-          ```cpp
-                      for (auto const& [old_sid, new_sid] : state_map) {
-                          auto it = acc->terminals_union.find(old_sid);
-                          const RangeSet& bv_source = (it != acc->terminals_union.end()) ? it->second : rs_empty;
-                          
-                          // operator[] ensures the key exists, default-constructing an empty RangeSet if needed.
-                          // This correctly mirrors Python's defaultdict behavior.
-                          na->terminals_union[new_sid] = na->terminals_union[new_sid].union_with(bv_source);
-                      }
-          ```
-
-      After applying this change, the C++ engine's behavior will align with the Python reference implementation, resolving the mask mismatch.
-
-      ### Git Diff
-
-      Here is the git patch to apply the fix automatically.
+      ### Git Diffs
 
       ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python_standalone.py b/python/aug25/models/precompute3_model_pure_python_standalone.py
+      --- a/python/aug25/models/precompute3_model_pure_python_standalone.py
+      +++ b/python/aug25/models/precompute3_model_pure_python_standalone.py
+      @@ -1,5 +1,6 @@
+       from __future__ import annotations
+       
+      +import os
+       import json
+       import heapq
+       import collections
+      @@ -791,6 +792,14 @@
+           terminals_union: Dict[int, RangeSet]
+           llm_mask: RangeSet
+       
+      +    def __repr__(self):
+      +        # to_indices is slow, but this is for debug.
+      +        mask_size = len(self.llm_mask.to_indices())
+      +        return (
+      +            f"PyAcc(terminals_union_size={len(self.terminals_union)}, "
+      +            f"llm_mask_size={mask_size})"
+      +        )
+      +
+           def __eq__(self, other):
+               if not isinstance(other, PyAcc):
+                   return NotImplemented
+      @@ -1003,6 +1012,13 @@
+               merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
+       
+               self.state = merged_states
+      +
+      +        if os.environ.get("RUST_LOG") == "debug":
+      +            print("\n--- PY: State after commit ---")
+      +            for tsid, gss in sorted(self.state.items()):
+      +                print(f"  TSID {tsid}: {gss.to_stacks()}")
+      +            print("------------------------------\n")
+      +
+       
+           def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+               heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
+      @@ -1091,6 +1107,12 @@
+                       enqueued_nodes.add(r)
+                       hp(depth_heap, (-d, r))
+       
+      +        if os.environ.get("RUST_LOG") == "debug":
+      +            print("\n--- PY: get_mask initial values ---")
+      +            for node_id, gss in sorted(values.items()):
+      +                print(f"  Node {node_id}: {gss.to_stacks()}")
+      +            print("-------------------------------------\n")
+      +
+               def enqueue(d: int, n: int) -> None:
+                   if n not in enqueued_nodes:
+                       enqueued_nodes.add(n)
+      @@ -1102,6 +1124,12 @@
+                   gss_node: GSS = values.pop(node)
+                   enqueued_nodes.remove(node)
+       
+      +            if os.environ.get("RUST_LOG") == "debug":
+      +                print(f"\n--- PY: get_mask processing node {node} ---")
+      +                print(f"  GSS: {gss_node.to_stacks()}")
+      +                print(f"  Current final_mask: {final_mask.to_ranges()}")
+      +
+      +
+                   # End-node handling: just union the allowed LLM tokens
+                   if is_end(node):
+                       reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+      @@ -1170,6 +1198,12 @@
+                   if i in self.internal_to_original_map:
+                       original_indices.append(self.internal_to_original_map[i])
+       
+      +        if os.environ.get("RUST_LOG") == "debug":
+      +            print(f"\n--- PY: get_mask final internal mask ---")
+      +            print(f"  Mask: {final_mask.to_ranges()}")
+      +            print("----------------------------------------\n")
+      +
+      +
+               return RangeSet.from_indices(original_indices)
+
+      ```
+      ```diff
       diff --git a/python/aug25/models/precompute3_engine.cpp b/python/aug25/models/precompute3_engine.cpp
-      index 8111111..2222222 100644
       --- a/python/aug25/models/precompute3_engine.cpp
       +++ b/python/aug25/models/precompute3_engine.cpp
-      @@ -1213,24 +1213,15 @@
-               auto mapper = [&](const std::shared_ptr<Acc>& acc) -> std::shared_ptr<Acc> {
-                   auto na = std::make_shared<Acc>();
-                   na->llm_mask = acc->llm_mask;
-                   RangeSet rs_empty = RangeSet::empty();
-      -            // This logic must mirror the Python version to ensure terminals_union is pruned
-      -            // and does not grow indefinitely. We iterate over the small state_map, not the
-      -            // potentially large terminals_union.
+      @@ -10,10 +10,12 @@
+       #include <optional>
+       #include <string>
+       #include <utility>
+       #include <tuple>
+      +#include <iostream>
+      +#include <cstdlib>
+       #include <sstream>
+       #include <deque>
+       #include <algorithm>
+       #include <functional>
+       #include <memory>
+       #include "leveled_gss.hpp"
+      @@ -161,6 +163,11 @@
+                 // Pre-bind Python methods to avoid repeated attr lookups
+                 tokenizer_execute_from_state_(tokenizer_.attr("execute_from_state")),
+                 tokenizer_tokens_accessible_from_state_(tokenizer_.attr("tokens_accessible_from_state"))
+                 {
       +
-                   for (auto const& [old_sid, new_sid] : state_map) {
-                       auto it = acc->terminals_union.find(old_sid);
-      -                if (it != acc->terminals_union.end()) {
-      -                    const RangeSet& bv_source = it->second;
-      -                    auto it_new = na->terminals_union.find(new_sid);
-      -                    if (it_new != na->terminals_union.end()) {
-      -                        it_new->second = it_new->second.union_with(bv_source);
-      -                    } else {
-      -                        na->terminals_union.emplace(new_sid, bv_source);
-      -                    }
-      -                }
-      +                const RangeSet& bv_source = (it != acc->terminals_union.end()) ? it->second : rs_empty;
-      +                
-      +                // operator[] ensures the key exists, default-constructing an empty RangeSet if needed.
-      +                // This correctly mirrors Python's defaultdict behavior.
-      +                na->terminals_union[new_sid] = na->terminals_union[new_sid].union_with(bv_source);
-                   }
-                   return na;
-               };
-               return g.apply(mapper);
+      +        const char* rust_log = std::getenv("RUST_LOG");
+      +        if (rust_log && std::string(rust_log) == "debug") {
+      +            debug_logging_ = true;
+      +        }
+       
+               if (!ignore_terminal_id_or_none.is_none()) {
+                   ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
+      @@ -382,6 +389,17 @@
+               // Update internal state
+               state_ = std::move(merged_states);
+               stats.inc("commit.tokenizer_states_out", state_.size());
+      +
+      +        if (debug_logging_) {
+      +            std::cout << "\n--- CPP: State after commit ---" << std::endl;
+      +            std::vector<int> keys;
+      +            for(auto const& [key, val] : state_) keys.push_back(key);
+      +            std::sort(keys.begin(), keys.end());
+      +            for (int tsid : keys) {
+      +                std::cout << "  TSID " << tsid << ": " << gss_to_string(state_.at(tsid)) << std::endl;
+      +            }
+      +            std::cout << "-------------------------------" << std::endl << std::endl;
+      +        }
+               stats.stop("commit.total");
+           }
+       
+      @@ -441,6 +459,18 @@
+                   enqueue(d, root);
+               }
+               stats.stop("get_mask.seeding");
+      +
+      +        if (debug_logging_) {
+      +            std::cout << "\n--- CPP: get_mask initial values ---" << std::endl;
+      +            std::vector<int> keys;
+      +            for(auto const& [key, val] : values) keys.push_back(key);
+      +            std::sort(keys.begin(), keys.end());
+      +            for (int node_id : keys) {
+      +                std::cout << "  Node " << node_id << ": " << gss_to_string(values.at(node_id)) << std::endl;
+      +            }
+      +            std::cout << "--------------------------------------" << std::endl << std::endl;
+      +        }
+      +
+       
+               RangeSet final_mask = RangeSet::empty();
+       
+      @@ -459,6 +489,12 @@
+                   auto itv = values.find(node);
+                   if (itv == values.end()) continue;
+                   Leveled gss_node = std::move(itv->second);
+      +
+      +            if (debug_logging_) {
+      +                std::cout << "\n--- CPP: get_mask processing node " << node << " ---" << std::endl;
+      +                std::cout << "  GSS: " << gss_to_string(gss_node) << std::endl;
+      +                std::cout << "  Current final_mask: " << final_mask.repr() << std::endl;
+      +            }
+                   values.erase(itv);
+                   stats.inc("get_mask.gss.at_node.accs.sum", gss_node.get_all_accs().size());
+       
+      @@ -578,6 +614,13 @@
+               stats.stop("get_mask.final_conversion.from_indices");
+               stats.stop("get_mask.final_conversion");
+               stats.stop("get_mask.total");
+      +
+      +        if (debug_logging_) {
+      +            std::cout << "\n--- CPP: get_mask final internal mask ---" << std::endl;
+      +            std::cout << "  Mask: " << final_mask.repr() << std::endl;
+      +            std::cout << "-----------------------------------------" << std::endl << std::endl;
+      +        }
+      +
+               py::gil_scoped_acquire acquire; // Re-acquire GIL before returning to Python
+               return py::cast(result);
+           }
+      @@ -648,6 +691,8 @@
+           py::object tokenizer_tokens_accessible_from_state_;
+           // Cache for tokens_accessible_from_state (cleared per commit)
+           std::unordered_map<int, std::unordered_set<int>> accessible_cache_;
+      +
+      +    bool debug_logging_ = false;
+       
+           // Check membership in a vector of inclusive ranges (sorted, non-overlapping).
+           static bool contains_in_ranges(const std::vector<std::pair<int,int>>& ranges, int v) {
+      @@ -682,6 +727,51 @@
+       
+               auto [inserted_it, success] = accessible_cache_.emplace(state_id, std::move(accessible_set));
+               return inserted_it->second;
+      +    }
+      +
+      +    std::string acc_to_string(const std::shared_ptr<Acc>& acc) {
+      +        if (!acc) return "Acc(null)";
+      +        std::stringstream ss;
+      +        ss << "PyAcc(terminals_union_size=" << acc->terminals_union.size()
+      +            << ", llm_mask_size=" << acc->llm_mask.size() << ")";
+      +        return ss.str();
+      +    }
+      +
+      +    std::string gss_to_string(const Leveled& gss) {
+      +        std::stringstream ss;
+      +        auto stacks = gss.to_stacks();
+      +
+      +        // Sort stacks for canonical representation, matching Python's ReferenceGSS
+      +        std::sort(stacks.begin(), stacks.end(),
+      +            [](const auto& a, const auto& b) {
+      +                if (a.first.size() != b.first.size()) {
+      +                    return a.first.size() < b.first.size();
+      +                }
+      +                return a.first < b.first; // relies on std::vector::operator<
+      +            });
+      +
+      +        ss << "[";
+      +        bool first_stack = true;
+      +        for (const auto& stack_pair : stacks) {
+      +            if (!first_stack) ss << ", ";
+      +            first_stack = false;
+      +
+      +            ss << "([";
+      +            bool first_val = true;
+      +            for (const auto& val : stack_pair.first) {
+      +                if (!first_val) ss << ", ";
+      +                first_val = false;
+      +                ss << val;
+      +            }
+      +            ss << "], ";
+      +
+      +            ss << acc_to_string(stack_pair.second);
+      +
+      +            ss << ")";
+      +        }
+      +        ss << "]";
+      +        return ss.str();
+           }
+       
+           // -----------------------------
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python_standalone.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python_standalone.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_standalone.py.
+
+      --- Processing Diff Block 2 ---
       Identified target file: python/aug25/models/precompute3_engine.cpp
       Applying patch to 'python/aug25/models/precompute3_engine.cpp' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_engine.cpp.
     metadata:
-  - user: 'Changes committed with message: "Fix: Ensure terminals_union is correctly
-      initialized for new state IDs during state map application in C++ engine by
-      using operator[] to mimic defaultdict."'
+  - user: 'Changes committed with message: "Add extensive debug logging to Python
+      and C++ precompute engine for state tracing"'
     metadata:
 ...
