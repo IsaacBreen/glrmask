@@ -294,6 +294,8 @@ class Model(GraphProvider):
         model._reorder_llm_tokens_for_range_minimization()
         # Run the optimization pass (mask Alt 6 + edge reduction Alt 2) after token reordering
         model.optimize_state_masks_and_edges()
+        model._merge_equivalent_llm_tokens()
+        model._reorder_llm_tokens_for_range_minimization()
         return model
 
     @profile
