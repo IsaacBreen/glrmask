@@ -365,7 +365,7 @@ local_system:
           }
 
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
-              
+              // ...
           }
       }
 
@@ -1116,7 +1116,15 @@ local_system:
 
           /// Creates a new `GSSNode` that represents only the path segment of this peek.
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
+              if self.parent_arc.num_predecessors() == 1 {
+                  return self.parent_arc.clone();
+              }
 
+              Arc::new(GSSNode::new_with_single_predecessor(
+                  self.predecessor_node.clone(),
+                  self.edge_value.clone(),
+                  (*self.parent_arc.local_acc()).clone(),
+              ))
           }
       }
 
@@ -3566,13 +3574,15 @@ local_system:
           }
 
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
-              let mut predecessors_map = NodeMap::new();
-              predecessors_map
-                  .entry(self.edge_value.clone())
-                  .or_default()
-                  .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
-              // The new node's local acc should be the accumulated path acc leading to the original parent.
-              Arc::new(GSSNode::new_with_map(self.path_acc.clone(), predecessors_map))
+              if self.parent_arc.num_predecessors() == 1 {
+                  return self.parent_arc.clone();
+              }
+
+              Arc::new(GSSNode::new_with_single_predecessor(
+                  self.predecessor_node.clone(),
+                  self.edge_value.clone(),
+                  (*self.parent_arc.local_acc()).clone(),
+              ))
           }
       }
 
@@ -4323,12 +4333,15 @@ local_system:
 
           /// Creates a new `GSSNode` that represents only the path segment of this peek.
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
-              let mut predecessors_map = NodeMap::new();
-              predecessors_map
-                  .entry(self.edge_value.clone())
-                  .or_default()
-                  .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
-              Arc::new(GSSNode::new_with_map(self.parent_arc.local_acc(), predecessors_map))
+              if self.parent_arc.num_predecessors() == 1 {
+                  return self.parent_arc.clone();
+              }
+
+              Arc::new(GSSNode::new_with_single_predecessor(
+                  self.predecessor_node.clone(),
+                  self.edge_value.clone(),
+                  (*self.parent_arc.local_acc()).clone(),
+              ))
           }
       }
 
@@ -6821,7 +6834,7 @@ messages:
           }
 
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
-              
+              // ...
           }
       }
 
@@ -7572,7 +7585,15 @@ messages:
 
           /// Creates a new `GSSNode` that represents only the path segment of this peek.
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
+              if self.parent_arc.num_predecessors() == 1 {
+                  return self.parent_arc.clone();
+              }
 
+              Arc::new(GSSNode::new_with_single_predecessor(
+                  self.predecessor_node.clone(),
+                  self.edge_value.clone(),
+                  (*self.parent_arc.local_acc()).clone(),
+              ))
           }
       }
 
@@ -9683,92 +9704,59 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to implement the `isolated_parent` method, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to implement `isolated_parent`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/datastructures/gss.rs`.**
+      1.  **Open the file `src/datastructures/gss.rs`**.
 
-      2.  **Implement `isolated_parent` for `GSSPopperItemPeek`:**
-          Navigate to the `impl<'a> GSSPopperItemPeek<'a>` block (around line 395). Find the `isolated_parent` method and replace its empty body. This implementation ensures that the accumulated `Acc` from the pop operation is preserved as the local `Acc` of the newly created isolated parent node.
+      2.  **Navigate to the `isolated_parent` method** within the `impl<'a> GSSPopperItemPeek<'a>` block, which is around line 432.
 
-          Replace this:
+      3.  **Replace the placeholder implementation**. The current method is empty:
           ```rust
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
-              
+              // ...
           }
           ```
-          with this:
+          You will replace the `// ...` comment with the logic to create an isolated parent node. This logic first checks if the parent node already has only one predecessor; if so, it can be returned directly. Otherwise, it constructs a new parent node that represents only the single path segment of the current `peek`.
+
+          Update the function to be:
           ```rust
           pub fn isolated_parent(&self) -> Arc<GSSNode> {
-              let mut predecessors_map = NodeMap::new();
-              predecessors_map
-                  .entry(self.edge_value.clone())
-                  .or_default()
-                  .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
-              // The new node's local acc should be the accumulated path acc leading to the original parent.
-              Arc::new(GSSNode::new_with_map(self.path_acc.clone(), predecessors_map))
-          }
-          ```
+              if self.parent_arc.num_predecessors() == 1 {
+                  return self.parent_arc.clone();
+              }
 
-      3.  **Implement `isolated_parent` for `GSSPeek`:**
-          Navigate to the `impl<'a> GSSPeek<'a>` block (around line 1228). Find the `isolated_parent` method and replace its empty body. This version creates an isolated parent using the original parent's local `Acc`, as `GSSPeek` is a direct view and doesn't carry the path accumulation context from a pop operation.
-
-          Replace this:
-          ```rust
-          /// Creates a new `GSSNode` that represents only the path segment of this peek.
-          pub fn isolated_parent(&self) -> Arc<GSSNode> {
-
-          }
-          ```
-          with this:
-          ```rust
-          /// Creates a new `GSSNode` that represents only the path segment of this peek.
-          pub fn isolated_parent(&self) -> Arc<GSSNode> {
-              let mut predecessors_map = NodeMap::new();
-              predecessors_map
-                  .entry(self.edge_value.clone())
-                  .or_default()
-                  .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
-              Arc::new(GSSNode::new_with_map(self.parent_arc.local_acc(), predecessors_map))
+              Arc::new(GSSNode::new_with_single_predecessor(
+                  self.predecessor_node.clone(),
+                  self.edge_value.clone(),
+                  (*self.parent_arc.local_acc()).clone(),
+              ))
           }
           ```
 
       ### Git Diff
 
-      Here is the git patch that applies the changes described above.
+      Here is the git patch to apply these changes:
 
       ```diff
       diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
-      index 03138b2..76e026c 100644
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -398,7 +398,13 @@
+      @@ -432,7 +432,15 @@
            }
        
            pub fn isolated_parent(&self) -> Arc<GSSNode> {
-      -        
-      +        let mut predecessors_map = NodeMap::new();
-      +        predecessors_map
-      +            .entry(self.edge_value.clone())
-      +            .or_default()
-      +            .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
-      +        // The new node's local acc should be the accumulated path acc leading to the original parent.
-      +        Arc::new(GSSNode::new_with_map(self.path_acc.clone(), predecessors_map))
-           }
-       }
-       
-      @@ -1226,7 +1232,12 @@
-       
-           /// Creates a new `GSSNode` that represents only the path segment of this peek.
-           pub fn isolated_parent(&self) -> Arc<GSSNode> {
-      -
-      +        let mut predecessors_map = NodeMap::new();
-      +        predecessors_map
-      +            .entry(self.edge_value.clone())
-      +            .or_default()
-      +            .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
-      +        Arc::new(GSSNode::new_with_map(self.parent_arc.local_acc(), predecessors_map))
+      -        // ...
+      +        if self.parent_arc.num_predecessors() == 1 {
+      +            return self.parent_arc.clone();
+      +        }
+      +
+      +        Arc::new(GSSNode::new_with_single_predecessor(
+      +            self.predecessor_node.clone(),
+      +            self.edge_value.clone(),
+      +            (*self.parent_arc.local_acc()).clone(),
+      +        ))
            }
        }
        
@@ -9784,7 +9772,6 @@ messages:
       Applying patch to 'src/datastructures/gss.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/gss.rs.
     metadata:
-  - user: 'Changes committed with message: "feat(gss): Implement isolated_parent for
-      GSSPopperItemPeek and GSSPeek"'
+  - user: 'Changes committed with message: "Implement isolated_parent for GSSPopperItemPeek"'
     metadata:
 ...

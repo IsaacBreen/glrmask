@@ -358,13 +358,7 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 
     pub fn isolated_parent(&self) -> Arc<GSSNode> {
-        let mut predecessors_map = NodeMap::new();
-        predecessors_map
-            .entry(self.edge_value.clone())
-            .or_default()
-            .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
-        // The new node's local acc should be the accumulated path acc leading to the original parent.
-        Arc::new(GSSNode::new_with_map(self.path_acc.clone(), predecessors_map))
+        
     }
 }
 
@@ -1115,12 +1109,7 @@ impl<'a> GSSPeek<'a> {
 
     /// Creates a new `GSSNode` that represents only the path segment of this peek.
     pub fn isolated_parent(&self) -> Arc<GSSNode> {
-        let mut predecessors_map = NodeMap::new();
-        predecessors_map
-            .entry(self.edge_value.clone())
-            .or_default()
-            .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
-        Arc::new(GSSNode::new_with_map(self.parent_arc.local_acc(), predecessors_map))
+
     }
 }
 
