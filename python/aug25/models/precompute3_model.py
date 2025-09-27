@@ -265,7 +265,7 @@ class Model(GraphProvider):
                 for (pop, llm_bv), dests in children:
                     print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
                     # Collect all pops from GSS parents
-                    peeks = gss_node.popn_fast(pop)
+                    peeks = ffi.gss_popn_collect(gss_node, pop)
                     print(f"      - Found {len(peeks)} peeks from GSS set")
                     if not peeks:
                         continue
