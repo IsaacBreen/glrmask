@@ -216,7 +216,7 @@ class Model(GraphProvider):
 
                 # End-node handling
                 if is_end(node_idx):
-                    print(f"    - END NODE {node_idx} found. GSS: gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}, Propagated mask: {llm_mask.to_ranges()}")
+                    print(f"    - END NODE found")
                     print(f"      - final_mask before: {final_mask.to_ranges()}")
 
                     # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
