@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Set, Any, Optional
 from copy import deepcopy
 
+# Unique counters to avoid reusing filenames/env across runs, which can interfere with external caches.
+_candidate_write_counter = 0
+_benchmark_run_counter = 0
+
 
 def load_json_gz(path: str) -> Dict[str, Any]:
     with gzip.open(path, "rt", encoding="utf-8") as f:
@@ -20,9 +24,15 @@ def load_json_gz(path: str) -> Dict[str, Any]:
 
 
 def save_json_gz(path: str, data: Dict[str, Any]) -> None:
-    # Keep formatting simple; stability not required beyond correctness.
-    with gzip.open(path, "wt", encoding="utf-8") as f:
+    """
+    Atomic write: write to a temp file in the same directory and then replace.
+    Prevents readers from observing partially-written files.
+    """
+    dir_name = os.path.dirname(path) or "."
+    tmp_path = os.path.join(dir_name, f".tmp_{os.getpid()}_{int(time.time()*1_000_000)}.json.gz")
+    with gzip.open(tmp_path, "wt", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp_path, path)
 
 
 def values_list_to_dict(values_list: List[Tuple[int, Dict[str, Any]]]) -> Dict[int, Dict[str, Any]]:
@@ -166,11 +176,14 @@ def write_candidate_constraint(tmp_dir: Path, original: Dict[str, Any], values_d
     Build a candidate constraint JSON by replacing trie3_god['values'] and write to a temp .json.gz.
     Returns the file path.
     """
+    global _candidate_write_counter
     data = dict(original)  # shallow copy top-level; nested parts reused
     trie = dict(data.get("trie3_god") or {})
     trie["values"] = dict_to_values_list(values_dict)
     data["trie3_god"] = trie
-    candidate_path = tmp_dir / "candidate_constraint.json.gz"
+    # Use a unique filename on every write to avoid any external caching keyed by path.
+    _candidate_write_counter += 1
+    candidate_path = tmp_dir / f"candidate_constraint_{_candidate_write_counter:06d}.json.gz"
     save_json_gz(str(candidate_path), data)
     return candidate_path
 
@@ -187,6 +200,9 @@ def run_benchmarks_and_has_mismatch(
     Run run_benchmarks.sh for baseline and candidate against constraint_path+code_file.
     Returns (mismatch_found, mismatch_index_or_None, raw_stdout).
     """
+    global _benchmark_run_counter
+    _benchmark_run_counter += 1
+
     script = repo_root / "python" / "run_benchmarks.sh"
     if not script.exists():
         raise FileNotFoundError(f"run_benchmarks.sh not found at {script}")
@@ -196,6 +212,10 @@ def run_benchmarks_and_has_mismatch(
     env["CODE_FILE"] = str(code_file)
     env["SKIP_CPP_BUILD"] = "1"
     env["DISABLE_TQDM"] = "1"
+    # Add a per-run cache buster to minimize any external caching keyed on env.
+    env["BENCHMARK_RUN_ID"] = str(_benchmark_run_counter)
+    env["CACHE_BUSTER"] = str(int(time.time() * 1_000_000))
+
     if env_extra:
         env.update(env_extra)
 
@@ -990,6 +1010,16 @@ def main():
         if not ok:
             print("Warning: final candidate unexpectedly does not mismatch. Reverting to last accepted state.", file=sys.stderr)
             final_candidate_path = write_candidate_constraint(tmpdir, original, accepted_values_dict)
+            # Re-verify the last accepted state; if this also fails, abort to surface the issue early.
+            print("Re-checking mismatch on last accepted candidate...")
+            ok2, idx2, _out2 = run_benchmarks_and_has_mismatch(
+                repo_root, final_candidate_path, code_file, baseline_model, candidate_model
+            )
+            if not ok2:
+                print("Error: last accepted candidate also does not mismatch; aborting to avoid emitting an invalid artifact.", file=sys.stderr)
+                # Optionally keep the last accepted file in tmpdir for post-mortem.
+                # You can copy it manually from the printed tmp path if needed.
+                sys.exit(3)
 
         # Copy to user-provided output path
         shutil.copyfile(final_candidate_path, out_path)
