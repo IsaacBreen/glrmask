@@ -358,7 +358,22 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 
     pub fn isolated_parent(&self) -> Arc<GSSNode> {
-        
+        let narrowed_acc = Arc::new(Acc::narrow(self.path_acc, &self.parent_arc.local_acc()));
+
+        // Optimization: if the parent already represents this single path and the path_acc
+        // didn't add any constraints, we can return it directly.
+        if self.parent_arc.num_predecessors() == 1 && narrowed_acc == self.parent_arc.local_acc() {
+            return self.parent_arc.clone();
+        }
+
+        // Otherwise, create a new parent node representing only this path.
+        let mut predecessors = NodeMap::new();
+        predecessors
+            .entry(self.edge_value.clone())
+            .or_default()
+            .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
+
+        Arc::new(GSSNode::new_with_map(narrowed_acc, predecessors))
     }
 }
 
@@ -1109,7 +1124,20 @@ impl<'a> GSSPeek<'a> {
 
     /// Creates a new `GSSNode` that represents only the path segment of this peek.
     pub fn isolated_parent(&self) -> Arc<GSSNode> {
+        // Optimization: if the parent already represents this single path, return it.
+        if self.parent_arc.num_predecessors() == 1 {
+            return self.parent_arc.clone();
+        }
 
+        // Create a new parent node representing only this path segment.
+        let mut predecessors = NodeMap::new();
+        predecessors
+            .entry(self.edge_value.clone())
+            .or_default()
+            .insert(self.predecessor_node.dest_key(), vec![self.predecessor_node.clone()]);
+
+        // The new node keeps the original parent's local acc.
+        Arc::new(GSSNode::new_with_map(self.parent_arc.local_acc(), predecessors))
     }
 }
 
