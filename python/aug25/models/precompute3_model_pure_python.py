@@ -1243,9 +1243,11 @@ class Model(GraphProvider):
 
             # Iteratively refine until convergence
             changed = True
+            iteration = 0
             while changed:
+                iteration += 1
                 changed = False
-                for src in nodes_list:
+                for src in tqdm(nodes_list, desc=f"  Fixpoint T iter {iteration}", leave=False, unit="node"):
                     if is_end(src):
                         continue
                     src_edges = edges_by_src.get(src, {})
@@ -1293,7 +1295,9 @@ class Model(GraphProvider):
 
             # Phase 2: edge collapsing
             # Iterate until no change; recompute degrees and incoming each round
+            iteration = 0
             while True:
+                iteration += 1
                 # Build out-degree and incoming map
                 out_degree: Dict[NodeID, int] = {}
                 incoming: Dict[NodeID, List[Tuple[NodeID, int, StateIDSet]]] = collections.defaultdict(list)
@@ -1304,7 +1308,8 @@ class Model(GraphProvider):
                 changed = False
 
                 # Candidates: B with out-degree 1, not end
-                for b, deg in list(out_degree.items()):
+                pbar_desc = f"  Edge collapsing iter {iteration}"
+                for b, deg in tqdm(list(out_degree.items()), desc=pbar_desc, leave=False, unit="node"):
                     if deg != 1:
                         continue
                     if is_end(b):
@@ -1401,7 +1406,7 @@ class Model(GraphProvider):
             )
 
         # Build, per source node and pop, per-token dest->mask maps to compute grouping.
-        for src in arena.keys():
+        for src in tqdm(arena.keys(), desc="  Rebuilding arena children", unit="node"):
             # Map: (pop, signature) -> set(tokens)
             groups: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = collections.defaultdict(set)
 

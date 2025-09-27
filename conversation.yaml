@@ -152,6 +152,8 @@ local_system:
       from typing import Dict, List, Tuple, Optional, Union, Any, Set
       from dataclasses import dataclass, field
 
+      from tqdm import tqdm
+
       from ..common_interface import GraphProvider
       from ..range_set.py_range_set import PyRangeSet as RangeSet
       import _sep1 as ffi
@@ -1324,7 +1326,7 @@ local_system:
               are merged back into arena.children by grouping tokens that have identical (pop -> dest->mask)
               signatures at each source node.
               """
-              print("Optimizing masks and edges (Alt6 + Alt2)...", end='', flush=True)
+              print("Optimizing masks and edges (Alt6 + Alt2)...")
               t_start = time.perf_counter()
 
               # Precompute LR universe and forward map once.
@@ -1517,7 +1519,7 @@ local_system:
                   return edges_by_src
 
               # Process all tokens actually used.
-              for token_id in sorted(tokens_in_use):
+              for token_id in tqdm(sorted(tokens_in_use), desc="Optimizing per-token edges"):
                   edges_for_token = build_token_edges(token_id)
                   if not edges_for_token:
                       # No edges under this token (shouldn't happen if tokens_in_use is correct), skip.
@@ -3087,9 +3089,11 @@ local_system:
 
                   # Iteratively refine until convergence
                   changed = True
+                  iteration = 0
                   while changed:
+                      iteration += 1
                       changed = False
-                      for src in nodes_list:
+                      for src in tqdm(nodes_list, desc=f"  Fixpoint T iter {iteration}", leave=False, unit="node"):
                           if is_end(src):
                               continue
                           src_edges = edges_by_src.get(src, {})
@@ -3137,7 +3141,9 @@ local_system:
 
                   # Phase 2: edge collapsing
                   # Iterate until no change; recompute degrees and incoming each round
+                  iteration = 0
                   while True:
+                      iteration += 1
                       # Build out-degree and incoming map
                       out_degree: Dict[NodeID, int] = {}
                       incoming: Dict[NodeID, List[Tuple[NodeID, int, StateIDSet]]] = collections.defaultdict(list)
@@ -3148,7 +3154,8 @@ local_system:
                       changed = False
 
                       # Candidates: B with out-degree 1, not end
-                      for b, deg in list(out_degree.items()):
+                      pbar_desc = f"  Edge collapsing iter {iteration}"
+                      for b, deg in tqdm(list(out_degree.items()), desc=pbar_desc, leave=False, unit="node"):
                           if deg != 1:
                               continue
                           if is_end(b):
@@ -3245,7 +3252,7 @@ local_system:
                   )
 
               # Build, per source node and pop, per-token dest->mask maps to compute grouping.
-              for src in arena.keys():
+              for src in tqdm(arena.keys(), desc="  Rebuilding arena children", unit="node"):
                   # Map: (pop, signature) -> set(tokens)
                   groups: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = collections.defaultdict(set)
 
@@ -3601,6 +3608,8 @@ messages:
       import time
       from typing import Dict, List, Tuple, Optional, Union, Any, Set
       from dataclasses import dataclass, field
+
+      from tqdm import tqdm
 
       from ..common_interface import GraphProvider
       from ..range_set.py_range_set import PyRangeSet as RangeSet
@@ -4774,7 +4783,7 @@ messages:
               are merged back into arena.children by grouping tokens that have identical (pop -> dest->mask)
               signatures at each source node.
               """
-              print("Optimizing masks and edges (Alt6 + Alt2)...", end='', flush=True)
+              print("Optimizing masks and edges (Alt6 + Alt2)...")
               t_start = time.perf_counter()
 
               # Precompute LR universe and forward map once.
@@ -4967,7 +4976,7 @@ messages:
                   return edges_by_src
 
               # Process all tokens actually used.
-              for token_id in sorted(tokens_in_use):
+              for token_id in tqdm(sorted(tokens_in_use), desc="Optimizing per-token edges"):
                   edges_for_token = build_token_edges(token_id)
                   if not edges_for_token:
                       # No edges under this token (shouldn't happen if tokens_in_use is correct), skip.
@@ -5158,7 +5167,7 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: Use tqdm in optimize_state_masks_and_edges
+  - user: Add more progress bars so we can see what's going on in optimize_state_masks_and_edges
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5177,41 +5186,38 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course! I can help you add a `tqdm` progress bar to the `optimize_state_masks_and_edges` method to better visualize its progress. Here are the step-by-step instructions and the corresponding git diff.
+      Of course. I can add more progress bars to the `optimize_state_masks_and_edges` method to provide better visibility into its long-running operations. Here are the step-by-step instructions and the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **File: `python/aug25/models/precompute3_model_pure_python.py`**
+      In the file `python/aug25/models/precompute3_model_pure_python.py`, you will make three changes inside the `optimize_state_masks_and_edges` method and its nested functions.
 
-          *   First, import the `tqdm` library. Add the following line after the existing imports, for instance, after `from dataclasses import dataclass, field`:
+      1.  **Add a progress bar to the terminal sets fixpoint computation:**
+          - Navigate to the `compute_terminal_sets_for_token` nested function.
+          - Before the `while changed:` loop, initialize an iteration counter: `iteration = 0`.
+          - Inside the `while changed:` loop, increment the counter: `iteration += 1`.
+          - Modify the `for src in nodes_list:` loop to wrap `nodes_list` with `tqdm`. The new line should be:
+            ```python
+            for src in tqdm(nodes_list, desc=f"  Fixpoint T iter {iteration}", leave=False, unit="node"):
+            ```
 
-              ```python
-              from tqdm import tqdm
-              ```
+      2.  **Add a progress bar to the edge collapsing loop:**
+          - Navigate to the `expand_masks_and_collapse_for_token` nested function.
+          - Find the "Phase 2: edge collapsing" section.
+          - Before the `while True:` loop, initialize an iteration counter: `iteration = 0`.
+          - Inside the `while True:` loop, increment the counter: `iteration += 1`.
+          - Just before the `for b, deg in list(out_degree.items()):` loop, define a description string for the progress bar: `pbar_desc = f"  Edge collapsing iter {iteration}"`.
+          - Modify the `for` loop to wrap `list(out_degree.items())` with `tqdm`:
+            ```python
+            for b, deg in tqdm(list(out_degree.items()), desc=pbar_desc, leave=False, unit="node"):
+            ```
 
-          *   Next, in the `optimize_state_masks_and_edges` method, modify the initial print statement to ensure the progress bar starts on a new line. Change this line:
-
-              ```python
-              print("Optimizing masks and edges (Alt6 + Alt2)...", end='', flush=True)
-              ```
-
-              to:
-
-              ```python
-              print("Optimizing masks and edges (Alt6 + Alt2)...")
-              ```
-
-          *   Finally, wrap the main token processing loop with `tqdm`. Find this loop:
-
-              ```python
-              for token_id in sorted(tokens_in_use):
-              ```
-
-              And change it to:
-
-              ```python
-              for token_id in tqdm(sorted(tokens_in_use), desc="Optimizing per-token edges"):
-              ```
+      3.  **Add a progress bar for rebuilding arena children:**
+          - At the end of the `optimize_state_masks_and_edges` method, locate the final loop where the arena children are rebuilt.
+          - Modify the `for src in arena.keys():` loop to wrap `arena.keys()` with `tqdm`:
+            ```python
+            for src in tqdm(arena.keys(), desc="  Rebuilding arena children", unit="node"):
+            ```
 
       ### Git Diff
 
@@ -5219,35 +5225,55 @@ messages:
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      index 45543c7..8689531 100644
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -7,6 +7,8 @@
-       import time
-       from typing import Dict, List, Tuple, Optional, Union, Any, Set
-       from dataclasses import dataclass, field
-      +
-      +from tqdm import tqdm
+      @@ -1220,11 +1220,13 @@
+                           T[nid] = RangeSet.empty()
        
-       from ..common_interface import GraphProvider
-       from ..range_set.py_range_set import PyRangeSet as RangeSet
-      @@ -1286,7 +1288,7 @@
-               are merged back into arena.children by grouping tokens that have identical (pop -> dest->mask)
-               signatures at each source node.
-               """
-      -        print("Optimizing masks and edges (Alt6 + Alt2)...", end='', flush=True)
-      +        print("Optimizing masks and edges (Alt6 + Alt2)...")
-               t_start = time.perf_counter()
+                   # Iteratively refine until convergence
+                   changed = True
+      +            iteration = 0
+                   while changed:
+      +                iteration += 1
+                       changed = False
+      -                for src in nodes_list:
+      +                for src in tqdm(nodes_list, desc=f"  Fixpoint T iter {iteration}", leave=False, unit="node"):
+                           if is_end(src):
+                               continue
+                           src_edges = edges_by_src.get(src, {})
+      @@ -1272,18 +1274,21 @@
        
-               # Precompute LR universe and forward map once.
-      @@ -1432,7 +1434,7 @@
-                   return edges_by_src
+                   # Phase 2: edge collapsing
+                   # Iterate until no change; recompute degrees and incoming each round
+      +            iteration = 0
+                   while True:
+      +                iteration += 1
+                       # Build out-degree and incoming map
+                       out_degree: Dict[NodeID, int] = {}
+                       incoming: Dict[NodeID, List[Tuple[NodeID, int, StateIDSet]]] = collections.defaultdict(list)
+                       for a, amap in edges_by_src.items():
+                           out_degree[a] = len(amap)
+                           for (b, pop), mask in amap.items():
+                               incoming[b].append((a, pop, mask))
+                       changed = False
        
-               # Process all tokens actually used.
-      -        for token_id in sorted(tokens_in_use):
-      +        for token_id in tqdm(sorted(tokens_in_use), desc="Optimizing per-token edges"):
-                   edges_for_token = build_token_edges(token_id)
-                   if not edges_for_token:
-                       # No edges under this token (shouldn't happen if tokens_in_use is correct), skip.
+                       # Candidates: B with out-degree 1, not end
+      -                for b, deg in list(out_degree.items()):
+      +                pbar_desc = f"  Edge collapsing iter {iteration}"
+      +                for b, deg in tqdm(list(out_degree.items()), desc=pbar_desc, leave=False, unit="node"):
+                           if deg != 1:
+                               continue
+                           if is_end(b):
+      @@ -1373,7 +1378,7 @@
+                   )
+       
+               # Build, per source node and pop, per-token dest->mask maps to compute grouping.
+      -        for src in arena.keys():
+      +        for src in tqdm(arena.keys(), desc="  Rebuilding arena children", unit="node"):
+                   # Map: (pop, signature) -> set(tokens)
+                   groups: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = collections.defaultdict(set)
+       
 
       ```
     metadata:
@@ -5260,6 +5286,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "Add tqdm progress bar to optimize_state_masks_and_edges"'
+  - user: 'Changes committed with message: "Add tqdm progress bars to long-running
+      loops in optimize_state_masks_and_edges"'
     metadata:
 ...
