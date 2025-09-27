@@ -218,6 +218,7 @@ class Model(GraphProvider):
                 if is_end(node_idx):
                     print(f"    - END NODE found")
                     print(f"      - final_mask before: {final_mask.to_ranges()}")
+                    print(self.constraint.state_with_nodes([(0, gss_node)]))
 
                     # Calculate forbidden_llm_tokens based on GSS's disallowed terminals
                     forbidden_llm_tokens = ffi.Bitset.zeros()
