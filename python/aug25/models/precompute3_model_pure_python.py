@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import heapq
 import collections
 import time
@@ -286,6 +287,7 @@ class Model(GraphProvider):
 
         model._merge_equivalent_llm_tokens()
         model._reorder_llm_tokens_for_range_minimization()
+        model.optimize_state_masks_and_edges()
         return model
 
     @profile
@@ -1106,6 +1108,346 @@ class Model(GraphProvider):
                     new_internal_to_original_map[old_to_new_map[old_tok]] = set(orig_set)
             self.internal_to_original_map = new_internal_to_original_map
 
+
+    # ===============================
+    # Graph/state-set optimization
+    # ===============================
+    def _all_parser_states_bitset(self) -> StateIDSet:
+        """
+        RangeSet of all LR parser states known to the table.
+        """
+        return RangeSet.from_indices(list(self.parser_table.table.keys()))
+
+    def _build_forward_state_map(self) -> Dict[int, Set[int]]:
+        """
+        Build forward LR state graph: state -> set of successor states
+        (those that can appear above it on the stack), derived from reverse_state_map.
+        """
+        forward: Dict[int, Set[int]] = collections.defaultdict(set)
+        # Ensure all states appear as keys
+        for s in self.parser_table.table.keys():
+            forward[int(s)]  # touch key
+        for to_state, from_states in self.reverse_state_map.items():
+            y = int(to_state)
+            for x in from_states:
+                forward[int(x)].add(y)
+        return dict(forward)
+
+    def _forward_image_k(self, seeds: StateIDSet, k: int, fwd: Dict[int, Set[int]]) -> StateIDSet:
+        """
+        Compute k-step forward image of a set of states over the LR graph.
+        k == 0 returns seeds.
+        """
+        if k <= 0:
+            return seeds
+        curr = set(int(i) for i in seeds.to_indices())
+        for _ in range(k):
+            if not curr:
+                break
+            nxt: Set[int] = set()
+            for s in curr:
+                nxt.update(fwd.get(s, ()))
+            curr = nxt
+        if not curr:
+            return RangeSet.empty()
+        return RangeSet.from_indices(sorted(curr))
+
+    def _rs_equal(self, a: StateIDSet, b: StateIDSet) -> bool:
+        """
+        Robust RangeSet equality using issubset both ways.
+        """
+        return a.issubset(b) and b.issubset(a)
+
+    def optimize_state_masks_and_edges(self) -> None:
+        """
+        Two-phase optimization, generalized over LLM tokens:
+        Phase 1 (Goal 1, Alt 6): Maximize full-span masks where safe.
+            - For each token, compute terminal sets T[node] via a monotone fixpoint:
+              * T(end) = Universe (all parser states)
+              * T(n)   = union_e F^pop( mask_e ∩ T(dest(e)) ) for all outgoing edges e from n
+            - For each edge (n -> d) under the token, safely add all non-terminal states at d:
+              mask_e := mask_e ∪ (Universe \ T(d)).
+
+        Phase 2 (Goal 2, Alt 2): Reduce edges by safe rewrites (per token):
+            - For any node B (not end) with exactly one outgoing edge B --(m, y)--> C:
+              * If m == 0: For every incoming A --(n, x)--> B, replace with A --(n, x∩y)--> C.
+                           Remove B --(0, y)--> C and all A --(n, x)--> B.
+              * Else (m > 0): If every incoming A --(n, x)--> B has x == Universe, then
+                              replace with A --(n+m, y)--> C for all incoming A->B.
+                              Remove B --(m, y)--> C and all A --(n, x)--> B.
+
+        Implementation is per-token to respect LLM masks. After processing, edges for all tokens
+        are merged back into arena.children by grouping tokens that have identical (pop -> dest->mask)
+        signatures at each source node.
+        """
+        print("Optimizing masks and edges (Alt6 + Alt2)...", end='', flush=True)
+        t_start = time.perf_counter()
+
+        # Precompute LR universe and forward map once.
+        all_states_universe: StateIDSet = self._all_parser_states_bitset()
+        forward_map: Dict[int, Set[int]] = self._build_forward_state_map()
+
+        # Collect the set of tokens that actually appear in the arena.
+        tokens_in_use: Set[int] = set()
+        for node in self.arena.values():
+            for (pop, llm_bv), _dests in node.children:
+                for t in llm_bv.to_indices():
+                    tokens_in_use.add(int(t))
+
+        # Early out if nothing to do
+        if not tokens_in_use:
+            print(" done (no tokens in use).", flush=True)
+            return
+
+        # Convenience handles
+        arena = self.arena
+        is_end = self.is_end
+        nodes_list: List[NodeID] = list(arena.keys())
+
+        # For each token, build, optimize, and stash per-token adjacency.
+        # Structure: per_token_edges[token][src][(dest, pop)] = state_mask (RangeSet)
+        per_token_edges: Dict[int, Dict[NodeID, Dict[Tuple[NodeID, int], StateIDSet]]] = {}
+
+        # Helper to aggregate edges for a specific token from the arena
+        def build_token_edges(token_id: int) -> Dict[NodeID, Dict[Tuple[NodeID, int], StateIDSet]]:
+            e: Dict[NodeID, Dict[Tuple[NodeID, int], StateIDSet]] = {}
+            for src_id, node in arena.items():
+                if not node.children:
+                    continue
+                for (pop, llm_bv), dests in node.children:
+                    if not llm_bv.contains(token_id):
+                        continue
+                    src_map = e.get(src_id)
+                    if src_map is None:
+                        src_map = {}
+                        e[src_id] = src_map
+                    for dest_id, state_bv in dests:
+                        key = (int(dest_id), int(pop))
+                        if key in src_map:
+                            src_map[key] = src_map[key].union(state_bv)
+                        else:
+                            src_map[key] = state_bv
+            return e
+
+        # Fixpoint computation of terminal sets T for a token.
+        def compute_terminal_sets_for_token(token_id: int, edges_by_src: Dict[NodeID, Dict[Tuple[NodeID, int], StateIDSet]]) -> Dict[NodeID, StateIDSet]:
+            T: Dict[NodeID, StateIDSet] = {}
+            # Initialize: end nodes -> Universe, others -> empty
+            for nid in nodes_list:
+                if is_end(nid):
+                    T[nid] = all_states_universe
+                else:
+                    T[nid] = RangeSet.empty()
+
+            # Iteratively refine until convergence
+            changed = True
+            while changed:
+                changed = False
+                for src in nodes_list:
+                    if is_end(src):
+                        continue
+                    src_edges = edges_by_src.get(src, {})
+                    if not src_edges:
+                        # No change; remains empty (unless already non-empty due to previous iterations)
+                        if not T[src].is_empty():
+                            # Could only shrink if we did so, but monotone only grows; so skip
+                            pass
+                        continue
+
+                    acc: StateIDSet = RangeSet.empty()
+                    for (dest, pop), mask in src_edges.items():
+                        dest_term = T.get(dest, RangeSet.empty())
+                        if dest_term.is_empty():
+                            continue
+                        inter = mask.intersection(dest_term)
+                        if inter.is_empty():
+                            continue
+                        img = self._forward_image_k(inter, int(pop), forward_map)
+                        if not img.is_empty():
+                            acc = acc.union(img)
+
+                    if not self._rs_equal(acc, T[src]):
+                        T[src] = acc
+                        changed = True
+            return T
+
+        # Per-token mask expansion and edge collapsing.
+        def expand_masks_and_collapse_for_token(token_id: int, edges_by_src: Dict[NodeID, Dict[Tuple[NodeID, int], StateIDSet]]) -> Dict[NodeID, Dict[Tuple[NodeID, int], StateIDSet]]:
+            # Compute terminal sets
+            T = compute_terminal_sets_for_token(token_id, edges_by_src)
+
+            # Phase 1: expand masks using non-terminal complement
+            nonterm_cache: Dict[NodeID, StateIDSet] = {}
+            for src, src_map in list(edges_by_src.items()):
+                new_src_map: Dict[Tuple[NodeID, int], StateIDSet] = {}
+                for (dest, pop), mask in src_map.items():
+                    add = nonterm_cache.get(dest)
+                    if add is None:
+                        add = all_states_universe.difference(T.get(dest, RangeSet.empty()))
+                        nonterm_cache[dest] = add
+                    new_mask = mask.union(add)
+                    new_src_map[(dest, pop)] = new_mask
+                edges_by_src[src] = new_src_map
+
+            # Phase 2: edge collapsing
+            # Iterate until no change; recompute degrees and incoming each round
+            while True:
+                # Build out-degree and incoming map
+                out_degree: Dict[NodeID, int] = {}
+                incoming: Dict[NodeID, List[Tuple[NodeID, int, StateIDSet]]] = collections.defaultdict(list)
+                for a, amap in edges_by_src.items():
+                    out_degree[a] = len(amap)
+                    for (b, pop), mask in amap.items():
+                        incoming[b].append((a, pop, mask))
+                changed = False
+
+                # Candidates: B with out-degree 1, not end
+                for b, deg in list(out_degree.items()):
+                    if deg != 1:
+                        continue
+                    if is_end(b):
+                        continue
+                    b_edges = edges_by_src.get(b, {})
+                    if not b_edges:
+                        continue
+                    ((c, m), y) = next(iter(b_edges.items()))
+
+                    incs = incoming.get(b, [])
+                    if not incs:
+                        # No incoming: remove unreachable outgoing edge for this token.
+                        # Safe and reduces edges.
+                        if b in edges_by_src:
+                            del edges_by_src[b]
+                            changed = True
+                        continue
+
+                    if m == 0:
+                        # Replacement 2: A --(n,x)--> B --(0,y)--> C  =>  A --(n, x∩y)--> C
+                        for (a, n, x) in incs:
+                            am = edges_by_src.setdefault(a, {})
+                            # new edge A->C with pop n
+                            new_key = (c, n)
+                            new_mask = x.intersection(y)
+                            if new_key in am:
+                                am[new_key] = am[new_key].union(new_mask)
+                            else:
+                                am[new_key] = new_mask
+                            # remove old A->B
+                            old_key = (b, n)
+                            if old_key in am:
+                                del am[old_key]
+                        # remove B->C
+                        if b in edges_by_src:
+                            del edges_by_src[b]
+                        changed = True
+                        continue
+
+                    # m > 0: Replacement 1 requires x == Universe for all incoming
+                    can_collapse = True
+                    for (_a, _n, x) in incs:
+                        if not (x.issubset(all_states_universe) and all_states_universe.issubset(x)):
+                            can_collapse = False
+                            break
+                    if can_collapse:
+                        for (a, n, _x) in incs:
+                            am = edges_by_src.setdefault(a, {})
+                            new_key = (c, n + m)
+                            # mask becomes y
+                            if new_key in am:
+                                am[new_key] = am[new_key].union(y)
+                            else:
+                                am[new_key] = y
+                            # remove old A->B
+                            old_key = (b, n)
+                            if old_key in am:
+                                del am[old_key]
+                        # remove B->C
+                        if b in edges_by_src:
+                            del edges_by_src[b]
+                        changed = True
+                        continue
+
+                if not changed:
+                    break
+
+            return edges_by_src
+
+        # Process all tokens actually used.
+        for token_id in sorted(tokens_in_use):
+            edges_for_token = build_token_edges(token_id)
+            if not edges_for_token:
+                # No edges under this token (shouldn't happen if tokens_in_use is correct), skip.
+                continue
+            optimized_edges = expand_masks_and_collapse_for_token(token_id, edges_for_token)
+            per_token_edges[token_id] = optimized_edges
+
+        # Rebuild arena children by grouping tokens that share identical (pop -> dest->mask) at each source.
+        # We create, for each node, groups keyed by (pop, signature_of_dests), where signature encodes
+        # the dest list and each dest's state_bv ranges. Tokens sharing the same key are merged into one child.
+        def rs_ranges_key(rs: StateIDSet) -> Tuple[Tuple[int, int], ...]:
+            try:
+                return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+            except Exception:
+                return ()
+
+        def child_sort_key(item):
+            (pop, llm_bv), dests = item
+            return (
+                int(pop),
+                rs_ranges_key(llm_bv),
+                tuple(sorted(int(did) for (did, _bv) in dests))
+            )
+
+        # Build, per source node and pop, per-token dest->mask maps to compute grouping.
+        for src in arena.keys():
+            # Map: (pop, signature) -> set(tokens)
+            groups: Dict[Tuple[int, Tuple[Tuple[int, Tuple[Tuple[int, int], ...]], ...]], Set[int]] = collections.defaultdict(set)
+
+            # To build signatures, for each token, we build per-pop dest->mask map
+            for token_id, token_edges in per_token_edges.items():
+                src_map = token_edges.get(src, {})
+                if not src_map:
+                    continue
+                # pop -> dest -> mask
+                per_pop: Dict[int, Dict[int, StateIDSet]] = collections.defaultdict(dict)
+                for (dest, pop), mask in src_map.items():
+                    per_pop[int(pop)][int(dest)] = mask
+                # For each pop, build signature and assign this token to the group
+                for pop, dest_map in per_pop.items():
+                    dests_sig = tuple(sorted(
+                        (int(did), rs_ranges_key(bv))
+                        for did, bv in dest_map.items()
+                    ))
+                    key = (int(pop), dests_sig)
+                    groups[key].add(int(token_id))
+
+            # Construct new children from groups
+            new_children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[int, StateIDSet]]]] = []
+            llm_union: LLMTokenSet = RangeSet.empty()
+
+            for (pop, dests_sig), tokset in groups.items():
+                # Build llm_bv
+                llm_bv = RangeSet.from_indices(sorted(tokset))
+                llm_union = llm_union.union(llm_bv)
+                # Recreate dest list
+                dests_list: List[Tuple[int, StateIDSet]] = []
+                for dest_id, ranges in dests_sig:
+                    dests_list.append((int(dest_id), RangeSet.from_ranges(list(ranges))))
+                new_children.append(((int(pop), llm_bv), dests_list))
+
+            # Deterministic sort
+            new_children.sort(key=child_sort_key)
+
+            # Assign back
+            node = arena[src]
+            node.children = new_children
+            node.llm_bv_union = llm_union
+
+        # Refresh max_depth since edges changed
+        self.max_depth = self._recompute_max_depth_from_arena()
+
+        t_end = time.perf_counter()
+        print(f" done in {t_end - t_start:.3f}s.", flush=True)
 
     def _remap_llm_tokens_many_to_one(self, old_to_new_map: Dict[int, int]) -> None:
         """
