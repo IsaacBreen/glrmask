@@ -472,7 +472,7 @@ public:
 
         // This memoization cache is critical for performance. It's shared across all GSSs
         // being initialized, mirroring the Python implementation's optimization.
-        std::unordered_map<Acc*, std::shared_ptr<Acc>> init_acc_memo;
+        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> init_acc_memo;
 
         values.reserve(state_.size());
         // --- Initial GSS Stats ---
@@ -1201,7 +1201,7 @@ private:
 
     Leveled initialize_gss_accs(
         const Leveled& g,
-        std::unordered_map<Acc*, std::shared_ptr<Acc>>* acc_memo
+        std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>>* acc_memo
     ) {
         auto& stats = Stats::get();
         auto mutator = [&](const std::shared_ptr<Acc>& a) -> std::shared_ptr<Acc> {
