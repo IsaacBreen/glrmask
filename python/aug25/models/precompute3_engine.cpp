@@ -105,6 +105,23 @@ struct pair_hash {
     }
 };
 
+// Add std::hash and std::equal_to specializations for std::shared_ptr<Acc> to enable value-based hashing.
+namespace std {
+    template <>
+    struct hash<std::shared_ptr<Acc>> {
+        size_t operator()(const std::shared_ptr<Acc>& a) const {
+            return a ? a->hash() : 0;
+        }
+    };
+    template <>
+    struct equal_to<std::shared_ptr<Acc>> {
+        bool operator()(const std::shared_ptr<Acc>& lhs, const std::shared_ptr<Acc>& rhs) const {
+            if (!lhs && !rhs) return true;
+            if (!lhs || !rhs) return false;
+            return *lhs == *rhs;
+        }
+    };
+}
 
 class Engine {
 public:
