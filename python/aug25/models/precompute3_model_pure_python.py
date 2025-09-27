@@ -7,6 +7,13 @@ import time
 from typing import Dict, List, Tuple, Optional, Union, Any, Set
 from dataclasses import dataclass, field
 
+# Progress bars (safe fallback if tqdm is unavailable)
+try:
+    from tqdm import tqdm
+except Exception:  # pragma: no cover
+    def tqdm(x, **kwargs):
+        return x
+
 from ..common_interface import GraphProvider
 from ..range_set.py_range_set import PyRangeSet as RangeSet
 import _sep1 as ffi
@@ -286,6 +293,8 @@ class Model(GraphProvider):
 
         model._merge_equivalent_llm_tokens()
         model._reorder_llm_tokens_for_range_minimization()
+        # Run graph optimization after LLM token reorder, as requested
+        model._optimize_state_masks_and_edges()
         return model
 
     @profile
@@ -1217,4 +1226,509 @@ class Model(GraphProvider):
                     new_internal_to_original_map[rep] = set()
                 new_internal_to_original_map[rep].update(orig_set)
             self.internal_to_original_map = new_internal_to_original_map
+
+    # ===========================
+    # Graph optimization (masks + edges)
+    # ===========================
+    def _count_edges(self) -> int:
+        """
+        Count total number of edge destinations across the arena.
+        Each (dest_id, state_bv) pair inside a child group counts as one edge.
+        """
+        total = 0
+        for node in self.arena.values():
+            for (_pop, _llm_bv), dests in node.children:
+                total += len(dests)
+        return total
+
+    def _build_parser_state_universe(self) -> Tuple[Set[int], StateIDSet]:
+        """
+        Returns:
+          - universe_set: set of all parser LR states (actual)
+          - universe_rs: contiguous [0..max_state] RangeSet for universal masks
+        """
+        if not self.parser_table or not self.parser_table.table:
+            return set(), RangeSet.empty()
+        all_states = set(int(s) for s in self.parser_table.table.keys())
+        if not all_states:
+            return set(), RangeSet.empty()
+        max_sid = max(all_states)
+        # Use contiguous 0..max_sid for maximal interval minimization
+        universe_rs = RangeSet.from_ranges([(0, int(max_sid))])
+        return all_states, universe_rs
+
+    def _build_forward_state_map(self) -> Dict[int, Set[int]]:
+        """
+        Build forward one-pop map: for each state t, forward[t] = {y | t ∈ reverse_state_map[y]}.
+        Then invR(X) = ⋃_{t in X} forward[t].
+        """
+        fwd: Dict[int, Set[int]] = collections.defaultdict(set)
+        rev = self.reverse_state_map or {}
+        for y, preds in rev.items():
+            yy = int(y)
+            for x in preds:
+                fwd[int(x)].add(yy)
+        # Ensure all known states are present with possibly-empty sets
+        for s in self.parser_table.table.keys():
+            _ = fwd[int(s)]
+        return fwd
+
+    def _compute_terminal_state_sets(self) -> Dict[NodeID, Set[int]]:
+        """
+        Compute T(n): the set of LR states that are terminal at node n (ignoring LLM tokens),
+        i.e., starting at node n with top-of-stack in state s, there exists a path to an end node.
+
+        Recurrence:
+          T(n) = (n is end) ? U : ⋃ over edges e=(n --(p, S)-> v) of invR^p(S ∩ T(v))
+        where invR(X) = { y | R({y}) ∩ X != ∅ } and R is the reverse_state_map mapping (apply after pop).
+        """
+        universe_set, _ = self._build_parser_state_universe()
+        if not universe_set:
+            return {}
+
+        # Prepare forward map for invR
+        forward = self._build_forward_state_map()
+
+        def invR_pow(X: Set[int], p: int) -> Set[int]:
+            if p <= 0:
+                # No pop: preimage is the set itself
+                return set(X)
+            S: Set[int] = set(X)
+            for _ in range(int(p)):
+                nxt: Set[int] = set()
+                for t in S:
+                    nxt.update(forward.get(int(t), ()))
+                S = nxt
+                if not S:
+                    break
+            return S
+
+        # Materialize edges per node: list of (pop, dest_id, state_set)
+        edges: Dict[NodeID, List[Tuple[int, NodeID, Set[int]]]] = {}
+        for nid, node in self.arena.items():
+            lst: List[Tuple[int, NodeID, Set[int]]] = []
+            for (pop, _llm_bv), dests in node.children:
+                for dest_id, state_bv in dests:
+                    state_set = set(int(x) for x in state_bv.to_indices())
+                    lst.append((int(pop), int(dest_id), state_set))
+            edges[int(nid)] = lst
+
+        # Initialize T
+        T: Dict[NodeID, Set[int]] = {int(n): set() for n in self.arena.keys()}
+        for nid, node in self.arena.items():
+            if node.clean_end:
+                T[int(nid)] = set(universe_set)
+
+        # Bottom-up order using max_depth (smallest depth first).
+        order = sorted(self.arena.keys(), key=lambda n: int(self.max_depth.get(int(n), 0)))
+
+        # Fixed-point iteration with a safe upper bound
+        N = max(1, len(order))
+        for _iter in range(N * 2):
+            changed = False
+            for nid in tqdm(order, desc="Compute terminal states (fixed-point)", leave=False):
+                nid_int = int(nid)
+                accum = set(T[nid_int])  # current terminal states at nid
+                if self.arena[nid_int].clean_end:
+                    # Already universal; no need to process edges
+                    if accum != universe_set:
+                        T[nid_int] = set(universe_set)
+                        changed = True
+                    continue
+                for pop, dest_id, state_set in edges.get(nid_int, []):
+                    Tv = T[int(dest_id)]
+                    if not Tv:
+                        continue
+                    X = state_set & Tv
+                    if not X:
+                        continue
+                    pre = invR_pow(X, pop)
+                    if pre:
+                        before = len(accum)
+                        accum |= pre
+                        if len(accum) != before:
+                            changed = True
+                if T[nid_int] != accum:
+                    T[nid_int] = accum
+            if not changed:
+                break
+        return T
+
+    def _transform_state_masks_alt6(self, T: Dict[NodeID, Set[int]]) -> Dict[str, int]:
+        """
+        Goal 1 Alt 6: Make as many (0..num_states) masks as possible by safely adding
+        non-terminal states to edge masks. For each edge to v with mask S:
+            S' = (U \ T(v)) ∪ (S ∩ T(v))
+        This preserves all existing terminal states while filling every non-terminal.
+        """
+        stats = {
+            "dest_masks_total": 0,
+            "dest_masks_already_universal": 0,
+            "dest_masks_made_universal": 0,
+            "dest_masks_changed": 0,
+        }
+
+        universe_set, universe_rs = self._build_parser_state_universe()
+        univ_full_indices = set(range(0, max(universe_set) + 1)) if universe_set else set()
+
+        def is_universal(rs: StateIDSet) -> bool:
+            if rs.is_empty():
+                return False
+            return rs.issubset(universe_rs) and universe_rs.issubset(rs)
+
+        for nid, node in tqdm(self.arena.items(), desc="Transform state masks (Alt 6)", leave=False):
+            for gi, ((pop, llm_bv), dests) in enumerate(node.children):
+                new_dests: List[Tuple[int, StateIDSet]] = []
+                for (dest_id, state_bv) in dests:
+                    stats["dest_masks_total"] += 1
+                    already_univ = is_universal(state_bv)
+                    if already_univ:
+                        stats["dest_masks_already_universal"] += 1
+                        new_dests.append((int(dest_id), state_bv))
+                        continue
+                    Tv = T.get(int(dest_id), set())
+                    S_set = set(int(x) for x in state_bv.to_indices())
+                    # S' = (U\T) ∪ (S∩T)
+                    addable_non_term = set(univ_full_indices) - set(Tv)
+                    keep_terminals = S_set & set(Tv)
+                    S_new = addable_non_term | keep_terminals
+                    # Build new RangeSet mask
+                    new_bv = RangeSet.from_indices(sorted(S_new)) if S_new else RangeSet.empty()
+                    if not new_bv.is_empty():
+                        if is_universal(new_bv):
+                            stats["dest_masks_made_universal"] += 1
+                        if list(new_bv.to_ranges()) != list(state_bv.to_ranges()):
+                            stats["dest_masks_changed"] += 1
+                        new_dests.append((int(dest_id), new_bv))
+                    else:
+                        # Extremely unlikely (if Tv == U and S had no terminals)
+                        new_dests.append((int(dest_id), state_bv))
+                node.children[gi] = ((int(pop), llm_bv), new_dests)
+        return stats
+
+    def _build_incoming_map(self) -> Dict[NodeID, List[Tuple[int, int, LLMTokenSet, StateIDSet]]]:
+        """
+        Build a map dest_id -> list of (src_id, src_pop, src_llm_bv, src_state_bv_to_that_dest).
+        """
+        incoming: Dict[NodeID, List[Tuple[int, int, LLMTokenSet, StateIDSet]]] = collections.defaultdict(list)
+        for src_id, src_node in self.arena.items():
+            for (pop, llm_bv), dests in src_node.children:
+                for dest_id, state_bv in dests:
+                    incoming[int(dest_id)].append((int(src_id), int(pop), llm_bv, state_bv))
+        return incoming
+
+    def _add_or_merge_child_edge(
+        self,
+        src_node: ArenaNode,
+        pop: int,
+        llm_bv: LLMTokenSet,
+        dest_id: int,
+        state_bv: StateIDSet,
+    ) -> None:
+        """
+        Add an edge (pop,llm)->dest_id with state_bv to src_node, merging into an existing group
+        if (pop,llm) already exists. Merge state_bv for same dest by union.
+        """
+        def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+            try:
+                return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+            except Exception:
+                return ()
+
+        # Try to find a matching (pop,llm_bv) group
+        for idx, ((pop0, llm0), dests) in enumerate(src_node.children):
+            if int(pop0) != int(pop):
+                continue
+            if _ranges_key(llm0) == _ranges_key(llm_bv):
+                # Merge into this group
+                merged = False
+                new_dests: List[Tuple[int, StateIDSet]] = []
+                for (d_id, d_bv) in dests:
+                    if int(d_id) == int(dest_id):
+                        # union
+                        new_dests.append((int(d_id), d_bv.union(state_bv)))
+                        merged = True
+                    else:
+                        new_dests.append((int(d_id), d_bv))
+                if not merged:
+                    new_dests.append((int(dest_id), state_bv))
+                src_node.children[idx] = ((int(pop), llm0), new_dests)
+                return
+
+        # No existing group; create a new one
+        src_node.children.append(((int(pop), llm_bv), [(int(dest_id), state_bv)]))
+        # Deterministic sort
+        def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+            try:
+                return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+            except Exception:
+                return ()
+        src_node.children.sort(
+            key=lambda item: (
+                int(item[0][0]),
+                _ranges_key(item[0][1]),
+                tuple(sorted(int(d[0]) for d in item[1])),
+            )
+        )
+
+    def _remove_dest_entry(self, src_node: ArenaNode, pop: int, llm_bv: LLMTokenSet, dest_id: int) -> bool:
+        """
+        Remove the dest entry for dest_id from the group (pop,llm_bv) in src_node.
+        Returns True if something was removed.
+        """
+        def _ranges_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+            try:
+                return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+            except Exception:
+                return ()
+        removed = False
+        new_children = []
+        for (pop0, llm0), dests in src_node.children:
+            if int(pop0) == int(pop) and _ranges_key(llm0) == _ranges_key(llm_bv):
+                new_dests = [(d, bv) for (d, bv) in dests if int(d) != int(dest_id)]
+                if len(new_dests) != len(dests):
+                    removed = True
+                if new_dests:
+                    new_children.append(((int(pop0), llm0), new_dests))
+                # If no dests remain, drop the group entirely
+            else:
+                new_children.append(((int(pop0), llm0), dests))
+        if removed:
+            src_node.children = new_children
+        return removed
+
+    def _gc_unreachable_nodes(self) -> int:
+        """
+        Remove nodes not reachable from any root in roots_map.
+        Returns number of nodes removed.
+        """
+        roots = set(int(r) for r in self.roots_map.values())
+        if not roots:
+            return 0
+
+        # BFS from roots
+        visited: Set[int] = set()
+        q = collections.deque()
+        for r in roots:
+            if r in self.arena:
+                visited.add(int(r))
+                q.append(int(r))
+        while q:
+            u = q.popleft()
+            node = self.arena.get(int(u))
+            if not node:
+                continue
+            for (_pop, _llm), dests in node.children:
+                for (v, _sbv) in dests:
+                    if int(v) not in visited and int(v) in self.arena:
+                        visited.add(int(v))
+                        q.append(int(v))
+        # Remove unreachable
+        to_remove = [nid for nid in self.arena.keys() if int(nid) not in visited]
+        for nid in to_remove:
+            self.arena.pop(int(nid), None)
+            self.max_depth.pop(int(nid), None)
+        return len(to_remove)
+
+    def _edge_replacement_pass(self) -> Dict[str, int]:
+        """
+        Perform replacement/contraction to reduce edges (Goal 2 Alt 2).
+        Strategy:
+          - Replacement 1: If x (A->B mask) is universal, replace B->C with A->C using pop=n+m and state mask y,
+            llm mask becomes intersection; apply only if indegree(B)==1 or outdegree(B)==1, and B not an end.
+          - Replacement 2: If outdegree(B)==1 and m==0, replace A->B->C with A->C using pop=n and state mask x∩y,
+            llm mask intersection; again require indegree(B)==1 or outdegree(B)==1.
+          - Only contract nodes B that are not roots.
+        """
+        stats = {
+            "contractions": 0,
+            "replacement_1": 0,
+            "replacement_2": 0,
+            "edges_added": 0,
+            "edges_removed": 0,
+            "nodes_removed": 0,
+        }
+        _, universe_rs = self._build_parser_state_universe()
+
+        def is_universal(rs: StateIDSet) -> bool:
+            if rs.is_empty():
+                return False
+            return rs.issubset(universe_rs) and universe_rs.issubset(rs)
+
+        roots = set(int(r) for r in self.roots_map.values())
+
+        # Helper to count outdegree (number of dest entries)
+        def outdegree(node_id: int) -> int:
+            node = self.arena.get(int(node_id))
+            if not node:
+                return 0
+            total = 0
+            for (_p, _llm), dests in node.children:
+                total += len(dests)
+            return total
+
+        # Try to contract nodes in a loop until no changes
+        while True:
+            incoming = self._build_incoming_map()
+            node_ids = list(self.arena.keys())
+            changed = False
+
+            for B in tqdm(node_ids, desc="Edge replacement pass", leave=False):
+                B = int(B)
+                if B not in self.arena:
+                    continue
+                if self.arena[B].clean_end:
+                    continue  # never contract end nodes
+                if B in roots:
+                    continue  # do not contract root nodes
+
+                inc_list = incoming.get(B, [])
+                indeg = len(inc_list)
+                out_edges: List[Tuple[int, LLMTokenSet, int, StateIDSet]] = []
+                # Gather B's outgoing edges as flat list
+                for (m, llm_bc), dests in self.arena[B].children:
+                    for (C, y) in dests:
+                        out_edges.append((int(m), llm_bc, int(C), y))
+                outdeg = len(out_edges)
+
+                if indeg == 0 or outdeg == 0:
+                    continue
+
+                # We only attempt when it will reduce edges: indegree==1 or outdegree==1
+                if not (indeg == 1 or outdeg == 1):
+                    continue
+
+                # Check for replacement 1 condition: all incoming masks are universal
+                all_incoming_universal = True
+                for (A, n, llm_ab, x_mask) in inc_list:
+                    if not is_universal(x_mask):
+                        all_incoming_universal = False
+                        break
+
+                # Determine if replacement 2 is applicable: outdegree==1 and m==0
+                repl2_candidate = False
+                only_out = None
+                if outdeg == 1:
+                    only_out = out_edges[0]
+                    m0, _llm_bc0, _C0, _y0 = only_out
+                    if int(m0) == 0:
+                        repl2_candidate = True
+
+                performed = False
+                if all_incoming_universal:
+                    # Replacement 1
+                    # Replicate all outgoing edges from B to incoming sources
+                    for (A, n, llm_ab, x_mask) in inc_list:
+                        src_node = self.arena.get(int(A))
+                        if not src_node:
+                            continue
+                        for (m, llm_bc, C, y) in out_edges:
+                            llm_new = llm_ab.intersection(llm_bc)
+                            if llm_new.is_empty():
+                                continue
+                            state_new = y  # x is universal; keep y
+                            pop_new = int(n) + int(m)
+                            self._add_or_merge_child_edge(src_node, pop_new, llm_new, int(C), state_new)
+                            stats["edges_added"] += 1
+                        # remove A->B
+                        if self._remove_dest_entry(src_node, int(n), llm_ab, int(B)):
+                            stats["edges_removed"] += 1
+                    # Remove node B entirely
+                    if B in self.arena:
+                        del self.arena[B]
+                        self.max_depth.pop(B, None)
+                        stats["nodes_removed"] += 1
+                    stats["contractions"] += 1
+                    stats["replacement_1"] += 1
+                    performed = True
+                elif repl2_candidate:
+                    # Replacement 2 (m == 0). Replicate to all incoming, intersect state masks.
+                    m0, llm_bc0, C0, y0 = only_out
+                    for (A, n, llm_ab, x_mask) in inc_list:
+                        src_node = self.arena.get(int(A))
+                        if not src_node:
+                            continue
+                        llm_new = llm_ab.intersection(llm_bc0)
+                        if llm_new.is_empty():
+                            # nothing to add for this incoming
+                            pass
+                        else:
+                            new_state = x_mask.intersection(y0)
+                            if not new_state.is_empty():
+                                pop_new = int(n)  # since m0 == 0, n + 0 == n
+                                self._add_or_merge_child_edge(src_node, pop_new, llm_new, int(C0), new_state)
+                                stats["edges_added"] += 1
+                        # remove A->B
+                        if self._remove_dest_entry(src_node, int(n), llm_ab, int(B)):
+                            stats["edges_removed"] += 1
+                    # Remove node B entirely
+                    if B in self.arena:
+                        del self.arena[B]
+                        self.max_depth.pop(B, None)
+                        stats["nodes_removed"] += 1
+                    stats["contractions"] += 1
+                    stats["replacement_2"] += 1
+                    performed = True
+
+                if performed:
+                    changed = True
+                    # Restart the outer loop with fresh incoming map
+                    break
+
+            if not changed:
+                break
+
+        return stats
+
+    def _optimize_state_masks_and_edges(self) -> None:
+        """
+        Orchestrates the optimization:
+          - Compute terminal states per node (ignoring LLM masks)
+          - Transform state masks (Goal 1 Alt 6)
+          - Perform edge replacement pass (Goal 2 Alt 2) while it reduces edges
+          - GC unreachable nodes
+          - Recompute llm_bv_union and max_depth
+          - Report concrete improvements
+        """
+        print("Optimizing graph state masks and edges...", end="", flush=True)
+        t0 = time.perf_counter()
+
+        before_ranges = self._count_total_ranges()
+        before_edges = self._count_edges()
+        before_nodes = len(self.arena)
+
+        # Terminal sets
+        T = self._compute_terminal_state_sets()
+
+        # Transform state masks
+        mask_stats = self._transform_state_masks_alt6(T)
+
+        # Replacement pass
+        repl_stats = self._edge_replacement_pass()
+
+        # GC unreachable nodes (safety)
+        gc_removed = self._gc_unreachable_nodes()
+
+        # Recompute unions/depths
+        self._recompute_llm_bv_unions()
+        self.max_depth = self._recompute_max_depth_from_arena()
+
+        after_ranges = self._count_total_ranges()
+        after_edges = self._count_edges()
+        after_nodes = len(self.arena)
+
+        t1 = time.perf_counter()
+        print(" done.")
+        # Concrete report
+        print("Optimization report:")
+        print(f"- Time: {t1 - t0:.3f}s")
+        print(f"- Ranges: {before_ranges} -> {after_ranges} ({before_ranges - after_ranges} fewer)")
+        print(f"- Edges:  {before_edges} -> {after_edges} ({before_edges - after_edges} fewer)")
+        print(f"- Nodes:  {before_nodes} -> {after_nodes} ({before_nodes - after_nodes} fewer, {gc_removed} GC removed)")
+        print(f"- Masks total: {mask_stats['dest_masks_total']}, made universal: {mask_stats['dest_masks_made_universal']}, "
+              f"already universal: {mask_stats['dest_masks_already_universal']}, changed: {mask_stats['dest_masks_changed']}")
+        print(f"- Contractions: {repl_stats['contractions']} "
+              f"(rep1: {repl_stats['replacement_1']}, rep2: {repl_stats['replacement_2']}), "
+              f"edges +{repl_stats['edges_added']}/-{repl_stats['edges_removed']}, "
+              f"nodes removed: {repl_stats['nodes_removed']}")
 
