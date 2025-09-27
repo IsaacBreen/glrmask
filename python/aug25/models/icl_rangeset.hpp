@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <boost/functional/hash.hpp>
 #include <boost/icl/interval_set.hpp>
+#include <boost/icl/interval.hpp>
 #include "stats.hpp"
 
 class RangeSet {
@@ -86,8 +87,8 @@ public:
     std::vector<std::pair<unsigned long long, unsigned long long>> to_ranges() const {
         std::vector<std::pair<unsigned long long, unsigned long long>> ranges;
         for (const auto& interval : set) {
-            // .first() and .last() give inclusive bounds for discrete intervals
-            ranges.emplace_back(interval.first(), interval.last());
+            // boost::icl::first/last are free functions that give inclusive bounds
+            ranges.emplace_back(boost::icl::first(interval), boost::icl::last(interval));
         }
         return ranges;
     }
@@ -95,10 +96,10 @@ public:
     std::vector<unsigned long long> to_indices() const {
         std::vector<unsigned long long> indices;
         for (const auto& interval : set) {
-            // .last() is inclusive for discrete intervals
-            for (unsigned long long i = interval.first(); ; ++i) {
+            // boost::icl::last is inclusive for discrete intervals
+            for (unsigned long long i = boost::icl::first(interval); ; ++i) {
                 indices.push_back(i);
-                if (i == interval.last()) break; // handle overflow for max ull
+                if (i == boost::icl::last(interval)) break; // handle overflow for max ull
             }
         }
         return indices;
@@ -116,7 +117,7 @@ public:
             if (!first) {
                 ss << ", ";
             }
-            ss << "(" << interval.first() << ", " << interval.last() << ")";
+            ss << "(" << boost::icl::first(interval) << ", " << boost::icl::last(interval) << ")";
             first = false;
         }
         ss << "]";
