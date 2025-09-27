@@ -11,6 +11,8 @@
 #include <string>
 #include <utility>
 #include <tuple>
+#include <iostream>
+#include <cstdlib>
 #include <sstream>
 #include <deque>
 #include <algorithm>
@@ -144,6 +146,11 @@ public:
           tokenizer_execute_from_state_(tokenizer_.attr("execute_from_state")),
           tokenizer_tokens_accessible_from_state_(tokenizer_.attr("tokens_accessible_from_state"))
           {
+
+        const char* rust_log = std::getenv("RUST_LOG");
+        if (rust_log && std::string(rust_log) == "debug") {
+            debug_logging_ = true;
+        }
 
         if (!ignore_terminal_id_or_none.is_none()) {
             ignore_terminal_id_ = py::cast<int>(ignore_terminal_id_or_none);
@@ -420,6 +427,17 @@ public:
         // Update internal state
         state_ = std::move(merged_states);
         stats.inc("commit.tokenizer_states_out", state_.size());
+
+        if (debug_logging_) {
+            std::cout << "\n--- CPP: State after commit ---" << std::endl;
+            std::vector<int> keys;
+            for(auto const& [key, val] : state_) keys.push_back(key);
+            std::sort(keys.begin(), keys.end());
+            for (int tsid : keys) {
+                std::cout << "  TSID " << tsid << ": " << gss_to_string(state_.at(tsid)) << std::endl;
+            }
+            std::cout << "-------------------------------" << std::endl << std::endl;
+        }
         stats.stop("commit.total");
     }
 
@@ -488,6 +506,18 @@ public:
         }
         stats.stop("get_mask.seeding");
 
+        if (debug_logging_) {
+            std::cout << "\n--- CPP: get_mask initial values ---" << std::endl;
+            std::vector<int> keys;
+            for(auto const& [key, val] : values) keys.push_back(key);
+            std::sort(keys.begin(), keys.end());
+            for (int node_id : keys) {
+                std::cout << "  Node " << node_id << ": " << gss_to_string(values.at(node_id)) << std::endl;
+            }
+            std::cout << "--------------------------------------" << std::endl << std::endl;
+        }
+
+
         RangeSet final_mask = RangeSet::empty();
 
         stats.start("get_mask.main_loop");
@@ -507,6 +537,12 @@ public:
             auto itv = values.find(node);
             if (itv == values.end()) continue;
             Leveled gss_node = std::move(itv->second);
+
+            if (debug_logging_) {
+                std::cout << "\n--- CPP: get_mask processing node " << node << " ---" << std::endl;
+                std::cout << "  GSS: " << gss_to_string(gss_node) << std::endl;
+                std::cout << "  Current final_mask: " << final_mask.repr() << std::endl;
+            }
             values.erase(itv);
             stats.inc("get_mask.gss.at_node.accs.sum", gss_node.get_all_accs().size());
 
@@ -646,6 +682,13 @@ public:
         stats.stop("get_mask.final_conversion.from_indices");
         stats.stop("get_mask.final_conversion");
         stats.stop("get_mask.total");
+
+        if (debug_logging_) {
+            std::cout << "\n--- CPP: get_mask final internal mask ---" << std::endl;
+            std::cout << "  Mask: " << final_mask.repr() << std::endl;
+            std::cout << "-----------------------------------------" << std::endl << std::endl;
+        }
+
         py::gil_scoped_acquire acquire; // Re-acquire GIL before returning to Python
         return py::cast(result);
     }
@@ -727,6 +770,8 @@ private:
     // Cache for tokens_accessible_from_state (cleared per commit)
     std::unordered_map<int, std::unordered_set<int>> accessible_cache_;
 
+    bool debug_logging_ = false;
+
     // Check membership in a vector of inclusive ranges (sorted, non-overlapping).
     static bool contains_in_ranges(const std::vector<std::pair<int,int>>& ranges, int v) {
         // Binary search by upper_bound on end values
@@ -762,6 +807,50 @@ private:
 
         auto [inserted_it, success] = accessible_cache_.emplace(state_id, std::move(accessible_set));
         return inserted_it->second;
+    }
+
+    std::string acc_to_string(const std::shared_ptr<Acc>& acc) {
+        if (!acc) return "Acc(null)";
+        std::stringstream ss;
+        ss << "PyAcc(terminals_union_size=" << acc->terminals_union.size()
+            << ", llm_mask_size=" << acc->llm_mask.size() << ")";
+        return ss.str();
+    }
+
+    std::string gss_to_string(const Leveled& gss) {
+        std::stringstream ss;
+        auto stacks = gss.to_stacks();
+
+        // Sort stacks for canonical representation, matching Python's ReferenceGSS
+        std::sort(stacks.begin(), stacks.end(),
+            [](const auto& a, const auto& b) {
+                if (a.first.size() != b.first.size()) {
+                    return a.first.size() < b.first.size();
+                }
+                return a.first < b.first; // relies on std::vector::operator<
+            });
+
+        ss << "[";
+        bool first_stack = true;
+        for (const auto& stack_pair : stacks) {
+            if (!first_stack) ss << ", ";
+            first_stack = false;
+
+            ss << "([";
+            bool first_val = true;
+            for (const auto& val : stack_pair.first) {
+                if (!first_val) ss << ", ";
+                first_val = false;
+                ss << val;
+            }
+            ss << "], ";
+
+            ss << acc_to_string(stack_pair.second);
+
+            ss << ")";
+        }
+        ss << "]";
+        return ss.str();
     }
 
     // -----------------------------

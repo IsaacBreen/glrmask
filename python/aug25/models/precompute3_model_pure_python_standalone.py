@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import json
 import heapq
 import collections
@@ -808,6 +809,14 @@ class PyAcc:
     terminals_union: Dict[int, RangeSet]
     llm_mask: RangeSet
 
+    def __repr__(self):
+        # to_indices is slow, but this is for debug.
+        mask_size = len(self.llm_mask.to_indices())
+        return (
+            f"PyAcc(terminals_union_size={len(self.terminals_union)}, "
+            f"llm_mask_size={mask_size})"
+        )
+
     def __eq__(self, other):
         if not isinstance(other, PyAcc):
             return NotImplemented
@@ -1118,6 +1127,13 @@ class Model(GraphProvider):
 
         self.state = merged_states
 
+        if os.environ.get("RUST_LOG") == "debug":
+            print("\n--- PY: State after commit ---")
+            for tsid, gss in sorted(self.state.items()):
+                print(f"  TSID {tsid}: {gss.to_stacks()}")
+            print("------------------------------\n")
+
+
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
         for state_id in gss.peek():
@@ -1224,6 +1240,12 @@ class Model(GraphProvider):
                 enqueued_nodes.add(r)
                 hp(depth_heap, (-d, r))
 
+        if os.environ.get("RUST_LOG") == "debug":
+            print("\n--- PY: get_mask initial values ---")
+            for node_id, gss in sorted(values.items()):
+                print(f"  Node {node_id}: {gss.to_stacks()}")
+            print("-------------------------------------\n")
+
         def enqueue(d: int, n: int) -> None:
             if n not in enqueued_nodes:
                 enqueued_nodes.add(n)
@@ -1234,6 +1256,12 @@ class Model(GraphProvider):
             neg_depth, node = hpop(depth_heap)
             gss_node: GSS = values.pop(node)
             enqueued_nodes.remove(node)
+
+            if os.environ.get("RUST_LOG") == "debug":
+                print(f"\n--- PY: get_mask processing node {node} ---")
+                print(f"  GSS: {gss_node.to_stacks()}")
+                print(f"  Current final_mask: {final_mask.to_ranges()}")
+
 
             # End-node handling: just union the allowed LLM tokens
             if is_end(node):
@@ -1314,5 +1342,11 @@ class Model(GraphProvider):
         for i in final_mask.to_indices():
             if i in self.internal_to_original_map:
                 original_indices.append(self.internal_to_original_map[i])
+
+        if os.environ.get("RUST_LOG") == "debug":
+            print(f"\n--- PY: get_mask final internal mask ---")
+            print(f"  Mask: {final_mask.to_ranges()}")
+            print("----------------------------------------\n")
+
 
         return RangeSet.from_indices(original_indices)
