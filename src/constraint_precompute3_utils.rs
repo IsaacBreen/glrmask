@@ -12,9 +12,19 @@ pub fn optimize_trie3_size(
     trie3_god: &Trie3GodWrapper,
     config: &GrammarConstraintConfig,
     max_state_id: usize,
-    max_llm_token_id: usize,
+    mut max_llm_token_id: usize,
+    stage_vocab: &mut StageVocab,
 ) {
     crate::debug!(2, "Optimizing Trie 3 size...");
+
+    if config.optimize_trie3_merge_equivalent_llm_tokens {
+        merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
+    }
+    if config.optimize_trie3_reorder_llm_tokens {
+        reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
+        max_llm_token_id = stage_vocab.internal_max_llm_token;
+    }
+
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
 

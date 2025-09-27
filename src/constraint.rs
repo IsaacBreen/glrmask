@@ -23,6 +23,7 @@ use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
+use crate::constraint_precompute1_utils;
 use crate::constraint_precompute2_utils;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::entry_api::EntryApi;
@@ -538,8 +539,8 @@ impl GrammarConstraint {
             internal_to_original: internal_to_original_.clone(),
             internal_max_llm_token: internal_max_llm_token,
         };
-        let precompute2_vocab = precompute_vocab.clone();
-        let precompute3_vocab = precompute_vocab.clone();
+        let mut precompute2_vocab = precompute_vocab.clone();
+        let mut precompute3_vocab = precompute_vocab.clone();
 
         if config.skip_precomputation {
             return Self {
@@ -572,13 +573,19 @@ impl GrammarConstraint {
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
         );
-        // Self::_dump_precomputed(
-        //     &precomputed,
-        //     &llm_vocab.original_to_internal_id_bimap,
-        //     &token_name_map,
-        //     &llm_vocab.llm_token_map,
-        //     &trie1_god,
-        // );
+
+        if config.optimize_trie1_merge_equivalent_llm_tokens {
+            constraint_precompute1_utils::merge_equivalent_llm_tokens_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
+        }
+        if config.optimize_trie1_reorder_llm_tokens {
+            constraint_precompute1_utils::reorder_llm_tokens_for_range_minimization_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
+        }
+        // Always run normalization pass after potential token changes.
+        constraint_precompute1_utils::optimize_state_masks_and_edges_trie1(&precomputed, &trie1_god);
+
+        // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
+        precompute2_vocab = precompute_vocab.clone();
+        precompute3_vocab = precompute_vocab.clone();
 
         let (precomputed2, trie2_god) = Self::precompute2(
             &precomputed,
@@ -611,6 +618,7 @@ impl GrammarConstraint {
             &trie1_god,
             &tokenizer, Some(&parser), Some(llm_vocab.clone()), &internal_llm_token_map_for_precompute, &token_name_map, internal_max_llm_token, &terminal_follow_map, parser.ignore_terminal_id, &mut computed_possible_matches,
             config,
+            &mut precompute3_vocab,
         );
 
         let mut stats3 = PrecomputeStats::default();
@@ -722,6 +730,7 @@ impl GrammarConstraint {
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
         config: &GrammarConstraintConfig,
+        stage_vocab: &mut StageVocab,
     ) -> (Precomputed3, Trie3GodWrapper) {
         crate::debug!(2, "Precomputing Trie 3...");
         const BELOW_BOTTOM_REDUCE_MODE__CONTINUE_FROM_EVERYTHING: bool = false;
@@ -852,7 +861,7 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
-        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token);
+        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
 
         (precomputed3, trie3_god)
     }
