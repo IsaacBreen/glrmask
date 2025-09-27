@@ -16,7 +16,6 @@ use std::mem;
 use std::ops::{BitOr, BitOrAssign};
 use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
-use crate::constraint_precompute3_utils::optimize_trie3_with_token_remapping;
 
 use bimap::BiBTreeMap;
 use bitvec::prelude::*;
@@ -111,8 +110,7 @@ pub type Precomputed3 = BTreeMap<TokenizerStateID, PrecomputeNode3Index>;
 pub struct LLMVocab {
     pub llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
     pub(crate) max_original_llm_token_id: usize,
-    pub original_to_internal_map: BTreeMap<usize, usize>,
-    pub internal_to_original_map: BTreeMap<usize, BTreeSet<usize>>,
+    pub original_to_internal_id_bimap: BiBTreeMap<usize, usize>,
     pub(crate) internal_max_llm_token: usize
 }
 
@@ -181,12 +179,12 @@ impl GrammarConstraint {
         assert_eq!(self.precomputed3.len(), other.precomputed3.len());
         for ((sid1, arc1), (sid2, arc2)) in self.precomputed3.iter().zip(other.precomputed3.iter()) {
             assert_eq!(sid1, sid2);
-        assert!(PrecomputeNode3::are_graphs_equal(&self.trie3_god, *arc1, &other.trie3_god, *arc2));
+            assert!(PrecomputeNode3::are_graphs_equal(&self.trie3_god, *arc1, &other.trie3_god, *arc2));
+        }
         assert_eq!(self.llm_vocab.llm_token_map, other.llm_vocab.llm_token_map);
         assert_eq!(self.token_name_map, other.token_name_map);
         assert_eq!(self.llm_vocab.max_original_llm_token_id, other.llm_vocab.max_original_llm_token_id);
-        assert_eq!(self.llm_vocab.original_to_internal_map, other.llm_vocab.original_to_internal_map);
-        assert_eq!(self.llm_vocab.internal_to_original_map, other.llm_vocab.internal_to_original_map);
+        assert_eq!(self.llm_vocab.original_to_internal_id_bimap, other.llm_vocab.original_to_internal_id_bimap);
         assert_eq!(self.llm_vocab.internal_max_llm_token, other.llm_vocab.internal_max_llm_token);
         assert_eq!(self.possible_matches, other.possible_matches);
         assert_eq!(self.post_commit_allow_check_mode, other.post_commit_allow_check_mode);
@@ -204,8 +202,7 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("llm_token_map".to_string(), self.llm_vocab.llm_token_map.to_json());
         obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
         obj.insert("max_original_llm_token_id".to_string(), self.llm_vocab.max_original_llm_token_id.to_json());
-        obj.insert("original_to_internal_map".to_string(), self.llm_vocab.original_to_internal_map.to_json());
-        obj.insert("internal_to_original_map".to_string(), self.llm_vocab.internal_to_original_map.to_json());
+        obj.insert("original_to_internal_id_bimap".to_string(), self.llm_vocab.original_to_internal_id_bimap.to_json());
         obj.insert("internal_max_llm_token".to_string(), self.llm_vocab.internal_max_llm_token.to_json());
         obj.insert("possible_matches".to_string(), self.possible_matches.to_json());
         obj.insert("trie1_god".to_string(), self.trie1_god.to_json());
@@ -235,10 +232,8 @@ impl JSONConvertible for GrammarConstraint {
                                         .and_then(|n| BiBTreeMap::<Terminal, usize>::from_json(n))?;
                 let max_original_llm_token_id = obj.remove("max_original_llm_token_id").ok_or_else(|| "Missing field max_original_llm_token_id".to_string())
                                                    .and_then(usize::from_json)?;
-                let original_to_internal_map = obj.remove("original_to_internal_map").ok_or_else(|| "Missing field original_to_internal_map".to_string())
-                                                       .and_then(|n| BTreeMap::<usize, usize>::from_json(n))?;
-                let internal_to_original_map = obj.remove("internal_to_original_map").ok_or_else(|| "Missing field internal_to_original_map".to_string())
-                                                       .and_then(|n| BTreeMap::<usize, BTreeSet<usize>>::from_json(n))?;
+                let original_to_internal_id_bimap = obj.remove("original_to_internal_id_bimap").ok_or_else(|| "Missing field original_to_internal_id_bimap".to_string())
+                                                       .and_then(|n| BiBTreeMap::<usize, usize>::from_json(n))?;
                 let internal_max_llm_token = obj.remove("internal_max_llm_token").ok_or_else(|| "Missing field internal_max_llm_token".to_string())
                                                   .and_then(usize::from_json)?;
                 let possible_matches = obj.remove("possible_matches").ok_or_else(|| "Missing field possible_matches".to_string())
@@ -260,7 +255,7 @@ impl JSONConvertible for GrammarConstraint {
                     precomputed,
                     precomputed2,
                     precomputed3,
-                    llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_map, internal_to_original_map, internal_max_llm_token }),
+                    llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_max_llm_token }),
                     token_name_map,
                     possible_matches,
                     trie1_god,
@@ -307,25 +302,27 @@ impl GrammarConstraint {
 
     pub(crate) fn setup_llm_token_mappings(
         original_llm_token_map: &LLMTokenMap,
-    ) -> (BTreeMap<usize, usize>, BTreeMap<usize, BTreeSet<usize>>)
+    ) -> BiBTreeMap<usize, usize>
     {
+        // // TODO: delete this
+        // let mut original_to_internal_id_bimap = BiBTreeMap::new();
+        // for (_, id) in original_llm_token_map.iter() {
+        //     original_to_internal_id_bimap.insert(id.0, id.0);
+        // }
+        // return original_to_internal_id_bimap;
+
         let mut sorted_tokens_with_original_ids: Vec<(Vec<u8>, LLMTokenID)> = original_llm_token_map
             .iter()
             .map(|(bytes, original_id)| (bytes.clone(), *original_id))
             .collect();
         sorted_tokens_with_original_ids.sort_by(|(bytes_a, _), (bytes_b, _)| bytes_a.cmp(bytes_b));
 
-        let mut original_to_internal_map = BTreeMap::new();
-        let mut internal_to_original_map = BTreeMap::new();
+        let mut original_to_internal_id_bimap = BiBTreeMap::new();
         let mut internal_id_counter = 0;
 
         for (_bytes, original_llm_id) in sorted_tokens_with_original_ids {
             let internal_llm_id_val = internal_id_counter;
-            original_to_internal_map.insert(original_llm_id.0, internal_llm_id_val);
-            internal_to_original_map
-                .entry(internal_llm_id_val)
-                .or_default()
-                .insert(original_llm_id.0);
+            original_to_internal_id_bimap.insert(original_llm_id.0, internal_llm_id_val);
             internal_id_counter += 1;
         }
 
@@ -360,13 +357,13 @@ impl GrammarConstraint {
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
         let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
         assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
-        let (original_to_internal_map, internal_to_original_map) = Self::setup_llm_token_mappings(&llm_token_map);
+        let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
 
-        let internal_max_llm_token = internal_to_original_map.keys().max().copied().unwrap_or(0);
+        let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap_or(0);
 
         let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
         for (bytes, original_id) in llm_token_map.iter() {
-            if let Some(internal_id_val) = original_to_internal_map.get(&original_id.0) {
+            if let Some(internal_id_val) = original_to_internal_id_bimap.get_by_left(&original_id.0) {
                 internal_llm_token_map_for_precompute.insert(bytes.clone(), LLMTokenID(*internal_id_val));
             }
         }
@@ -432,8 +429,7 @@ impl GrammarConstraint {
         let llm_vocab = Arc::new(LLMVocab {
             llm_token_map,
             max_original_llm_token_id,
-            original_to_internal_map,
-            internal_to_original_map,
+            original_to_internal_id_bimap,
             internal_max_llm_token,
         });
 
@@ -531,8 +527,6 @@ impl GrammarConstraint {
             trie3_god,
             post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
         };
-
-        gc.optimize_trie3_with_token_remapping(config);
 
         gc
     }
@@ -761,19 +755,19 @@ impl GrammarConstraint {
 
     #[inline]
     pub(crate) fn original_id_to_internal(&self, original_id: LLMTokenID) -> Option<LLMTokenID> {
-        self.llm_vocab.original_to_internal_map.get(&original_id.0).map(|internal_val| LLMTokenID(*internal_val))
+        self.llm_vocab.original_to_internal_id_bimap.get_by_left(&original_id.0).map(|internal_val| LLMTokenID(*internal_val))
     }
 
     #[inline]
     pub(crate) fn internal_id_to_original(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
-        self.llm_vocab.internal_to_original_map.get(&internal_id.0).and_then(|s| s.iter().next()).map(|original_val| LLMTokenID(*original_val))
+        self.llm_vocab.original_to_internal_id_bimap.get_by_right(&internal_id.0).map(|original_val| LLMTokenID(*original_val))
     }
 
     #[allow(dead_code)]
     pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
         let mut internal_bv = HybridBitset::zeros();
         for original_id_val in original_bv.iter() {
-            let internal_id_val = self.llm_vocab.original_to_internal_map.get(&(original_id_val as usize)).expect(format!("Original ID {} not found in original_to_internal_map", original_id_val).as_str());
+            let internal_id_val = self.llm_vocab.original_to_internal_id_bimap.get_by_left(&(original_id_val as usize)).expect(format!("Original ID {} not found in original_to_internal_id_bimap", original_id_val).as_str());
             internal_bv.insert(*internal_id_val as usize);
         }
         internal_bv
@@ -783,12 +777,14 @@ impl GrammarConstraint {
     pub fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
         let internal_bv = internal_bv & &LLMTokenBV::max_ones();
         let mut original_bv = HybridBitset::zeros();
+        // for internal_id_val in internal_bv.iter() {
+        //     let original_id_val = self.llm_vocab.original_to_internal_id_bimap.get_by_right(&(internal_id_val as usize)).expect(format!("Internal ID {} not found in original_to_internal_id_bimap while converting to original BV: {:?}", internal_id_val, internal_bv).as_str());
+        //     original_bv.insert(*original_id_val as usize);
+        // }
         for i in 0..=self.llm_vocab.internal_max_llm_token {
             if internal_bv.contains(i) {
-                if let Some(original_id_vals) = self.llm_vocab.internal_to_original_map.get(&i) {
-                    for original_id_val in original_id_vals {
-                        original_bv.insert(*original_id_val);
-                    }
+                if let Some(original_id_val) = self.llm_vocab.original_to_internal_id_bimap.get_by_right(&i) {
+                    original_bv.insert(*original_id_val);
                 }
             }
         }
@@ -857,18 +853,10 @@ impl GrammarConstraint {
     }
 
     pub fn print_gss_nodes(&self, roots: &Vec<Arc<GSSNode>>, labels: Option<&[String]>) {
-        // HACK: Create a temporary BiBTreeMap for display, as GSSPrintConfig expects one.
-        // This is safe because it's for display only. We pick the first original ID for any internal ID.
-        let mut temp_bimap = BiBTreeMap::new();
-        for (internal, originals) in &self.llm_vocab.internal_to_original_map {
-            if let Some(original) = originals.iter().next() {
-                temp_bimap.insert(*original, *internal);
-            }
-        }
         let config = GSSPrintConfig {
             labels,
             max_edges: 500,
-            original_internal_bimap: Some(&temp_bimap),
+            original_internal_bimap: Some(&self.llm_vocab.original_to_internal_id_bimap),
             llm_token_map: Some(&self.llm_vocab.llm_token_map),
             verbose: false,
         };
@@ -885,10 +873,6 @@ impl GrammarConstraint {
             state.insert(tokenizer_state_id, glr_state);
         }
         GrammarConstraintState { parent: self, state }
-    }
-
-    fn optimize_trie3_with_token_remapping(&mut self, config: &GrammarConstraintConfig) {
-        optimize_trie3_with_token_remapping(self, config);
     }
 }
 
@@ -1886,18 +1870,10 @@ impl<'a> Display for GrammarConstraintState<'a> {
 
         if !gss_roots.is_empty() {
             writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
-            // HACK: Create a temporary BiBTreeMap for display, as GSSPrintConfig expects one.
-            let mut temp_bimap = BiBTreeMap::new();
-            for (internal, originals) in &self.parent.llm_vocab.internal_to_original_map {
-                if let Some(original) = originals.iter().next() {
-                    temp_bimap.insert(*original, *internal);
-                }
-            }
-
             let config = GSSPrintConfig {
                 labels: None,
                 max_edges: 50,
-                original_internal_bimap: Some(&temp_bimap),
+                original_internal_bimap: Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
                 llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
                 verbose: false,
             };
@@ -1964,17 +1940,9 @@ impl<'a> GrammarConstraintState<'a> {
                 .map(|s| s.as_str())
                 .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
                 .collect();
-
-            // HACK: Create a temporary BiBTreeMap for display.
-            let mut temp_bimap = BiBTreeMap::new();
-            for (internal, originals) in &self.parent.llm_vocab.internal_to_original_map {
-                if let Some(original) = originals.iter().next() {
-                    temp_bimap.insert(*original, *internal);
-                }
-            }
             println!("{}", self.parent.parser.gss_forest_to_dot(
                 &roots_with_labels,
-                Some(&temp_bimap),
+                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
                 Some(&self.parent.llm_vocab.llm_token_map),
             ));
             println!("\n\n--- End GSS Graphviz ---");
@@ -2319,17 +2287,9 @@ impl<'a> GrammarConstraintState<'a> {
                 .map(|s| s.as_str())
                 .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
                 .collect();
-
-            // HACK: Create a temporary BiBTreeMap for display.
-            let mut temp_bimap = BiBTreeMap::new();
-            for (internal, originals) in &self.parent.llm_vocab.internal_to_original_map {
-                if let Some(original) = originals.iter().next() {
-                    temp_bimap.insert(*original, *internal);
-                }
-            }
             println!("{}", self.parent.parser.gss_forest_to_dot(
                 &roots_with_labels,
-                Some(&temp_bimap),
+                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
                 Some(&self.parent.llm_vocab.llm_token_map),
             ));
             println!("\n\n--- End GSS Graphviz ---");
@@ -2601,17 +2561,9 @@ impl<'a> GrammarConstraintState<'a> {
                 .map(|s| s.as_str())
                 .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
                 .collect();
-
-            // HACK: Create a temporary BiBTreeMap for display.
-            let mut temp_bimap = BiBTreeMap::new();
-            for (internal, originals) in &self.parent.llm_vocab.internal_to_original_map {
-                if let Some(original) = originals.iter().next() {
-                    temp_bimap.insert(*original, *internal);
-                }
-            }
             println!("{}", self.parent.parser.gss_forest_to_dot(
                 &roots_with_labels,
-                Some(&temp_bimap),
+                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
                 Some(&self.parent.llm_vocab.llm_token_map),
             ));
             println!("\n\n--- End GSS Graphviz ---");
