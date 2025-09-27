@@ -431,16 +431,15 @@ public:
 
         // values: node_id -> GSS
         std::unordered_map<int, Leveled> values;
-        // todo buckets: depth -> set of nodes
-        std::unordered_map<int, std::set<int>> todo;
-        // min-heap for depths
-        std::priority_queue<int> depth_heap;
+        // priority queue storing {depth, node_id}
+        std::priority_queue<std::pair<int, int>> depth_heap;
+        std::unordered_set<int> enqueued_nodes;
 
         auto enqueue = [&](int d, int n) {
-            auto &bucket = todo[d];
-            bool first = bucket.empty();
-            bucket.insert(n);
-            if (first) depth_heap.push(d);
+            if (enqueued_nodes.find(n) == enqueued_nodes.end()) {
+                enqueued_nodes.insert(n);
+                depth_heap.push({d, n});
+            }
         };
 
         // This memoization cache is critical for performance. It's shared across all GSSs
@@ -448,7 +447,6 @@ public:
         std::unordered_map<std::shared_ptr<Acc>, std::shared_ptr<Acc>> init_acc_memo;
 
         values.reserve(state_.size());
-        todo.reserve(state_.size());
         // --- Initial GSS Stats ---
         stats.start("get_mask.initial_stats");
         std::unordered_set<std::shared_ptr<Acc>> all_initial_accs;
@@ -496,12 +494,9 @@ public:
         int max_depth_reached = 0;
         std::unordered_set<int> visited_nodes;
         while (!depth_heap.empty()) {
-            int depth = depth_heap.top(); depth_heap.pop();
-            auto &bucket = todo[depth];
-
-            while (!bucket.empty()) {
-                int node = *bucket.begin();
-                bucket.erase(bucket.begin());
+            auto [depth, node] = depth_heap.top();
+            depth_heap.pop();
+            enqueued_nodes.erase(node);
 
             max_depth_reached = std::max(max_depth_reached, depth);
             stats.inc("get_mask.traversal.depth_heap.pops");
@@ -621,11 +616,9 @@ public:
                     } else {
                         values[dnode] = std::move(child2);
                     }
-                    enqueue(arena_.at(dnode).max_depth, dnode);
-                }
-            }
-            }
-            todo.erase(depth);
+                     enqueue(arena_.at(dnode).max_depth, dnode);
+                 }
+             }
         }
         stats.stop("get_mask.main_loop");
         stats.inc("get_mask.traversal.max_depth_reached", max_depth_reached);
