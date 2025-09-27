@@ -162,8 +162,8 @@ class Model(GraphProvider):
             
             print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}")
 
-            # gss = gss.clone_node()
-            # ffi.gss_prune_llm_tokens_by_disallowed_terminals(gss, self.possible_matches_cache)
+            gss = gss.clone_node()
+            ffi.gss_prune_llm_tokens_by_disallowed_terminals(gss, self.possible_matches_cache)
 
             existing = values.get(root_idx)
             if existing is not None:
@@ -243,9 +243,6 @@ class Model(GraphProvider):
 
                     # Clone the GSS node to avoid modifying it in place if it's shared
                     gss_node_copy = gss_node.clone_node()
-
-                    # Prune LLM tokens based on disallowed terminals locally within the GSS
-                    ffi.gss_prune_llm_tokens_by_disallowed_terminals(gss_node_copy, self.possible_matches_cache)
 
                     # Get the final allowed tokens from the pruned GSS
                     final_allowed_tokens = gss_node_copy.allowed_llm_tokens()
