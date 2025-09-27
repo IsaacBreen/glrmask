@@ -822,12 +822,13 @@ impl PyGSSNode {
         self.inner.print()
     }
 
-    fn flatten(&self) -> Vec<(Vec<usize>, PyHybridL2Bitset)> {
+    fn flatten(&self) -> Vec<(Vec<usize>, (PyHybridBitset, PyHybridL2Bitset))> {
         let flattened = self.inner.flatten();
         flattened.into_iter().map(|(path, acc)| {
             let path_ids: Vec<usize> = path.into_iter().map(|edge| edge.state_id.0).collect();
+            let py_llm_tokens = PyHybridBitset { inner: acc.llm_tokens_union };
             let py_terminals_union = PyHybridL2Bitset { inner: acc.terminals_union };
-            (path_ids, py_terminals_union)
+            (path_ids, (py_llm_tokens, py_terminals_union))
         }).collect()
     }
 
