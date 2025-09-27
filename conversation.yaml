@@ -640,7 +640,30 @@ local_system:
               match self {
                   GSSNode::Root(r) => r.acc.clone(),
                   GSSNode::Internal(i) => {
-                      todo!()
+                      // This is a recursive method that can be slow. It computes the aggregated
+                      // Acc for the entire subgraph rooted at this node. For performance-critical
+                      // checks like `is_alive`, a custom traversal is used instead.
+
+                      // 1. Merge the aggregated Accs of all children (predecessors).
+                      let mut merged_children_acc: Option<Acc> = None;
+
+                      for predecessor_arc in i.predecessors.values().flat_map(|m| m.values()).flatten() {
+                          let child_acc = predecessor_arc.acc();
+                          if let Some(merged) = merged_children_acc.as_mut() {
+                              *merged = Acc::merge(merged, &child_acc);
+                          } else {
+                              merged_children_acc = Some((*child_acc).clone());
+                          }
+                      }
+
+                      // 2. Narrow the merged children's Acc with this node's local Acc.
+                      if let Some(acc) = merged_children_acc {
+                          Arc::new(Acc::narrow(&i.acc, &acc))
+                      } else {
+                          // An internal node must have predecessors. If it somehow doesn't,
+                          // its aggregated Acc is just its local Acc.
+                          i.acc.clone()
+                      }
                   }
               }
           }
@@ -3854,17 +3877,13 @@ local_system:
           /// Returns the set of LLM tokens allowed by any root reachable from this node.
           /// Applies the node's local Acc as a final intersection (blanket restriction).
           pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
-              let local = self.local_acc().llm_tokens_union.clone();
-              let aggregated = self.acc().llm_tokens_union.clone();
-              &local & &aggregated
+              self.acc().llm_tokens_union.clone()
           }
 
           /// Returns a map of disallowed terminals for each tokenizer state.
           /// A terminal is disallowed if it's disallowed on every root reachable from this node.
           pub fn disallowed_terminals(&self) -> TerminalInfo {
-              let local = self.local_acc().terminals_union.clone();
-              let aggregated = self.acc().terminals_union.clone();
-              (&local & &aggregated).complement()
+              self.acc().terminals_union.clone().complement()
           }
 
           pub fn is_empty(&self) -> bool { self.predecessors().is_empty() }
@@ -4279,9 +4298,9 @@ local_system:
 
           /// Returns the resolved union of LLM tokens, without computing other parts of `Acc`.
           pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
-              let parent = self.parent_arc.allowed_llm_tokens();
+              let parent_local = &self.parent_arc.local_acc().llm_tokens_union;
               let pred = self.predecessor_node.allowed_llm_tokens();
-              &parent & &pred
+              parent_local & &pred
           }
 
           /// Returns a new `GSSNode` representing the predecessor.
@@ -7010,7 +7029,30 @@ messages:
               match self {
                   GSSNode::Root(r) => r.acc.clone(),
                   GSSNode::Internal(i) => {
-                      todo!()
+                      // This is a recursive method that can be slow. It computes the aggregated
+                      // Acc for the entire subgraph rooted at this node. For performance-critical
+                      // checks like `is_alive`, a custom traversal is used instead.
+
+                      // 1. Merge the aggregated Accs of all children (predecessors).
+                      let mut merged_children_acc: Option<Acc> = None;
+
+                      for predecessor_arc in i.predecessors.values().flat_map(|m| m.values()).flatten() {
+                          let child_acc = predecessor_arc.acc();
+                          if let Some(merged) = merged_children_acc.as_mut() {
+                              *merged = Acc::merge(merged, &child_acc);
+                          } else {
+                              merged_children_acc = Some((*child_acc).clone());
+                          }
+                      }
+
+                      // 2. Narrow the merged children's Acc with this node's local Acc.
+                      if let Some(acc) = merged_children_acc {
+                          Arc::new(Acc::narrow(&i.acc, &acc))
+                      } else {
+                          // An internal node must have predecessors. If it somehow doesn't,
+                          // its aggregated Acc is just its local Acc.
+                          i.acc.clone()
+                      }
                   }
               }
           }
@@ -9529,17 +9571,21 @@ messages:
       ```
     metadata:
       filename: src/datastructures/gss.rs
-  - user: |2
-          fn acc(&self) -> Arc<Acc> {
-              match self {
-                  GSSNode::Root(r) => r.acc.clone(),
-                  GSSNode::Internal(i) => {
-                      todo!()
-                  }
-              }
+  - user: |-
+      ```rust
+          pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
+              let local = self.local_acc().llm_tokens_union.clone();
+              let aggregated = self.acc().llm_tokens_union.clone();
+              &local & &aggregated
           }
-    metadata:
-  - user: Complete this
+      ```
+      This is inefficient. We could just do
+      ```rust
+          pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
+              self.acc().llm_tokens_union.clone()
+          }
+      ```
+      There are other places this mistake is made. Improve them too.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9558,84 +9604,115 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to complete the `acc` method, followed by the corresponding git diff.
+      Of course. You've correctly identified an inefficiency in how allowed tokens and terminals are calculated. The aggregated `acc()` already accounts for the local constraints, so intersecting it again with the local constraints is redundant. Here are the step-by-step instructions to correct this and apply a similar optimization elsewhere.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/datastructures/gss.rs`**.
-      2.  **Navigate to the `acc` method** within the `impl GSSNode` block (around line 800).
-      3.  **Replace the `todo!()`** in the `GSSNode::Internal(i)` match arm with the logic to compute the aggregated accumulator. This involves recursively gathering the `Acc` from all predecessor nodes, merging them, and then narrowing the result with the current node's local `Acc`.
+      #### File: `src/datastructures/gss.rs`
 
-      Here is the code block to insert:
+      1.  **Optimize `GSSNode::allowed_llm_tokens`**:
+          -   Navigate to the `allowed_llm_tokens` function within the `impl GSSNode` block.
+          -   The current implementation redundantly intersects the `local` and `aggregated` token sets.
+          -   Replace the body of the function with a more direct version that returns the `llm_tokens_union` from the aggregated `acc()`.
 
-      ```rust
-                      // This is a recursive method that can be slow. It computes the aggregated
-                      // Acc for the entire subgraph rooted at this node. For performance-critical
-                      // checks like `is_alive`, a custom traversal is used instead.
+          **From:**
+          ```rust
+              pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
+                  let local = self.local_acc().llm_tokens_union.clone();
+                  let aggregated = self.acc().llm_tokens_union.clone();
+                  &local & &aggregated
+              }
+          ```
+          **To:**
+          ```rust
+              pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
+                  self.acc().llm_tokens_union.clone()
+              }
+          ```
 
-                      // 1. Merge the aggregated Accs of all children (predecessors).
-                      let mut merged_children_acc: Option<Acc> = None;
+      2.  **Optimize `GSSNode::disallowed_terminals`**:
+          -   Locate the `disallowed_terminals` function, which is right after `allowed_llm_tokens`.
+          -   This function has the same redundant logic.
+          -   Modify its body to remove the extra intersection before calling `.complement()`.
 
-                      for predecessor_arc in i.predecessors.values().flat_map(|m| m.values()).flatten() {
-                          let child_acc = predecessor_arc.acc();
-                          if let Some(merged) = merged_children_acc.as_mut() {
-                              *merged = Acc::merge(merged, &child_acc);
-                          } else {
-                              merged_children_acc = Some((*child_acc).clone());
-                          }
-                      }
+          **From:**
+          ```rust
+              pub fn disallowed_terminals(&self) -> TerminalInfo {
+                  let local = self.local_acc().terminals_union.clone();
+                  let aggregated = self.acc().terminals_union.clone();
+                  (&local & &aggregated).complement()
+              }
+          ```
+          **To:**
+          ```rust
+              pub fn disallowed_terminals(&self) -> TerminalInfo {
+                  self.acc().terminals_union.clone().complement()
+              }
+          ```
 
-                      // 2. Narrow the merged children's Acc with this node's local Acc.
-                      if let Some(acc) = merged_children_acc {
-                          Arc::new(Acc::narrow(&i.acc, &acc))
-                      } else {
-                          // An internal node must have predecessors. If it somehow doesn't,
-                          // its aggregated Acc is just its local Acc.
-                          i.acc.clone()
-                      }
-      ```
+      3.  **Optimize `GSSPeek::resolved_llm_tokens_union`**:
+          -   Navigate to the `resolved_llm_tokens_union` function within the `impl<'a> GSSPeek<'a>` block.
+          -   This function can be made more efficient by avoiding the expensive recursive call to `allowed_llm_tokens()` on the `parent_arc`. The logic is equivalent if we use the parent's *local* accumulator, which is much faster to access.
+          -   Replace the body of the function with the optimized version.
+
+          **From:**
+          ```rust
+              pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
+                  let parent = self.parent_arc.allowed_llm_tokens();
+                  let pred = self.predecessor_node.allowed_llm_tokens();
+                  &parent & &pred
+              }
+          ```
+          **To:**
+          ```rust
+              pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
+                  let parent_local = &self.parent_arc.local_acc().llm_tokens_union;
+                  let pred = self.predecessor_node.allowed_llm_tokens();
+                  parent_local & &pred
+              }
+          ```
 
       ### Git Diff
 
-      Here is the git patch to apply the changes:
+      Here is the git diff to apply these changes.
 
       ```diff
       diff --git a/src/datastructures/gss.rs b/src/datastructures/gss.rs
-      index 8c98357..a859a58 100644
+      index 738989e..2764b85 100644
       --- a/src/datastructures/gss.rs
       +++ b/src/datastructures/gss.rs
-      @@ -802,7 +802,28 @@
-               match self {
-                   GSSNode::Root(r) => r.acc.clone(),
-                   GSSNode::Internal(i) => {
-      -                todo!()
-      +                // This is a recursive method that can be slow. It computes the aggregated
-      +                // Acc for the entire subgraph rooted at this node. For performance-critical
-      +                // checks like `is_alive`, a custom traversal is used instead.
-      +
-      +                // 1. Merge the aggregated Accs of all children (predecessors).
-      +                let mut merged_children_acc: Option<Acc> = None;
-      +
-      +                for predecessor_arc in i.predecessors.values().flat_map(|m| m.values()).flatten() {
-      +                    let child_acc = predecessor_arc.acc();
-      +                    if let Some(merged) = merged_children_acc.as_mut() {
-      +                        *merged = Acc::merge(merged, &child_acc);
-      +                    } else {
-      +                        merged_children_acc = Some((*child_acc).clone());
-      +                    }
-      +                }
-      +
-      +                // 2. Narrow the merged children's Acc with this node's local Acc.
-      +                if let Some(acc) = merged_children_acc {
-      +                    Arc::new(Acc::narrow(&i.acc, &acc))
-      +                } else {
-      +                    // An internal node must have predecessors. If it somehow doesn't,
-      +                    // its aggregated Acc is just its local Acc.
-      +                    i.acc.clone()
-      +                }
-                   }
-               }
+      @@ -763,18 +763,12 @@
+           /// Returns the set of LLM tokens allowed by any root reachable from this node.
+           /// Applies the node's local Acc as a final intersection (blanket restriction).
+           pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
+      -        let local = self.local_acc().llm_tokens_union.clone();
+      -        let aggregated = self.acc().llm_tokens_union.clone();
+      -        &local & &aggregated
+      +        self.acc().llm_tokens_union.clone()
            }
+       
+           /// Returns a map of disallowed terminals for each tokenizer state.
+           /// A terminal is disallowed if it's disallowed on every root reachable from this node.
+           pub fn disallowed_terminals(&self) -> TerminalInfo {
+      -        let local = self.local_acc().terminals_union.clone();
+      -        let aggregated = self.acc().terminals_union.clone();
+      -        (&local & &aggregated).complement()
+      +        self.acc().terminals_union.clone().complement()
+           }
+       
+           pub fn is_empty(&self) -> bool { self.predecessors().is_empty() }
+      @@ -1116,10 +1110,9 @@
+       
+           /// Returns the resolved union of LLM tokens, without computing other parts of `Acc`.
+           pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
+      -        let parent = self.parent_arc.allowed_llm_tokens();
+      +        let parent_local = &self.parent_arc.local_acc().llm_tokens_union;
+               let pred = self.predecessor_node.allowed_llm_tokens();
+      -        &parent & &pred
+      +        parent_local & &pred
+           }
+       
+           /// Returns a new `GSSNode` representing the predecessor.
 
       ```
     metadata:
@@ -9648,6 +9725,7 @@ messages:
       Applying patch to 'src/datastructures/gss.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/gss.rs.
     metadata:
-  - user: 'Changes committed with message: "feat(gss): Implement acc() for GSSNode::Internal"'
+  - user: 'Changes committed with message: "Refactor: Optimize GSSNode/GSSPeek token/terminal
+      set calculations by removing redundant intersections"'
     metadata:
 ...

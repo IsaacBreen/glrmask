@@ -695,17 +695,13 @@ impl GSSNode {
     /// Returns the set of LLM tokens allowed by any root reachable from this node.
     /// Applies the node's local Acc as a final intersection (blanket restriction).
     pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
-        let local = self.local_acc().llm_tokens_union.clone();
-        let aggregated = self.acc().llm_tokens_union.clone();
-        &local & &aggregated
+        self.acc().llm_tokens_union.clone()
     }
 
     /// Returns a map of disallowed terminals for each tokenizer state.
     /// A terminal is disallowed if it's disallowed on every root reachable from this node.
     pub fn disallowed_terminals(&self) -> TerminalInfo {
-        let local = self.local_acc().terminals_union.clone();
-        let aggregated = self.acc().terminals_union.clone();
-        (&local & &aggregated).complement()
+        self.acc().terminals_union.clone().complement()
     }
 
     pub fn is_empty(&self) -> bool { self.predecessors().is_empty() }
@@ -1120,9 +1116,9 @@ impl<'a> GSSPeek<'a> {
 
     /// Returns the resolved union of LLM tokens, without computing other parts of `Acc`.
     pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
-        let parent = self.parent_arc.allowed_llm_tokens();
+        let parent_local = &self.parent_arc.local_acc().llm_tokens_union;
         let pred = self.predecessor_node.allowed_llm_tokens();
-        &parent & &pred
+        parent_local & &pred
     }
 
     /// Returns a new `GSSNode` representing the predecessor.
