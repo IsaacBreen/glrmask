@@ -14522,14 +14522,11 @@ local_system:
               }
 
               let final_mask_internal = RefCell::new(HybridBitset::zeros());
-
               if self.state.is_empty() {
                   return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
               }
-
               let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, GLRParserState<'a>> = BTreeMap::new();
               crate::debug!(10, "\n--- Seeding work queue ---");
-
               for (&tokenizer_state_id, glr_state) in &self.state {
                   if glr_state.active_state.stack.is_empty() {
                       continue;
@@ -15001,6 +14998,7 @@ local_system:
               GSS nodes. This is the performance-critical routine.
               """
               state_map: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
+              all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
 
               print("states in get_mask:")
               for k, v in state_map.items():
@@ -15011,8 +15009,8 @@ local_system:
 
               final_mask = ffi.Bitset.zeros()
 
-              # node_idx -> GSSNode
-              values: Dict[int, ffi.GSSNode] = {}
+              # node_idx -> (GSSNode, Bitset)
+              values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
 
               stopped: set[int] = set()  # nodes that stopped (no gss parents)
               todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
@@ -15026,24 +15024,25 @@ local_system:
 
               print("\n--- Seeding work queue ---")
               for sid, gss in state_map.items():
+                  new_mask = all_ones_mask
                   root_idx = roots_map.get(int(sid))
                   if root_idx is None:
                       continue
                   root_idx = int(root_idx)
                   
-                  print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}")
+                  print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
 
                   existing = values.get(root_idx)
                   if existing is not None:
-                      existing_gss = existing
+                      existing_gss, existing_mask = existing
                       print(f"  - MERGING into root {root_idx}:")
                       print(f"    - Existing GSS: ptr={existing_gss.ptr()} flat={GSS.from_stacks(existing_gss.flatten())}")
                       print(f"    - New GSS:      ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}")
 
                       merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
-                      values[root_idx] = merged_gss
+                      values[root_idx] = (merged_gss, existing_mask.union(new_mask))
                   else:
-                      values[root_idx] = gss
+                      values[root_idx] = (gss, new_mask)
 
                   depth = max_depth[root_idx]
                   bucket = todo.get(depth)
@@ -15054,8 +15053,8 @@ local_system:
                       bucket.add(root_idx)
 
               print("--- After Seeding ---")
-              for node_idx, gss in values.items():
-                  print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}")
+              for node_idx, (gss, mask) in values.items():
+                  print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}, mask={mask.to_ranges()}")
 
 
               # Main scheduler
@@ -15097,12 +15096,12 @@ local_system:
                           print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                           continue
 
-                      gss_node = values.pop(node_idx, None)
-                      if gss_node is None:
+                      item = values.pop(node_idx, None)
+                      if item is None:
                           print(f"  - Node {node_idx}: SKIPPING (no value)")
                           continue
-
-                      print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}")
+                      gss_node, llm_mask = item
+                      print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}, mask={llm_mask.to_ranges()}")
 
                       # End-node handling
                       if is_end(node_idx):
@@ -15131,7 +15130,8 @@ local_system:
                                           forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
 
                           glr_active_tokens = gss_node.allowed_llm_tokens()
-                          print(f"Allowed LLM tokens from GSS heads: {glr_active_tokens.to_ranges()}")
+                          glr_active_tokens = llm_mask.intersection(glr_active_tokens)
+                          print(f"Allowed LLM tokens from GSS heads (after llm_mask intersection): {glr_active_tokens.to_ranges()}")
                           final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
                           tokens_to_add = final_allowed_tokens
 
@@ -15156,6 +15156,8 @@ local_system:
                           if not peeks:
                               continue
 
+                          llm_empty = llm_bv.is_empty()
+
                           for dest_idx, state_bv in dests:
                               print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
                               # Filter peeks by destination state bitset
@@ -15172,19 +15174,23 @@ local_system:
 
                               # Merge matched parent GSS nodes
                               child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
-                              ffi.gss_allow_only_llm_tokens_and_prune(child_gss_node, llm_bv)
                               print(f"        - Child GSS: ptr={child_gss_node.ptr()} flat={GSS.from_stacks(child_gss_node.flatten())}")
+
+                              # Compute child mask (intersection with llm_bv when present)
+                              child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+                              print(f"        - Child mask: {child_llm_mask.to_ranges()}")
 
                               d = int(dest_idx)
                               existing = values.get(d)
                               if existing is not None:
-                                  existing_gss = existing
+                                  existing_gss, existing_mask = existing
                                   merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
-                                  values[d] = merged_gss
-                                  print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}")
+                                  combined_mask = existing_mask.union(child_llm_mask)
+                                  values[d] = (merged_gss, combined_mask)
+                                  print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
                               else:
-                                  values[d] = child_gss_node
-                                  print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}")
+                                  values[d] = (child_gss_node, child_llm_mask)
+                                  print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
 
                               enqueue(max_depth[d], d)
 
@@ -22877,74 +22883,198 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions and corresponding git diffs to adjust the mask computation logic.
+      Of course. Here are the step-by-step instructions and corresponding git diffs to apply the requested changes.
 
       ### Step-by-step Instructions
 
-      #### 1. Update `src/constraint.rs`
+      #### File: `src/constraint.rs`
 
-      In the `get_mask3` function, we need to change the work queue to only store `GLRParserState` objects, instead of tuples of `(GLRParserState, LLMTokenBV)`. The LLM token constraints from trie edges will be applied directly to the GSS within the `GLRParserState`.
+      1.  Navigate to the `get_mask3` method within the `impl<'a> GrammarConstraintState<'a>` block.
+      2.  Change the type of `initial_values_by_trie_node` from `BTreeMap<PrecomputeNode3Index, (GLRParserState<'a>, LLMTokenBV)>` to `BTreeMap<PrecomputeNode3Index, GLRParserState<'a>>`.
+      3.  In the seeding loop for `initial_values_by_trie_node`:
+          *   Remove the `allowed_bv` variable.
+          *   Update the `.and_modify()` closure to only accept `existing_glr` and merge the new `glr_state` into it.
+          *   Update the `.or_insert()` call to only insert `glr_state.clone()`.
+      4.  In the call to `Trie::special_map_grouped`:
+          *   **`step_fn` closure**:
+              *   The first argument `state` is now just `glr_s`. Remove the tuple destructuring `let (glr_s, allowed_bv) = state;`.
+              *   Inside the `for (dest_idx, state_id_bv) in dest_map.iter()` loop, after creating `new_glr_s`, remove the line `let new_allowed_bv = allowed_bv & llm_token_bv_from_edge;`.
+              *   In its place, add a call: `allow_only_llm_tokens_and_prune_arc(&mut new_glr_s.active_state.stack, llm_token_bv_from_edge, &mut HashMap::new());`.
+              *   Change the condition `if new_glr_s.is_ok() && !new_allowed_bv.is_empty()` to `if new_glr_s.is_ok()`.
+              *   Change the value pushed to `results` from `(dest_idx.clone(), (new_glr_s, new_allowed_bv))` to `(dest_idx.clone(), new_glr_s)`.
+          *   **`merge_fn` closure**:
+              *   Change its signature to accept `|glr_s1, glr_s2|`. Remove the tuple destructuring.
+              *   The body should now only contain `glr_s1.merge_with(glr_s2);`. Remove the line that merges bitsets.
+          *   **`process_fn` closure**:
+              *   Its second argument `state` is now just `glr_s`. Remove the tuple destructuring `let (glr_s, allowed_bv) = state;`.
+              *   Change `let glr_active_tokens = &glr_s.active_state.stack.allowed_llm_tokens() & allowed_bv;` to `let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();`.
+              *   Change `let keep_going = glr_s.is_ok() && !allowed_bv.is_empty();` to `let keep_going = glr_s.is_ok();`.
 
-      1.  **Modify `initial_values_by_trie_node`**:
-          -   Locate the declaration of `initial_values_by_trie_node` inside `get_mask3`.
-          -   Change its type from `BTreeMap<PrecomputeNode3Index, (GLRParserState<'a>, LLMTokenBV)>` to `BTreeMap<PrecomputeNode3Index, GLRParserState<'a>>`.
-          -   In the seeding loop that follows, update the `.entry().and_modify().or_insert()` logic to work with `GLRParserState` directly, removing all references to `allowed_bv` and `existing_bv`.
+      #### File: `python/aug25/models/precompute3_model.py`
 
-      2.  **Update `Trie::special_map_grouped` `step_fn`**:
-          -   The first argument to the lambda will now be `glr_s: &GLRParserState<'a>`. Remove the `let (glr_s, allowed_bv) = state;` destructuring.
-          -   Inside the `for (dest_idx, state_id_bv) in dest_map.iter()` loop, after creating `new_glr_s`, apply the edge's token constraints by calling `allow_only_llm_tokens_and_prune_arc(&mut new_glr_s.active_state.stack, llm_token_bv_from_edge, &mut HashMap::new());`.
-          -   Change the condition for pushing a result from `if new_glr_s.is_ok() && !new_allowed_bv.is_empty()` to just `if new_glr_s.is_ok()`.
-          -   The value pushed to `results` should be `new_glr_s`, not a tuple.
-
-      3.  **Update `Trie::special_map_grouped` `merge_fn`**:
-          -   The lambda will now take `glr_s1: &mut GLRParserState<'a>` and `glr_s2: GLRParserState<'a>`.
-          -   The body should only contain `glr_s1.merge_with(glr_s2);`. Remove the bitset union operation.
-
-      4.  **Update `Trie::special_map_grouped` `process_fn`**:
-          -   The lambda will now take `glr_s: &mut GLRParserState<'a>`. Remove the `let (glr_s, allowed_bv) = state;` destructuring.
-          -   When calculating `glr_active_tokens`, remove the intersection with `allowed_bv`. It should be `let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();`.
-          -   The `keep_going` condition should be simplified from `glr_s.is_ok() && !allowed_bv.is_empty()` to just `glr_s.is_ok()`.
-
-      #### 2. Update `python/aug25/models/precompute3_model.py`
-
-      In the `get_mask` method, we'll apply the same conceptual changes to the Python implementation.
-
-      1.  **Modify `values` dictionary**:
-          -   Change the type hint for `values` from `Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]]` to `Dict[int, ffi.GSSNode]`.
-          -   In the seeding loop, remove `all_ones_mask` and `new_mask`. The `values` dictionary should now store `GSSNode` objects directly. Update the merge logic accordingly.
-
-      2.  **Update main loop**:
-          -   When popping an item from `values`, you will get a `gss_node` directly, not a tuple. Remove the `llm_mask` variable.
-
-      3.  **Update end-node logic**:
-          -   When calculating `glr_active_tokens`, remove the `llm_mask.intersection(...)` part.
-
-      4.  **Update child processing logic**:
-          -   After creating `child_gss_node` by merging, apply the edge's `llm_bv` by calling `ffi.gss_allow_only_llm_tokens_and_prune(child_gss_node, llm_bv)`.
-          -   Remove all logic related to `llm_mask`, `child_llm_mask`, and `combined_mask`.
-          -   When updating the `values` dictionary for a destination, the merge logic should only handle `GSSNode` objects.
-
-      ---
+      1.  Navigate to the `get_mask` method within the `Model` class.
+      2.  Change the type annotation and initialization of the `values` dictionary from `Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]]` to `Dict[int, ffi.GSSNode]`.
+      3.  In the seeding loop at the beginning of the method:
+          *   Remove the `new_mask` variable.
+          *   When an entry already exists in `values`, retrieve the `existing_gss` directly. Remove `existing_mask`.
+          *   Update the `values[root_idx]` assignment to store only the `merged_gss`, not a tuple.
+          *   When an entry does not exist, assign `gss` directly to `values[root_idx]`.
+      4.  In the main `while True:` loop:
+          *   When popping an item from `values`, assign it directly to `gss_node`. Remove `llm_mask`.
+      5.  In the end-node handling block (`if is_end(node_idx):`):
+          *   Change the line `glr_active_tokens = llm_mask.intersection(glr_active_tokens)` to `glr_active_tokens = gss_node.allowed_llm_tokens()`.
+      6.  In the transitions loop (`for (pop, llm_bv), dests in children:`):
+          *   Inside the `for dest_idx, state_bv in dests:` loop:
+              *   After creating `child_gss_node`, remove the `child_llm_mask` calculation.
+              *   Add a new block to apply the edge's `llm_bv` to the `child_gss_node`:
+                  ```python
+                  if not llm_bv.is_empty():
+                      ffi.gss_allow_only_llm_tokens_and_prune(child_gss_node, llm_bv)
+                  ```
+              *   When updating an existing entry in `values`:
+                  *   Retrieve `existing_gss` directly.
+                  *   Assign the `merged_gss` directly to `values[d]`. Remove all `mask` related logic.
+              *   When creating a new entry in `values`, assign `child_gss_node` directly.
 
       ### Git Diffs
 
-      Here are the `git diff` patches for the files.
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model.py b/python/aug25/models/precompute3_model.py
+      --- a/python/aug25/models/precompute3_model.py
+      +++ b/python/aug25/models/precompute3_model.py
+      @@ -100,10 +100,9 @@
+       
+               final_mask = ffi.Bitset.zeros()
+       
+      -        # node_idx -> (GSSNode, Bitset)
+      -        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
+      +        # node_idx -> GSSNode
+      +        values: Dict[int, ffi.GSSNode] = {}
+       
+               stopped: set[int] = set()  # nodes that stopped (no gss parents)
+               todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
+      @@ -117,25 +116,23 @@
+       
+               print("\n--- Seeding work queue ---")
+               for sid, gss in state_map.items():
+      -            new_mask = all_ones_mask
+                   root_idx = roots_map.get(int(sid))
+                   if root_idx is None:
+                       continue
+                   root_idx = int(root_idx)
+                   
+      -            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
+      +            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}")
+       
+                   existing = values.get(root_idx)
+                   if existing is not None:
+      -                existing_gss, existing_mask = existing
+      +                existing_gss = existing
+                       print(f"  - MERGING into root {root_idx}:")
+                       print(f"    - Existing GSS: ptr={existing_gss.ptr()} flat={GSS.from_stacks(existing_gss.flatten())}")
+                       print(f"    - New GSS:      ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}")
+       
+                       merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
+      -                values[root_idx] = (merged_gss, existing_mask.union(new_mask))
+      +                values[root_idx] = merged_gss
+                   else:
+      -                values[root_idx] = (gss, new_mask)
+      +                values[root_idx] = gss
+       
+                   depth = max_depth[root_idx]
+                   bucket = todo.get(depth)
+      @@ -145,8 +142,8 @@
+                       bucket.add(root_idx)
+       
+               print("--- After Seeding ---")
+      -        for node_idx, (gss, mask) in values.items():
+      -            print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}, mask={mask.to_ranges()}")
+      +        for node_idx, gss in values.items():
+      +            print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}")
+       
+       
+               # Main scheduler
+      @@ -183,12 +180,11 @@
+                           print(f"  - Node {node_idx}: SKIPPING (already stopped)")
+                           continue
+       
+      -                item = values.pop(node_idx, None)
+      -                if item is None:
+      +                gss_node = values.pop(node_idx, None)
+      +                if gss_node is None:
+                           print(f"  - Node {node_idx}: SKIPPING (no value)")
+                           continue
+      -                gss_node, llm_mask = item
+      -                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}, mask={llm_mask.to_ranges()}")
+      +                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}")
+       
+                       # End-node handling
+                       if is_end(node_idx):
+      @@ -216,8 +212,7 @@
+                                           forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
+       
+                           glr_active_tokens = gss_node.allowed_llm_tokens()
+      -                    glr_active_tokens = llm_mask.intersection(glr_active_tokens)
+      -                    print(f"Allowed LLM tokens from GSS heads (after llm_mask intersection): {glr_active_tokens.to_ranges()}")
+      +                    print(f"Allowed LLM tokens from GSS heads: {glr_active_tokens.to_ranges()}")
+                           final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
+                           tokens_to_add = final_allowed_tokens
+       
+      @@ -238,8 +233,6 @@
+                           if not peeks:
+                               continue
+       
+      -                    llm_empty = llm_bv.is_empty()
+      -
+                           for dest_idx, state_bv in dests:
+                               print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
+                               # Filter peeks by destination state bitset
+      @@ -257,23 +250,23 @@
+                               child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+                               print(f"        - Child GSS: ptr={child_gss_node.ptr()} flat={GSS.from_stacks(child_gss_node.flatten())}")
+       
+      -                        # Compute child mask (intersection with llm_bv when present)
+      -                        child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
+      -                        print(f"        - Child mask: {child_llm_mask.to_ranges()}")
+      +                        # Apply edge's LLM token mask to the new GSS node
+      +                        if not llm_bv.is_empty():
+      +                            ffi.gss_allow_only_llm_tokens_and_prune(child_gss_node, llm_bv)
+       
+                               d = int(dest_idx)
+                               existing = values.get(d)
+                               if existing is not None:
+      -                            existing_gss, existing_mask = existing
+      +                            existing_gss = existing
+                                   merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+      -                            combined_mask = existing_mask.union(child_llm_mask)
+      -                            values[d] = (merged_gss, combined_mask)
+      -                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
+      +                            values[d] = merged_gss
+      +                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}")
+                               else:
+      -                            values[d] = (child_gss_node, child_llm_mask)
+      -                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
+      +                            values[d] = child_gss_node
+      +                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}")
+       
+                               enqueue(max_depth[d], d)
+       
 
+      ```
       ```diff
       diff --git a/src/constraint.rs b/src/constraint.rs
-      index 2111111..2222222 100644
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -1110,23 +1110,21 @@
-                   return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
-               }
+      @@ -2000,7 +2000,7 @@
+       
+               let step_counts = Arc::new(RwLock::new(BTreeMap::<TerminalID, StepCount>::new()));
        
       -        let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, (GLRParserState<'a>, LLMTokenBV)> = BTreeMap::new();
       +        let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, GLRParserState<'a>> = BTreeMap::new();
                crate::debug!(10, "\n--- Seeding work queue ---");
        
                for (&tokenizer_state_id, glr_state) in &self.state {
-                   if glr_state.active_state.stack.is_empty() {
+      @@ -2008,16 +2008,13 @@
                        continue;
                    }
                    if let Some(precomputed_trie_root_arc) = self.parent.precomputed3.get(&tokenizer_state_id) {
@@ -22963,7 +23093,7 @@ messages:
                    } else {
                        panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
                    }
-      @@ -1147,9 +1145,8 @@
+      @@ -2040,9 +2037,8 @@
                    &self.parent.trie3_god,
                    initial_values_for_map,
                    // step_fn: (current_state, (pop, llm_token_bv), destinations_map)
@@ -22975,7 +23105,7 @@ messages:
                        let popped = glr_s.active_state.stack.popn(*pop);
                        let num_peeks: usize = popped.iter().map(|p| p.peek_iter().count()).sum();
                        if num_peeks > 0 {
-      @@ -1174,28 +1171,25 @@
+      @@ -2067,28 +2063,25 @@
                            let mut new_glr_s = glr_s.clone();
                            new_glr_s.active_state.stack = merged_gss;
        
@@ -23012,7 +23142,7 @@ messages:
        
                        let mut forbidden_llm_tokens = LLMTokenBV::zeros();
                        let disallowed_terminals_l2 = glr_s.active_state.stack.disallowed_terminals();
-      @@ -1214,9 +1208,9 @@
+      @@ -2107,9 +2100,9 @@
                            }
                        }
        
@@ -23026,155 +23156,169 @@ messages:
                                let before = final_mask_internal.borrow().len();
 
       ```
+    metadata:
+  - user: |-
+      Failed Hunk:
+
       ```diff
-      diff --git a/python/aug25/models/precompute3_model.py b/python/aug25/models/precompute3_model.py
-      index 3333333..4444444 100644
-      --- a/python/aug25/models/precompute3_model.py
-      +++ b/python/aug25/models/precompute3_model.py
-      @@ -100,7 +100,6 @@
-               GSS nodes. This is the performance-critical routine.
-               """
-               state_map: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
-      -        all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
+      @@ -2000,7 +2000,7 @@
        
-               print("states in get_mask:")
-               for k, v in state_map.items():
-      @@ -111,8 +110,8 @@
+               let step_counts = Arc::new(RwLock::new(BTreeMap::<TerminalID, StepCount>::new()));
        
-               final_mask = ffi.Bitset.zeros()
+      -        let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, (GLRParserState<'a>, LLMTokenBV)> = BTreeMap::new();
+      +        let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, GLRParserState<'a>> = BTreeMap::new();
+               crate::debug!(10, "\n--- Seeding work queue ---");
        
-      -        # node_idx -> (GSSNode, Bitset)
-      -        values: Dict[int, Tuple[ffi.GSSNode, ffi.Bitset]] = {}
-      +        # node_idx -> GSSNode
-      +        values: Dict[int, ffi.GSSNode] = {}
+               for (&tokenizer_state_id, glr_state) in &self.state {
+      ```
+
+      Expected Context (from patch):
+
+      ```diff
+
+              let step_counts = Arc::new(RwLock::new(BTreeMap::<TerminalID, StepCount>::new()));
+
+              let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, (GLRParserState<'a>, LLMTokenBV)> = BTreeMap::new();
+              crate::debug!(10, "\n--- Seeding work queue ---");
+
+              for (&tokenizer_state_id, glr_state) in &self.state {
+      ```
+
+      Nearest Match in `src/constraint.rs` (found at line 2619 with 71.43% similarity, shown with padding):
+
+      ```rust
+              }
+
+              let final_mask_internal = RefCell::new(HybridBitset::zeros());
+
+              if self.state.is_empty() {
+                  return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+              }
+
+              let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, (GLRParserState<'a>, LLMTokenBV)> = BTreeMap::new();
+              crate::debug!(10, "\n--- Seeding work queue ---");
+
+              for (&tokenizer_state_id, glr_state) in &self.state {
+                  if glr_state.active_state.stack.is_empty() {
+                      continue;
+                  }
+                  if let Some(precomputed_trie_root_arc) = self.parent.precomputed3.get(&tokenizer_state_id) {
+                      let allowed_bv = self.parent.all_internal_llm_tokens_bitset();
+      ```
+
+      The git diff hunk above failed to apply to the file `src/constraint.rs`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
+      Do not include any other text or explanation outside the code block.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/src/constraint.rs b/src/constraint.rs
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -2615,9 +2615,9 @@
+               let final_mask_internal = RefCell::new(HybridBitset::zeros());
+
+               if self.state.is_empty() {
+                   return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+               }
+
+      -        let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, (GLRParserState<'a>, LLMTokenBV)> = BTreeMap::new();
+      +        let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, GLRParserState<'a>> = BTreeMap::new();
+               crate::debug!(10, "\n--- Seeding work queue ---");
+
+               for (&tokenizer_state_id, glr_state) in &self.state {
+      @@ -2008,16 +2008,13 @@
+                       continue;
+                   }
+                   if let Some(precomputed_trie_root_arc) = self.parent.precomputed3.get(&tokenizer_state_id) {
+      -                let allowed_bv = self.parent.all_internal_llm_tokens_bitset();
+      -                crate::debug!(10, "  SEED: sid={}, root_idx={}, gss_ptr={:p}, mask={}", tokenizer_state_id.0, precomputed_trie_root_arc, glr_state.active_state.stack, format_bv(&allowed_bv));
+      +                crate::debug!(10, "  SEED: sid={}, root_idx={}, gss_ptr={:p}", tokenizer_state_id.0, precomputed_trie_root_arc, glr_state.active_state.stack);
+                       
+                       initial_values_by_trie_node.entry(precomputed_trie_root_arc.clone())
+      -                    .and_modify(|(existing_glr, existing_bv)| {
+      +                    .and_modify(|existing_glr| {
+                               existing_glr.merge_with(glr_state.clone());
+      -                        *existing_bv |= &allowed_bv;
+                           })
+      -                    .or_insert((glr_state.clone(), allowed_bv));
+      +                    .or_insert(glr_state.clone());
+                   } else {
+                       panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
+                   }
+      @@ -2040,9 +2037,8 @@
+                   &self.parent.trie3_god,
+                   initial_values_for_map,
+                   // step_fn: (current_state, (pop, llm_token_bv), destinations_map)
+      -            |state, (pop, llm_token_bv_from_edge), dest_map| {
+      -                let (glr_s, allowed_bv) = state;
+      -                crate::debug!(10, "  - STEP: gss_ptr={:p}, allowed_bv={}, edge=(pop={}, llm_bv={})", glr_s.active_state.stack, format_bv(allowed_bv), pop, format_bv(llm_token_bv_from_edge));
+      +            |glr_s, (pop, llm_token_bv_from_edge), dest_map| {
+      +                crate::debug!(10, "  - STEP: gss_ptr={:p}, edge=(pop={}, llm_bv={})", glr_s.active_state.stack, pop, format_bv(llm_token_bv_from_edge));
+                       let popped = glr_s.active_state.stack.popn(*pop);
+                       let num_peeks: usize = popped.iter().map(|p| p.peek_iter().count()).sum();
+                       if num_peeks > 0 {
+      @@ -2067,28 +2063,25 @@
+                           let mut new_glr_s = glr_s.clone();
+                           new_glr_s.active_state.stack = merged_gss;
        
-               stopped: set[int] = set()  # nodes that stopped (no gss parents)
-               todo: Dict[int, set[int]] = {}  # depth -> set(node_idx)
-      @@ -126,24 +125,22 @@
-       
-               print("\n--- Seeding work queue ---")
-               for sid, gss in state_map.items():
-      -            new_mask = all_ones_mask
-                   root_idx = roots_map.get(int(sid))
-                   if root_idx is None:
-                       continue
-                   root_idx = int(root_idx)
-                   
-      -            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}, mask={new_mask.to_ranges()}")
-      +            print(f"  SEED: sid={sid}, root_idx={root_idx}, gss_ptr={gss.ptr()}")
-       
-                   existing = values.get(root_idx)
-                   if existing is not None:
-      -                existing_gss, existing_mask = existing
-      +                existing_gss = existing
-                       print(f"  - MERGING into root {root_idx}:")
-                       print(f"    - Existing GSS: ptr={existing_gss.ptr()} flat={GSS.from_stacks(existing_gss.flatten())}")
-                       print(f"    - New GSS:      ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}")
-       
-                       merged_gss = ffi.gss_merge_many_with_depth([existing_gss, gss], 1)
-      -                values[root_idx] = (merged_gss, existing_mask.union(new_mask))
-      +                values[root_idx] = merged_gss
-                   else:
-      -                values[root_idx] = (gss, new_mask)
-      +                values[root_idx] = gss
-       
-                   depth = max_depth[root_idx]
-                   bucket = todo.get(depth)
-      @@ -154,8 +151,8 @@
-                       bucket.add(root_idx)
-       
-               print("--- After Seeding ---")
-      -        for node_idx, (gss, mask) in values.items():
-      -            print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}, mask={mask.to_ranges()}")
-      +        for node_idx, gss in values.items():
-      +            print(f"Node {node_idx}: gss_ptr={gss.ptr()} flat={GSS.from_stacks(gss.flatten())}")
-       
-       
-               # Main scheduler
-      @@ -192,13 +189,12 @@
-                           print(f"  - Node {node_idx}: SKIPPING (already stopped)")
-                           continue
-       
-      -                item = values.pop(node_idx, None)
-      -                if item is None:
-      +                gss_node = values.pop(node_idx, None)
-      +                if gss_node is None:
-                           print(f"  - Node {node_idx}: SKIPPING (no value)")
-                           continue
-      -                gss_node, llm_mask = item
-      -                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}, mask={llm_mask.to_ranges()}")
+      -                    let new_allowed_bv = allowed_bv & llm_token_bv_from_edge;
+      -
+      -                    if new_glr_s.is_ok() && !new_allowed_bv.is_empty() {
+      -                        crate::debug!(10, "      - Dest: idx={}, state_bv={}, matched={}, child_mask={}, new_gss_ptr={:p}", dest_idx, format_bv(state_id_bv), valid_gss_nodes.len(), format_bv(&new_allowed_bv), new_glr_s.active_state.stack);
+      -                        results.push((dest_idx.clone(), (new_glr_s, new_allowed_bv)));
+      +                    allow_only_llm_tokens_and_prune_arc(&mut new_glr_s.active_state.stack, llm_token_bv_from_edge, &mut HashMap::new());
       +
-      +                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}")
+      +                    if new_glr_s.is_ok() {
+      +                        crate::debug!(10, "      - Dest: idx={}, state_bv={}, matched={}, new_gss_ptr={:p}", dest_idx, format_bv(state_id_bv), valid_gss_nodes.len(), new_glr_s.active_state.stack);
+      +                        results.push((dest_idx.clone(), new_glr_s));
+                           }
+                       }
+                       results
+                   },
+                   // merge_fn
+      -            |state1, state2| {
+      -                let (glr_s1, allowed_bv1) = state1;
+      -                let (glr_s2, allowed_bv2) = state2;
+      -                crate::debug!(10, "    - MERGE: gss1(ptr={:p}, mask={}) WITH gss2(ptr={:p}, mask={})", glr_s1.active_state.stack, format_bv(allowed_bv1), glr_s2.active_state.stack, format_bv(&allowed_bv2));
+      +            |glr_s1, glr_s2| {
+      +                crate::debug!(10, "    - MERGE: gss1(ptr={:p}) WITH gss2(ptr={:p})", glr_s1.active_state.stack, glr_s2.active_state.stack);
+                       glr_s1.merge_with(glr_s2);
+      -                *allowed_bv1 |= allowed_bv2;
+                   },
+                   // process_fn: (precomputed_node_data, final_state_for_this_path)
+      -            |precomputed_node_data, state| {
+      -                let (glr_s, allowed_bv) = state;
+      -                crate::debug!(10, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}, mask={}", precomputed_node_data as *const _, glr_s.active_state.stack, format_bv(allowed_bv));
+      +            |precomputed_node_data, glr_s| {
+      +                crate::debug!(10, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}", precomputed_node_data as *const _, glr_s.active_state.stack);
        
-                       # End-node handling
-                       if is_end(node_idx):
-      @@ -227,8 +223,7 @@
-                                           forbidden_llm_tokens = forbidden_llm_tokens.union(llm_tokens_for_terminal)
+                       let mut forbidden_llm_tokens = LLMTokenBV::zeros();
+                       let disallowed_terminals_l2 = glr_s.active_state.stack.disallowed_terminals();
+      @@ -2107,9 +2100,9 @@
+                           }
+                       }
        
-                           glr_active_tokens = gss_node.allowed_llm_tokens()
-      -                    glr_active_tokens = llm_mask.intersection(glr_active_tokens)
-      -                    print(f"Allowed LLM tokens from GSS heads (after llm_mask intersection): {glr_active_tokens.to_ranges()}")
-      +                    print(f"Allowed LLM tokens from GSS heads: {glr_active_tokens.to_ranges()}")
-                           final_allowed_tokens = glr_active_tokens.difference(forbidden_llm_tokens)
-                           tokens_to_add = final_allowed_tokens
-       
-      @@ -249,8 +244,6 @@
-                           if not peeks:
-                               continue
-       
-      -                    llm_empty = llm_bv.is_empty()
-      -
-                           for dest_idx, state_bv in dests:
-                               print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
-                               # Filter peeks by destination state bitset
-      @@ -267,23 +260,21 @@
-       
-                               # Merge matched parent GSS nodes
-                               child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
-      +                        ffi.gss_allow_only_llm_tokens_and_prune(child_gss_node, llm_bv)
-                               print(f"        - Child GSS: ptr={child_gss_node.ptr()} flat={GSS.from_stacks(child_gss_node.flatten())}")
-       
-      -                        # Compute child mask (intersection with llm_bv when present)
-      -                        child_llm_mask = llm_mask if llm_empty else llm_mask.intersection(llm_bv)
-      -                        print(f"        - Child mask: {child_llm_mask.to_ranges()}")
-      -
-                               d = int(dest_idx)
-                               existing = values.get(d)
-                               if existing is not None:
-      -                            existing_gss, existing_mask = existing
-      +                            existing_gss = existing
-                                   merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
-      -                            combined_mask = existing_mask.union(child_llm_mask)
-      -                            values[d] = (merged_gss, combined_mask)
-      -                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}, mask={combined_mask.to_ranges()}")
-      +                            values[d] = merged_gss
-      +                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}")
-                               else:
-      -                            values[d] = (child_gss_node, child_llm_mask)
-      -                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}, mask={child_llm_mask.to_ranges()}")
-      +                            values[d] = child_gss_node
-      +                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}")
-       
-                               enqueue(max_depth[d], d)
-       
+      -                let glr_active_tokens = &glr_s.active_state.stack.allowed_llm_tokens() & allowed_bv;
+      +                let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
+                       let final_allowed_tokens = glr_active_tokens - &forbidden_llm_tokens;
+      -                let keep_going = glr_s.is_ok() && !allowed_bv.is_empty();
+      +                let keep_going = glr_s.is_ok();
+                       if precomputed_node_data.value.end {
+                           if !final_allowed_tokens.is_empty() {
+                               let before = final_mask_internal.borrow().len();
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/constraint.rs
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/aug25/models/precompute3_model.py
-      Applying patch to 'python/aug25/models/precompute3_model.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/models/precompute3_model.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor get_mask3/get_mask to queue GSS/ParserStates
-      directly and apply edge LLM masks via GSS manipulation"'
+  - user: 'Changes committed with message: "Refactor get_mask/get_mask3 to only queue
+      GSS/Parser states, applying LLM token masks directly during transition"'
     metadata:
 ...

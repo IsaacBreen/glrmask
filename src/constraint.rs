@@ -2614,14 +2614,11 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
-
         if self.state.is_empty() {
             return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
         }
-
         let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, GLRParserState<'a>> = BTreeMap::new();
         crate::debug!(10, "\n--- Seeding work queue ---");
-
         for (&tokenizer_state_id, glr_state) in &self.state {
             if glr_state.active_state.stack.is_empty() {
                 continue;

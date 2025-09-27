@@ -109,6 +109,7 @@ class Model(GraphProvider):
         GSS nodes. This is the performance-critical routine.
         """
         state_map: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
+        all_ones_mask = self.constraint.all_internal_llm_tokens_bitset()
 
         print("states in get_mask:")
         for k, v in state_map.items():
@@ -209,7 +210,6 @@ class Model(GraphProvider):
                 if gss_node is None:
                     print(f"  - Node {node_idx}: SKIPPING (no value)")
                     continue
-
                 print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={GSS.from_stacks(gss_node.flatten())}")
 
                 # End-node handling
@@ -280,8 +280,11 @@ class Model(GraphProvider):
 
                         # Merge matched parent GSS nodes
                         child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
-                        ffi.gss_allow_only_llm_tokens_and_prune(child_gss_node, llm_bv)
                         print(f"        - Child GSS: ptr={child_gss_node.ptr()} flat={GSS.from_stacks(child_gss_node.flatten())}")
+
+                        # Apply edge's LLM token mask to the new GSS node
+                        if not llm_bv.is_empty():
+                            ffi.gss_allow_only_llm_tokens_and_prune(child_gss_node, llm_bv)
 
                         d = int(dest_idx)
                         existing = values.get(d)
