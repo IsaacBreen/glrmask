@@ -40,6 +40,7 @@ class Model(GraphProvider):
         self.id_to_token: Dict[int, bytes] = {}
         self.max_depth: Dict[int, int] = {}
         self.possible_matches_cache: Optional[Dict[int, Dict[int, ffi.Bitset]]] = None
+        self.time_budgets: Optional[List[float]] = None
 
         # Normalize arena children bitsets and cache max_depth
         dumps = json.dumps
@@ -129,14 +130,21 @@ class Model(GraphProvider):
         Compute the final LLM token mask given a mapping from tokenizer state to
         GSS nodes. This is the performance-critical routine.
         """
+        time_budgets = self.time_budgets
+        phase1_budget = phase2_budget = float('inf')
+        if time_budgets:
+            if len(time_budgets) == 1:
+                phase1_budget = phase2_budget = time_budgets[0]
+            elif len(time_budgets) >= 2:
+                phase1_budget = time_budgets[0]
+                phase2_budget = time_budgets[1]
+
         state_map: Dict[int, ffi.GSSNode] = self.constraint_state.get_state_map()
 
         print("states in get_mask:")
         for k, v in state_map.items():
             print(f"state {k}: gss_ptr={v.ptr()} flat={self.gss_from_ffi_node(v)}")
 
-
-        # t0 = time.time()
 
         final_mask = ffi.Bitset.zeros()
 
@@ -154,7 +162,11 @@ class Model(GraphProvider):
         max_depth = self.max_depth
 
         print("\n--- Seeding work queue ---")
+        t0_phase1 = time.time()
         for sid, gss in state_map.items():
+            if time.time() - t0_phase1 > phase1_budget:
+                print(f"Time budget for phase 1 (seeding) exceeded ({phase1_budget}s).")
+                break
             root_idx = roots_map.get(int(sid))
             if root_idx is None:
                 continue
@@ -204,105 +216,113 @@ class Model(GraphProvider):
 
         print("\n--- Main loop ---")
         iter_count = 0
-        while True:
-            iter_count += 1
-            # Pop the smallest depth bucket (skip stale heap entries)
-            node_indices: Optional[set[int]] = None
-            current_depth = -1
-            while depth_heap:
-                current_depth = heappop(depth_heap)
-                node_indices = todo.pop(current_depth, None)
-                if node_indices:
+        if phase2_budget > 0:
+            t0_phase2 = time.time()
+            while True:
+                iter_count += 1
+                if time.time() - t0_phase2 > phase2_budget:
+                    print(f"Time budget for phase 2 (main loop) exceeded ({phase2_budget}s).")
                     break
-            if not node_indices:
-                print(f"[{iter_count}] Loop finished: no more nodes to process.")
-                break  # nothing left to process
 
-            print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
+                # Pop the smallest depth bucket (skip stale heap entries)
+                node_indices: Optional[set[int]] = None
+                current_depth = -1
+                while depth_heap:
+                    current_depth = heappop(depth_heap)
+                    node_indices = todo.pop(current_depth, None)
+                    if node_indices:
+                        break
+                if not node_indices:
+                    print(f"[{iter_count}] Loop finished: no more nodes to process.")
+                    break  # nothing left to process
 
-            # Process all nodes in this depth bucket
-            for node_idx in node_indices:
-                if node_idx in stopped:
-                    print(f"  - Node {node_idx}: SKIPPING (already stopped)")
-                    continue
+                print(f"\n[{iter_count}] Processing depth={current_depth}, nodes={node_indices}")
 
-                gss_node = values.pop(node_idx)
-                if gss_node is None:
-                    print(f"  - Node {node_idx}: SKIPPING (no value)")
-                    continue
-                print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={self.gss_from_ffi_node(gss_node)}")
-
-                # End-node handling
-                if is_end(node_idx):
-                    print(f"    - END NODE found")
-                    print(f"      - final_mask before: {final_mask.to_ranges()}")
-                    print(self.constraint.state_with_nodes([(0, gss_node)]))
-
-                    # Clone the GSS node to avoid modifying it in place if it's shared
-                    gss_node_copy = gss_node.clone_node()
-
-                    # Prune LLM tokens based on disallowed terminals locally within the GSS
-                    ffi.gss_prune_llm_tokens_by_disallowed_terminals(gss_node_copy, self.possible_matches_cache)
-
-                    # Get the final allowed tokens from the pruned GSS
-                    final_allowed_tokens = gss_node_copy.allowed_llm_tokens()
-
-                    print(f"Allowed LLM tokens from pruned GSS: {final_allowed_tokens.to_ranges()}")
-
-                    final_mask = final_mask.union(final_allowed_tokens)
-                    print(f"      - final_mask after:  {final_mask.to_ranges()}")
-
-                if not gss_node.is_alive():
-                    stopped.add(node_idx)
-                    print(f"    - STOPPING node {node_idx} (GSS not alive)")
-                    continue
-
-                # Transitions grouped by (pop, llm_bv)
-                node_data = arena.get(node_idx, {})
-                children = node_data.get("children") or []
-                if not children:
-                    print(f"    - No children for node {node_idx}")
-                for (pop, llm_bv), dests in children:
-                    print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
-                    # Collect all pops from GSS parents
-                    peeks = gss_node.popn_fast(pop)
-                    print(f"      - Found {len(peeks)} peeks from GSS set")
-                    if not peeks:
+                # Process all nodes in this depth bucket
+                for node_idx in node_indices:
+                    if node_idx in stopped:
+                        print(f"  - Node {node_idx}: SKIPPING (already stopped)")
                         continue
 
-                    for dest_idx, state_bv in dests:
-                        print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
-                        # Filter peeks by destination state bitset
-                        matched = []
-                        if not state_bv.is_empty():
-                            contains = state_bv.contains
-                            for sid_val, parent_node in peeks:
-                                if contains(sid_val):
-                                    matched.append(parent_node)
-                        if not matched:
-                            print(f"        - No matched parent GSS nodes")
+                    gss_node = values.pop(node_idx)
+                    if gss_node is None:
+                        print(f"  - Node {node_idx}: SKIPPING (no value)")
+                        continue
+                    print(f"  - Node {node_idx}: Popped gss_ptr={gss_node.ptr()} flat={self.gss_from_ffi_node(gss_node)}")
+
+                    # End-node handling
+                    if is_end(node_idx):
+                        print(f"    - END NODE found")
+                        print(f"      - final_mask before: {final_mask.to_ranges()}")
+                        print(self.constraint.state_with_nodes([(0, gss_node)]))
+
+                        # Clone the GSS node to avoid modifying it in place if it's shared
+                        gss_node_copy = gss_node.clone_node()
+
+                        # Prune LLM tokens based on disallowed terminals locally within the GSS
+                        ffi.gss_prune_llm_tokens_by_disallowed_terminals(gss_node_copy, self.possible_matches_cache)
+
+                        # Get the final allowed tokens from the pruned GSS
+                        final_allowed_tokens = gss_node_copy.allowed_llm_tokens()
+
+                        print(f"Allowed LLM tokens from pruned GSS: {final_allowed_tokens.to_ranges()}")
+
+                        final_mask = final_mask.union(final_allowed_tokens)
+                        print(f"      - final_mask after:  {final_mask.to_ranges()}")
+
+                    if not gss_node.is_alive():
+                        stopped.add(node_idx)
+                        print(f"    - STOPPING node {node_idx} (GSS not alive)")
+                        continue
+
+                    # Transitions grouped by (pop, llm_bv)
+                    node_data = arena.get(node_idx, {})
+                    children = node_data.get("children") or []
+                    if not children:
+                        print(f"    - No children for node {node_idx}")
+                    for (pop, llm_bv), dests in children:
+                        print(f"    - Edge: pop={pop}, llm_bv={llm_bv.to_ranges()}")
+                        # Collect all pops from GSS parents
+                        peeks = gss_node.popn_fast(pop)
+                        print(f"      - Found {len(peeks)} peeks from GSS set")
+                        if not peeks:
                             continue
-                        print(f"        - Matched {len(matched)} parent GSS nodes")
 
-                        # Merge matched parent GSS nodes
-                        child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
-                        print(f"        - Child GSS: ptr={child_gss_node.ptr()} flat={self.gss_from_ffi_node(child_gss_node)}")
+                        for dest_idx, state_bv in dests:
+                            print(f"      - Dest: idx={dest_idx}, state_bv={state_bv.to_ranges()}")
+                            # Filter peeks by destination state bitset
+                            matched = []
+                            if not state_bv.is_empty():
+                                contains = state_bv.contains
+                                for sid_val, parent_node in peeks:
+                                    if contains(sid_val):
+                                        matched.append(parent_node)
+                            if not matched:
+                                print(f"        - No matched parent GSS nodes")
+                                continue
+                            print(f"        - Matched {len(matched)} parent GSS nodes")
 
-                        # Apply edge's LLM token mask to the new GSS node
-                        ffi.gss_allow_only_llm_tokens_and_prune(child_gss_node, llm_bv)
+                            # Merge matched parent GSS nodes
+                            child_gss_node = ffi.gss_merge_many_with_depth(matched, 1)
+                            print(f"        - Child GSS: ptr={child_gss_node.ptr()} flat={self.gss_from_ffi_node(child_gss_node)}")
 
-                        d = int(dest_idx)
-                        existing = values.get(d)
-                        if existing is not None:
-                            existing_gss = existing
-                            merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
-                            values[d] = merged_gss
-                            print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}")
-                        else:
-                            values[d] = child_gss_node
-                            print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}")
+                            # Apply edge's LLM token mask to the new GSS node
+                            ffi.gss_allow_only_llm_tokens_and_prune(child_gss_node, llm_bv)
 
-                        enqueue(max_depth[d], d)
+                            d = int(dest_idx)
+                            existing = values.get(d)
+                            if existing is not None:
+                                existing_gss = existing
+                                merged_gss = ffi.gss_merge_many_with_depth([existing_gss, child_gss_node], 1)
+                                values[d] = merged_gss
+                                print(f"        - Enqueue {d}: UPDATING gss_ptr={merged_gss.ptr()}")
+                            else:
+                                values[d] = child_gss_node
+                                print(f"        - Enqueue {d}: CREATING gss_ptr={child_gss_node.ptr()}")
+
+                            enqueue(max_depth[d], d)
+        else:
+            print("Skipping phase 2 (main loop) due to zero time budget.")
 
         print("final internal mask:", final_mask)
 
