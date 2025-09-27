@@ -820,12 +820,25 @@ def main():
     ap.add_argument("--candidate-model", default="python/aug25/models/precompute3_model_pure_python.py",
                     help="Path to candidate model module (default: optimized pure python).")
     ap.add_argument("--output", required=True, help="Path to write the minimized .json.gz.")
-    ap.add_argument("--time-budget-seconds", type=int, default=900, help="Overall time budget (seconds).")
+    ap.add_argument("--time-budget-seconds", type=int, default=300, help="Default time budget per phase (seconds).")
+    ap.add_argument("--phase1-time-budget", type=int, default=None, help="Time budget for Phase 1 (depth reduction). Overrides default.")
+    ap.add_argument("--phase2-time-budget", type=int, default=None, help="Time budget for Phase 2 (child reduction). Overrides default.")
+    ap.add_argument("--phase3-time-budget", type=int, default=None, help="Time budget for Phase 3 (dest reduction). Overrides default.")
+    ap.add_argument("--phase4-time-budget", type=int, default=None, help="Time budget for Phase 4 (LLM token reduction). Overrides default.")
+    ap.add_argument("--phase5-time-budget", type=int, default=None, help="Time budget for Phase 5 (token sweep). Overrides default.")
     ap.add_argument("--seed", type=int, default=None, help="Random seed for deterministic runs.")
     args = ap.parse_args()
 
     if args.seed is not None:
         random.seed(args.seed)
+
+    phase_budgets = {
+        1: args.phase1_time_budget if args.phase1_time_budget is not None else args.time_budget_seconds,
+        2: args.phase2_time_budget if args.phase2_time_budget is not None else args.time_budget_seconds,
+        3: args.phase3_time_budget if args.phase3_time_budget is not None else args.time_budget_seconds,
+        4: args.phase4_time_budget if args.phase4_time_budget is not None else args.time_budget_seconds,
+        5: args.phase5_time_budget if args.phase5_time_budget is not None else args.time_budget_seconds,
+    }
 
     repo_root = Path(__file__).resolve().parents[2]
     constraint_in = Path(args.constraint_in).resolve()
@@ -864,13 +877,13 @@ def main():
     n0, c0, d0 = count_nodes_children_dests(values_dict)
     print(f"Initial trie size: {n0} nodes, {c0} children, {d0} dests")
 
-    time_budget_deadline = time.time() + int(args.time_budget_seconds)
-
     with tempfile.TemporaryDirectory(prefix="constraint_reduce_") as td:
         tmpdir = Path(td)
 
         # Phase 1: BFS depth minimization
-        if time.time() < time_budget_deadline:
+        if phase_budgets[1] > 0:
+            print(f"\n--- Phase 1: Reducing depth (budget: {phase_budgets[1]}s) ---")
+            time_budget_deadline = time.time() + phase_budgets[1]
             start = time.time()
             pruned_values, best_depth = bsearch_min_depth_with_mismatch(
                 original, values_dict, repo_root, tmpdir, code_file,
@@ -880,13 +893,16 @@ def main():
                 values_dict = pruned_values
                 accepted_values_dict = deepcopy(values_dict)
                 n1, c1, d1 = count_nodes_children_dests(values_dict)
-                print(f"[Depth] Minimal depth {best_depth} keeps mismatch. Size now: {n1} nodes, {c1} children, {d1} dests. Took {time.time()-start:.1f}s")
+                print(f"--- Phase 1 finished. Minimal depth {best_depth} keeps mismatch. Size now: {n1} nodes, {c1} children, {d1} dests. Took {time.time()-start:.1f}s ---")
             else:
-                print("[Depth] Depth pruning could not preserve mismatch; keeping full reachability.")
+                print(f"--- Phase 1 finished. Depth pruning could not preserve mismatch; keeping full reachability. Took {time.time()-start:.1f}s ---")
+        else:
+            print("\n--- Phase 1: Skipped (budget is 0) ---")
 
         # Phase 2: Delete child edges per node (delta-debug)
-        if time.time() < time_budget_deadline:
-            print("\n--- Phase 2: Reducing child edges ---")
+        if phase_budgets[2] > 0:
+            print(f"\n--- Phase 2: Reducing child edges (budget: {phase_budgets[2]}s) ---")
+            time_budget_deadline = time.time() + phase_budgets[2]
             start = time.time()
             values_dict = ddmin_children(
                 original, values_dict, repo_root, tmpdir, code_file,
@@ -895,10 +911,13 @@ def main():
             accepted_values_dict = deepcopy(values_dict)
             n2, c2, d2 = count_nodes_children_dests(values_dict)
             print(f"--- Phase 2 finished. Size: {n2} nodes, {c2} children, {d2} dests. Took {time.time()-start:.1f}s ---")
+        else:
+            print("\n--- Phase 2: Skipped (budget is 0) ---")
 
         # Phase 3: Delete dests within child edges (delta-debug)
-        if time.time() < time_budget_deadline:
-            print("\n--- Phase 3: Reducing destinations ---")
+        if phase_budgets[3] > 0:
+            print(f"\n--- Phase 3: Reducing destinations (budget: {phase_budgets[3]}s) ---")
+            time_budget_deadline = time.time() + phase_budgets[3]
             start = time.time()
             values_dict = ddmin_dests(
                 original, values_dict, repo_root, tmpdir, code_file,
@@ -907,10 +926,13 @@ def main():
             accepted_values_dict = deepcopy(values_dict)
             n3, c3, d3 = count_nodes_children_dests(values_dict)
             print(f"--- Phase 3 finished. Size: {n3} nodes, {c3} children, {d3} dests. Took {time.time()-start:.1f}s ---")
+        else:
+            print("\n--- Phase 3: Skipped (budget is 0) ---")
 
         # Phase 4: Delete LLM tokens from edges (delta-debug)
-        if time.time() < time_budget_deadline:
-            print("\n--- Phase 4: Reducing LLM tokens in edges ---")
+        if phase_budgets[4] > 0:
+            print(f"\n--- Phase 4: Reducing LLM tokens in edges (budget: {phase_budgets[4]}s) ---")
+            time_budget_deadline = time.time() + phase_budgets[4]
             start = time.time()
             values_dict = ddmin_llm_tokens(
                 original, values_dict, repo_root, tmpdir, code_file,
@@ -919,35 +941,43 @@ def main():
             accepted_values_dict = deepcopy(values_dict)
             n4, c4, d4 = count_nodes_children_dests(values_dict)
             print(f"--- Phase 4 finished. Size: {n4} nodes, {c4} children, {d4} dests. Took {time.time()-start:.1f}s ---")
+        else:
+            print("\n--- Phase 4: Skipped (budget is 0) ---")
 
         # Phase 5: Deterministic single-sweep pruning by token reachability
-        if time.time() < time_budget_deadline:
-            print("\n--- Phase 5: Sweeping unreachable tokens (forward/backward reachability) ---")
-            start = time.time()
-            swept_values_dict, sweep_stats = sweep_prune_llm_tokens(original, values_dict)
-            
-            # Verify this aggressive, un-checked reduction
-            sweep_cand_path = write_candidate_constraint(tmpdir, original, swept_values_dict)
-            ok, _, _ = run_benchmarks_and_has_mismatch(
-                repo_root, sweep_cand_path, code_file, baseline_model, candidate_model
-            )
+        if phase_budgets[5] > 0:
+            print(f"\n--- Phase 5: Sweeping unreachable tokens (forward/backward reachability) (budget: {phase_budgets[5]}s) ---")
+            time_budget_deadline = time.time() + phase_budgets[5]
+            if time.time() < time_budget_deadline:
+                start = time.time()
+                swept_values_dict, sweep_stats = sweep_prune_llm_tokens(original, values_dict)
+                
+                # Verify this aggressive, un-checked reduction
+                sweep_cand_path = write_candidate_constraint(tmpdir, original, swept_values_dict)
+                ok, _, _ = run_benchmarks_and_has_mismatch(
+                    repo_root, sweep_cand_path, code_file, baseline_model, candidate_model
+                )
 
-            if ok:
-                print("  Sweep reduction is valid and preserves mismatch.")
-                values_dict = swept_values_dict
-                accepted_values_dict = deepcopy(values_dict)
-                n_after, c_after, d_after = count_nodes_children_dests(values_dict)
-                took = time.time() - start
-                print(f"--- Phase 5 finished. "
-                      f"Tokens removed: {sweep_stats.get('tokens_removed', 0)}, "
-                      f"Edges removed: {sweep_stats.get('edges_removed', 0)}. "
-                      f"Size: {n_after} nodes, {c_after} children, {d_after} dests. "
-                      f"Took {took:.1f}s ---")
+                if ok:
+                    print("  Sweep reduction is valid and preserves mismatch.")
+                    values_dict = swept_values_dict
+                    accepted_values_dict = deepcopy(values_dict)
+                    n_after, c_after, d_after = count_nodes_children_dests(values_dict)
+                    took = time.time() - start
+                    print(f"--- Phase 5 finished. "
+                          f"Tokens removed: {sweep_stats.get('tokens_removed', 0)}, "
+                          f"Edges removed: {sweep_stats.get('edges_removed', 0)}. "
+                          f"Size: {n_after} nodes, {c_after} children, {d_after} dests. "
+                          f"Took {took:.1f}s ---")
+                else:
+                    print("  Sweep reduction was unsound (did not preserve mismatch). Discarding.")
+                    n_after, c_after, d_after = count_nodes_children_dests(values_dict)
+                    took = time.time() - start
+                    print(f"--- Phase 5 finished. No changes applied. Size: {n_after} nodes, {c_after} children, {d_after} dests. Took {took:.1f}s ---")
             else:
-                print("  Sweep reduction was unsound (did not preserve mismatch). Discarding.")
-                n_after, c_after, d_after = count_nodes_children_dests(values_dict)
-                took = time.time() - start
-                print(f"--- Phase 5 finished. No changes applied. Size: {n_after} nodes, {c_after} children, {d_after} dests. Took {took:.1f}s ---")
+                print("--- Phase 5: Skipped due to time budget exceeded before start ---")
+        else:
+            print("\n--- Phase 5: Skipped (budget is 0) ---")
 
         # Final write
         final_candidate_path = write_candidate_constraint(tmpdir, original, values_dict)
