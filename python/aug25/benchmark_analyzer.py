@@ -7,6 +7,8 @@ import warnings
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from matplotlib.colors import to_rgba
+import colorsys
 
 
 # Suppress noisy FutureWarning from seaborn/pandas
@@ -253,7 +255,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
     # 3. Line plot of commit timings per token
     if not df_commit.empty:
         plt.figure(figsize=(15, 8))
-        ax_commit = sns.lineplot(data=df_commit, x='token_index', y='time_sec', hue='model', linewidth=0.7)
+        ax_commit = sns.lineplot(data=df_commit, x='token_index', y='time_sec', hue='model', alpha=0.7, linewidth=0.7)
 
         ax_commit.set_xlabel('Token Index in Sequence')
         ax_commit.set_ylabel('Time (seconds)')
@@ -286,14 +288,39 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
             df_commit_copy[['model', 'token_index', 'time_sec', 'operation']]
         ], ignore_index=True)
 
+        def adjust_lightness(color, amount=0.7):
+            try:
+                c = colorsys.rgb_to_hls(*to_rgba(color)[:3])
+                return colorsys.hls_to_rgb(c[0], max(0, min(1, amount * c[1])), c[2])
+            except Exception:
+                return color
+
+        df_combined['hue_key'] = df_combined['model'] + " | " + df_combined['operation']
+        unique_models = model_order
+        base_colors = sns.color_palette(n_colors=len(unique_models))
+
+        custom_palette = {}
+        hue_order_list = []
+        for i, model in enumerate(unique_models):
+            base_color = base_colors[i]
+            get_mask_key = f"{model} | get_mask"
+            commit_key = f"{model} | commit"
+            hue_order_list.extend([get_mask_key, commit_key])
+            custom_palette[get_mask_key] = base_color
+            custom_palette[commit_key] = adjust_lightness(base_color)
+
         plt.figure(figsize=(15, 8))
         ax_combined = sns.lineplot(
             data=df_combined,
             x='token_index',
             y='time_sec',
-            hue='model',
+            hue='hue_key',
+            hue_order=hue_order_list,
             style='operation',
-            linewidth=0.8
+            style_order=['get_mask', 'commit'],
+            palette=custom_palette,
+            linewidth=0.7,
+            alpha=0.7
         )
         ax_combined.set_xlabel('Token Index in Sequence')
         ax_combined.set_ylabel('Time (seconds)')
@@ -377,7 +404,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
         df_total['time_sec'] = df_total['time_sec_get_mask'] + df_total['time_sec_commit']
 
         plt.figure(figsize=(15, 8))
-        ax_total = sns.lineplot(data=df_total, x='token_index', y='time_sec', hue='model', linewidth=0.7)
+        ax_total = sns.lineplot(data=df_total, x='token_index', y='time_sec', hue='model', alpha=0.7, linewidth=0.7)
         ax_total.set_xlabel('Token Index in Sequence')
         ax_total.set_ylabel('Total Time (seconds)')
         ax_total.grid(True, which='both', linestyle='--', linewidth=0.5)
