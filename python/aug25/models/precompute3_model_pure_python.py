@@ -170,6 +170,7 @@ class Model(GraphProvider):
     internal_to_original_map: Dict[int, Set[int]]
     all_internal_llm_tokens_bitset: LLMTokenSet
     all_terminals_bitset: TerminalIdSet
+    all_original_llm_tokens_bitset: TerminalIdSet
     ignore_terminal_id: Optional[int]
 
     # State
@@ -316,6 +317,13 @@ class Model(GraphProvider):
             all_internal = constraint.all_internal_llm_tokens_bitset()
             all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
 
+        # Build the universe of original LLM tokens (for optional early exits and diagnostics)
+        original_token_ids_set: Set[int] = set()
+        for _itok, oset in internal_to_original_map.items():
+            if oset:
+                original_token_ids_set.update(oset)
+        all_original_llm_tokens_bitset = RangeSet.from_indices(sorted(original_token_ids_set)) if original_token_ids_set else RangeSet.empty()
+
         model = Model(
             arena=arena,
             roots_map=roots_map,
@@ -331,6 +339,7 @@ class Model(GraphProvider):
             internal_to_original_map=internal_to_original_map,
             all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
             all_terminals_bitset=all_terminals_bitset,
+            all_original_llm_tokens_bitset=all_original_llm_tokens_bitset,
             ignore_terminal_id=ignore_terminal_id,
             state=state,
         )
@@ -698,15 +707,20 @@ class Model(GraphProvider):
             stats.start('get_mask.zombie_check')
             a_node = arena.get(node)
             node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-            # We only care about tokens that are not yet in the final mask.
-            potential_new_tokens = node_llm_bv_union.difference(final_mask)
-            if potential_new_tokens.is_empty():
+            # Fast pre-check: if the node's union is entirely covered by final_mask, skip
+            if node_llm_bv_union.issubset(final_mask):
                 stats.inc('get_mask.zombie_check.skipped_nodes_no_potential')
                 stats.stop('get_mask.zombie_check')
                 continue
 
+            # Compute the remaining allowed mask for this node's GSS (once)
             gss_mask_acc = gss_node.reduce_acc()
-            if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
+            allowed_remaining: Optional[LLMTokenSet] = None
+            if gss_mask_acc:
+                # Tokens still allowed by this GSS that are not already in final_mask
+                allowed_remaining = gss_mask_acc.llm_mask.difference(final_mask)
+            # If we have an allowed_remaining and it doesn't overlap the node union, skip
+            if allowed_remaining is not None and allowed_remaining.intersection(node_llm_bv_union).is_empty():
                 stats.inc('get_mask.zombie_check.skipped_nodes_no_overlap')
                 stats.stop('get_mask.zombie_check')
                 continue
@@ -718,8 +732,13 @@ class Model(GraphProvider):
             stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
             stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
             for (pop, llm_bv), dests in edges:
-                llm_bv = llm_bv.difference(final_mask)
-                if llm_bv.is_empty():
+                # Early edge-level zombie pruning:
+                # Use the node-level allowed_remaining when available to avoid heavy pop/apply work.
+                if gss_mask_acc is not None and allowed_remaining is not None:
+                    edge_mask = allowed_remaining.intersection(llm_bv)
+                else:
+                    edge_mask = llm_bv.difference(final_mask)
+                if edge_mask.is_empty():
                     stats.inc('get_mask.traversal.edge.llm_bv_empty')
                     continue
 
@@ -741,7 +760,7 @@ class Model(GraphProvider):
                         stats.inc('get_mask.intersect_and_prune.memo_hits')
                         return acc_memo[acc]
                     stats.start('get_mask.intersect_and_prune.intersection')
-                    new_mask = acc.llm_mask.intersection(llm_bv)
+                    new_mask = acc.llm_mask.intersection(edge_mask)
                     stats.stop('get_mask.intersect_and_prune.intersection')
 
                     if new_mask.is_empty():
@@ -763,17 +782,22 @@ class Model(GraphProvider):
                     stats.inc('get_mask.traversal.edge.popped_pruned_empty')
                     continue
 
-                if popped.reduce_acc().is_empty():
+                # Quick reject if (still) no allowed tokens remain after applying the edge mask
+                reduced_after_edge = popped.reduce_acc()
+                if (not reduced_after_edge) or reduced_after_edge.is_empty():
                     stats.inc('get_mask.traversal.edge.popped_reduced_empty')
                     continue
+
+                # Cache peek() once per edge group; reuse for all dests
+                stats.start('get_mask.main_loop.edge.peek_and_filter')
+                peeked = popped.peek()
+                stats.stop('get_mask.main_loop.edge.peek_and_filter')
 
                 for dest_idx, state_bv in dests:
                     stats.inc('get_mask.traversal.dests_traversed')
 
-                    stats.start('get_mask.main_loop.edge.peek_and_filter')
-                    peeked = popped.peek()
+                    # Filter the heads using the precomputed peek list
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-                    stats.stop('get_mask.main_loop.edge.peek_and_filter')
 
                     if not values_to_keep:
                         continue
@@ -787,10 +811,34 @@ class Model(GraphProvider):
                         stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
                         continue
 
-                    if child_gss.reduce_acc().is_empty():
+                    # Pre-enqueue zombie avoidance for child: ensure it can contribute
+                    child_acc = child_gss.reduce_acc()
+                    if (not child_acc) or child_acc.is_empty():
+                        continue
+                    child_allowed_remaining = child_acc.llm_mask.difference(final_mask)
+                    if child_allowed_remaining.is_empty():
+                        # Child cannot contribute anything new to final_mask
                         continue
 
                     d: NodeID = int(dest_idx)
+                    child_node = arena.get(d)
+                    if child_node:
+                        # If child is an end node, enqueue only if it can add new tokens
+                        if child_node.clean_end:
+                            pass  # child_allowed_remaining.non-empty already checked
+                        else:
+                            # For non-end nodes, ensure the subtree has any potential
+                            child_union = child_node.llm_bv_union
+                            # If child's union is fully covered by final_mask, skip
+                            if child_union.issubset(final_mask):
+                                continue
+                            # If child cannot overlap with its edge union beyond final_mask, skip
+                            if child_allowed_remaining.intersection(child_union).is_empty():
+                                continue
+                    else:
+                        # No node data -> nothing to contribute
+                        continue
+
                     if d in values:
                         stats.inc('get_mask.traversal.edge.gss_merges')
                         stats.start('get_mask.main_loop.edge.gss_merge')
@@ -804,20 +852,29 @@ class Model(GraphProvider):
         stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
 
         stats.start('get_mask.final_conversion')
-        # Convert internal mask back to original IDs
-        original_indices: List[int] = []
+        # Convert internal mask back to original IDs (deduplicate first via Python set)
+        original_indices_set: Set[int] = set()
         stats.start('get_mask.final_conversion.to_indices')
         final_indices = final_mask.to_indices()
         stats.stop('get_mask.final_conversion.to_indices')
 
         stats.inc('get_mask.final_mask.internal_indices', len(final_indices))
         for i in final_indices:
-            if i in self.internal_to_original_map:
-                original_indices.extend(list(self.internal_to_original_map[i]))
+            oset = self.internal_to_original_map.get(i)
+            if oset:
+                # Deduplicate aggressively: original space is typically far smaller
+                original_indices_set.update(oset)
 
         stats.start('get_mask.final_conversion.from_indices')
-        result = RangeSet.from_indices(original_indices)
+        # Sort once and build RangeSet; much faster than building from a huge list with duplicates
+        result = RangeSet.from_indices(sorted(original_indices_set)) if original_indices_set else RangeSet.empty()
         stats.stop('get_mask.final_conversion.from_indices')
+
+        # Optional: track unique original token count
+        try:
+            Stats.get().inc('get_mask.final_conversion.original_indices_unique', len(original_indices_set))
+        except Exception:
+            pass
 
         stats.stop('get_mask.final_conversion')
 
