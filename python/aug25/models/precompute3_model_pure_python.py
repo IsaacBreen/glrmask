@@ -366,18 +366,22 @@ class Model(GraphProvider):
                 # Prune condition
                 disallowed_terminals_map = acc.terminals_union
                 for tsid, matched_bv in terminals_map.items():
-                    disallowed_for_state = disallowed_terminals_map.get(tsid, RangeSet.empty())
-                    if not matched_bv.intersection(disallowed_for_state).is_empty():
+                    disallowed_for_state = disallowed_terminals_map.get(tsid)
+                    if disallowed_for_state and not matched_bv.intersection(disallowed_for_state).is_empty():
                         return None
 
                 # Map
                 old_map = acc.terminals_union
-                new_bvs: Dict[int, TerminalIdSet] = collections.defaultdict(RangeSet.empty)
+                new_bvs: Dict[int, TerminalIdSet] = {}
                 for old_sid, new_sid in state_map.items():
-                    bv_source = old_map.get(old_sid, RangeSet.empty())
-                    new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
+                    bv_source = old_map.get(old_sid)
+                    if bv_source and not bv_source.is_empty():
+                        if new_sid in new_bvs:
+                            new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
+                        else:
+                            new_bvs[new_sid] = bv_source
 
-                return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
+                return PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
 
             processed_gss = gss.apply_and_prune(mutator)
             if not processed_gss.is_empty():
