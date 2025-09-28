@@ -354,7 +354,7 @@ class Model(GraphProvider):
         token_bytes = self.id_to_token[token_id]
         print(f"\n--- Committing token {token_id}: {token_bytes!r} ---")
         print(f"Initial state: {len(self.state)} tokenizer states, "
-              f"total GSS heads: {sum(gss.size() for gss in self.state.values())}")
+              f"total GSS heads: {sum(len(gss.peek()) for gss in self.state.values())}")
 
         # Build tokenizer maps
         terminals_map: Dict[int, TerminalIdSet] = {}
@@ -441,12 +441,12 @@ class Model(GraphProvider):
         merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
 
         print(f"Final state: {len(merged_states)} tokenizer states, "
-              f"total GSS heads: {sum(gss.size() for gss in merged_states.values())}")
+              f"total GSS heads: {sum(len(gss.peek()) for gss in merged_states.values())}")
         self.state = merged_states
 
     @profile
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-        print(f"  Processing terminal {terminal_id} for GSS of size {gss.size()}")
+        print(f"  Processing terminal {terminal_id} for GSS of size {len(gss.peek())}")
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
         for state_id in gss.peek():
             heads_by_state[state_id].append(gss.isolate(state_id))
@@ -491,7 +491,7 @@ class Model(GraphProvider):
 
         final_gss = GSS.merge_many(shifted_gsses)
         print(f"  Finished processing terminal {terminal_id}. "
-              f"Shifted GSSs: {len(shifted_gsses)}, final merged size: {final_gss.size()}")
+              f"Shifted GSSs: {len(shifted_gsses)}, final merged size: {len(final_gss.peek())}")
         return final_gss
     def get_mask(self) -> LLMTokenSet:
         """
