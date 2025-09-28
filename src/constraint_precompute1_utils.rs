@@ -13,10 +13,10 @@ fn count_total_ranges_trie1(
     let mut count = 0;
     for n in all_nodes {
         let g = n.read(trie1_god).expect("read");
-        count += g.value.live_tokens.to_ranges().len();
+        count += g.value.live_tokens.inner().ranges_len();
         for (_ek, dm) in g.children() {
             for (_dst, bv) in dm {
-                count += bv.to_ranges().len();
+                count += bv.inner().ranges_len();
             }
         }
     }

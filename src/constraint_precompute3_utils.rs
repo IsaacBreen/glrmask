@@ -18,9 +18,9 @@ fn count_total_ranges_trie3(
     let mut count = 0;
     for n in all_nodes {
         let g = n.read(trie3_god).expect("read");
-        count += g.value.live_tokens.to_ranges().len();
+        count += g.value.live_tokens.inner().ranges_len();
         for ((_pop, llm_bv), _dm) in g.children() {
-            count += llm_bv.to_ranges().len();
+            count += llm_bv.inner().ranges_len();
         }
     }
     count
