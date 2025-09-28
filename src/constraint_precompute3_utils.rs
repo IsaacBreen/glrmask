@@ -160,7 +160,7 @@ pub fn merge_equivalent_llm_tokens_trie3(
     let tokens_after = sig_map.len();
     let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
     let mut merged_count = 0;
-    for (_sig, group) in tqdm!(sig_map, desc = "Trie3 Merge Tokens (Build Map)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
+    for (_sig, group) in tqdm!(sig_map.into_iter(), desc = "Trie3 Merge Tokens (Build Map)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
         if group.len() <= 1 { continue; }
         let rep = *group.iter().min().unwrap();
         for t in group {
@@ -277,14 +277,14 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
 
     // Update StageVocab under permutation
     let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-    for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone(), desc = "Trie3 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
+    for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie3 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
         if let Some(new_id) = old_to_new.get(&old_id) {
             new_internal_to_original.insert(*new_id, setv);
         }
     }
     stage_vocab.internal_to_original = new_internal_to_original;
     let mut new_original_to_internal: BTreeMap<usize, usize> = BTreeMap::new();
-    for (orig, old_internal) in tqdm!(stage_vocab.original_to_internal.clone(), desc = "Trie3 Reorder (Vocab 2)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
+    for (orig, old_internal) in tqdm!(stage_vocab.original_to_internal.clone().into_iter(), desc = "Trie3 Reorder (Vocab 2)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
         if let Some(new_internal) = old_to_new.get(&old_internal) {
             new_original_to_internal.insert(orig, *new_internal);
         }

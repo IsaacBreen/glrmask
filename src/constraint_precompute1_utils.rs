@@ -233,14 +233,14 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
 
     // Update stage vocab (pure permutation)
     let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-    for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone(), desc = "Trie1 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
+    for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie1 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
         if let Some(new_id) = old_to_new.get(&old_id) {
             new_internal_to_original.insert(*new_id, setv);
         }
     }
     stage_vocab.internal_to_original = new_internal_to_original;
     let mut new_original_to_internal: BTreeMap<usize, usize> = BTreeMap::new();
-    for (orig, old_internal) in tqdm!(stage_vocab.original_to_internal.clone(), desc = "Trie1 Reorder (Vocab 2)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
+    for (orig, old_internal) in tqdm!(stage_vocab.original_to_internal.clone().into_iter(), desc = "Trie1 Reorder (Vocab 2)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
         if let Some(new_internal) = old_to_new.get(&old_internal) {
             new_original_to_internal.insert(orig, *new_internal);
         }
