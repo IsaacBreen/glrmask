@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover
         return x
 
 from ..common_interface import GraphProvider
+from ..stats import Stats
 # from ..common_interface import RangeSet
 from ..range_set.py_range_set import PyRangeSet as RangeSet
 # from ..range_set.bitset_range_set import BitsetRangeSet as RangeSet
@@ -24,6 +25,28 @@ from ..range_set.py_range_set import PyRangeSet as RangeSet
 import _sep1 as ffi
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
+
+
+# --- Monkey-patch RangeSet to collect stats on union/intersection ---
+# This is to fulfill the request of tracking ffi.Bitset.union and intersection calls.
+# Since the code was refactored to use a pure Python RangeSet, we track its methods instead.
+_original_rangeset_union = RangeSet.union
+_original_rangeset_intersection = RangeSet.intersection
+
+def _patched_union(self, other: "RangeSet") -> "RangeSet":
+    """Patched version of RangeSet.union that increments a stats counter."""
+    Stats.get().inc('bitset.union.calls')
+    return _original_rangeset_union(self, other)
+
+def _patched_intersection(self, other: "RangeSet") -> "RangeSet":
+    """Patched version of RangeSet.intersection that increments a stats counter."""
+    Stats.get().inc('bitset.intersection.calls')
+    return _original_rangeset_intersection(self, other)
+
+# Apply the patches
+RangeSet.union = _patched_union
+RangeSet.intersection = _patched_intersection
+# --- End of monkey-patch ---
 
 
 NodeID = int
@@ -146,6 +169,7 @@ class Model(GraphProvider):
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
+        Stats.get().reset()
         data = json.loads(s)
         roots_map_raw = data["precomputed3"]
         arena_json = data["trie3_god"]
@@ -352,9 +376,13 @@ class Model(GraphProvider):
 
     @profile
     def commit(self, token_id: int):
+        stats = Stats.get()
+        stats.start('commit.total')
         token_bytes = self.id_to_token[token_id]
 
         # Build tokenizer maps
+        stats.start('commit.build_tokenizer_maps')
+        stats.inc('commit.tokenizer_states_in', len(self.state))
         terminals_map: Dict[int, TerminalIdSet] = {}
         state_map: Dict[int, int] = {}
         for tokenizer_sid in self.state.keys():
@@ -364,8 +392,10 @@ class Model(GraphProvider):
             matched_terminals = [terminal_id for terminal_id, _ in matches]
             terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
 
+        stats.stop('commit.build_tokenizer_maps')
         # Prune and map per-state GSS in a single pass
         temp_states: Dict[int, GSS] = {}
+        stats.start('commit.prune_and_map_gss')
         for tokenizer_sid, gss in self.state.items():
             def mutator(acc: PyAcc) -> Optional[PyAcc]:
                 # Prune condition
@@ -392,10 +422,12 @@ class Model(GraphProvider):
             if not processed_gss.is_empty():
                 # The GSS is still associated with the old tokenizer_sid for the next step
                 temp_states[tokenizer_sid] = processed_gss
+        stats.stop('commit.prune_and_map_gss')
 
         current_state_for_processing = temp_states
 
         new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
+        stats.start('commit.main_loop')
         q = collections.deque()
         for tokenizer_sid, gss in current_state_for_processing.items():
             q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
@@ -430,28 +462,40 @@ class Model(GraphProvider):
 
             if end_state is not None:
                 new_states[end_state].append(gss)
+        stats.stop('commit.main_loop')
 
+        stats.start('commit.merge_states')
         merged_states = {
             sid: GSS.merge_many(gss_list)
             for sid, gss_list in new_states.items()
             if gss_list
         }
         merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
+        stats.stop('commit.merge_states')
 
         memo = {}
         merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
 
+        stats.inc('commit.tokenizer_states_out', len(merged_states))
         self.state = merged_states
+        stats.stop('commit.total')
 
     @profile
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+        stats = Stats.get()
+        stats.start('_process_token.total')
+        stats.inc('_process_token.calls')
+        stats.inc('_process_token.initial_heads', len(gss.peek()))
+
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
         for state_id in gss.peek():
             heads_by_state[state_id].append(gss.isolate(state_id))
 
         shifted_gsses: List[GSS] = []
+        reduces_handled = 0
 
         while heads_by_state:
+            stats.inc('_process_token.loop_iterations')
             state_id, state_gsss = heads_by_state.popitem()
             state_gss = GSS.merge_many(state_gsss)
             row = self.parser_table.table.get(state_id)
@@ -462,9 +506,11 @@ class Model(GraphProvider):
                 continue
 
             def handle_shift(shift_to_state_id, gss_to_shift):
+                stats.inc('_process_token.shifts')
                 shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
 
             def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
+                stats.inc('_process_token.reduces')
                 popped_gss = gss_to_reduce
                 for _ in range(reduce_action.len):
                     popped_gss = popped_gss.pop()
@@ -472,20 +518,24 @@ class Model(GraphProvider):
                     goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
                     goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
                     heads_by_state[goto_state_id].append(goto_gss)
+                    stats.inc('_process_token.reduce.new_heads')
 
             if isinstance(action, int):
                 handle_shift(action, state_gss)
             elif isinstance(action, Reduce):
                 handle_reduce(action, state_gss)
             elif isinstance(action, Split):
+                stats.inc('_process_token.splits')
                 if action.shift is not None:
                     handle_shift(action.shift, state_gss)
                 for length, nts in action.reduces.items():
                     for nt_id, pids in nts.items():
                         handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
-        final_gss = GSS.merge_many(shifted_gsses)
-        return final_gss
+        result = GSS.merge_many(shifted_gsses)
+        stats.inc('_process_token.final_heads', len(result.peek()))
+        stats.stop('_process_token.total')
+        return result
     def get_mask(self) -> LLMTokenSet:
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
@@ -497,7 +547,10 @@ class Model(GraphProvider):
         - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
-        state_map: Dict[int, GSS] = self.state.copy()
+        stats = Stats.get()
+        stats.start('get_mask.total')
+        state_map: Dict[int, GSS] = self.state
+        stats.inc('get_mask.initial_tokenizer_states', len(state_map))
 
         all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
         final_mask: LLMTokenSet = RangeSet.empty()
@@ -515,36 +568,73 @@ class Model(GraphProvider):
         pmc: Dict[int, Dict[int, LLMTokenSet]] = self.possible_matches_cache or {}
         max_state: int = self.tokenizer_max_state
 
+        # --- Initial GSS Stats ---
+        stats.start('get_mask.initial_stats')
+        all_initial_accs = set()
+        for gss in state_map.values():
+            # We assume gss.get_all_accs() exists for stats gathering.
+            accs = getattr(gss, 'get_all_accs', lambda: [])()
+            all_initial_accs.update(accs)
+            stats.inc('get_mask.initial.gss_heads.sum', len(gss.peek()))
+        stats.inc('get_mask.initial.unique_accs', len(all_initial_accs))
+        for acc in all_initial_accs:
+            stats.inc('get_mask.initial.terminals_union_size.sum', len(acc.terminals_union))
+        stats.stop('get_mask.initial_stats')
+
+        stats.start('get_mask.seeding')
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
         def initialize_acc(acc: PyAcc) -> PyAcc:
+            stats.inc('get_mask.initialize_acc.calls')
+            stats.start('get_mask.initialize_acc.total')
             # Compute allowed LLM tokens from disallowed terminals for this accumulator
             disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
             disallowed_map = acc.terminals_union
+            stats.inc('get_mask.initialize_acc.disallowed_map_size.sum', len(disallowed_map))
 
             for tsid, disallowed_terminals in disallowed_map.items():
+                stats.inc('get_mask.initialize_acc.disallowed_terminals_loops')
                 if tsid > max_state or tsid not in pmc:
                     continue
                 terminals_to_llm = pmc[tsid]
-                for terminal_id in disallowed_terminals.to_indices():
+
+                stats.start('get_mask.initialize_acc.to_indices')
+                indices = disallowed_terminals.to_indices()
+                stats.stop('get_mask.initialize_acc.to_indices')
+
+                stats.inc('get_mask.initialize_acc.disallowed_terminals_count.sum', len(indices))
+                for terminal_id in indices:
+                    stats.inc('get_mask.initialize_acc.disallowed_terminals_inner_loops')
                     if terminal_id in terminals_to_llm:
+                        stats.start('get_mask.initialize_acc.union')
                         disallowed_llm_mask = disallowed_llm_mask.union(
                             terminals_to_llm[terminal_id]
                         )
+                        stats.stop('get_mask.initialize_acc.union')
 
+            stats.start('get_mask.initialize_acc.difference')
             allowed_mask = all_ones.difference(disallowed_llm_mask)
+            stats.stop('get_mask.initialize_acc.difference')
+
+            stats.stop('get_mask.initialize_acc.total')
             return PyAcc(
                 terminals_union={},  # consume
                 llm_mask=allowed_mask,
             )
 
-        state_map = {sid: gss.apply(initialize_acc) for sid, gss in state_map.items()}
-
         for sid, gss in state_map.items():
+            stats.inc('get_mask.seeding.gss_loops')
             r: NodeID = roots_map[int(sid)]
+
+            stats.start('get_mask.seeding.gss.apply')
+            gss_initialized: GSS = gss.apply(initialize_acc)
+            stats.stop('get_mask.seeding.gss.apply')
+
             if r in values:
-                values[r] = values[r].merge(gss)
+                stats.start('get_mask.seeding.gss.merge')
+                values[r] = values[r].merge(gss_initialized)
+                stats.stop('get_mask.seeding.gss.merge')
             else:
-                values[r] = gss
+                values[r] = gss_initialized
 
             d: int = max_depth[r]
             if r not in enqueued_nodes:
@@ -552,54 +642,96 @@ class Model(GraphProvider):
                 hp(depth_heap, (-d, r))
 
         def enqueue(d: int, n: NodeID) -> None:
+            stats.inc('get_mask.traversal.enqueues')
             if n not in enqueued_nodes:
                 enqueued_nodes.add(n)
                 hp(depth_heap, (-d, n))
 
+        def dequeue() -> Tuple[int, int]:
+            neg_d, n = hpop(depth_heap)
+            return -neg_d, n
+        stats.stop('get_mask.seeding')
+
         # Main loop
+        stats.start('get_mask.main_loop')
+        max_depth_reached = 0
+        visited_nodes = set()
         while depth_heap:
-            neg_depth, node = hpop(depth_heap)
+            depth, node = dequeue()
+            max_depth_reached = max(max_depth_reached, depth)
+            stats.inc('get_mask.traversal.depth_heap.pops')
+            stats.inc('get_mask.traversal.nodes_processed')
+            visited_nodes.add(node)
             gss_node: GSS = values.pop(node)
             enqueued_nodes.remove(node)
+            stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
 
             # End-node handling: just union the allowed LLM tokens
             if is_end(node):
+                stats.inc('get_mask.traversal.end_nodes')
+                stats.start('get_mask.main_loop.end_node.reduce_acc')
                 reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+                stats.stop('get_mask.main_loop.end_node.reduce_acc')
                 if reduced_acc:
+                    stats.start('get_mask.main_loop.end_node.final_mask_union')
                     final_mask = final_mask.union(reduced_acc.llm_mask)
+                    stats.stop('get_mask.main_loop.end_node.final_mask_union')
 
-            # Zombie traversal avoidance
+            # Zombie traversal avoidance: if this node's edges can't possibly add
+            # to the final mask given the current GSS mask, skip it.
+            stats.start('get_mask.zombie_check')
             a_node = arena.get(node)
             node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
+            # We only care about tokens that are not yet in the final mask.
             potential_new_tokens = node_llm_bv_union.difference(final_mask)
             if potential_new_tokens.is_empty():
+                stats.inc('get_mask.zombie_check.skipped_nodes_no_potential')
+                stats.stop('get_mask.zombie_check')
                 continue
 
             gss_mask_acc = gss_node.reduce_acc()
             if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
+                stats.inc('get_mask.zombie_check.skipped_nodes_no_overlap')
+                stats.stop('get_mask.zombie_check')
                 continue
+            stats.stop('get_mask.zombie_check')
 
             # Traverse edges and propagate masks
             a_node = arena.get(node)
             edges = a_node.children if a_node else []
+            stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
+            stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
             for (pop, llm_bv), dests in edges:
                 llm_bv = llm_bv.difference(final_mask)
                 if llm_bv.is_empty():
+                    stats.inc('get_mask.traversal.edge.llm_bv_empty')
                     continue
 
+                stats.inc('get_mask.traversal.edges_traversed')
+                stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
+                stats.inc('get_mask.data.llm_bv_on_edge.len.sum', len(llm_bv))
+                stats.start('get_mask.main_loop.edge.popn')
                 popped: GSS = gss_node.popn(pop)
+                stats.stop('get_mask.main_loop.edge.popn')
                 if popped.is_empty():
+                    stats.inc('get_mask.traversal.edge.popped_empty')
                     continue
 
-                peeked = popped.peek()
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                 acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
 
                 def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                    stats.inc('get_mask.intersect_and_prune.calls')
                     if acc in acc_memo:
+                        stats.inc('get_mask.intersect_and_prune.memo_hits')
                         return acc_memo[acc]
+                    stats.start('get_mask.intersect_and_prune.intersection')
                     new_mask = acc.llm_mask.intersection(llm_bv)
+                    stats.stop('get_mask.intersect_and_prune.intersection')
+                    stats.inc('get_mask.data.llm_mask_after_intersect.len.sum', len(new_mask))
+
                     if new_mask.is_empty():
+                        stats.inc('get_mask.intersect_and_prune.pruned_accs')
                         result = None
                     else:
                         result = PyAcc(
@@ -609,44 +741,76 @@ class Model(GraphProvider):
                     acc_memo[acc] = result
                     return result
 
+                stats.start('get_mask.main_loop.edge.apply_and_prune')
                 popped = popped.apply_and_prune(intersect_and_prune)
+                stats.stop('get_mask.main_loop.edge.apply_and_prune')
+
                 if popped.is_empty():
+                    stats.inc('get_mask.traversal.edge.popped_pruned_empty')
                     continue
 
-                reduced = popped.reduce_acc()
-                if not reduced or reduced.is_empty():
+                if popped.reduce_acc().is_empty():
+                    stats.inc('get_mask.traversal.edge.popped_reduced_empty')
                     continue
 
                 for dest_idx, state_bv in dests:
+                    stats.inc('get_mask.traversal.dests_traversed')
+                    stats.inc('get_mask.data.state_bv_on_edge.len.sum', len(state_bv))
+
+                    stats.start('get_mask.main_loop.edge.peek_and_filter')
+                    peeked = popped.peek()
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                    stats.stop('get_mask.main_loop.edge.peek_and_filter')
 
                     if not values_to_keep:
                         continue
 
+                    stats.start('get_mask.main_loop.edge.isolate_many')
                     child_gss = popped.isolate_many(values_to_keep)
+                    stats.stop('get_mask.main_loop.edge.isolate_many')
+
+                    stats.inc('get_mask.intersect_and_prune.memo_size.sum', len(acc_memo))
                     if child_gss.is_empty():
+                        stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
                         continue
 
-                    reduced_child = child_gss.reduce_acc()
-                    if not reduced_child or reduced_child.is_empty():
+                    if child_gss.reduce_acc().is_empty():
                         continue
 
                     d: NodeID = int(dest_idx)
                     if d in values:
+                        stats.inc('get_mask.traversal.edge.gss_merges')
+                        stats.start('get_mask.main_loop.edge.gss_merge')
                         values[d] = values[d].merge(child_gss)
+                        stats.stop('get_mask.main_loop.edge.gss_merge')
                     else:
                         values[d] = child_gss
                     enqueue(max_depth[d], d)
+        stats.stop('get_mask.main_loop')
+        stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
+        stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
 
-
+        stats.start('get_mask.final_conversion')
         # Convert internal mask back to original IDs
         original_indices: List[int] = []
-        for i in final_mask.to_indices():
+        stats.start('get_mask.final_conversion.to_indices')
+        final_indices = final_mask.to_indices()
+        stats.stop('get_mask.final_conversion.to_indices')
+
+        stats.inc('get_mask.final_mask.internal_indices', len(final_indices))
+        for i in final_indices:
             if i in self.internal_to_original_map:
                 original_indices.extend(list(self.internal_to_original_map[i]))
+        stats.inc('get_mask.final_mask.original_indices', len(original_indices))
 
+        stats.start('get_mask.final_conversion.from_indices')
+        result = RangeSet.from_indices(original_indices)
+        stats.stop('get_mask.final_conversion.from_indices')
 
-        return RangeSet.from_indices(original_indices)
+        stats.stop('get_mask.final_conversion')
+
+        stats.stop('get_mask.total')
+        return result
 
     # ===========================
     # Optimization/conversion API
@@ -2023,3 +2187,9 @@ class Model(GraphProvider):
         print(f"- Nodes:  {before_nodes} -> {after_nodes} ({before_nodes - after_nodes} fewer, {compaction_stats.get('gc_removed', 0)} GC removed)")
         print(f"- Nodes merged (equiv signatures): {compaction_stats.get('nodes_merged', 0)}")
         print(f"- Normalization: groups before/after not tracked across stages here")
+
+    def finalize(self):
+        """Called at the end of a benchmark run to perform any final actions, like printing stats."""
+        print("\n--- Final Stats Report from Model ---")
+        Stats.get().report()
+
