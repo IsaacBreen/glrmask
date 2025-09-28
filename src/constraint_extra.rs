@@ -102,7 +102,7 @@ pub fn dump_precompute_trie_recursive(
     }
 
     let num_children = children_to_visit.len();
-    for (i, (edge_key, edge_val, child_arc)) in children_to_visit.iter().enumerate() {
+    for (i, (edge_key, edge_val_bv, child_arc)) in children_to_visit.iter().enumerate() {
         let is_last = i == num_children - 1;
         let connector = if is_last { "└──" } else { "├──" };
 
@@ -119,16 +119,7 @@ pub fn dump_precompute_trie_recursive(
             None => "ε".to_string(),
         };
 
-        let (edge_val_bv, edge_map) = edge_val;
-        let mut tokens_display = format_bv_with_tokens(&edge_val_bv, original_internal_bimap, llm_token_map, 5);
-        if !edge_map.is_empty() {
-            let map_summary = edge_map.iter().map(|(sid, tm)| {
-                let term_count = tm.len();
-                format!("sid {}: {} terms", sid.0, term_count)
-            }).collect::<Vec<_>>().join(", ");
-            tokens_display.push_str(&format!(" (map: {})", map_summary));
-        }
-
+        let tokens_display = format_bv_with_tokens(&edge_val_bv, original_internal_bimap, llm_token_map, 5);
 
         let child_ptr;
         let child_info;
@@ -492,7 +483,7 @@ pub fn calculate_final_stats2(
                 stats.final_num_occupied_some_edge_keys += 1;
             }
 
-            for (llm_token_bv_on_edge, _map) in dest_map.values() {
+            for llm_token_bv_on_edge in dest_map.values() {
                 stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
             }
         }
@@ -801,7 +792,7 @@ pub fn calculate_final_stats(
                     .entry(*gtid)
                     .or_default()
                     .push(num_edges_for_this_key_to_distinct_children);
-                for (llm_token_bv_on_edge, _map) in dest_map.values() {
+                for llm_token_bv_on_edge in dest_map.values() {
                     stats.final_grammar_token_edge_token_set_sizes_dist
                         .entry(*gtid)
                         .or_default()

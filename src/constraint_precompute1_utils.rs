@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use range_set_blaze::RangeSetBlaze;
-use ordered_hash_map::{Entry, OrderedHashMap};
+use ordered_hash_map::OrderedHashMap;
 use kdam::tqdm;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::constraint::{StageVocab, PrecomputeNodeIndex, Trie1GodWrapper};
@@ -18,13 +18,8 @@ fn count_total_ranges_trie1(
         let g = n.read(trie1_god).expect("read");
         count += g.value.live_tokens.inner().ranges_len();
         for (_ek, dm) in g.children() {
-            for (_dst, (bv, map)) in dm {
+            for (_dst, bv) in dm {
                 count += bv.inner().ranges_len();
-                for tm in map.values() {
-                    for bv2 in tm.values() {
-                        count += bv2.inner().ranges_len();
-                    }
-                }
             }
         }
     }
@@ -123,16 +118,9 @@ pub fn merge_equivalent_llm_tokens_trie1(
             all_bvs.insert(g.value.live_tokens.clone());
         }
         for (_ek, dm) in g.children() {
-            for (_dst, (bv, map)) in dm {
+            for (_dst, bv) in dm {
                 if !bv.is_empty() {
                     all_bvs.insert(bv.clone());
-                }
-                for tm in map.values() {
-                    for bv2 in tm.values() {
-                        if !bv2.is_empty() {
-                            all_bvs.insert(bv2.clone());
-                        }
-                    }
                 }
             }
         }
@@ -256,12 +244,12 @@ pub fn merge_equivalent_llm_tokens_trie1(
 
         // Remap children edge masks
         let old_children = std::mem::take(w.children_mut());
-        let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, (LLMTokenBV, BTreeMap<crate::tokenizer::TokenizerStateID, BTreeMap<crate::types::TerminalID, LLMTokenBV>>)>> = BTreeMap::new();
+        let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
         for (ek, dm) in old_children {
-            let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, (LLMTokenBV, BTreeMap<crate::tokenizer::TokenizerStateID, BTreeMap<crate::types::TerminalID, LLMTokenBV>>) > = OrderedHashMap::new();
-            for (dst, (bv, map)) in dm {
+            let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
+            for (dst, bv) in dm {
                 let bv_ptr = Arc::as_ptr(&bv.inner);
-                let mapped_bv = if bv.is_empty() {
+                let mapped = if bv.is_empty() {
                     LLMTokenBV::zeros()
                 } else if bv == LLMTokenBV::max_ones() {
                     mapped_universe.clone()
@@ -272,36 +260,10 @@ pub fn merge_equivalent_llm_tokens_trie1(
                 } else {
                     bv.clone()
                 };
-
-                let mut new_map = BTreeMap::new();
-                for (sid, tm) in map {
-                    let mut new_tm = BTreeMap::new();
-                    for (tid, bv_in_map) in tm {
-                        let mapped_bv_in_map = memo.entry(bv_in_map.clone())
-                            .or_insert_with_key(|bv| remap_llm_bv_many_to_one(bv, &old_to_new, max_tok))
-                            .clone();
-                        if !mapped_bv_in_map.is_empty() {
-                            new_tm.insert(tid, mapped_bv_in_map);
-                        }
-                    }
-                    if !new_tm.is_empty() {
-                        new_map.insert(sid, new_tm);
-                    }
-                }
-
-                if !mapped_bv.is_empty() {
-                    let new_val = (mapped_bv, new_map);
+                if !mapped.is_empty() {
                     new_dm.entry(dst)
-                        .and_modify(|e| {
-                            e.0 |= &new_val.0;
-                            for (sid, tm) in new_val.1 {
-                                let etm = e.1.entry(sid).or_default();
-                                for (tid, bv) in tm {
-                                    etm.entry(tid).or_default() |= &bv;
-                                }
-                            }
-                        })
-                        .or_insert(new_val);
+                        .and_modify(|e| *e |= &mapped)
+                        .or_insert(mapped);
                 }
             }
             if !new_dm.is_empty() {
@@ -347,16 +309,9 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
             if t as usize <= max_tok { freq[t as usize] += 1; }
         }
         for (_ek, dm) in g.children() {
-            for (_dst, (bv, map)) in dm {
+            for (_dst, bv) in dm {
                 for t in bv.iter() {
                     if t as usize <= max_tok { freq[t as usize] += 1; }
-                }
-                for tm in map.values() {
-                    for bv2 in tm.values() {
-                        for t in bv2.iter() {
-                            if t as usize <= max_tok { freq[t as usize] += 1; }
-                        }
-                    }
                 }
             }
         }
@@ -388,33 +343,15 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
                 .or_insert_with_key(|bv| remap_llm_bv_permutation(bv, &old_to_new, max_tok))
                 .clone()
         };
-        let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, (LLMTokenBV, BTreeMap<crate::tokenizer::TokenizerStateID, BTreeMap<crate::types::TerminalID, LLMTokenBV>>)>> = BTreeMap::new();
+        let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
         for (ek, dm) in r.children() {
-            let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, (LLMTokenBV, BTreeMap<crate::tokenizer::TokenizerStateID, BTreeMap<crate::types::TerminalID, LLMTokenBV>>) > = OrderedHashMap::new();
-            for (dst, (bv, map)) in dm {
-                let mapped_bv = memo.entry(bv.clone())
+            let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
+            for (dst, bv) in dm {
+                let mapped = memo.entry(bv.clone())
                     .or_insert_with_key(|bv| remap_llm_bv_permutation(bv, &old_to_new, max_tok))
                     .clone();
-
-                let mut new_map = BTreeMap::new();
-                for (sid, tm) in map {
-                    let mut new_tm = BTreeMap::new();
-                    for (tid, bv_in_map) in tm {
-                        let mapped_bv_in_map = memo.entry(bv_in_map.clone())
-                            .or_insert_with_key(|bv| remap_llm_bv_permutation(bv, &old_to_new, max_tok))
-                            .clone();
-                        if !mapped_bv_in_map.is_empty() {
-                            new_tm.insert(*tid, mapped_bv_in_map);
-                        }
-                    }
-                    if !new_tm.is_empty() {
-                        new_map.insert(*sid, new_tm);
-                    }
-                }
-
-                if !mapped_bv.is_empty() {
-                    let new_val = (mapped_bv, new_map);
-                    new_dm.insert(dst.clone(), new_val);
+                if !mapped.is_empty() {
+                    new_dm.insert(dst.clone(), mapped);
                 }
             }
             if !new_dm.is_empty() {
@@ -461,24 +398,18 @@ pub fn optimize_state_masks_and_edges_trie1(
     let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
     for n in &all_nodes {
         let mut w = n.write(trie1_god).expect("write");
-        let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, (LLMTokenBV, BTreeMap<crate::tokenizer::TokenizerStateID, BTreeMap<crate::types::TerminalID, LLMTokenBV>>)>> = BTreeMap::new();
+        let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
         for (ek, dm) in w.children().clone() {
             // Union masks for same dst
-            let mut coalesced: HashMap<PrecomputeNodeIndex, (LLMTokenBV, BTreeMap<crate::tokenizer::TokenizerStateID, BTreeMap<crate::types::TerminalID, LLMTokenBV>>)> = HashMap::new();
-            for (dst, val) in dm {
-                let entry = coalesced.entry(dst).or_insert_with(|| (LLMTokenBV::zeros(), BTreeMap::new()));
-                entry.0 |= &val.0;
-                for (sid, tm) in val.1 {
-                    let etm = entry.1.entry(sid).or_default();
-                    for (tid, bv) in tm {
-                        etm.entry(tid).or_default() |= &bv;
-                    }
-                }
+            let mut coalesced: HashMap<PrecomputeNodeIndex, LLMTokenBV> = HashMap::new();
+            for (dst, bv) in dm {
+                let entry = coalesced.entry(dst).or_insert_with(LLMTokenBV::zeros);
+                *entry |= &bv;
             }
-            let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, (LLMTokenBV, BTreeMap<crate::tokenizer::TokenizerStateID, BTreeMap<crate::types::TerminalID, LLMTokenBV>>)> = OrderedHashMap::new();
-            for (dst, val) in coalesced {
-                if !val.0.is_empty() {
-                    new_dm.insert(dst, val);
+            let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
+            for (dst, bv) in coalesced {
+                if !bv.is_empty() {
+                    new_dm.insert(dst, bv);
                 }
             }
             if !new_dm.is_empty() {
