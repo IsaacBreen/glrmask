@@ -354,13 +354,14 @@ class Model(GraphProvider):
         print("commit")
         for tsid, gss in self.state.items():
             print(f"  [{tsid}]:")
-            grouped = {}
-            for stack, acc in gss.to_stacks():
-                grouped.setdefault(acc, []).append(stack)
-            for acc, stacks in grouped.items():
-                print(f"    [{acc}]:")
-                for stack in sorted(stacks):
-                    print(f"      {stack}")
+            # grouped = {}
+            # for stack, acc in gss.to_stacks():
+            #     grouped.setdefault(acc, []).append(stack)
+            # for acc, stacks in grouped.items():
+            #     print(f"    [{acc}]:")
+            #     for stack in sorted(stacks):
+            #         print(f"      {stack}")
+            print(gss.to_graph_string())
 
         token_bytes = self.id_to_token[token_id]
 
