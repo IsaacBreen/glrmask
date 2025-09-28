@@ -268,7 +268,7 @@ pub fn merge_equivalent_llm_tokens_trie3(
 
         // Remap edge keys (pop, LLMTokenBV)
         let old_children = std::mem::take(w.children_mut());
-        let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<PrecomputeNodeIndex, StateIDBV>> = BTreeMap::new();
+        let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = BTreeMap::new();
         for ((pop, llm_bv), dm) in old_children {
             let mapped_key_bv = if llm_bv.is_empty() {
                 LLMTokenBV::zeros()

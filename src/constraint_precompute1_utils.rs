@@ -5,6 +5,7 @@ use ordered_hash_map::OrderedHashMap;
 use kdam::tqdm;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::constraint::{StageVocab, PrecomputeNodeIndex, Trie1GodWrapper};
+use crate::datastructures::EntryApi;
 use crate::datastructures::gss::LLMTokenBV;
 use crate::datastructures::trie::Trie;
 
