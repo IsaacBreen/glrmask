@@ -573,7 +573,7 @@ class Model(GraphProvider):
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
         values: Dict[NodeID, GSS] = {}
-        depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
+        depth_heap: List[Tuple[int, int, NodeID]] = []  # Stores (-depth, -potential_tokens, node_id)
         enqueued_nodes: Set[NodeID] = set()
 
         hp, hpop = heapq.heappush, heapq.heappop
@@ -583,6 +583,15 @@ class Model(GraphProvider):
         is_end = self.is_end
         pmc: Dict[int, Dict[int, LLMTokenSet]] = self.possible_matches_cache or {}
         max_state: int = self.tokenizer_max_state
+
+        # Small helper: cardinality of a RangeSet via ranges (avoids to_indices explosion)
+        def _rs_cardinality(rs: RangeSet) -> int:
+            if rs.is_empty():
+                return 0
+            total = 0
+            for a, b in rs.to_ranges():
+                total += int(b) - int(a) + 1
+            return total
 
         # --- Initial GSS Stats ---
         stats.start('get_mask.initial_stats')
@@ -655,16 +664,25 @@ class Model(GraphProvider):
             d: int = max_depth[r]
             if r not in enqueued_nodes:
                 enqueued_nodes.add(r)
-                hp(depth_heap, (-d, r))
+                # Include dynamic potential tokens (remaining tokens at the node after subtracting current final_mask)
+                a_node = arena.get(r)
+                node_union = a_node.llm_bv_union if a_node else RangeSet.empty()
+                potential_rs = node_union.difference(final_mask)
+                potential_cnt = _rs_cardinality(potential_rs)
+                hp(depth_heap, (-d, -potential_cnt, r))
 
         def enqueue(d: int, n: NodeID) -> None:
             stats.inc('get_mask.traversal.enqueues')
             if n not in enqueued_nodes:
                 enqueued_nodes.add(n)
-                hp(depth_heap, (-d, n))
+                a_node = arena.get(n)
+                node_union = a_node.llm_bv_union if a_node else RangeSet.empty()
+                potential_rs = node_union.difference(final_mask)
+                potential_cnt = _rs_cardinality(potential_rs)
+                hp(depth_heap, (-d, -potential_cnt, n))
 
         def dequeue() -> Tuple[int, int]:
-            neg_d, n = hpop(depth_heap)
+            neg_d, _neg_pot, n = hpop(depth_heap)
             return -neg_d, n
         stats.stop('get_mask.seeding')
 
@@ -692,6 +710,10 @@ class Model(GraphProvider):
                     stats.start('get_mask.main_loop.end_node.final_mask_union')
                     final_mask = final_mask.union(reduced_acc.llm_mask)
                     stats.stop('get_mask.main_loop.end_node.final_mask_union')
+                    # Early stop if we've already covered the whole universe
+                    if all_ones.difference(final_mask).is_empty():
+                        stats.inc('get_mask.traversal.early_full_mask_breaks')
+                        break
 
             # Zombie traversal avoidance: if this node's edges can't possibly add
             # to the final mask given the current GSS mask, skip it.
@@ -717,22 +739,92 @@ class Model(GraphProvider):
             edges = a_node.children if a_node else []
             stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
             stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
+            # Cache base popped/peek per distinct pop to avoid recomputing per group
+            pops_in_node = sorted(set(int(pop) for (pop, _llm) , _dests in edges))
+            base_popped_by_pop: Dict[int, GSS] = {}
+            base_peek_by_pop: Dict[int, List[int]] = {}
+            for p in pops_in_node:
+                stats.start('get_mask.main_loop.edge.popn')
+                base = gss_node if int(p) == 0 else gss_node.popn(int(p))
+                stats.stop('get_mask.main_loop.edge.popn')
+                if base.is_empty():
+                    base_popped_by_pop[int(p)] = base
+                    base_peek_by_pop[int(p)] = []
+                else:
+                    base_popped_by_pop[int(p)] = base
+                    base_peek_by_pop[int(p)] = list(base.peek())
+
+            # Prepare candidate groups with heuristic metadata and llm_bv filtered by final_mask
+            candidates = []
             for (pop, llm_bv), dests in edges:
-                llm_bv = llm_bv.difference(final_mask)
-                if llm_bv.is_empty():
+                llm_bv2 = llm_bv.difference(final_mask)
+                if llm_bv2.is_empty():
                     stats.inc('get_mask.traversal.edge.llm_bv_empty')
+                    stats.inc('get_mask.traversal.edge.filtered_by_final_mask')
                     continue
+                # End-dest presence and best depth to end (smaller is closer)
+                has_end_dest = any(is_end(int(did)) for (did, _sbv) in dests)
+                # Use min depth among dests; default large if missing
+                best_dest_depth = min(int(max_depth.get(int(did), 10**9)) for (did, _sbv) in dests) if dests else 10**9
+                # Cheap shape/cost proxies
+                rs_ranges = list(llm_bv2.to_ranges())
+                llm_range_count = len(rs_ranges)
+                llm_cardinality = 0
+                for a, b in rs_ranges:
+                    llm_cardinality += int(b) - int(a) + 1
+                candidates.append((int(pop), llm_bv2, dests, has_end_dest, best_dest_depth, llm_range_count, llm_cardinality))
+
+            # Sort to hit promising groups first: end-dests first, closer to end, fewer ranges (cheaper), more tokens
+            candidates.sort(key=lambda x: (
+                -int(x[3]),            # has_end_dest desc
+                int(x[4]),             # best_dest_depth asc
+                int(x[5]),             # llm_range_count asc
+                -int(x[6])             # llm_cardinality desc
+            ))
+            stats.inc('get_mask.traversal.edge_groups.sorted', len(candidates))
+
+            # Overall mask of the node (for fast per-group disjointness checks)
+            gss_mask_acc = gss_node.reduce_acc()
+
+            for (pop, llm_bv2, dests, _has_end_dest, _best_depth, _rc, _card) in candidates:
+                # Skip via overall-acc mask if disjoint with this group's LLM mask
+                if gss_mask_acc is not None:
+                    if gss_mask_acc.llm_mask.intersection(llm_bv2).is_empty():
+                        stats.inc('get_mask.traversal.edge.skipped_by_overall_mask')
+                        continue
+
+                # Fast state reachability: use base peek before expensive per-acc pruning
+                base_peek = base_peek_by_pop.get(int(pop), [])
+                if base_peek:
+                    reachable = False
+                    for sid in base_peek:
+                        # If any dest's state mask contains sid, group is potentially viable
+                        for (_did, state_bv) in dests:
+                            if state_bv.contains(int(sid)):
+                                reachable = True
+                                break
+                        if reachable:
+                            break
+                    if not reachable:
+                        stats.inc('get_mask.traversal.edge.skipped_by_state_union')
+                        continue
+                else:
+                    # If base popped is empty, skip
+                    base_popped = base_popped_by_pop.get(int(pop))
+                    if base_popped is None or base_popped.is_empty():
+                        stats.inc('get_mask.traversal.edge.popped_empty')
+                        continue
 
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
-                stats.start('get_mask.main_loop.edge.popn')
-                popped: GSS = gss_node.popn(pop)
-                stats.stop('get_mask.main_loop.edge.popn')
+
+                # Use cached base popped for this pop
+                popped: GSS = base_popped_by_pop[int(pop)]
                 if popped.is_empty():
                     stats.inc('get_mask.traversal.edge.popped_empty')
                     continue
 
-                # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv2
                 acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
 
                 def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
@@ -741,7 +833,7 @@ class Model(GraphProvider):
                         stats.inc('get_mask.intersect_and_prune.memo_hits')
                         return acc_memo[acc]
                     stats.start('get_mask.intersect_and_prune.intersection')
-                    new_mask = acc.llm_mask.intersection(llm_bv)
+                    new_mask = acc.llm_mask.intersection(llm_bv2)
                     stats.stop('get_mask.intersect_and_prune.intersection')
 
                     if new_mask.is_empty():
@@ -756,14 +848,14 @@ class Model(GraphProvider):
                     return result
 
                 stats.start('get_mask.main_loop.edge.apply_and_prune')
-                popped = popped.apply_and_prune(intersect_and_prune)
+                pruned = popped.apply_and_prune(intersect_and_prune)
                 stats.stop('get_mask.main_loop.edge.apply_and_prune')
 
-                if popped.is_empty():
+                if pruned.is_empty():
                     stats.inc('get_mask.traversal.edge.popped_pruned_empty')
                     continue
 
-                if popped.reduce_acc().is_empty():
+                if pruned.reduce_acc().is_empty():
                     stats.inc('get_mask.traversal.edge.popped_reduced_empty')
                     continue
 
@@ -771,7 +863,7 @@ class Model(GraphProvider):
                     stats.inc('get_mask.traversal.dests_traversed')
 
                     stats.start('get_mask.main_loop.edge.peek_and_filter')
-                    peeked = popped.peek()
+                    peeked = pruned.peek()
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
                     stats.stop('get_mask.main_loop.edge.peek_and_filter')
 
@@ -779,7 +871,7 @@ class Model(GraphProvider):
                         continue
 
                     stats.start('get_mask.main_loop.edge.isolate_many')
-                    child_gss = popped.isolate_many(values_to_keep)
+                    child_gss = pruned.isolate_many(values_to_keep)
                     stats.stop('get_mask.main_loop.edge.isolate_many')
 
                     stats.inc('get_mask.intersect_and_prune.memo_size.sum', len(acc_memo))
