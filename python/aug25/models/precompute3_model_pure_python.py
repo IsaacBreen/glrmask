@@ -404,35 +404,29 @@ class Model(GraphProvider):
         # Prune and map per-state GSS in a single pass
         temp_states: Dict[int, GSS] = {}
         stats.start('commit.prune_and_map_gss')
-        for tokenizer_sid, gss in self.state.items():
-            def mutator(acc: PyAcc) -> Optional[PyAcc]:
-                # Prune condition
-                disallowed_terminals_map = acc.terminals_union
-                for tsid, matched_bv in terminals_map.items():
-                    disallowed_for_state = disallowed_terminals_map.get(tsid)
-                    if disallowed_for_state and not matched_bv.intersection(disallowed_for_state).is_empty():
-                        return None
+        def mutator(acc: PyAcc) -> Optional[PyAcc]:
+            # Prune condition
+            disallowed_terminals_map = acc.terminals_union
+            for tsid, matched_bv in terminals_map.items():
+                disallowed_for_state = disallowed_terminals_map.get(tsid)
+                if disallowed_for_state and not matched_bv.intersection(disallowed_for_state).is_empty():
+                    return None
 
-                # Map
-                old_map = acc.terminals_union
-                new_bvs: Dict[int, TerminalIdSet] = {}
-                for old_sid, new_sid in state_map.items():
-                    bv_source = old_map.get(old_sid)
-                    if bv_source and not bv_source.is_empty():
-                        if new_sid in new_bvs:
-                            new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-                        else:
-                            new_bvs[new_sid] = bv_source
-
-                return PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
-
-            processed_gss = gss.apply_and_prune(mutator)
-            if not processed_gss.is_empty():
-                # The GSS is still associated with the old tokenizer_sid for the next step
-                temp_states[tokenizer_sid] = processed_gss
+            # Map
+            old_map = acc.terminals_union
+            new_bvs: Dict[int, TerminalIdSet] = {}
+            for old_sid, new_sid in state_map.items():
+                bv_source = old_map.get(old_sid)
+                if bv_source and not bv_source.is_empty():
+                    if new_sid in new_bvs:
+                        new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
+                    else:
+                        new_bvs[new_sid] = bv_source
+            return PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
+        cache = {}
+        current_state_for_processing = {tsid: gss.apply_and_prune(mutator, cache) for tsid, gss in self.state.items()}
+        current_state_for_processing = {tsid: gss for tsid, gss in current_state_for_processing.items() if gss.is_empty()}
         stats.stop('commit.prune_and_map_gss')
-
-        current_state_for_processing = temp_states
 
         new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
         stats.start('commit.main_loop')
@@ -637,12 +631,13 @@ class Model(GraphProvider):
                 llm_mask=allowed_mask,
             )
 
+        cache = {}
         for sid, gss in state_map.items():
             stats.inc('get_mask.seeding.gss_loops')
             r: NodeID = roots_map[int(sid)]
 
             stats.start('get_mask.seeding.gss.apply')
-            gss_initialized: GSS = gss.apply(initialize_acc)
+            gss_initialized: GSS = gss.apply(initialize_acc, cache)
             stats.stop('get_mask.seeding.gss.apply')
 
             if r in values:
