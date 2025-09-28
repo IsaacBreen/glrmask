@@ -747,18 +747,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return LeveledGSS(merge_upper(self.inner, other.inner))
 
     def fuse(self, levels: Optional[int] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
-        """
-        Fuse edges by value so that, at each fused level, there is at most one outgoing
-        edge per value T on a node.
-        - levels=None: fuse all levels (entire structure).
-        - levels=N>0: fuse only the top N levels (root is level 1).
-        - levels<=0: no-op; returns self.
-
-        The optional memo allows re-use across shared subgraphs. It should be a dict
-        keyed by tuples:
-          ('U', id(node), remaining_levels) -> Upper node result
-          ('L', id(node), remaining_levels) -> Lower node result
-        """
         if levels is not None and levels <= 0:
             return self
         if memo is None:
@@ -768,23 +756,36 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             key = ('L', id(node), remain)
             cached = memo.get(key)
             if cached is not None:
-                return cached  # type: ignore[return-value]
+                return cached
             if remain == 0:
                 memo[key] = node
                 return node
 
             next_remain: Optional[int] = None if remain is None else remain - 1
-            new_children: Dict[T, Dict[int, Lower[T]]] = {}
 
-            # For each value, merge all children (across depths) into a single child
+            has_multi_depth_slots = any(len(kids) > 1 for kids in node.children.values())
+
+            new_children_by_value: Dict[T, List[Lower[T]]] = defaultdict(list)
+            children_changed = False
             for v, kids in node.children.items():
-                fused_kids = [fuse_lower_node(child, next_remain) for child in kids.values()]
+                for child in kids.values():
+                    fused_child = fuse_lower_node(child, next_remain)
+                    if fused_child is not child:
+                        children_changed = True
+                    new_children_by_value[v].append(fused_child)
+
+            if not has_multi_depth_slots and not children_changed:
+                memo[key] = node
+                return node
+
+            final_children: Dict[T, Dict[int, Lower[T]]] = {}
+            for v, fused_kids in new_children_by_value.items():
                 if not fused_kids:
                     continue
                 merged_child = reduce(merge_lower, fused_kids[1:], fused_kids[0])
-                new_children[v] = {merged_child._max_depth: merged_child}
+                final_children[v] = {merged_child._max_depth: merged_child}
 
-            res = Lower(children=new_children if new_children else {}, empty=node.empty)
+            res = Lower(children=final_children, empty=node.empty)
             memo[key] = res
             return res
 
@@ -792,7 +793,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             key = ('U', id(node), remain)
             cached = memo.get(key)
             if cached is not None:
-                return cached  # type: ignore[return-value]
+                return cached
             if remain == 0:
                 memo[key] = node
                 return node
@@ -800,32 +801,62 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             next_remain: Optional[int] = None if remain is None else remain - 1
 
             if isinstance(node, Interface):
-                # Fuse Lower layer at this boundary: one Lower child per value
-                new_children: Dict[T, Dict[int, Lower[T]]] = {}
+                has_multi_depth_slots = any(len(kids) > 1 for kids in node.children.values())
+
+                new_children_by_value: Dict[T, List[Lower[T]]] = defaultdict(list)
+                children_changed = False
                 for v, kids in node.children.items():
-                    fused_kids = [fuse_lower_node(child, next_remain) for child in kids.values()]
+                    for child in kids.values():
+                        fused_child = fuse_lower_node(child, next_remain)
+                        if fused_child is not child:
+                            children_changed = True
+                        new_children_by_value[v].append(fused_child)
+
+                if not has_multi_depth_slots and not children_changed:
+                    memo[key] = node
+                    return node
+
+                final_children: Dict[T, Dict[int, Lower[T]]] = {}
+                for v, fused_kids in new_children_by_value.items():
                     if not fused_kids:
                         continue
                     merged_child = reduce(merge_lower, fused_kids[1:], fused_kids[0])
-                    new_children[v] = {merged_child._max_depth: merged_child}
-                res: Upper[T, Acc] = Interface(children=new_children, acc=node.acc, empty=node.empty)
+                    final_children[v] = {merged_child._max_depth: merged_child}
+
+                res: Upper[T, Acc] = Interface(children=final_children, acc=node.acc, empty=node.empty)
                 memo[key] = res
                 return res
             else:
-                # UpperBranch: fuse Upper/Interface children by value
-                new_children_u: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+                has_multi_depth_slots = any(len(kids) > 1 for kids in node.children.values())
+
+                new_children_by_value: Dict[T, List[Upper[T, Acc]]] = defaultdict(list)
+                children_changed = False
                 for v, kids in node.children.items():
-                    fused_kids = [fuse_upper_node(child, next_remain) for child in kids.values()]
+                    for child in kids.values():
+                        fused_child = fuse_upper_node(child, next_remain)
+                        if fused_child is not child:
+                            children_changed = True
+                        new_children_by_value[v].append(fused_child)
+
+                if not has_multi_depth_slots and not children_changed:
+                    memo[key] = node
+                    return node
+
+                final_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+                for v, fused_kids in new_children_by_value.items():
                     if not fused_kids:
                         continue
                     merged_child_u = reduce(merge_upper, fused_kids[1:], fused_kids[0])
-                    new_children_u[v] = {merged_child_u._max_depth: merged_child_u}
-                res_branch = UpperBranch(children=new_children_u, empty=node.empty)
+                    final_children[v] = {merged_child_u._max_depth: merged_child_u}
+
+                res_branch = UpperBranch(children=final_children, empty=node.empty)
                 res_promoted = try_promote(res_branch)
                 memo[key] = res_promoted
                 return res_promoted
 
         new_inner = fuse_upper_node(self.inner, levels)
+        if new_inner is self.inner:
+            return self
         return LeveledGSS(new_inner)
 
     def peek(self) -> Set[T]:
