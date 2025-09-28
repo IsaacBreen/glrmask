@@ -66,7 +66,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
 
     // 1) Collect all LLM sets (node live_tokens, edge masks)
     let mut family: Vec<LLMTokenBV> = Vec::new();
-    for n in &all_nodes {
+    for n in tqdm!(all_nodes.iter(), desc = "Trie1 Merge Tokens (Collect)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
         let g = n.read(trie1_god).expect("read");
         if !g.value.live_tokens.is_empty() {
             family.push(g.value.live_tokens.clone());
@@ -138,7 +138,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
         }
         new_states.push((new_live_tokens, new_children));
     }
-    for (i, n) in all_nodes.iter().enumerate() {
+    for (i, n) in tqdm!(all_nodes.iter().enumerate(), desc = "Remapping trie (write)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
         let mut w = n.write(trie1_god).expect("write");
         let (live_tokens, children) = &new_states[i];
         w.value.live_tokens = live_tokens.clone();
@@ -201,7 +201,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     }
     // Apply mapping to trie
     let mut new_states = Vec::with_capacity(all_nodes.len());
-    for n in &all_nodes {
+    for n in tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Remap Read)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
         let r = n.read(trie1_god).expect("read");
         let new_live_tokens = if r.value.live_tokens.is_empty() {
             r.value.live_tokens.clone()
@@ -223,7 +223,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
         }
         new_states.push((new_live_tokens, new_children));
     }
-    for (i, n) in all_nodes.iter().enumerate() {
+    for (i, n) in tqdm!(all_nodes.iter().enumerate(), desc = "Trie1 Reorder (Remap Write)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
         let mut w = n.write(trie1_god).expect("write");
         let (live_tokens, children) = &new_states[i];
         w.value.live_tokens = live_tokens.clone();
@@ -233,14 +233,14 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
 
     // Update stage vocab (pure permutation)
     let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-    for (old_id, setv) in stage_vocab.internal_to_original.clone() {
+    for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone(), desc = "Trie1 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
         if let Some(new_id) = old_to_new.get(&old_id) {
             new_internal_to_original.insert(*new_id, setv);
         }
     }
     stage_vocab.internal_to_original = new_internal_to_original;
     let mut new_original_to_internal: BTreeMap<usize, usize> = BTreeMap::new();
-    for (orig, old_internal) in stage_vocab.original_to_internal.clone() {
+    for (orig, old_internal) in tqdm!(stage_vocab.original_to_internal.clone(), desc = "Trie1 Reorder (Vocab 2)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
         if let Some(new_internal) = old_to_new.get(&old_internal) {
             new_original_to_internal.insert(orig, *new_internal);
         }
