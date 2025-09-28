@@ -48,6 +48,19 @@ fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, us
     remap_llm_bv_many_to_one(bv, map_old_to_new, max_token_id)
 }
 
+/// Fast-path variant: if `bv` has no intersection with `moved_mask`,
+/// return `bv.clone()` without remapping.
+fn remap_llm_bv_many_to_one_fast(
+    bv: &LLMTokenBV,
+    map_old_to_new: &BTreeMap<usize, usize>,
+    max_token_id: usize,
+    moved_mask: &LLMTokenBV,
+) -> LLMTokenBV {
+    if bv.is_empty() { return LLMTokenBV::zeros(); }
+    if (&bv & moved_mask).is_empty() { return bv.clone(); }
+    remap_llm_bv_many_to_one(bv, map_old_to_new, max_token_id)
+}
+
 /// Merge equivalent internal LLM token ids in Trie1:
 /// Two tokens are equivalent if they appear together in every occurrence across:
 /// - node.value.live_tokens
@@ -65,25 +78,28 @@ pub fn merge_equivalent_llm_tokens_trie1(
     if all_nodes.is_empty() { return; }
 
     // 1) Collect all LLM sets (node live_tokens, edge masks)
-    let mut family: Vec<LLMTokenBV> = Vec::new();
+    // Deduplicate identical sets to shrink the family drastically.
+    let mut family_set: BTreeSet<LLMTokenBV> = BTreeSet::new();
     for n in tqdm!(all_nodes.iter(), desc = "Trie1 Merge Tokens (Collect)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
         let g = n.read(trie1_god).expect("read");
         if !g.value.live_tokens.is_empty() {
-            family.push(g.value.live_tokens.clone());
+            family_set.insert(g.value.live_tokens.clone());
         }
         for (_ek, dm) in g.children() {
             for (_dst, bv) in dm {
                 if !bv.is_empty() {
-                    family.push(bv.clone());
+                    family_set.insert(bv.clone());
                 }
             }
         }
     }
-    if family.is_empty() { return; }
+    if family_set.is_empty() { return; }
+    let family: Vec<LLMTokenBV> = family_set.into_iter().collect();
 
     // 2) Build signature per token
     let max_tok = stage_vocab.internal_max_llm_token;
-    let mut sig_map: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
+    // Use HashMap for speed; input sizes are modest (<= ~1k tokens).
+    let mut sig_map: HashMap<Vec<usize>, Vec<usize>> = HashMap::new();
     #[cfg(not(rustrover))]
     let it = tqdm!(0..=max_tok, desc = "Trie1 Merge Tokens (Sigs)", disable = !PROGRESS_BAR_ENABLED, leave=false);
     #[cfg(rustrover)] let it = 0..=max_tok;
@@ -114,35 +130,59 @@ pub fn merge_equivalent_llm_tokens_trie1(
     crate::debug!(2, "Trie1: merged LLM tokens. Before: {}, After: {}. ({} merged)", tokens_before, tokens_after, merged_count);
     if merged_count == 0 { return; }
 
-    // 4) Apply mapping to trie
-    let mut new_states = Vec::with_capacity(all_nodes.len());
-    for n in tqdm!(all_nodes.iter(), desc = "Remapping trie (read)") {
-        let r = n.read(trie1_god).expect("read");
-        let new_live_tokens = if r.value.live_tokens.is_empty() {
-            r.value.live_tokens.clone()
+    // 4) Apply mapping to trie (in-place, with skip for unaffected nodes)
+    // Build a mask of tokens that move, to detect unaffected bitvectors quickly.
+    let mut moved_mask = LLMTokenBV::zeros();
+    for old in old_to_new.keys() {
+        moved_mask.insert(*old);
+    }
+    for n in tqdm!(all_nodes.iter(), desc = "Remapping trie (in-place)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
+        let mut w = n.write(trie1_god).expect("write");
+
+        // Quick skip if neither node live tokens nor any edge bv is affected.
+        let mut affected = false;
+        if !w.value.live_tokens.is_empty() && !(&w.value.live_tokens & &moved_mask).is_empty() {
+            affected = true;
         } else {
-            remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new, max_tok)
-        };
+            'outer: for (_ek, dm) in w.children() {
+                for (_dst, bv) in dm {
+                    if !(&bv & &moved_mask).is_empty() {
+                        affected = true;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        if !affected {
+            continue;
+        }
+
+        if !w.value.live_tokens.is_empty() {
+            w.value.live_tokens = remap_llm_bv_many_to_one_fast(&w.value.live_tokens, &old_to_new, max_tok, &moved_mask);
+        }
+
+        let old_children = std::mem::take(w.children_mut());
         let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
-        for (ek, dm) in r.children() {
+        for (ek, dm) in old_children {
+            // If none of the destination BVs are affected, move the whole map without per-entry remap.
+            let needs_dm_remap = dm.iter().any(|(_, bv)| !(&bv & &moved_mask).is_empty());
+            if !needs_dm_remap {
+                new_children.insert(ek, dm);
+                continue;
+            }
+
             let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
             for (dst, bv) in dm {
-                let mapped = remap_llm_bv_many_to_one(&bv, &old_to_new, max_tok);
+                let mapped = remap_llm_bv_many_to_one_fast(&bv, &old_to_new, max_tok, &moved_mask);
                 if !mapped.is_empty() {
-                    new_dm.insert(dst.clone(), mapped);
+                    new_dm.insert(dst, mapped);
                 }
             }
             if !new_dm.is_empty() {
-                new_children.insert(ek.clone(), new_dm);
+                new_children.insert(ek, new_dm);
             }
         }
-        new_states.push((new_live_tokens, new_children));
-    }
-    for (i, n) in tqdm!(all_nodes.iter().enumerate(), desc = "Remapping trie (write)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-        let mut w = n.write(trie1_god).expect("write");
-        let (live_tokens, children) = &new_states[i];
-        w.value.live_tokens = live_tokens.clone();
-        *w.children_mut() = children.clone();
+        *w.children_mut() = new_children;
     }
     // 5) Update stage vocab
     // Merge internal_to_original for tokens mapped into representatives
@@ -159,7 +199,6 @@ pub fn merge_equivalent_llm_tokens_trie1(
 }
 
 /// Reorder internal LLM tokens (permutation) to reduce ranges in masks by clustering co-occurring tokens.
-/// Conservative heuristic: sort by (descending frequency, then by id).
 pub fn reorder_llm_tokens_for_range_minimization_trie1(
     roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNodeIndex>,
     trie1_god: &Trie1GodWrapper,
