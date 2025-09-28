@@ -311,13 +311,17 @@ class Model(GraphProvider):
         return model
     @profile
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+        terminal_to_add_rs = RangeSet.from_indices([terminal_id])
+
         def apply_disallow(acc: PyAcc) -> PyAcc:
-            current_map = acc.terminals_union.copy()
-            curr_bv = current_map.get(state_id, RangeSet.empty())
-            to_add = RangeSet.from_indices([terminal_id])
-            new_bv = curr_bv.union(to_add)
-            current_map[state_id] = new_bv
-            return PyAcc(terminals_union=current_map, llm_mask=acc.llm_mask)
+            current_set = acc.terminals_union.get(state_id, RangeSet.empty())
+            if current_set.contains(terminal_id):
+                return acc
+
+            new_map = acc.terminals_union.copy()
+            new_map[state_id] = current_set.union(terminal_to_add_rs)
+            return PyAcc(terminals_union=new_map, llm_mask=acc.llm_mask)
+
         return gss.apply(apply_disallow)
 
     def get_root(self, state_id: int) -> NodeID:
