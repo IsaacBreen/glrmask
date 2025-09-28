@@ -355,7 +355,7 @@ class Model(GraphProvider):
         for tsid, gss in self.state.items():
             print(f"  [{tsid}]:")
             for stack, acc in gss.to_stacks():
-                print(f"    [{stack}]: {acc}")
+                print(f"    {stack}: {acc}")
 
 
         token_bytes = self.id_to_token[token_id]
