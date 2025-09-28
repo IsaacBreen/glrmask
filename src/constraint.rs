@@ -2836,8 +2836,10 @@ impl<'a> GrammarConstraintState<'a> {
         crate::profiler::reset();
 
         crate::debug!(10, "\n--- get_mask3 END ---");
+        crate::debug!(10, "Final mask internal: {}", format_bv(&final_mask_internal.borrow()));
         crate::debug!(4, "Final mask internal: {}", format_bv(&final_mask_internal.borrow()));
         let final_mask_mapped = self.parent.internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
+        crate::debug!(10, "Final mask mapped: {}", format_bv(&final_mask_mapped));
         crate::debug!(4, "Final mask mapped: {}", format_bv(&final_mask_mapped));
 
         let t_end = std::time::Instant::now();

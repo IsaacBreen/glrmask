@@ -66,11 +66,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
 
     // 1) Collect all LLM sets (node live_tokens, edge masks)
     let mut family: Vec<LLMTokenBV> = Vec::new();
-    #[cfg(not(rustrover))]
-    let it = tqdm!(&all_nodes, desc = "Trie1 Merge Tokens (Collect)", disable = !PROGRESS_BAR_ENABLED, leave=false);
-    #[cfg(rustrover)]
-    let it = all_nodes.iter();
-    for n in it {
+    for n in &all_nodes {
         let g = n.read(trie1_god).expect("read");
         if !g.value.live_tokens.is_empty() {
             family.push(g.value.live_tokens.clone());
@@ -105,11 +101,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
     let tokens_after = sig_map.len();
     let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
     let mut merged_count = 0;
-    #[cfg(not(rustrover))]
-    let it = tqdm!(sig_map.into_iter(), desc = "Building mapping", disable = !PROGRESS_BAR_ENABLED, leave=false);
-    #[cfg(rustrover)]
-    let it = sig_map.into_iter();
-    for (_sig, group) in it {
+    for (_sig, group) in tqdm!(sig_map.into_iter(), desc = "Building mapping") {
         if group.len() <= 1 { continue; }
         let rep = *group.iter().min().unwrap();
         for t in group {
@@ -146,11 +138,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
         }
         new_states.push((new_live_tokens, new_children));
     }
-    #[cfg(not(rustrover))]
-    let it = tqdm!(all_nodes.iter().enumerate(), desc = "Remapping trie (write)", disable = !PROGRESS_BAR_ENABLED, leave=false);
-    #[cfg(rustrover)]
-    let it = all_nodes.iter().enumerate();
-    for (i, n) in it {
+    for (i, n) in all_nodes.iter().enumerate() {
         let mut w = n.write(trie1_god).expect("write");
         let (live_tokens, children) = &new_states[i];
         w.value.live_tokens = live_tokens.clone();
@@ -158,11 +146,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
     }
     // 5) Update stage vocab
     // Merge internal_to_original for tokens mapped into representatives
-    #[cfg(not(rustrover))]
-    let it = tqdm!(old_to_new.iter(), desc = "Updating stage vocab", disable = !PROGRESS_BAR_ENABLED, leave=false);
-    #[cfg(rustrover)]
-    let it = old_to_new.iter();
-    for (old, new_rep) in it {
+    for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Updating stage vocab") {
         if old == new_rep { continue; }
         let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
         stage_vocab.internal_to_original.entry(*new_rep).or_default().extend(moved.clone());
@@ -217,11 +201,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     }
     // Apply mapping to trie
     let mut new_states = Vec::with_capacity(all_nodes.len());
-    #[cfg(not(rustrover))]
-    let it = tqdm!(&all_nodes, desc = "Trie1 Reorder (read)", disable = !PROGRESS_BAR_ENABLED, leave=false);
-    #[cfg(rustrover)]
-    let it = all_nodes.iter();
-    for n in it {
+    for n in &all_nodes {
         let r = n.read(trie1_god).expect("read");
         let new_live_tokens = if r.value.live_tokens.is_empty() {
             r.value.live_tokens.clone()
@@ -243,11 +223,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
         }
         new_states.push((new_live_tokens, new_children));
     }
-    #[cfg(not(rustrover))]
-    let it = tqdm!(all_nodes.iter().enumerate(), desc = "Trie1 Reorder (write)", disable = !PROGRESS_BAR_ENABLED, leave=false);
-    #[cfg(rustrover)]
-    let it = all_nodes.iter().enumerate();
-    for (i, n) in it {
+    for (i, n) in all_nodes.iter().enumerate() {
         let mut w = n.write(trie1_god).expect("write");
         let (live_tokens, children) = &new_states[i];
         w.value.live_tokens = live_tokens.clone();
