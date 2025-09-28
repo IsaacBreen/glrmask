@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Iterable, Optional, Tuple, List
 
 try:
-    from roaringbitmap import RoaringBitmap
+    from pyroaring import BitMap as RoaringBitmap
 except ImportError:
     raise ImportError("RoaringRangeSet requires the 'roaringbitmap' library. Please install it with 'pip install pyroaring'.")
 
