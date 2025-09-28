@@ -2118,13 +2118,21 @@ local_system:
                   promotable_upper_nodes=promotable_upper_nodes,
               )
 
-          def to_graph_string(self) -> str:
+          def to_graph_string(self, memo: Optional[Set[int]] = None) -> str:
               """
               Generates a pretty, indented string representation of the GSS structure.
               Nodes are expanded inline on first appearance. Subsequent encounters are
               represented as references to avoid redundancy and cycles.
+
+              Args:
+                  memo: An optional set of node IDs (from id()) that have already been
+                        printed. This method will mutate the set by adding IDs of
+                        nodes it prints. This allows for coherent printing of multiple
+                        GSS structures that share nodes.
               """
-              printed_nodes: Set[int] = set()
+              if memo is None:
+                  memo = set()
+              printed_nodes = memo  # Use the provided or a new memo
               output_lines: List[str] = []
 
               def _get_node_info(node: Any) -> str:
@@ -2183,8 +2191,12 @@ local_system:
 
               # Start the process from the root node
               root = self.inner
-              output_lines.append(f"--- Root {_get_node_info(root)} ---")
-              _format_recursive(root, "")
+              root_id = id(root)
+              if root_id in printed_nodes:
+                  output_lines.append(f"--- Root -> Ref to Node @ {hex(root_id)} ---")
+              else:
+                  output_lines.append(f"--- Root {_get_node_info(root)} ---")
+                  _format_recursive(root, "")
 
               return "\n".join(output_lines)
 
@@ -4035,5 +4047,142 @@ messages:
     metadata:
   - user: 'Changes committed with message: "leveled_impl: Refactor LeveledGSS.to_graph_string
       to use a prettier, indented tree format"'
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/leveled_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Allow a memo to be passed to it to keep track of which have already been
+      printed. Mutate it.
+    metadata:
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to modify the `to_graph_string` method to accept and mutate a memo of already-printed nodes, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file**: `python/gss_tester/implementations/leveled_impl.py`.
+
+      2.  **Locate the `to_graph_string` method**: Find the method inside the `LeveledGSS` class.
+
+      3.  **Modify the method signature**: Change the signature to accept an optional `memo` argument.
+          *   **From**:
+              ```python
+              def to_graph_string(self) -> str:
+              ```
+          *   **To**:
+              ```python
+              def to_graph_string(self, memo: Optional[Set[int]] = None) -> str:
+              ```
+
+      4.  **Update the docstring**: Add an `Args` section to the docstring to explain the new `memo` parameter.
+          *   **Add**:
+              ```python
+              Args:
+                  memo: An optional set of node IDs (from id()) that have already been
+                        printed. This method will mutate the set by adding IDs of
+                        nodes it prints. This allows for coherent printing of multiple
+                        GSS structures that share nodes.
+              ```
+
+      5.  **Handle the memo initialization**: Replace the internal `printed_nodes` set initialization with logic that uses the provided `memo` or creates a new one.
+          *   **From**:
+              ```python
+              printed_nodes: Set[int] = set()
+              ```
+          *   **To**:
+              ```python
+              if memo is None:
+                  memo = set()
+              printed_nodes = memo  # Use the provided or a new memo
+              ```
+
+      6.  **Update the root node handling**: Modify the logic at the end of the method to check if the root node is already in the memo. If it is, print a reference; otherwise, expand it as before.
+          *   **From**:
+              ```python
+              # Start the process from the root node
+              root = self.inner
+              output_lines.append(f"--- Root {_get_node_info(root)} ---")
+              _format_recursive(root, "")
+              ```
+          *   **To**:
+              ```python
+              # Start the process from the root node
+              root = self.inner
+              root_id = id(root)
+              if root_id in printed_nodes:
+                  output_lines.append(f"--- Root -> Ref to Node @ {hex(root_id)} ---")
+              else:
+                  output_lines.append(f"--- Root {_get_node_info(root)} ---")
+                  _format_recursive(root, "")
+              ```
+
+      ### Git Diff
+
+      Here is the git diff to apply the changes:
+
+      ```diff
+      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
+      index 8250080..19f9b5a 100644
+      --- a/python/gss_tester/implementations/leveled_impl.py
+      +++ b/python/gss_tester/implementations/leveled_impl.py
+      @@ -1014,15 +1014,25 @@
+                   promotable_upper_nodes=promotable_upper_nodes,
+               )
+       
+      -    def to_graph_string(self) -> str:
+      +    def to_graph_string(self, memo: Optional[Set[int]] = None) -> str:
+               """
+               Generates a pretty, indented string representation of the GSS structure.
+               Nodes are expanded inline on first appearance. Subsequent encounters are
+               represented as references to avoid redundancy and cycles.
+      +
+      +        Args:
+      +            memo: An optional set of node IDs (from id()) that have already been
+      +                  printed. This method will mutate the set by adding IDs of
+      +                  nodes it prints. This allows for coherent printing of multiple
+      +                  GSS structures that share nodes.
+               """
+      -        printed_nodes: Set[int] = set()
+      +        if memo is None:
+      +            memo = set()
+      +        printed_nodes = memo  # Use the provided or a new memo
+               output_lines: List[str] = []
+       
+               def _get_node_info(node: Any) -> str:
+                   node_type = type(node).__name__
+                   info = f"{node_type} @ {hex(id(node))} (MaxDepth: {node._max_depth})"
+                   if isinstance(node, Interface):
+                       info += f" | acc: {repr(node.acc)}"
+      @@ -1078,9 +1088,13 @@
+       
+               # Start the process from the root node
+               root = self.inner
+      -        output_lines.append(f"--- Root {_get_node_info(root)} ---")
+      -        _format_recursive(root, "")
+      +        root_id = id(root)
+      +        if root_id in printed_nodes:
+      +            output_lines.append(f"--- Root -> Ref to Node @ {hex(root_id)} ---")
+      +        else:
+      +            output_lines.append(f"--- Root {_get_node_info(root)} ---")
+      +            _format_recursive(root, "")
+       
+               return "\n".join(output_lines)
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/implementations/leveled_impl.py
+      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
+    metadata:
+  - user: 'Changes committed with message: "leveled_impl: Allow passing a memo set
+      to to_graph_string to track printed nodes"'
     metadata:
 ...

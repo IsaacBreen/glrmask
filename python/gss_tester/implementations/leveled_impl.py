@@ -983,13 +983,21 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             promotable_upper_nodes=promotable_upper_nodes,
         )
 
-    def to_graph_string(self) -> str:
+    def to_graph_string(self, memo: Optional[Set[int]] = None) -> str:
         """
         Generates a pretty, indented string representation of the GSS structure.
         Nodes are expanded inline on first appearance. Subsequent encounters are
         represented as references to avoid redundancy and cycles.
+
+        Args:
+            memo: An optional set of node IDs (from id()) that have already been
+                  printed. This method will mutate the set by adding IDs of
+                  nodes it prints. This allows for coherent printing of multiple
+                  GSS structures that share nodes.
         """
-        printed_nodes: Set[int] = set()
+        if memo is None:
+            memo = set()
+        printed_nodes = memo  # Use the provided or a new memo
         output_lines: List[str] = []
 
         def _get_node_info(node: Any) -> str:
@@ -1048,8 +1056,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         # Start the process from the root node
         root = self.inner
-        output_lines.append(f"--- Root {_get_node_info(root)} ---")
-        _format_recursive(root, "")
+        root_id = id(root)
+        if root_id in printed_nodes:
+            output_lines.append(f"--- Root -> Ref to Node @ {hex(root_id)} ---")
+        else:
+            output_lines.append(f"--- Root {_get_node_info(root)} ---")
+            _format_recursive(root, "")
 
         return "\n".join(output_lines)
 
