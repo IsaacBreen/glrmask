@@ -84,6 +84,15 @@ pub fn optimize_trie3_size(
     }
     crate::debug!(2, "Step 11: Recomputing max depths...");
     Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+
+    crate::debug!(2, "Step 12: Merging equivalent LLM tokens (final pass)...");
+    if config.optimize_trie3_merge_equivalent_llm_tokens {
+        merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
+    }
+    crate::debug!(2, "Step 13: Reordering LLM tokens (final pass)...");
+    if config.optimize_trie3_reorder_llm_tokens {
+        reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
+    }
 }
 
 fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {

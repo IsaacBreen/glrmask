@@ -585,6 +585,14 @@ impl GrammarConstraint {
         // Always run normalization pass after potential token changes.
         constraint_precompute1_utils::optimize_state_masks_and_edges_trie1(&precomputed, &trie1_god);
 
+        // Rerun token optimizations at the end.
+        if config.optimize_trie1_merge_equivalent_llm_tokens {
+            constraint_precompute1_utils::merge_equivalent_llm_tokens_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
+        }
+        if config.optimize_trie1_reorder_llm_tokens {
+            constraint_precompute1_utils::reorder_llm_tokens_for_range_minimization_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
+        }
+
         // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
         precompute2_vocab = precompute_vocab.clone();
         precompute3_vocab = precompute_vocab.clone();
