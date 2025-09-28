@@ -6,6 +6,23 @@ use crate::constraint::{StageVocab, PrecomputeNodeIndex, Trie1GodWrapper};
 use crate::datastructures::gss::LLMTokenBV;
 use crate::datastructures::trie::Trie;
 
+fn count_total_ranges_trie1(
+    all_nodes: &[PrecomputeNodeIndex],
+    trie1_god: &Trie1GodWrapper,
+) -> usize {
+    let mut count = 0;
+    for n in all_nodes {
+        let g = n.read(trie1_god).expect("read");
+        count += g.value.live_tokens.to_ranges().len();
+        for (_ek, dm) in g.children() {
+            for (_dst, bv) in dm {
+                count += bv.to_ranges().len();
+            }
+        }
+    }
+    count
+}
+
 fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
     if bv.is_empty() { return LLMTokenBV::zeros(); }
     let mut out = LLMTokenBV::zeros();
@@ -80,6 +97,8 @@ pub fn merge_equivalent_llm_tokens_trie1(
     }
 
     // 3) Build many-to-one mapping
+    let tokens_before = sig_map.values().map(|g| g.len()).sum::<usize>();
+    let tokens_after = sig_map.len();
     let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
     let mut merged_count = 0;
     for (_sig, group) in tqdm!(sig_map.into_iter(), desc = "Building mapping") {
@@ -92,7 +111,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
             }
         }
     }
-    crate::debug!(2, "Trie1: merged {} LLM tokens into representatives.", merged_count);
+    crate::debug!(2, "Trie1: merged LLM tokens. Before: {}, After: {}. ({} merged)", tokens_before, tokens_after, merged_count);
     if merged_count == 0 { return; }
 
     // 4) Apply mapping to trie
@@ -149,6 +168,8 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
     if all_nodes.is_empty() { return; }
+    let ranges_before = count_total_ranges_trie1(&all_nodes, trie1_god);
+
     let max_tok = stage_vocab.internal_max_llm_token;
 
     // Count frequencies
@@ -208,6 +229,8 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
         w.value.live_tokens = live_tokens.clone();
         *w.children_mut() = children.clone();
     }
+    let ranges_after = count_total_ranges_trie1(&all_nodes, trie1_god);
+
     // Update stage vocab (pure permutation)
     let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
     for (old_id, setv) in stage_vocab.internal_to_original.clone() {
@@ -224,7 +247,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     }
     stage_vocab.original_to_internal = new_original_to_internal;
     stage_vocab.internal_max_llm_token = present.len().saturating_sub(1);
-    crate::debug!(2, "Trie1 reordering complete. New max internal token ID: {}", stage_vocab.internal_max_llm_token);
+    crate::debug!(2, "Trie1 reordering complete. Ranges reduced from {} to {}. New max internal token ID: {}", ranges_before, ranges_after, stage_vocab.internal_max_llm_token);
 }
 
 /// Conservative normalization pass for Trie1:
