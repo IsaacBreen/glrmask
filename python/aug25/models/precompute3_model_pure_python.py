@@ -353,6 +353,7 @@ class Model(GraphProvider):
     @profile
     def commit(self, token_id: int):
         print("commit")
+        memo = {}
         for tsid, gss in self.state.items():
             print(f"  [{tsid}]:")
             # grouped = {}
@@ -362,7 +363,7 @@ class Model(GraphProvider):
             #     print(f"    [{acc}]:")
             #     for stack in sorted(stacks):
             #         print(f"      {stack}")
-            print(textwrap.indent(gss.to_graph_string(), "    "))
+            print(textwrap.indent(gss.to_graph_string(memo), "    "))
 
         token_bytes = self.id_to_token[token_id]
 
