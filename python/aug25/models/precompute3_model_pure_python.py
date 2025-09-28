@@ -600,11 +600,6 @@ class Model(GraphProvider):
         stats.start('get_mask.seeding')
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
         def initialize_acc(acc: PyAcc) -> PyAcc:
-            # Fast path: if no disallowed terminals, allow all.
-            if not acc.terminals_union:
-                return PyAcc(
-                    terminals_union={},
-                    llm_mask=all_ones)
             stats.inc('get_mask.initialize_acc.calls')
             stats.start('get_mask.initialize_acc.total')
             # Compute allowed LLM tokens from disallowed terminals for this accumulator
@@ -660,17 +655,17 @@ class Model(GraphProvider):
             d: int = max_depth[r]
             if r not in enqueued_nodes:
                 enqueued_nodes.add(r)
-                hp(depth_heap, (d, r))  # smaller depth (closer to end) first
+                hp(depth_heap, (-d, r))
 
         def enqueue(d: int, n: NodeID) -> None:
             stats.inc('get_mask.traversal.enqueues')
             if n not in enqueued_nodes:
                 enqueued_nodes.add(n)
-                hp(depth_heap, (d, n))  # smaller depth (closer to end) first
+                hp(depth_heap, (-d, n))
 
         def dequeue() -> Tuple[int, int]:
-            d, n = hpop(depth_heap)
-            return d, n
+            neg_d, n = hpop(depth_heap)
+            return -neg_d, n
         stats.stop('get_mask.seeding')
 
         # Main loop
@@ -730,12 +725,8 @@ class Model(GraphProvider):
 
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
-                # Avoid popn() when pop == 0 (hot path)
                 stats.start('get_mask.main_loop.edge.popn')
-                if int(pop) == 0:
-                    popped: GSS = gss_node
-                else:
-                    popped = gss_node.popn(pop)
+                popped: GSS = gss_node.popn(pop)
                 stats.stop('get_mask.main_loop.edge.popn')
                 if popped.is_empty():
                     stats.inc('get_mask.traversal.edge.popped_empty')
@@ -776,55 +767,20 @@ class Model(GraphProvider):
                     stats.inc('get_mask.traversal.edge.popped_reduced_empty')
                     continue
 
-                # Cache peek once per (pop, llm) group and use RangeSet ops to filter heads.
-                stats.start('get_mask.main_loop.edge.peek_cached')
-                peeked = popped.peek()
-                stats.stop('get_mask.main_loop.edge.peek_cached')
-                if not peeked:
-                    continue
-                stats.start('get_mask.main_loop.edge.peek_to_rs')
-                # Build a RangeSet for the current heads to enable fast subset/intersection.
-                try:
-                    peeked_rs = RangeSet.from_indices(list(peeked))
-                except Exception:
-                    peeked_rs = RangeSet.from_indices([int(x) for x in list(peeked)])
-                stats.stop('get_mask.main_loop.edge.peek_to_rs')
-                peeked_len = len(peeked)
-
-                # Process nearer-to-end children first to grow final_mask earlier.
-                try:
-                    dests_sorted = sorted(dests, key=lambda item: int(max_depth[int(item[0])]))
-                except Exception:
-                    dests_sorted = dests
-
-                for dest_idx, state_bv in dests_sorted:
+                for dest_idx, state_bv in dests:
                     stats.inc('get_mask.traversal.dests_traversed')
 
-                    # Fast-path: if dest's state mask covers all current heads, no need to isolate.
                     stats.start('get_mask.main_loop.edge.peek_and_filter')
-                    keep_all = False
-                    try:
-                        keep_all = peeked_rs.issubset(state_bv)
-                    except Exception:
-                        keep_all = False
-                    values_to_keep = None
-                    child_gss: Optional[GSS] = None
-                    if keep_all:
-                        child_gss = popped
-                    else:
-                        # Compute intersection and isolate only the necessary heads.
-                        keep_rs = state_bv.intersection(peeked_rs)
-                        if not keep_rs.is_empty():
-                            values_to_keep = keep_rs.to_indices()
+                    peeked = popped.peek()
+                    values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
                     stats.stop('get_mask.main_loop.edge.peek_and_filter')
 
-                    if child_gss is None and not values_to_keep:
+                    if not values_to_keep:
                         continue
 
-                    if child_gss is None:
-                        stats.start('get_mask.main_loop.edge.isolate_many')
-                        child_gss = popped.isolate_many(values_to_keep)  # type: ignore[arg-type]
-                        stats.stop('get_mask.main_loop.edge.isolate_many')
+                    stats.start('get_mask.main_loop.edge.isolate_many')
+                    child_gss = popped.isolate_many(values_to_keep)
+                    stats.stop('get_mask.main_loop.edge.isolate_many')
 
                     stats.inc('get_mask.intersect_and_prune.memo_size.sum', len(acc_memo))
                     if child_gss.is_empty():
