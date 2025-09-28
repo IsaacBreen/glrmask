@@ -108,19 +108,6 @@ fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, us
     remap_llm_bv_many_to_one(bv, map_old_to_new, max_token_id)
 }
 
-/// Fast-path variant: if `bv` has no intersection with `moved_mask`,
-/// return `bv.clone()` without remapping.
-fn remap_llm_bv_many_to_one_fast(
-    bv: &LLMTokenBV,
-    map_old_to_new: &BTreeMap<usize, usize>,
-    max_token_id: usize,
-    moved_mask: &LLMTokenBV,
-) -> LLMTokenBV {
-    if bv.is_empty() { return LLMTokenBV::zeros(); }
-    if (&bv & moved_mask).is_empty() { return bv.clone(); }
-    remap_llm_bv_many_to_one(bv, map_old_to_new, max_token_id)
-}
-
 /// Merge equivalent internal LLM token ids in Trie3:
 /// Two tokens are equivalent if they occur together in every LLMTokenBV occurrence across:
 /// - node.value.live_tokens
@@ -139,26 +126,23 @@ pub fn merge_equivalent_llm_tokens_trie3(
     if all_nodes.is_empty() { return; }
 
     // 1) Collect family of LLM sets
-    // Deduplicate identical sets to reduce the signature universe.
-    let mut family_set: BTreeSet<LLMTokenBV> = BTreeSet::new();
+    let mut family: Vec<LLMTokenBV> = Vec::new();
     for n in tqdm!(all_nodes.iter(), desc = "Trie3 Merge Tokens (Collect)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
         let g = n.read(trie3_god).expect("read");
         if !g.value.live_tokens.is_empty() {
-            family_set.insert(g.value.live_tokens.clone());
+            family.push(g.value.live_tokens.clone());
         }
         for ((_, llm_bv), _dm) in g.children() {
             if !llm_bv.is_empty() {
-                family_set.insert(llm_bv.clone());
+                family.push(llm_bv.clone());
             }
         }
     }
-    if family_set.is_empty() { return; }
-    let family: Vec<LLMTokenBV> = family_set.into_iter().collect();
+    if family.is_empty() { return; }
 
     // 2) Group tokens by signature
     let max_tok = stage_vocab.internal_max_llm_token;
-    // Use HashMap for grouping; we still choose the representative deterministically (min id).
-    let mut sig_map: HashMap<Vec<usize>, Vec<usize>> = HashMap::new();
+    let mut sig_map: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
     #[cfg(not(rustrover))]
     let it = tqdm!(0..=max_tok, desc = "Trie3 Merge Tokens (Sigs)", disable = !PROGRESS_BAR_ENABLED, leave=false);
     #[cfg(rustrover)] let it = 0..=max_tok;
@@ -189,56 +173,31 @@ pub fn merge_equivalent_llm_tokens_trie3(
     crate::debug!(2, "Trie3: merged LLM tokens. Before: {}, After: {}. ({} merged)", tokens_before, tokens_after, merged_count);
     if merged_count == 0 { return; }
 
-    // 3) Remap trie (in-place, skip unaffected nodes; move maps to avoid clones)
-    let mut moved_mask = LLMTokenBV::zeros();
-    for old in old_to_new.keys() {
-        moved_mask.insert(*old);
-    }
-    for n in tqdm!(all_nodes.iter(), desc = "Trie3 Merge (Remap In-Place)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-        let mut w = n.write(trie3_god).expect("write");
-
-        // Quick skip if neither live_tokens nor any edge mask intersects moved_mask.
-        let mut affected = false;
-        if !w.value.live_tokens.is_empty() && !(&w.value.live_tokens & &moved_mask).is_empty() {
-            affected = true;
+    // 3) Remap trie
+    let mut new_states = Vec::with_capacity(all_nodes.len());
+    for n in tqdm!(all_nodes.iter(), desc = "Trie3 Merge (Remap Read)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
+        let r = n.read(trie3_god).expect("read");
+        let new_live_tokens = if r.value.live_tokens.is_empty() {
+            r.value.live_tokens.clone()
         } else {
-            for ((_, llm_bv), _dm) in w.children() {
-                if !(&llm_bv & &moved_mask).is_empty() {
-                    affected = true;
-                    break;
-                }
-            }
-        }
-        if !affected {
-            continue;
-        }
-
-        if !w.value.live_tokens.is_empty() {
-            w.value.live_tokens = remap_llm_bv_many_to_one_fast(&w.value.live_tokens, &old_to_new, max_tok, &moved_mask);
-        }
-
-        let old_children = std::mem::take(w.children_mut());
+            remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new, max_tok)
+        };
         let mut new_children = BTreeMap::new();
-        for ((pop, llm_bv), dm) in old_children {
-            let mapped_key_bv = remap_llm_bv_many_to_one_fast(&llm_bv, &old_to_new, max_tok, &moved_mask);
+        for ((pop, llm_bv), dm) in r.children() {
+            let mapped_key_bv = remap_llm_bv_many_to_one(&llm_bv, &old_to_new, max_tok);
             if mapped_key_bv.is_empty() { continue; }
-            match new_children.entry((pop, mapped_key_bv)) {
-                std::collections::btree_map::Entry::Vacant(e) => {
-                    // Move entire dest map (no clones)
-                    e.insert(dm);
-                }
-                std::collections::btree_map::Entry::Occupied(mut e) => {
-                    // Merge destinations by unioning SIDs
-                    let entry = e.get_mut();
-                    for (dst, sid_bv) in dm {
-                        entry.entry(dst)
-                            .and_modify(|ex| *ex |= &sid_bv)
-                            .or_insert(sid_bv);
-                    }
-                }
+            let entry = new_children.entry((*pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
+            for (dst, sid_bv) in dm {
+                entry.entry(dst.clone()).and_modify(|e| *e |= sid_bv).or_insert_with(|| sid_bv.clone());
             }
         }
-        *w.children_mut() = new_children;
+        new_states.push((new_live_tokens, new_children));
+    }
+    for (i, n) in tqdm!(all_nodes.iter().enumerate(), desc = "Trie3 Merge (Remap Write)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
+        let mut w = n.write(trie3_god).expect("write");
+        let (live_tokens, children) = &new_states[i];
+        w.value.live_tokens = live_tokens.clone();
+        *w.children_mut() = children.clone();
     }
     // 4) Update StageVocab
     for (old, rep) in tqdm!(old_to_new.iter(), desc = "Trie3 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
