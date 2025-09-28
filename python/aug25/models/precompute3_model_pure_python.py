@@ -381,6 +381,8 @@ class Model(GraphProvider):
             matched_terminals = [terminal_id for terminal_id, _ in matches]
             terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
 
+        t1 = time.perf_counter()
+
         # Prune and map per-state GSS
         temp_states: Dict[int, GSS] = {}
         for tokenizer_sid, gss in self.state.items():
@@ -388,6 +390,8 @@ class Model(GraphProvider):
             if not pruned_gss.is_empty():
                 mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
                 temp_states[tokenizer_sid] = mapped_gss
+
+        t2 = time.perf_counter()
 
         current_state_for_processing = temp_states
 
@@ -427,6 +431,8 @@ class Model(GraphProvider):
             if end_state is not None:
                 new_states[end_state].append(gss)
 
+        t3 = time.perf_counter()
+
         merged_states = {
             sid: GSS.merge_many(gss_list)
             for sid, gss_list in new_states.items()
@@ -434,9 +440,18 @@ class Model(GraphProvider):
         }
         merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
 
+        t4 = time.perf_counter()
+
         self.state = merged_states
 
-        t1 = time.perf_counter()
+        t5 = time.perf_counter()
+        print(f"commit({token_id}, {token_bytes!r}):")
+        print(f"  - build tokenizer maps: {t1 - t0:.6f}s")
+        print(f"  - prune and map gss:    {t2 - t1:.6f}s")
+        print(f"  - process queue:        {t3 - t2:.6f}s")
+        print(f"  - merge states:         {t4 - t3:.6f}s")
+        print(f"  - final assignment:     {t5 - t4:.6f}s")
+        print(f"  - TOTAL:                {t5 - t0:.6f}s")
 
     @profile
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
