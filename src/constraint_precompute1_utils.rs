@@ -145,7 +145,6 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
 
     // Count frequencies
     let mut freq: Vec<usize> = vec![0; max_tok + 1];
-    crate::debug!(2, "Computing frequencies...");
     for n in tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Freq)", total = all_nodes.len()) {
         let g = n.read(trie1_god).expect("read");
         for t in g.value.live_tokens.iter() {
