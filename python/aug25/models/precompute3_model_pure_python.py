@@ -352,9 +352,6 @@ class Model(GraphProvider):
 
     @profile
     def commit(self, token_id: int):
-        memo = {}
-        self.state = {tsid: gss.fuse(1, memo) for tsid, gss in self.state.items()}
-
         token_bytes = self.id_to_token[token_id]
 
         # Build tokenizer maps
@@ -440,6 +437,9 @@ class Model(GraphProvider):
             if gss_list
         }
         merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
+
+        memo = {}
+        merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
 
         self.state = merged_states
 
