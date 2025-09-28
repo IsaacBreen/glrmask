@@ -250,50 +250,22 @@ pub fn merge_equivalent_llm_tokens_trie3(
         mapped_universe.insert(rep);
     }
 
-    // Identify affected bitvector instances (by Arc pointer identity)
-    let mut affected_ptrs: HashSet<*const RangeSetBlaze<usize>> = HashSet::new();
-    for (sig, group) in &sig_map {
-        if group.len() <= 1 { continue; }
-        for &set_idx in sig {
-            let ptr = Arc::as_ptr(&family[set_idx].inner);
-            affected_ptrs.insert(ptr);
-        }
-    }
+    // Memoization cache for remapping
+    let mut remap_cache: HashMap<LLMTokenBV, LLMTokenBV> = HashMap::new();
 
     // 3) Remap trie in‑place, only where needed
     for n in tqdm!(all_nodes.iter(), desc = "Trie3 Merge (Remap In‑Place)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-        // Quick check whether this node references any affected bitvector.
-        let needs_update = {
-            let r = n.read(trie3_god).expect("read");
-            let lv_ptr = Arc::as_ptr(&r.value.live_tokens.inner);
-            if affected_ptrs.contains(&lv_ptr) {
-                true
-            } else {
-                let mut touched = false;
-                for ((_, llm_bv), _dm) in r.children() {
-                    let key_ptr = Arc::as_ptr(&llm_bv.inner);
-                    if affected_ptrs.contains(&key_ptr) {
-                        touched = true;
-                        break;
-                    }
-                }
-                touched
-            }
-        };
-        if !needs_update { continue; }
-
         let mut w = n.write(trie3_god).expect("write");
 
         // Remap live_tokens if needed
         if !w.value.live_tokens.is_empty() {
-            if w.value.live_tokens == LLMTokenBV::max_ones() {
-                w.value.live_tokens = mapped_universe.clone();
-            } else {
-                let lv_ptr = Arc::as_ptr(&w.value.live_tokens.inner);
-                if affected_ptrs.contains(&lv_ptr) {
-                    w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new, max_tok);
+            w.value.live_tokens = remap_cache.entry(w.value.live_tokens.clone()).or_insert_with_key(|bv| {
+                if *bv == LLMTokenBV::max_ones() {
+                    mapped_universe.clone()
+                } else {
+                    remap_llm_bv_many_to_one(bv, &old_to_new, max_tok)
                 }
-            }
+            }).clone();
         }
 
         // Remap edge keys (pop, LLMTokenBV)
@@ -302,15 +274,14 @@ pub fn merge_equivalent_llm_tokens_trie3(
         for ((pop, llm_bv), dm) in old_children {
             let mapped_key_bv = if llm_bv.is_empty() {
                 LLMTokenBV::zeros()
-            } else if llm_bv == LLMTokenBV::max_ones() {
-                mapped_universe.clone()
             } else {
-                let key_ptr = Arc::as_ptr(&llm_bv.inner);
-                if affected_ptrs.contains(&key_ptr) {
-                    remap_llm_bv_many_to_one(&llm_bv, &old_to_new, max_tok)
-                } else {
-                    llm_bv
-                }
+                remap_cache.entry(llm_bv.clone()).or_insert_with_key(|bv| {
+                    if *bv == LLMTokenBV::max_ones() {
+                        mapped_universe.clone()
+                    } else {
+                        remap_llm_bv_many_to_one(bv, &old_to_new, max_tok)
+                    }
+                }).clone()
             };
             if mapped_key_bv.is_empty() { continue; }
             let entry = new_children.entry((pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
@@ -373,17 +344,24 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
         old_to_new.insert(*old_id, new_id);
     }
 
+    // Memoization cache for remapping
+    let mut remap_cache: HashMap<LLMTokenBV, LLMTokenBV> = HashMap::new();
+
     let mut new_states = Vec::with_capacity(all_nodes.len());
     for n in tqdm!(all_nodes.iter(), desc = "Trie3 Reorder (Remap Read)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
         let r = n.read(trie3_god).expect("read");
         let new_live_tokens = if r.value.live_tokens.is_empty() {
             r.value.live_tokens.clone()
         } else {
-            remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new, max_tok)
+            remap_cache.entry(r.value.live_tokens.clone()).or_insert_with_key(|bv| {
+                remap_llm_bv_permutation(bv, &old_to_new, max_tok)
+            }).clone()
         };
         let mut new_children = BTreeMap::new();
         for ((pop, llm_bv), dm) in r.children() {
-            let mapped_key_bv = remap_llm_bv_permutation(&llm_bv, &old_to_new, max_tok);
+            let mapped_key_bv = remap_cache.entry(llm_bv.clone()).or_insert_with_key(|bv| {
+                remap_llm_bv_permutation(bv, &old_to_new, max_tok)
+            }).clone();
             if mapped_key_bv.is_empty() { continue; }
             let entry = new_children.entry((*pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
             for (dst, sid_bv) in dm {
