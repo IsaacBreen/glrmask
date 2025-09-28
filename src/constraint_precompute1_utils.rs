@@ -138,7 +138,6 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     trie1_god: &Trie1GodWrapper,
     stage_vocab: &mut StageVocab,
 ) {
-    crate::debug!(2, "Reordering LLM tokens in Trie1 for range minimization...");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
     if all_nodes.is_empty() { return; }
@@ -146,7 +145,8 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
 
     // Count frequencies
     let mut freq: Vec<usize> = vec![0; max_tok + 1];
-    for n in tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Freq)", total=all_nodes.len(), leave=false) {
+    crate::debug!(2, "Computing frequencies...");
+    for n in tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Freq)", total=all_nodes.len()) {
         let g = n.read(trie1_god).expect("read");
         for t in g.value.live_tokens.iter() {
             if t as usize <= max_tok { freq[t as usize] += 1; }
@@ -159,6 +159,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
             }
         }
     }
+    crate::debug!(2, "Done computing frequencies.");
 
     // Build ordering: tokens present at least once, sorted by (freq desc, id asc)
     let mut present: Vec<usize> = (0..=max_tok).filter(|t| freq[*t] > 0).collect();
