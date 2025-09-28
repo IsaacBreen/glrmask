@@ -107,19 +107,19 @@ class GSS(ABC, Generic[T, Acc]):
         return dest
 
     @abstractmethod
-    def apply(self, func: Callable[[Acc], NewAcc]) -> GSS[T, NewAcc]:
+    def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
         """Applies a function to each accumulator, returning a new GSS state."""
         pass
 
     @abstractmethod
-    def prune(self: GSSType, predicate: Callable[[Acc], bool]) -> GSSType:
+    def prune(self: GSSType, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> GSSType:
         """
         Removes stacks from the GSS based on a predicate on their accumulator.
         If `predicate(acc)` returns False, the stack is removed.
         """
         pass
 
-    def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]]) -> GSS[T, NewAcc]:
+    def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
         """
         Combined transform that applies a mutate-and-prune function to each stack's accumulator.
         The `mutator` must return:
@@ -130,7 +130,7 @@ class GSS(ABC, Generic[T, Acc]):
         invoking `mutator` more than once per accumulator instance when possible.
         Concrete implementations can override for a faster single-pass transform.
         """
-        cache: Dict[int, Optional[NewAcc]] = {}
+        cache: Dict[int, Optional[NewAcc]] = {} if memo is None else memo
 
         def decide(a: Acc) -> Optional[NewAcc]:
             k = id(a)
@@ -140,13 +140,13 @@ class GSS(ABC, Generic[T, Acc]):
             cache[k] = r
             return r
 
-        pruned = self.prune(lambda a: decide(a) is not None)
+        pruned = self.prune(lambda a: decide(a) is not None, memo=memo)
         def map_acc(a: Acc) -> NewAcc:
             r = decide(a)
             if r is None:
                 raise AssertionError("This should not be reached if prune worked correctly")
             return r
-        return pruned.apply(map_acc)
+        return pruned.apply(map_acc, memo=memo)
     @abstractmethod
     def merge(self: GSSType, other: GSSType) -> GSSType:
         """Merges this GSS with another, combining accumulators for identical stacks."""

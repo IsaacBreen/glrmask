@@ -309,30 +309,6 @@ class Model(GraphProvider):
         # model._reorder_llm_tokens_for_range_minimization()
         # model._recompute_max_depth_from_arena()
         return model
-
-    @profile
-    def _prune_disallowed_terminals(self, gss: GSS, terminals_map: Dict[int, TerminalIdSet]) -> GSS:
-        def predicate(acc: PyAcc) -> bool:
-            disallowed_terminals_map = acc.terminals_union
-            for state_id, matched_bv in terminals_map.items():
-                disallowed_for_state = disallowed_terminals_map.get(state_id, RangeSet.empty())
-                if not matched_bv.intersection(disallowed_for_state).is_empty():
-                    return False
-            return True
-        return gss.prune(predicate)
-
-    @profile
-    def _map_allowed_terminals_tokenizer_states(self, gss: GSS, state_map: Dict[int, int]) -> GSS:
-        def apply_map(acc: PyAcc) -> PyAcc:
-            old_map = acc.terminals_union
-            new_bvs: Dict[int, TerminalIdSet] = collections.defaultdict(RangeSet.empty)
-            for old_sid, new_sid in state_map.items():
-                bv_source = old_map.get(old_sid, RangeSet.empty())
-                new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
-
-            return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
-        return gss.apply(apply_map)
-
     @profile
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         def apply_disallow(acc: PyAcc) -> PyAcc:
@@ -383,13 +359,30 @@ class Model(GraphProvider):
 
         t1 = time.perf_counter()
 
-        # Prune and map per-state GSS
+        # Prune and map per-state GSS in a single pass
         temp_states: Dict[int, GSS] = {}
         for tokenizer_sid, gss in self.state.items():
-            pruned_gss = self._prune_disallowed_terminals(gss, terminals_map)
-            if not pruned_gss.is_empty():
-                mapped_gss = self._map_allowed_terminals_tokenizer_states(pruned_gss, state_map)
-                temp_states[tokenizer_sid] = mapped_gss
+            def mutator(acc: PyAcc) -> Optional[PyAcc]:
+                # Prune condition
+                disallowed_terminals_map = acc.terminals_union
+                for tsid, matched_bv in terminals_map.items():
+                    disallowed_for_state = disallowed_terminals_map.get(tsid, RangeSet.empty())
+                    if not matched_bv.intersection(disallowed_for_state).is_empty():
+                        return None
+
+                # Map
+                old_map = acc.terminals_union
+                new_bvs: Dict[int, TerminalIdSet] = collections.defaultdict(RangeSet.empty)
+                for old_sid, new_sid in state_map.items():
+                    bv_source = old_map.get(old_sid, RangeSet.empty())
+                    new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
+
+                return PyAcc(terminals_union=dict(new_bvs), llm_mask=acc.llm_mask)
+
+            processed_gss = gss.apply_and_prune(mutator)
+            if not processed_gss.is_empty():
+                # The GSS is still associated with the old tokenizer_sid for the next step
+                temp_states[tokenizer_sid] = processed_gss
 
         t2 = time.perf_counter()
 

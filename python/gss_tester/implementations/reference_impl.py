@@ -86,14 +86,14 @@ class ReferenceGSS(GSS[T, Acc]):
                     filtered.append((list(vals), acc))
         return ReferenceGSS(filtered)
 
-    def apply(self, func: Callable[[Acc], NewAcc]) -> 'ReferenceGSS[T, NewAcc]':
+    def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> 'ReferenceGSS[T, NewAcc]':
         # Apply func to each accumulator independently
         transformed: List[Tuple[List[T], NewAcc]] = []
         for vals, acc in self._stacks:
             transformed.append((list(vals), func(acc)))
         return ReferenceGSS(transformed) # type: ignore[arg-type]
 
-    def prune(self, predicate: Callable[[Acc], bool]) -> 'ReferenceGSS[T, Acc]':
+    def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> 'ReferenceGSS[T, Acc]':
         # Keep only stacks where predicate(acc) is True
         kept: List[Tuple[List[T], Acc]] = []
         for vals, acc in self._stacks:

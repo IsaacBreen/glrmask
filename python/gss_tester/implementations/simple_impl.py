@@ -335,7 +335,7 @@ class SimpleGSS(GSS[T, Acc], Generic[T, Acc]):
                 new_map[acc] = filtered_root
         return SimpleGSS(acc_trees=new_map)
 
-    def apply(self, func: Callable[[Acc], NewAcc]) -> "SimpleGSS[T, NewAcc]":
+    def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> "SimpleGSS[T, NewAcc]":
         """
         Apply a function to each accumulator. If two accumulators map to the same new value,
         merge their tries.
@@ -353,7 +353,7 @@ class SimpleGSS(GSS[T, Acc], Generic[T, Acc]):
         # No cross-acc duplicates can appear here since stack sets were disjoint already.
         return SimpleGSS(acc_trees=new_map) # type: ignore[arg-type]
 
-    def prune(self, predicate: Callable[[Acc], bool]) -> "SimpleGSS[T, Acc]":
+    def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> "SimpleGSS[T, Acc]":
         """
         Remove all stacks whose accumulator does not satisfy predicate. Since predicate
         depends only on the accumulator, we remove whole subtries per-acc.

@@ -586,8 +586,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         return LeveledGSS(transform(self.inner)) # type: ignore[arg-type]
 
-    def prune(self, predicate: Callable[[Acc], bool]) -> LeveledGSS[T, Acc]:
-        memo: Dict[int, Optional[Upper[T, Acc]]] = {}
+    def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, Acc]:
+        if memo is None:
+            memo = {}
 
         def transform(node: Upper[T, Acc]) -> Optional[Upper[T, Acc]]:
             if id(node) in memo:
@@ -660,7 +661,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return LeveledGSS(UpperBranch(children={}, empty=None))
         return LeveledGSS(res_inner)
 
-    def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]]) -> LeveledGSS[T, NewAcc]:
+    def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, NewAcc]:
         """
         Fast single-pass implementation of apply_and_prune for LeveledGSS.
         - mutator(acc) -> Optional[NewAcc]
@@ -678,7 +679,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             acc_cache[k] = r
             return r
 
-        memo: Dict[int, Optional[Upper[T, NewAcc]]] = {}
+        if memo is None:
+            memo = {}
 
         def transform(node: Upper[T, Acc]) -> Optional[Upper[T, NewAcc]]:
             nid = id(node)

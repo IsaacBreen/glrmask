@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Tuple, Callable, Optional, Iterable, Any, Type
+from typing import List, Tuple, Callable, Optional, Iterable, Any, Type, Dict
 
 from ..interface import GSS, T, Acc, NewAcc
 # This will be the name of the compiled C++ module
@@ -43,13 +43,13 @@ class Leveled_impl_cppGSS(GSS[T, Acc]):
     def isolate_many(self, values: Iterable[Optional[T]]) -> Leveled_impl_cppGSS[T, Acc]:
         return Leveled_impl_cppGSS(self._cpp_gss.isolate_many(list(values)))
 
-    def apply(self, func: Callable[[Acc], NewAcc], memo=None) -> GSS[T, NewAcc]:
+    def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
         return Leveled_impl_cppGSS(self._cpp_gss.apply(func))
 
-    def prune(self, predicate: Callable[[Acc], bool], memo=None) -> Leveled_impl_cppGSS[T, Acc]:
+    def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> Leveled_impl_cppGSS[T, Acc]:
         return Leveled_impl_cppGSS(self._cpp_gss.prune(predicate))
 
-    def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]], memo=None) -> GSS[T, NewAcc]:
+    def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
         return Leveled_impl_cppGSS(self._cpp_gss.apply_and_prune(mutator))
 
     def merge(self, other: Leveled_impl_cppGSS[T, Acc]) -> Leveled_impl_cppGSS[T, Acc]:
