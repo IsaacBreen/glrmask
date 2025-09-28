@@ -354,18 +354,6 @@ class Model(GraphProvider):
     def commit(self, token_id: int):
         memo = {}
         self.state = {tsid: gss.fuse(1, memo) for tsid, gss in self.state.items()}
-        print("commit")
-        memo = set()
-        # for tsid, gss in self.state.items():
-        #     print(f"  [{tsid}]:")
-        #     # grouped = {}
-        #     # for stack, acc in gss.to_stacks():
-        #     #     grouped.setdefault(acc, []).append(stack)
-        #     # for acc, stacks in grouped.items():
-        #     #     print(f"    [{acc}]:")
-        #     #     for stack in sorted(stacks):
-        #     #         print(f"      {stack}")
-        #     print(textwrap.indent(gss.to_graph_string(memo), "    "))
 
         token_bytes = self.id_to_token[token_id]
 
