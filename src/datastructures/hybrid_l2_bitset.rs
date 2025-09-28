@@ -12,6 +12,27 @@ use std::ops::{
 };
 use std::sync::Arc;
 
+pub struct L2Iter<'a> {
+    inner_iter: Box<dyn Iterator<Item = (usize, usize)> + 'a>,
+    is_full: bool,
+    count: usize,
+}
+
+impl<'a> Iterator for L2Iter<'a> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.inner_iter.next();
+        if item.is_some() {
+            self.count += 1;
+            if self.count == 1000 && self.is_full {
+                eprintln!("Warning: Iterating over a full HybridL2Bitset. This may take a very long time and consume a lot of memory.");
+            }
+        }
+        item
+    }
+}
+
 #[derive(Clone, Eq)]
 pub struct HybridL2Bitset {
     pub(crate) inner: Acc<RangeMapBlaze<usize, HybridBitset>>,
@@ -116,6 +137,15 @@ impl HybridL2Bitset {
         self.inner.ranges_len() < cache::SIMPLE_L2_BITSET_THRESHOLD
     }
 
+    pub fn is_all(&self) -> bool {
+        if self.inner.ranges_len() == 1 {
+            if let Some((range, bitset)) = self.inner.range_values().next() {
+                return range == (0..=usize::MAX) && bitset.is_full();
+            }
+        }
+        false
+    }
+
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
@@ -185,10 +215,16 @@ impl HybridL2Bitset {
         self.inner.get(l1_index)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
-        self.inner
+    pub fn iter(&self) -> L2Iter<'_> {
+        let inner = self
+            .inner
             .iter()
-            .flat_map(|(l1_index, bitset)| bitset.iter().map(move |l2_index| (l1_index, l2_index)))
+            .flat_map(|(l1_index, bitset)| bitset.iter().map(move |l2_index| (l1_index, l2_index)));
+        L2Iter {
+            inner_iter: Box::new(inner),
+            is_full: self.is_all(),
+            count: 0,
+        }
     }
 
     pub fn iter_l1_bitsets(&self) -> impl Iterator<Item = (usize, &HybridBitset)> {
