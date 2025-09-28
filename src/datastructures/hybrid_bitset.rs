@@ -80,7 +80,7 @@ impl<'a> Debug for DebugRangesTruncated<'a> {
 
 impl Debug for HybridBitset {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if self.is_full() {
+        if self.is_all() {
             return f
                 .debug_struct("HybridBitset")
                 .field("inner", &format_args!("0..=usize::MAX"))
@@ -155,7 +155,7 @@ impl HybridBitset {
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
-    pub fn is_full(&self) -> bool {
+    pub fn is_all(&self) -> bool {
         self == &HybridBitset::max_ones()
     }
 
@@ -221,7 +221,7 @@ impl HybridBitset {
         Iter {
             iter_inner: self.inner.iter(),
             remaining: self.len(),
-            is_full: self.is_full(),
+            is_all: self.is_all(),
             count: 0,
         }
     }
@@ -230,13 +230,13 @@ impl HybridBitset {
     /// up to the largest index present in the set (inclusive) whether it's set or not.
     /// If the set is empty, the iterator is empty.
     pub fn iter_bits(&self) -> BitsIter<'_> {
-        let is_full = self.is_full();
+        let is_all = self.is_all();
         if self.is_empty() {
             BitsIter {
                 bitset: self,
                 current_idx: 1, // Start beyond max_idx_to_iterate to yield nothing
                 max_idx_to_iterate: 0,
-                is_full,
+                is_all,
                 count: 0,
             }
         } else {
@@ -245,7 +245,7 @@ impl HybridBitset {
                 bitset: self,
                 current_idx: 0,
                 max_idx_to_iterate: max_val_in_set,
-                is_full,
+                is_all,
                 count: 0,
             }
         }
@@ -373,7 +373,7 @@ const FULL_ITER_WARNING_THRESHOLD: usize = 1_000_000;
 pub struct Iter<'a> {
     iter_inner: range_set_blaze::Iter<usize, range_set_blaze::RangesIter<'a, usize>>,
     remaining: usize,
-    is_full: bool,
+    is_all: bool,
     count: usize,
 }
 
@@ -381,7 +381,7 @@ impl<'a> Iterator for Iter<'a> {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.is_full {
+        if self.is_all {
             self.count += 1;
             if self.count == FULL_ITER_WARNING_THRESHOLD {
                 eprintln!(
@@ -432,7 +432,7 @@ pub struct BitsIter<'a> {
     bitset: &'a HybridBitset,
     current_idx: usize,
     max_idx_to_iterate: usize, // Inclusive
-    is_full: bool,
+    is_all: bool,
     count: usize,
 }
 
@@ -440,7 +440,7 @@ impl<'a> Iterator for BitsIter<'a> {
     type Item = bool;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.is_full {
+        if self.is_all {
             self.count += 1;
             if self.count == FULL_ITER_WARNING_THRESHOLD {
                 eprintln!(
