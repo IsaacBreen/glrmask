@@ -985,90 +985,71 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def to_graph_string(self) -> str:
         """
-        Generates a string representation of the GSS structure as a graph.
-        This is useful for debugging the internal structure.
+        Generates a pretty, indented string representation of the GSS structure.
+        Nodes are expanded inline on first appearance. Subsequent encounters are
+        represented as references to avoid redundancy and cycles.
         """
-        # 1. Discover all nodes and assign IDs
-        nodes_in_order: List[Any] = []
-        node_ids: Dict[int, int] = {}  # id(node) -> print_id
+        printed_nodes: Set[int] = set()
+        output_lines: List[str] = []
 
-        queue: List[Any] = [self.inner]
-        # Keep track of nodes added to queue to avoid duplicates
-        in_queue: Set[int] = {id(self.inner)}
-
-        while queue:
-            node = queue.pop(0)
-
-            nid = id(node)
-            if nid not in node_ids:
-                node_ids[nid] = len(nodes_in_order)
-                nodes_in_order.append(node)
-
-            if isinstance(node, (UpperBranch, Interface, Lower)):
-                # Get children in a deterministic order to make traversal deterministic
-                if hasattr(node, 'children'):
-                    sorted_children_items = sorted(node.children.items())
-                    for _, kids_at_depths in sorted_children_items:
-                        sorted_kids = sorted(kids_at_depths.items())
-                        for _, child in sorted_kids:
-                            child_nid = id(child)
-                            if child_nid not in in_queue:
-                                in_queue.add(child_nid)
-                                queue.append(child)
-
-        # 2. Build the string representation for each node
-        output_lines = []
-
-        for print_id, node in enumerate(nodes_in_order):
-            nid = id(node)
+        def _get_node_info(node: Any) -> str:
             node_type = type(node).__name__
-
-            if print_id == 0:  # Root is always ID 0
-                output_lines.append(f"--- Root Node {print_id} ---")
-            else:
-                output_lines.append(f"--- Node {print_id} ---")
-
-            header = f"{node_type} @ {hex(nid)} (MaxDepth: {node._max_depth})"
-
+            info = f"{node_type} @ {hex(id(node))} (MaxDepth: {node._max_depth})"
             if isinstance(node, Interface):
-                header += f" | acc: {repr(node.acc)}"
+                info += f" | acc: {repr(node.acc)}"
 
-            output_lines.append(header)
-
-            # Collect all items to print for this node to handle prefixes correctly
-            items_to_print = []
-
-            # Print empty/terminal info
+            terminal_info = ""
             if isinstance(node, UpperBranch):
                 if node.empty is not None:
-                    items_to_print.append(f"Terminal empty: {repr(node.empty)}")
+                    terminal_info = f" [TERMINAL empty: {repr(node.empty)}]"
             elif isinstance(node, Interface):
                 if node.empty is not None:
-                    items_to_print.append(f"Terminal empty: {repr(node.empty)}")
-                if not node.children and node.empty is None:  # Implicit terminal
-                    items_to_print.append(f"Implicit Terminal (acc: {repr(node.acc)})")
+                    terminal_info = f" [TERMINAL empty: {repr(node.empty)}]"
+                if not node.children and node.empty is None:
+                    terminal_info = f" [IMPLICIT TERMINAL acc: {repr(node.acc)}]"
             elif isinstance(node, Lower):
                 if node.empty:
-                    items_to_print.append(f"Terminal")
+                    terminal_info = " [TERMINAL]"
 
-            # Print edges to children
+            return info + terminal_info
+
+        def _format_recursive(node: Any, current_prefix: str):
+            # This node is being expanded now, so future encounters will be refs.
+            printed_nodes.add(id(node))
+
+            # Collect children edges to be printed for this node
+            children_to_print = []
             if hasattr(node, 'children') and node.children:
-                # Sorting for deterministic output
                 sorted_children = sorted(node.children.items())
                 for v, kids_at_depths in sorted_children:
                     sorted_kids = sorted(kids_at_depths.items())
                     for depth, child in sorted_kids:
-                        child_nid = id(child)
-                        child_print_id = node_ids[child_nid]
-                        edge_str = f"Edge {repr(v)} (d={depth}): -> Node {child_print_id} @ {hex(child_nid)} (MaxDepth: {child._max_depth})"
-                        items_to_print.append(edge_str)
+                        label = f"Edge {repr(v)} (d={depth})"
+                        children_to_print.append((label, child))
 
-            for i, item_str in enumerate(items_to_print):
-                prefix = "└── " if i == len(items_to_print) - 1 else "├── "
-                output_lines.append(prefix + item_str)
+            # Iterate through the collected children and format them
+            for i, (label, child) in enumerate(children_to_print):
+                is_last = (i == len(children_to_print) - 1)
+                prefix_char = "└── " if is_last else "├── "
 
-            if print_id < len(nodes_in_order) - 1:
-                output_lines.append("")  # separator
+                child_id = id(child)
+                if child_id in printed_nodes:
+                    # Already expanded elsewhere, just print a reference
+                    line = current_prefix + prefix_char + label + f" -> Ref to Node @ {hex(child_id)}"
+                    output_lines.append(line)
+                else:
+                    # New node, expand it recursively
+                    line = current_prefix + prefix_char + label + f" -> {_get_node_info(child)}"
+                    output_lines.append(line)
+
+                    # Prepare prefix for the next level of recursion
+                    child_prefix = current_prefix + ("    " if is_last else "│   ")
+                    _format_recursive(child, child_prefix)
+
+        # Start the process from the root node
+        root = self.inner
+        output_lines.append(f"--- Root {_get_node_info(root)} ---")
+        _format_recursive(root, "")
 
         return "\n".join(output_lines)
 
