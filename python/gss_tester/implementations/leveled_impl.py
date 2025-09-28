@@ -17,11 +17,13 @@ from .reference_impl import ReferenceGSS
 type Upper[T, Acc] = UpperBranch[T, Acc] | Interface[T, Acc]
 
 
-@dataclass(frozen=True, eq=True)
+@dataclass(frozen=True, eq=False)
 class UpperBranch(Generic[T, Acc]):
     children: Dict[T, Dict[int, Upper[T, Acc]]]
     empty: Optional[Acc]
     _max_depth: int = field(init=False)
+
+    def __hash__(self): raise NotImplementedError
 
     def __post_init__(self):
         depth = max(child._max_depth for child in self._all_children()) + 1 if self.children else 0
@@ -33,12 +35,14 @@ class UpperBranch(Generic[T, Acc]):
             yield from children_at_depth.values()
 
 
-@dataclass(frozen=True, eq=True)
+@dataclass(frozen=True, eq=False)
 class Interface(Generic[T, Acc]):
     children: Dict[T, Dict[int, Lower[T]]]
     acc: Acc
     empty: Optional[Acc]
     _max_depth: int = field(init=False)
+
+    def __hash__(self): raise NotImplementedError
 
     def __post_init__(self):
         depth = max(child._max_depth for child in self._all_children()) + 1 if self.children else 0
@@ -49,11 +53,13 @@ class Interface(Generic[T, Acc]):
             yield from v_children.values()
 
 
-@dataclass(frozen=True, eq=True)
+@dataclass(frozen=True, eq=False)
 class Lower(Generic[T]):
     children: Dict[T, Dict[int, Lower[T]]]
     empty: bool
     _max_depth: int = field(init=False)
+
+    def __hash__(self): raise NotImplementedError
 
     def __post_init__(self):
         depth = max(child._max_depth for child in self._all_children()) + 1 if self.children else 0
@@ -161,9 +167,11 @@ class LeveledGSSStats(Generic[T, Acc]):
         return "\n".join(lines)
 
 
-@dataclass(frozen=True, eq=True)
+@dataclass(frozen=True, eq=False)
 class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     inner: Upper[T, Acc]
+
+    def __hash__(self): raise NotImplementedError
 
     def __post_init__(self):
         if os.environ.get("GSS_TESTER_VALIDATE"):
