@@ -35,13 +35,21 @@ _original_rangeset_intersection = RangeSet.intersection
 
 def _patched_union(self, other: "RangeSet") -> "RangeSet":
     """Patched version of RangeSet.union that increments a stats counter."""
-    Stats.get().inc('bitset.union.calls')
-    return _original_rangeset_union(self, other)
+    stats = Stats.get()
+    stats.inc('bitset.union.calls')
+    stats.start('bitset.union.time')
+    result = _original_rangeset_union(self, other)
+    stats.stop('bitset.union.time')
+    return result
 
 def _patched_intersection(self, other: "RangeSet") -> "RangeSet":
     """Patched version of RangeSet.intersection that increments a stats counter."""
-    Stats.get().inc('bitset.intersection.calls')
-    return _original_rangeset_intersection(self, other)
+    stats = Stats.get()
+    stats.inc('bitset.intersection.calls')
+    stats.start('bitset.intersection.time')
+    result = _original_rangeset_intersection(self, other)
+    stats.stop('bitset.intersection.time')
+    return result
 
 # Apply the patches
 RangeSet.union = _patched_union
@@ -473,9 +481,11 @@ class Model(GraphProvider):
         merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
         stats.stop('commit.merge_states')
 
+        stats.start('commit.fuse')
         memo = {}
         merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
-
+        stats.stop('commit.fuse')
+ 
         stats.inc('commit.tokenizer_states_out', len(merged_states))
         self.state = merged_states
         stats.stop('commit.total')
@@ -497,7 +507,9 @@ class Model(GraphProvider):
         while heads_by_state:
             stats.inc('_process_token.loop_iterations')
             state_id, state_gsss = heads_by_state.popitem()
+            stats.start('_process_token.merge_many.heads')
             state_gss = GSS.merge_many(state_gsss)
+            stats.stop('_process_token.merge_many.heads')
             row = self.parser_table.table.get(state_id)
             if not row:
                 continue
@@ -511,9 +523,11 @@ class Model(GraphProvider):
 
             def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
                 stats.inc('_process_token.reduces')
+                stats.start('_process_token.reduce.pop')
                 popped_gss = gss_to_reduce
                 for _ in range(reduce_action.len):
                     popped_gss = popped_gss.pop()
+                stats.stop('_process_token.reduce.pop')
                 for from_state_id in popped_gss.peek():
                     goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
                     goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
@@ -532,7 +546,9 @@ class Model(GraphProvider):
                     for nt_id, pids in nts.items():
                         handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
+        stats.start('_process_token.merge_many.final')
         result = GSS.merge_many(shifted_gsses)
+        stats.stop('_process_token.merge_many.final')
         stats.inc('_process_token.final_heads', len(result.peek()))
         stats.stop('_process_token.total')
         return result
@@ -709,7 +725,6 @@ class Model(GraphProvider):
 
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
-                stats.inc('get_mask.data.llm_bv_on_edge.len.sum', len(llm_bv))
                 stats.start('get_mask.main_loop.edge.popn')
                 popped: GSS = gss_node.popn(pop)
                 stats.stop('get_mask.main_loop.edge.popn')
@@ -728,7 +743,6 @@ class Model(GraphProvider):
                     stats.start('get_mask.intersect_and_prune.intersection')
                     new_mask = acc.llm_mask.intersection(llm_bv)
                     stats.stop('get_mask.intersect_and_prune.intersection')
-                    stats.inc('get_mask.data.llm_mask_after_intersect.len.sum', len(new_mask))
 
                     if new_mask.is_empty():
                         stats.inc('get_mask.intersect_and_prune.pruned_accs')
@@ -755,7 +769,6 @@ class Model(GraphProvider):
 
                 for dest_idx, state_bv in dests:
                     stats.inc('get_mask.traversal.dests_traversed')
-                    stats.inc('get_mask.data.state_bv_on_edge.len.sum', len(state_bv))
 
                     stats.start('get_mask.main_loop.edge.peek_and_filter')
                     peeked = popped.peek()
@@ -801,7 +814,6 @@ class Model(GraphProvider):
         for i in final_indices:
             if i in self.internal_to_original_map:
                 original_indices.extend(list(self.internal_to_original_map[i]))
-        stats.inc('get_mask.final_mask.original_indices', len(original_indices))
 
         stats.start('get_mask.final_conversion.from_indices')
         result = RangeSet.from_indices(original_indices)
