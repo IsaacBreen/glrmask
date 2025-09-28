@@ -134,7 +134,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
     class_to_tokens.insert(0, (0..=max_tok).collect());
     let mut num_classes = 1;
 
-    for splitter_bv in tqdm!(all_bvs, desc = "Trie1 Merge Tokens (Refine)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
+    for splitter_bv in tqdm!(all_bvs.iter(), desc = "Trie1 Merge Tokens (Refine)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
         if *splitter_bv == LLMTokenBV::max_ones() { continue; }
 
         let mut members_in_splitter_by_class: HashMap<usize, Vec<usize>> = HashMap::new();
