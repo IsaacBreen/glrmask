@@ -425,7 +425,7 @@ class Model(GraphProvider):
             return PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
         cache = {}
         current_state_for_processing = {tsid: gss.apply_and_prune(mutator, cache) for tsid, gss in self.state.items()}
-        current_state_for_processing = {tsid: gss for tsid, gss in current_state_for_processing.items() if gss.is_empty()}
+        current_state_for_processing = {tsid: gss for tsid, gss in current_state_for_processing.items() if not gss.is_empty()}
         stats.stop('commit.prune_and_map_gss')
 
         new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
