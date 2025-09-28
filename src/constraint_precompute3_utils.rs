@@ -127,7 +127,11 @@ pub fn merge_equivalent_llm_tokens_trie3(
 
     // 1) Collect family of LLM sets
     let mut family: Vec<LLMTokenBV> = Vec::new();
-    for n in &all_nodes {
+    #[cfg(not(rustrover))]
+    let it = tqdm!(&all_nodes, desc = "Trie3 Merge Tokens (Collect)", disable = !PROGRESS_BAR_ENABLED, leave=false);
+    #[cfg(rustrover)]
+    let it = all_nodes.iter();
+    for n in it {
         let g = n.read(trie3_god).expect("read");
         if !g.value.live_tokens.is_empty() {
             family.push(g.value.live_tokens.clone());
@@ -176,7 +180,11 @@ pub fn merge_equivalent_llm_tokens_trie3(
     // 3) Remap trie
     crate::debug!(2, "Remapping Trie3 for token range...");
     let mut new_states = Vec::with_capacity(all_nodes.len());
-    for n in &all_nodes {
+    #[cfg(not(rustrover))]
+    let it = tqdm!(&all_nodes, desc = "Remapping Trie3 (read)", disable = !PROGRESS_BAR_ENABLED, leave=false);
+    #[cfg(rustrover)]
+    let it = all_nodes.iter();
+    for n in it {
         let r = n.read(trie3_god).expect("read");
         let new_live_tokens = if r.value.live_tokens.is_empty() {
             r.value.live_tokens.clone()
@@ -195,7 +203,11 @@ pub fn merge_equivalent_llm_tokens_trie3(
         new_states.push((new_live_tokens, new_children));
     }
     crate::debug!(2, "Writing Trie3 for token range...");
-    for (i, n) in all_nodes.iter().enumerate() {
+    #[cfg(not(rustrover))]
+    let it = tqdm!(all_nodes.iter().enumerate(), desc = "Writing Trie3 (write)", disable = !PROGRESS_BAR_ENABLED, leave=false);
+    #[cfg(rustrover)]
+    let it = all_nodes.iter().enumerate();
+    for (i, n) in it {
         let mut w = n.write(trie3_god).expect("write");
         let (live_tokens, children) = &new_states[i];
         w.value.live_tokens = live_tokens.clone();
@@ -203,7 +215,11 @@ pub fn merge_equivalent_llm_tokens_trie3(
     }
     // 4) Update StageVocab
     crate::debug!(2, "Updating StageVocab for token range...");
-    for (old, rep) in &old_to_new {
+    #[cfg(not(rustrover))]
+    let it = tqdm!(&old_to_new, desc = "Updating StageVocab", disable = !PROGRESS_BAR_ENABLED, leave=false);
+    #[cfg(rustrover)]
+    let it = old_to_new.iter();
+    for (old, rep) in it {
         if old == rep { continue; }
         let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
         stage_vocab.internal_to_original.entry(*rep).or_default().extend(moved.clone());
@@ -253,7 +269,11 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
     }
 
     let mut new_states = Vec::with_capacity(all_nodes.len());
-    for n in &all_nodes {
+    #[cfg(not(rustrover))]
+    let it = tqdm!(&all_nodes, desc = "Trie3 Reorder (read)", disable = !PROGRESS_BAR_ENABLED, leave=false);
+    #[cfg(rustrover)]
+    let it = all_nodes.iter();
+    for n in it {
         let r = n.read(trie3_god).expect("read");
         let new_live_tokens = if r.value.live_tokens.is_empty() {
             r.value.live_tokens.clone()
@@ -271,7 +291,11 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
         }
         new_states.push((new_live_tokens, new_children));
     }
-    for (i, n) in all_nodes.iter().enumerate() {
+    #[cfg(not(rustrover))]
+    let it = tqdm!(all_nodes.iter().enumerate(), desc = "Trie3 Reorder (write)", disable = !PROGRESS_BAR_ENABLED, leave=false);
+    #[cfg(rustrover)]
+    let it = all_nodes.iter().enumerate();
+    for (i, n) in it {
         let mut w = n.write(trie3_god).expect("write");
         let (live_tokens, children) = &new_states[i];
         w.value.live_tokens = live_tokens.clone();
