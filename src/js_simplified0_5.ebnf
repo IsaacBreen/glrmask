@@ -42,7 +42,7 @@ object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? '
 property_binding ::= IDENTIFIER | IDENTIFIER ':' binding_pattern ; // Shorthand and aliased properties
 array_binding_pattern ::= '[' ( binding_pattern ( ',' binding_pattern )* )? ','? ']' ; // No elision
 
-if_statement ::= 'if' '(' expression ')' statement ;
+if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
 
 iteration_statement ::=
     'while' '(' expression ')' statement
