@@ -146,10 +146,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
 
     // Count frequencies
     let mut freq: Vec<usize> = vec![0; max_tok + 1];
-    #[cfg(not(rustrover))]
-    let it = tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Freq)", total=all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
-    #[cfg(rustrover)] let it = all_nodes.iter();
-    for n in it {
+    for n in tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Freq)", total=all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false) {
         let g = n.read(trie1_god).expect("read");
         for t in g.value.live_tokens.iter() {
             if t as usize <= max_tok { freq[t as usize] += 1; }
