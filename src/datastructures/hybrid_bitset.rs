@@ -222,6 +222,7 @@ impl HybridBitset {
     /// up to the largest index present in the set (inclusive) whether it's set or not.
     /// If the set is empty, the iterator is empty.
     pub fn iter_bits(&self) -> BitsIter<'_> {
+        assert!(!self.is_full(), "Attempting to iterate over a full set. You probably don't want to do this - it will take forever unless terminated early.");
         if self.is_empty() {
             BitsIter {
                 bitset: self,
