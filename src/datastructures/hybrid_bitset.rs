@@ -211,6 +211,7 @@ impl HybridBitset {
 
     /// Returns an iterator over the indices of the set bits.
     pub fn iter(&self) -> Iter<'_> {
+        assert!(!self.is_full(), "Attempting to iterate over a full set. You probably don't want to do this - it will take forever unless terminated early.");
         Iter {
             iter_inner: self.inner.iter(),
             remaining: self.len(),
