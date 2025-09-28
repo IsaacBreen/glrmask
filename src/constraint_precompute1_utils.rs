@@ -7,6 +7,7 @@ use crate::datastructures::gss::LLMTokenBV;
 use crate::datastructures::trie::Trie;
 
 fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>) -> LLMTokenBV {
+    if bv == &LLMTokenBV::max_ones() { return LLMTokenBV::max_ones(); }
     if bv.is_empty() { return LLMTokenBV::zeros(); }
     let mut out = LLMTokenBV::zeros();
     for t in bv.iter() {

@@ -826,7 +826,7 @@ impl GrammarConstraint {
                                 }
 
                                 let edge_key = (0, tokens_to_push.clone());
-                                let edge_value = StateIDBV::ones(parser.table.keys().max().unwrap().0);
+                                let edge_value = StateIDBV::max_ones();
 
                                 let inserter = EdgeInserter::new(
                                     glr_s.active_state.trie2_god.as_ref().unwrap(),
@@ -921,7 +921,7 @@ impl GrammarConstraint {
         internal_to_original: &BTreeMap<usize, BTreeSet<usize>>,
         internal_max_llm_token: usize,
     ) -> LLMTokenBV {
-        let internal_bv = internal_bv;
+        let internal_bv = internal_bv & &LLMTokenBV::max_ones();
         let mut original_bv = HybridBitset::zeros();
         for i in 0..=internal_max_llm_token {
             if internal_bv.contains(i) {
@@ -1089,7 +1089,7 @@ impl<'r> Precomputer<'r> {
             vocab,
             roots,
             possible_matches: RefCell::new(BTreeMap::new()),
-            all_llm_tokens: HybridBitset::ones(internal_max_llm_token + 1),
+            all_llm_tokens: HybridBitset::max_ones(),
             merge_threshold,
             pb,
             stats: PrecomputeStats::default(),
@@ -1878,7 +1878,7 @@ impl<K, V> InsertWith<K, V> for BTreeMap<K, V> where K: Eq + Ord {
 fn format_bv(bv: &LLMTokenBV) -> String {
     if bv.is_empty() {
         "[]".to_string()
-    } else if bv.is_full() {
+    } else if *bv == HybridBitset::max_ones() {
         "[ALL]".to_string()
     } else {
         format!("[len={}]", bv.len())

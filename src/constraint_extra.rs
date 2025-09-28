@@ -373,21 +373,19 @@ pub fn dump_precompute_trie3_recursive(
         }).collect::<Vec<_>>()
     };
 
-    let max_llm_token_id = if let Some(m) = original_internal_bimap { *m.values().max().unwrap() } else { usize::MAX };
-
     for (i, (edge_key, edge_val_bv, child_arc)) in children_to_visit.iter().enumerate() {
         let is_last = i == children_to_visit.len() - 1;
         let connector = if is_last { "└──" } else { "├──" };
         let (pop_len, llm_bv) = edge_key;
 
         let mut edge_parts = vec![format!("pop: {}", pop_len)];
-        if !(llm_bv.is_full() || llm_bv == &LLMTokenBV::ones(max_llm_token_id + 1)) {
+        if *llm_bv != LLMTokenBV::max_ones() {
             let llm_tokens_display = format_bv_with_tokens(llm_bv, original_internal_bimap, llm_token_map, 5);
             edge_parts.push(format!("tokens: {}", llm_tokens_display));
         }
         let edge_key_display = format!("({})", edge_parts.join(", "));
 
-        let state_ids_display = if edge_val_bv.is_full() {
+        let state_ids_display = if *edge_val_bv == HybridBitset::max_ones() {
             String::new()
         } else {
             format!("states {} ", format_hybrid_bitset_neatly(edge_val_bv))
