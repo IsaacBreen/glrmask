@@ -19,7 +19,7 @@ pub struct HybridL2Bitset {
 
 impl Debug for HybridL2Bitset {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if self.is_all() {
+        if self.is_full() {
             return f
                 .debug_struct("HybridL2Bitset")
                 .field(
@@ -131,6 +131,15 @@ impl HybridL2Bitset {
 
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
+    }
+
+    pub fn is_full(&self) -> bool {
+        if self.inner.ranges_len() == 1 {
+            if let Some((range, bitset)) = self.inner.range_values().next() {
+                return range == (0..=usize::MAX) && bitset.is_full()
+            }
+        }
+        false
     }
 
     pub fn len(&self) -> usize {
