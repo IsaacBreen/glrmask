@@ -352,6 +352,9 @@ class Model(GraphProvider):
     @profile
     def commit(self, token_id: int):
         token_bytes = self.id_to_token[token_id]
+        print(f"\n--- Committing token {token_id}: {token_bytes!r} ---")
+        print(f"Initial state: {len(self.state)} tokenizer states, "
+              f"total GSS heads: {sum(gss.size() for gss in self.state.values())}")
 
         # Build tokenizer maps
         terminals_map: Dict[int, TerminalIdSet] = {}
@@ -437,10 +440,13 @@ class Model(GraphProvider):
         }
         merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
 
+        print(f"Final state: {len(merged_states)} tokenizer states, "
+              f"total GSS heads: {sum(gss.size() for gss in merged_states.values())}")
         self.state = merged_states
 
     @profile
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+        print(f"  Processing terminal {terminal_id} for GSS of size {gss.size()}")
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
         for state_id in gss.peek():
             heads_by_state[state_id].append(gss.isolate(state_id))
@@ -449,6 +455,7 @@ class Model(GraphProvider):
 
         while heads_by_state:
             state_id, state_gsss = heads_by_state.popitem()
+            print(f"    Reducer queue: processing state {state_id} ({len(state_gsss)} GSSs)")
             state_gss = GSS.merge_many(state_gsss)
             row = self.parser_table.table.get(state_id)
             if not row:
@@ -456,11 +463,13 @@ class Model(GraphProvider):
             action = row.actions.get(terminal_id)
             if not action:
                 continue
+            print(f"      Action for state {state_id}: {action}")
 
             def handle_shift(shift_to_state_id, gss_to_shift):
                 shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
 
             def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
+                print(f"        Executing reduce: nt={reduce_action.nonterminal_id}, len={reduce_action.len}")
                 popped_gss = gss_to_reduce
                 for _ in range(reduce_action.len):
                     popped_gss = popped_gss.pop()
@@ -480,7 +489,10 @@ class Model(GraphProvider):
                     for nt_id, pids in nts.items():
                         handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
-        return GSS.merge_many(shifted_gsses)
+        final_gss = GSS.merge_many(shifted_gsses)
+        print(f"  Finished processing terminal {terminal_id}. "
+              f"Shifted GSSs: {len(shifted_gsses)}, final merged size: {final_gss.size()}")
+        return final_gss
     def get_mask(self) -> LLMTokenSet:
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
