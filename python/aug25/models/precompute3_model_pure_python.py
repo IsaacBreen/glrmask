@@ -15,8 +15,10 @@ except Exception:  # pragma: no cover
         return x
 
 from ..common_interface import GraphProvider
-from ..common_interface import RangeSet
+# from ..common_interface import RangeSet
 # from ..range_set.py_range_set import PyRangeSet as RangeSet
+# from ..range_set.bitset_range_set import BitsetRangeSet as RangeSet
+from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
 import _sep1 as ffi
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
