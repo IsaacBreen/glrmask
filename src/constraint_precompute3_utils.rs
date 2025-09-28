@@ -44,7 +44,7 @@ pub fn optimize_trie3_size(
     }
     crate::debug!(2, "Step 5: Compressing edges...");
     if config.optimize_trie2_compress_edges {
-        compress_trie3_edges(roots, &trie3_god);
+        compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
     }
     crate::debug!(2, "Step 6: Merging nodes...");
     if config.optimize_trie2_merge_nodes {
@@ -56,7 +56,7 @@ pub fn optimize_trie3_size(
     }
     crate::debug!(2, "Step 8: Compressing edges (post-merge)...");
     if config.optimize_trie2_compress_edges {
-        compress_trie3_edges(roots, &trie3_god);
+        compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
     }
     if config.optimize_trie2_merge_nodes {
         merge_nodes_trie3(roots, &trie3_god);
@@ -532,17 +532,15 @@ pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3I
     Trie::recompute_all_max_depths(trie3_god, &final_roots_vec);
 }
 
-pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
+pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_llm_token_id: usize, max_state_id: usize) {
     crate::debug!(2, "Compressing Trie 3 edges (conservative edge-reducing transforms)...");
 
-    // Helper: is the LLM-token BV "all tokens"?
-    fn is_all_llm(bv: &LLMTokenBV) -> bool {
-        bv == &LLMTokenBV::max_ones()
-    }
-    // Helper: is the StateIDBV "all states"?
-    fn is_all_sids(bv: &StateIDBV) -> bool {
-        bv == &StateIDBV::max_ones()
-    }
+    let is_all_llm = |bv: &LLMTokenBV| -> bool {
+        bv == &LLMTokenBV::max_ones() || bv == &LLMTokenBV::ones(max_llm_token_id + 1)
+    };
+    let is_all_sids = |bv: &StateIDBV| -> bool {
+        bv == &StateIDBV::max_ones() || bv == &StateIDBV::ones(max_state_id + 1)
+    };
 
     // Pass 1: local coalesce within each node
     fn coalesce_edges_within_nodes(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
@@ -751,7 +749,7 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
     // Pass 3: shortcut when the first edge is "universal" and the middle has a single outgoing edge.
     // A --(p1, ALL_LLM, ALL_SID)--> B and B --(p2, L2, SID2)--> C (only outgoing)
     // becomes A --(p1+p2, L2, SID2)--> C. (Do not apply when p2 == 0; zero-pop handled by pass 2.)
-    fn shortcut_universal_pop_step(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
+    let shortcut_universal_pop_step = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
         let nodes = Trie::all_nodes(trie3_god, roots_vec);
         if nodes.is_empty() { return false; }
 
@@ -842,7 +840,7 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
         }
 
         changed_any
-    }
+    };
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     if Trie::all_nodes(trie3_god, &roots_vec).is_empty() {
