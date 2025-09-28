@@ -157,6 +157,7 @@ pub fn merge_equivalent_llm_tokens_trie3(
     if merged_count == 0 { return; }
 
     // 3) Remap trie
+    crate::debug!(2, "Remapping Trie3 for token range...");
     let mut new_states = Vec::with_capacity(all_nodes.len());
     for n in &all_nodes {
         let r = n.read(trie3_god).expect("read");
@@ -176,6 +177,7 @@ pub fn merge_equivalent_llm_tokens_trie3(
         }
         new_states.push((new_live_tokens, new_children));
     }
+    crate::debug!(2, "Writing Trie3 for token range...");
     for (i, n) in all_nodes.iter().enumerate() {
         let mut w = n.write(trie3_god).expect("write");
         let (live_tokens, children) = &new_states[i];
@@ -183,6 +185,7 @@ pub fn merge_equivalent_llm_tokens_trie3(
         *w.children_mut() = children.clone();
     }
     // 4) Update StageVocab
+    crate::debug!(2, "Updating StageVocab for token range...");
     for (old, rep) in &old_to_new {
         if old == rep { continue; }
         let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
@@ -191,6 +194,7 @@ pub fn merge_equivalent_llm_tokens_trie3(
             stage_vocab.original_to_internal.insert(o, *rep);
         }
     }
+    crate::debug!(2, "Done minimizing Trie3 for token range.");
 }
 
 /// Reorder internal LLM tokens in Trie3 with a simple heuristic to cluster co-occurring tokens.
