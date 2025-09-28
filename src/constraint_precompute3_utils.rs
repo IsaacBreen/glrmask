@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashMap, VecDeque, HashSet};
+use std::sync::Arc;
+use range_set_blaze::RangeSetBlaze;
 use indicatif::{ProgressBar, ProgressStyle};
 use kdam::tqdm;
 use ordered_hash_map::OrderedHashMap;
@@ -104,8 +106,22 @@ fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, us
     out
 }
 
-fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
-    remap_llm_bv_many_to_one(bv, map_old_to_new, max_token_id)
+fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, _max_token_id: usize) -> LLMTokenBV {
+    // Fast‑paths for empty or full‑universe bitvectors.
+    if bv.is_empty() {
+        return LLMTokenBV::zeros();
+    }
+    if *bv == LLMTokenBV::max_ones() {
+        return LLMTokenBV::max_ones();
+    }
+    // Map only present tokens (bijection).
+    let mut out = LLMTokenBV::zeros();
+    for t in bv.iter() {
+        let ti = t as usize;
+        let nt = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+        out.insert(nt);
+    }
+    out
 }
 
 /// Merge equivalent internal LLM token ids in Trie3:
@@ -140,18 +156,42 @@ pub fn merge_equivalent_llm_tokens_trie3(
     }
     if family.is_empty() { return; }
 
-    // 2) Group tokens by signature
+    // 2) Group tokens by signature using occurrence‑based accumulation
     let max_tok = stage_vocab.internal_max_llm_token;
-    let mut sig_map: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
-    #[cfg(not(rustrover))]
-    let it = tqdm!(0..=max_tok, desc = "Trie3 Merge Tokens (Sigs)", disable = !PROGRESS_BAR_ENABLED, leave=false);
-    #[cfg(rustrover)] let it = 0..=max_tok;
-    for tok in it {
-        let mut sig: Vec<usize> = Vec::new();
-        for (i, setv) in family.iter().enumerate() {
-            if setv.contains(tok) { sig.push(i); }
+    let mut per_token_sigs: Vec<Vec<usize>> = vec![Vec::new(); max_tok + 1];
+    let mut max_ones_indices: Vec<usize> = Vec::new();
+    for (i, setv) in tqdm!(family.iter().enumerate(), desc = "Trie3 Merge Tokens (Sigs: scan sets)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
+        if *setv == LLMTokenBV::max_ones() {
+            max_ones_indices.push(i);
+            continue;
         }
-        if sig.is_empty() { continue; }
+        for t in setv.iter() {
+            let ti = t as usize;
+            if ti <= max_tok {
+                per_token_sigs[ti].push(i);
+            }
+        }
+    }
+    let mut sig_map: HashMap<Vec<usize>, Vec<usize>> = HashMap::new();
+    #[cfg(not(rustrover))]
+    let it2 = tqdm!(0..=max_tok, desc = "Trie3 Merge Tokens (Build Sig Map)", disable = !PROGRESS_BAR_ENABLED, leave=false);
+    #[cfg(rustrover)] let it2 = 0..=max_tok;
+    for tok in it2 {
+        let a = &max_ones_indices;
+        let b = &per_token_sigs[tok];
+        if a.is_empty() && b.is_empty() { continue; }
+        let mut sig: Vec<usize> = Vec::with_capacity(a.len() + b.len());
+        let mut i = 0usize;
+        let mut j = 0usize;
+        while i < a.len() && j < b.len() {
+            if a[i] <= b[j] {
+                sig.push(a[i]); i += 1;
+            } else {
+                sig.push(b[j]); j += 1;
+            }
+        }
+        if i < a.len() { sig.extend_from_slice(&a[i..]); }
+        if j < b.len() { sig.extend_from_slice(&b[j..]); }
         sig_map.entry(sig).or_default().push(tok);
     }
     if sig_map.is_empty() { return; }
@@ -160,10 +200,10 @@ pub fn merge_equivalent_llm_tokens_trie3(
     let tokens_after = sig_map.len();
     let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
     let mut merged_count = 0;
-    for (_sig, group) in tqdm!(sig_map.into_iter(), desc = "Trie3 Merge Tokens (Build Map)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
+    for (_sig, group) in tqdm!(sig_map.iter(), desc = "Trie3 Merge Tokens (Build Map)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
         if group.len() <= 1 { continue; }
         let rep = *group.iter().min().unwrap();
-        for t in group {
+        for &t in group.iter() {
             if t != rep {
                 old_to_new.insert(t, rep);
                 merged_count += 1;
@@ -173,31 +213,84 @@ pub fn merge_equivalent_llm_tokens_trie3(
     crate::debug!(2, "Trie3: merged LLM tokens. Before: {}, After: {}. ({} merged)", tokens_before, tokens_after, merged_count);
     if merged_count == 0 { return; }
 
-    // 3) Remap trie
-    let mut new_states = Vec::with_capacity(all_nodes.len());
-    for n in tqdm!(all_nodes.iter(), desc = "Trie3 Merge (Remap Read)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-        let r = n.read(trie3_god).expect("read");
-        let new_live_tokens = if r.value.live_tokens.is_empty() {
-            r.value.live_tokens.clone()
-        } else {
-            remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new, max_tok)
+    // Precompute the mapped universal set once (used when a set equals max_ones())
+    let mut mapped_universe = LLMTokenBV::zeros();
+    for t in 0..=max_tok {
+        let rep = old_to_new.get(&t).copied().unwrap_or(t);
+        mapped_universe.insert(rep);
+    }
+
+    // Identify affected bitvector instances (by Arc pointer identity)
+    let mut affected_ptrs: HashSet<*const RangeSetBlaze<usize>> = HashSet::new();
+    for (sig, group) in &sig_map {
+        if group.len() <= 1 { continue; }
+        for &set_idx in sig {
+            let ptr = Arc::as_ptr(&family[set_idx].inner);
+            affected_ptrs.insert(ptr);
+        }
+    }
+
+    // 3) Remap trie in‑place, only where needed
+    for n in tqdm!(all_nodes.iter(), desc = "Trie3 Merge (Remap In‑Place)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
+        // Quick check whether this node references any affected bitvector.
+        let needs_update = {
+            let r = n.read(trie3_god).expect("read");
+            let lv_ptr = Arc::as_ptr(&r.value.live_tokens.inner);
+            if affected_ptrs.contains(&lv_ptr) {
+                true
+            } else {
+                let mut touched = false;
+                for ((_, llm_bv), _dm) in r.children() {
+                    let key_ptr = Arc::as_ptr(&llm_bv.inner);
+                    if affected_ptrs.contains(&key_ptr) {
+                        touched = true;
+                        break;
+                    }
+                }
+                touched
+            }
         };
-        let mut new_children = BTreeMap::new();
-        for ((pop, llm_bv), dm) in r.children() {
-            let mapped_key_bv = remap_llm_bv_many_to_one(&llm_bv, &old_to_new, max_tok);
-            if mapped_key_bv.is_empty() { continue; }
-            let entry = new_children.entry((*pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
-            for (dst, sid_bv) in dm {
-                entry.entry(dst.clone()).and_modify(|e| *e |= sid_bv).or_insert_with(|| sid_bv.clone());
+        if !needs_update { continue; }
+
+        let mut w = n.write(trie3_god).expect("write");
+
+        // Remap live_tokens if needed
+        if !w.value.live_tokens.is_empty() {
+            if w.value.live_tokens == LLMTokenBV::max_ones() {
+                w.value.live_tokens = mapped_universe.clone();
+            } else {
+                let lv_ptr = Arc::as_ptr(&w.value.live_tokens.inner);
+                if affected_ptrs.contains(&lv_ptr) {
+                    w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new, max_tok);
+                }
             }
         }
-        new_states.push((new_live_tokens, new_children));
-    }
-    for (i, n) in tqdm!(all_nodes.iter().enumerate(), desc = "Trie3 Merge (Remap Write)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-        let mut w = n.write(trie3_god).expect("write");
-        let (live_tokens, children) = &new_states[i];
-        w.value.live_tokens = live_tokens.clone();
-        *w.children_mut() = children.clone();
+
+        // Remap edge keys (pop, LLMTokenBV)
+        let old_children = std::mem::take(w.children_mut());
+        let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<PrecomputeNodeIndex, StateIDBV>> = BTreeMap::new();
+        for ((pop, llm_bv), dm) in old_children {
+            let mapped_key_bv = if llm_bv.is_empty() {
+                LLMTokenBV::zeros()
+            } else if llm_bv == LLMTokenBV::max_ones() {
+                mapped_universe.clone()
+            } else {
+                let key_ptr = Arc::as_ptr(&llm_bv.inner);
+                if affected_ptrs.contains(&key_ptr) {
+                    remap_llm_bv_many_to_one(&llm_bv, &old_to_new, max_tok)
+                } else {
+                    llm_bv
+                }
+            };
+            if mapped_key_bv.is_empty() { continue; }
+            let entry = new_children.entry((pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
+            for (dst, sid_bv) in dm {
+                entry.entry(dst)
+                    .and_modify(|e| *e |= &sid_bv)
+                    .or_insert(sid_bv);
+            }
+        }
+        *w.children_mut() = new_children;
     }
     // 4) Update StageVocab
     for (old, rep) in tqdm!(old_to_new.iter(), desc = "Trie3 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
