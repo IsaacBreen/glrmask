@@ -744,6 +744,131 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
         return LeveledGSS(merge_upper(self.inner, other.inner))
+
+    def fuse(self, levels: Optional[int] = None) -> LeveledGSS[T, Acc]:
+        """
+        Fuse multi-depth edges per value into a single edge, recursively down to the
+        specified number of levels.
+        - levels=None or levels<0: fuse through the entire structure (arbitrarily deep)
+        - levels=0: no-op; return self unchanged
+        - levels=1: fuse only at the root node
+        - levels>1: fuse at root and recurse levels-1 into its children
+
+        Semantics:
+        - At any node (UpperBranch, Interface, or Lower), for each value T, if there
+          are multiple children (at different depths), they are merged into a single
+          child using merge_upper (for Upper children) or merge_lower (for Lower
+          children). The resulting child is then recursively fused if more levels
+          remain to be processed.
+        - For UpperBranch nodes that are reconstructed, try_promote is applied to keep
+          the structure canonical.
+        """
+        if self.is_empty() or levels == 0:
+            return self
+
+        # Memoization to respect sharing and avoid recomputing on repeated subgraphs.
+        # Key: (id(node), rem_tag) where rem_tag is -1 for "infinite" (fuse all) or an int >= 0.
+        upper_cache: Dict[Tuple[int, int], Upper[T, Acc]] = {}
+        lower_cache: Dict[Tuple[int, int], Lower[T]] = {}
+
+        ALL = -1
+        rem_tag: int = ALL if levels is None or levels < 0 else int(levels)
+
+        def dec_tag(r: int) -> int:
+            return r if r == ALL else max(r - 1, 0)
+
+        def _fuse_lower(node: Lower[T], rem: int) -> Lower[T]:
+            key = (id(node), rem)
+            if key in lower_cache:
+                return lower_cache[key]
+            if rem == 0:
+                lower_cache[key] = node
+                return node
+
+            changed = False
+            new_children: Dict[T, Dict[int, Lower[T]]] = {}
+
+            for v, kids in node.children.items():
+                # Merge all Lower children for this value across depths into one.
+                lowers = list(kids.values())
+                if not lowers:
+                    continue
+                merged = lowers[0] if len(lowers) == 1 else reduce(merge_lower, lowers[1:], lowers[0])
+                fused_child = _fuse_lower(merged, dec_tag(rem))
+
+                # Detect changes: if there was more than one child originally, or if the fused child identity differs
+                if len(kids) != 1 or next(iter(kids.values())) is not fused_child:
+                    changed = True
+
+                new_children[v] = {fused_child._max_depth: fused_child}
+
+            if not changed:
+                lower_cache[key] = node
+                return node
+
+            res = Lower(children=new_children, empty=node.empty)
+            lower_cache[key] = res
+            return res
+
+        def _fuse_upper(node: Upper[T, Acc], rem: int) -> Upper[T, Acc]:
+            key = (id(node), rem)
+            if key in upper_cache:
+                return upper_cache[key]
+            if rem == 0:
+                upper_cache[key] = node
+                return node
+
+            if isinstance(node, Interface):
+                changed = False
+                new_children: Dict[T, Dict[int, Lower[T]]] = {}
+
+                for v, kids in node.children.items():
+                    lowers = list(kids.values())
+                    if not lowers:
+                        continue
+                    merged = lowers[0] if len(lowers) == 1 else reduce(merge_lower, lowers[1:], lowers[0])
+                    fused_child = _fuse_lower(merged, dec_tag(rem))
+
+                    if len(kids) != 1 or next(iter(kids.values())) is not fused_child:
+                        changed = True
+
+                    new_children[v] = {fused_child._max_depth: fused_child}
+
+                if not changed:
+                    upper_cache[key] = node
+                    return node
+
+                res = Interface(children=new_children, acc=node.acc, empty=node.empty)
+                upper_cache[key] = res
+                return res
+
+            # UpperBranch
+            changed = False
+            new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+            for v, kids in node.children.items():
+                uppers = list(kids.values())
+                if not uppers:
+                    continue
+                merged = uppers[0] if len(uppers) == 1 else reduce(merge_upper, uppers[1:], uppers[0])
+                fused_child = _fuse_upper(merged, dec_tag(rem))
+
+                if len(kids) != 1 or next(iter(kids.values())) is not fused_child:
+                    changed = True
+
+                new_children[v] = {fused_child._max_depth: fused_child}
+
+            if not changed:
+                upper_cache[key] = node
+                return node
+
+            res_branch = UpperBranch(children=new_children, empty=node.empty)
+            res = try_promote(res_branch)
+            upper_cache[key] = res
+            return res
+
+        new_inner = _fuse_upper(self.inner, rem_tag)
+        return LeveledGSS(new_inner)
+
     def peek(self) -> Set[T]:
         if isinstance(self.inner, Interface):
             return set(self.inner.children.keys())
