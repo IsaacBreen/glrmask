@@ -239,19 +239,20 @@ pub fn merge_equivalent_llm_tokens_trie1(
             }
         }
         *w.children_mut() = new_children;
-    }
-    // 5) Update stage vocab
-    // Merge internal_to_original for tokens mapped into representatives
-    for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Updating stage vocab") {
-        if old == new_rep { continue; }
-        let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
-        stage_vocab.internal_to_original.entry(*new_rep).or_default().extend(moved.clone());
-        // Fix original->internal for all affected originals
-        for o in moved {
-            stage_vocab.original_to_internal.insert(o, *new_rep);
-        }
-    }
-    // internal_max_llm_token stays the same here (holes may appear). A later reorder can compact.
+	}
+	// 5) Update stage vocab
+	// Merge internal_to_original for tokens mapped into representatives
+	for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Trie1 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
+		if old == new_rep { continue; }
+		if let Some(moved) = stage_vocab.internal_to_original.remove(old) {
+			let entry = stage_vocab.internal_to_original.entry(*new_rep).or_default();
+			*entry |= &moved;
+			for o in moved.iter() {
+				stage_vocab.original_to_internal.insert(o, *new_rep);
+			}
+		}
+	}
+	// internal_max_llm_token stays the same here (holes may appear). A later reorder can compact.
 }
 
 /// Reorder internal LLM tokens (permutation) to reduce ranges in masks by clustering co-occurring tokens.
@@ -325,13 +326,13 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
         w.value.live_tokens = live_tokens.clone();
         *w.children_mut() = children.clone();
     }
-    let ranges_after = count_total_ranges_trie1(&all_nodes, trie1_god);
+	let ranges_after = count_total_ranges_trie1(&all_nodes, trie1_god);
 
-    // Update stage vocab (pure permutation)
-    let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-    for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie1 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
-        if let Some(new_id) = old_to_new.get(&old_id) {
-            new_internal_to_original.insert(*new_id, setv);
+	// Update stage vocab (pure permutation)
+	let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+	for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie1 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
+		if let Some(new_id) = old_to_new.get(&old_id) {
+			new_internal_to_original.insert(*new_id, setv);
         }
     }
     stage_vocab.internal_to_original = new_internal_to_original;

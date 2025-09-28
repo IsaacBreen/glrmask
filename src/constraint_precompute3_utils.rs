@@ -289,18 +289,20 @@ pub fn merge_equivalent_llm_tokens_trie3(
                     .and_modify(|e| *e |= &sid_bv)
                     .or_insert(sid_bv);
             }
-        }
-        *w.children_mut() = new_children;
-    }
-    // 4) Update StageVocab
-    for (old, rep) in tqdm!(old_to_new.iter(), desc = "Trie3 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-        if old == rep { continue; }
-        let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
-        stage_vocab.internal_to_original.entry(*rep).or_default().extend(moved.clone());
-        for o in moved {
-            stage_vocab.original_to_internal.insert(o, *rep);
-        }
-    }
+		}
+		*w.children_mut() = new_children;
+	}
+	// 4) Update StageVocab
+	for (old, rep) in tqdm!(old_to_new.iter(), desc = "Trie3 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
+		if old == rep { continue; }
+		if let Some(moved) = stage_vocab.internal_to_original.remove(old) {
+			let entry = stage_vocab.internal_to_original.entry(*rep).or_default();
+			*entry |= &moved;
+			for o in moved.iter() {
+				stage_vocab.original_to_internal.insert(o, *rep);
+			}
+		}
+	}
 }
 
 /// Reorder internal LLM tokens in Trie3 with a simple heuristic to cluster co-occurring tokens.
@@ -366,13 +368,13 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
         w.value.live_tokens = live_tokens.clone();
         *w.children_mut() = children.clone();
     }
-    let ranges_after = count_total_ranges_trie3(&all_nodes, trie3_god);
+	let ranges_after = count_total_ranges_trie3(&all_nodes, trie3_god);
 
-    // Update StageVocab under permutation
-    let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-    for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie3 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
-        if let Some(new_id) = old_to_new.get(&old_id) {
-            new_internal_to_original.insert(*new_id, setv);
+	// Update StageVocab under permutation
+	let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+	for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie3 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
+		if let Some(new_id) = old_to_new.get(&old_id) {
+			new_internal_to_original.insert(*new_id, setv);
         }
     }
     stage_vocab.internal_to_original = new_internal_to_original;
