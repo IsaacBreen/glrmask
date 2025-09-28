@@ -745,7 +745,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
         return LeveledGSS(merge_upper(self.inner, other.inner))
 
-    def fuse(self, levels: Optional[int] = None) -> LeveledGSS[T, Acc]:
+    def fuse(self, levels: Optional[int] = None, memo: Optional[Dict[Tuple[int, int], Any]] = None) -> LeveledGSS[T, Acc]:
         """
         Fuse multi-depth edges per value into a single edge, recursively down to the
         specified number of levels.
@@ -766,10 +766,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         if self.is_empty() or levels == 0:
             return self
 
-        # Memoization to respect sharing and avoid recomputing on repeated subgraphs.
-        # Key: (id(node), rem_tag) where rem_tag is -1 for "infinite" (fuse all) or an int >= 0.
-        upper_cache: Dict[Tuple[int, int], Upper[T, Acc]] = {}
-        lower_cache: Dict[Tuple[int, int], Lower[T]] = {}
+        if memo is None:
+            memo = {}
 
         ALL = -1
         rem_tag: int = ALL if levels is None or levels < 0 else int(levels)
@@ -779,10 +777,10 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
         def _fuse_lower(node: Lower[T], rem: int) -> Lower[T]:
             key = (id(node), rem)
-            if key in lower_cache:
-                return lower_cache[key]
+            if key in memo:
+                return memo[key]
             if rem == 0:
-                lower_cache[key] = node
+                memo[key] = node
                 return node
 
             changed = False
@@ -803,19 +801,19 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 new_children[v] = {fused_child._max_depth: fused_child}
 
             if not changed:
-                lower_cache[key] = node
+                memo[key] = node
                 return node
 
             res = Lower(children=new_children, empty=node.empty)
-            lower_cache[key] = res
+            memo[key] = res
             return res
 
         def _fuse_upper(node: Upper[T, Acc], rem: int) -> Upper[T, Acc]:
             key = (id(node), rem)
-            if key in upper_cache:
-                return upper_cache[key]
+            if key in memo:
+                return memo[key]
             if rem == 0:
-                upper_cache[key] = node
+                memo[key] = node
                 return node
 
             if isinstance(node, Interface):
@@ -835,11 +833,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     new_children[v] = {fused_child._max_depth: fused_child}
 
                 if not changed:
-                    upper_cache[key] = node
+                    memo[key] = node
                     return node
 
                 res = Interface(children=new_children, acc=node.acc, empty=node.empty)
-                upper_cache[key] = res
+                memo[key] = res
                 return res
 
             # UpperBranch
@@ -858,12 +856,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 new_children[v] = {fused_child._max_depth: fused_child}
 
             if not changed:
-                upper_cache[key] = node
+                memo[key] = node
                 return node
 
             res_branch = UpperBranch(children=new_children, empty=node.empty)
             res = try_promote(res_branch)
-            upper_cache[key] = res
+            memo[key] = res
             return res
 
         new_inner = _fuse_upper(self.inner, rem_tag)
