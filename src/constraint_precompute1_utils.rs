@@ -387,29 +387,6 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     crate::debug!(2, "Trie1 reordering complete. Ranges reduced from {} to {}. New max internal token ID: {}", ranges_before, ranges_after, stage_vocab.internal_max_llm_token);
 }
 
-/// Comprehensive optimization pass for Trie1.
-/// Runs token merging and reordering, then edge optimization, then repeats token optimizations.
-pub fn optimize_trie1(
-    roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNodeIndex>,
-    trie1_god: &Trie1GodWrapper,
-    stage_vocab: &mut StageVocab,
-) {
-    crate::debug!(2, "Optimizing Trie 1...");
-    crate::debug!(2, "Initial token merging...");
-    merge_equivalent_llm_tokens_trie1(roots, trie1_god, stage_vocab);
-    crate::debug!(2, "Initial token reordering...");
-    reorder_llm_tokens_for_range_minimization_trie1(roots, trie1_god, stage_vocab);
-
-    crate::debug!(2, "Optimizing state masks and edges...");
-    optimize_state_masks_and_edges_trie1(roots, trie1_god);
-
-    crate::debug!(2, "Final token merging...");
-    merge_equivalent_llm_tokens_trie1(roots, trie1_god, stage_vocab);
-    crate::debug!(2, "Final token reordering...");
-    reorder_llm_tokens_for_range_minimization_trie1(roots, trie1_god, stage_vocab);
-    crate::debug!(2, "Trie 1 optimization complete.");
-}
-
 /// Conservative normalization pass for Trie1:
 /// - Coalesce duplicate destination entries (union LLMBV) for same child under a terminal key.
 /// - Remove empty masks.

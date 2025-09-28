@@ -82,14 +82,6 @@ pub fn optimize_trie3_size(
     if config.optimize_trie2_gc {
         Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
     }
-    crate::debug!(2, "Step 10.5: Final merge of equivalent LLM tokens...");
-    if config.optimize_trie3_merge_equivalent_llm_tokens {
-        merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
-    }
-    crate::debug!(2, "Step 10.6: Final reordering of LLM tokens...");
-    if config.optimize_trie3_reorder_llm_tokens {
-        reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
-    }
     crate::debug!(2, "Step 11: Recomputing max depths...");
     Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 }
