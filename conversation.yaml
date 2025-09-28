@@ -1448,47 +1448,48 @@ local_system:
           pub llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
           pub max_original_llm_token_id: usize,
           // One-to-one original->internal index mapping for the baseline/global view.
-          // Note: this is a simple mapping (not a BiBTreeMap) so we can evolve stage-local
-          // vocabularies independently. Use internal_to_original_ for reverse lookups.
-          pub original_to_internal_id_bimap: BTreeMap<usize, usize>,
-          // Reverse mapping (many-to-one support): internal index -> set of original ids
-          pub internal_to_original_: BTreeMap<usize, BTreeSet<usize>>,
-          pub internal_max_llm_token: usize
+      	// Note: this is a simple mapping (not a BiBTreeMap) so we can evolve stage-local
+      	// vocabularies independently. Use internal_to_original_ for reverse lookups.
+      	pub original_to_internal_id_bimap: BTreeMap<usize, usize>,
+      	// Reverse mapping (many-to-one support): internal index -> set of original ids
+      	pub internal_to_original_: BTreeMap<usize, LLMTokenBV>,
+      	pub internal_max_llm_token: usize
       }
 
       #[derive(Debug, Clone, PartialEq, Eq)]
       pub struct StageVocab {
-          pub original_to_internal: BTreeMap<usize, usize>,
-          pub internal_to_original: BTreeMap<usize, BTreeSet<usize>>,
-          pub internal_max_llm_token: usize,
+      	pub original_to_internal: BTreeMap<usize, usize>,
+      	pub internal_to_original: BTreeMap<usize, LLMTokenBV>,
+      	pub internal_max_llm_token: usize,
       }
+
 
       impl JSONConvertible for StageVocab {
           fn to_json(&self) -> JSONNode {
               let mut m = StdMap::new();
-              m.insert("original_to_internal".to_string(), self.original_to_internal.to_json());
-              // Serialize internal_to_original as Vec<(usize, Vec<usize>)> to keep it compact
-              let mut ito: Vec<(usize, Vec<usize>)> = Vec::new();
-              for (k, setv) in &self.internal_to_original {
-                  ito.push((*k, setv.iter().cloned().collect::<Vec<_>>()));
-              }
-              m.insert("internal_to_original".to_string(), ito.to_json());
-              m.insert("internal_max_llm_token".to_string(), self.internal_max_llm_token.to_json());
-              JSONNode::Object(m)
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Object(mut obj) => {
-                      let original_to_internal = obj.remove("original_to_internal").ok_or("StageVocab: missing original_to_internal".to_string()).and_then(|n| BTreeMap::<usize, usize>::from_json(n))?;
-                      let internal_max_llm_token = obj.remove("internal_max_llm_token").ok_or("StageVocab: missing internal_max_llm_token".to_string()).and_then(usize::from_json)?;
-                      let ito_vec = obj.remove("internal_to_original").ok_or("StageVocab: missing internal_to_original".to_string()).and_then(|n| Vec::<(usize, Vec<usize>)>::from_json(n))?;
-                      let mut internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-                      for (k, v) in ito_vec {
-                          internal_to_original.insert(k, v.into_iter().collect());
-                      }
-                      Ok(StageVocab { original_to_internal, internal_to_original, internal_max_llm_token })
-                  }
-                  _ => Err("StageVocab: expected object".to_string())
+      		m.insert("original_to_internal".to_string(), self.original_to_internal.to_json());
+      		// Serialize internal_to_original as Vec<(usize, Vec<usize>)> to keep it compact
+      		let mut ito: Vec<(usize, Vec<usize>)> = Vec::new();
+      		for (k, bv) in &self.internal_to_original {
+      			ito.push((*k, bv.iter().collect::<Vec<_>>()));
+      		}
+      		m.insert("internal_to_original".to_string(), ito.to_json());
+      		m.insert("internal_max_llm_token".to_string(), self.internal_max_llm_token.to_json());
+      		JSONNode::Object(m)
+      	}
+      	fn from_json(node: JSONNode) -> Result<Self, String> {
+      		match node {
+      			JSONNode::Object(mut obj) => {
+      				let original_to_internal = obj.remove("original_to_internal").ok_or("StageVocab: missing original_to_internal".to_string()).and_then(|n| BTreeMap::<usize, usize>::from_json(n))?;
+      				let internal_max_llm_token = obj.remove("internal_max_llm_token").ok_or("StageVocab: missing internal_max_llm_token".to_string()).and_then(usize::from_json)?;
+      				let ito_vec: Vec<(usize, Vec<usize>)> = obj.remove("internal_to_original").ok_or("StageVocab: missing internal_to_original".to_string()).and_then(|n| Vec::from_json(n))?;
+      				let internal_to_original: BTreeMap<usize, LLMTokenBV> = ito_vec
+      					.into_iter()
+      					.map(|(k, v)| (k, v.into_iter().collect()))
+      					.collect();
+      				Ok(StageVocab { original_to_internal, internal_to_original, internal_max_llm_token })
+      			}
+      			_ => Err("StageVocab: expected object".to_string())
               }
           }
       }
@@ -1647,13 +1648,13 @@ local_system:
                       };
                       // Stage vocabs (optional)
                       let precompute_vocab = match obj.remove("precompute_vocab") {
-                          Some(n) => StageVocab::from_json(n)?,
-                          None => {
-                              // Synthesize from global mapping
-                              let mut ito: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-                              for (orig, int_id) in &original_to_internal_id_bimap {
-                                  ito.entry(*int_id).or_default().insert(*orig);
-                              }
+      					Some(n) => StageVocab::from_json(n)?,
+      					None => {
+      						// Synthesize from global mapping
+      						let mut ito: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+      						for (orig, int_id) in &original_to_internal_id_bimap {
+      							ito.entry(*int_id).or_default().insert(*orig);
+      						}
                               StageVocab {
                                   original_to_internal: original_to_internal_id_bimap.clone(),
                                   internal_to_original: ito.clone(),
@@ -1668,13 +1669,13 @@ local_system:
                       let precompute3_vocab = match obj.remove("precompute3_vocab") {
                           Some(n) => StageVocab::from_json(n)?,
                           None => precompute_vocab.clone(),
-                      };
+      				};
 
-                      // Build llm_vocab reverse map too
-                      let mut global_ito: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-                      for (o, i) in &original_to_internal_id_bimap {
-                          global_ito.entry(*i).or_default().insert(*o);
-                      }
+      				// Build llm_vocab reverse map too
+      				let mut global_ito: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+      				for (o, i) in &original_to_internal_id_bimap {
+      					global_ito.entry(*i).or_default().insert(*o);
+      				}
                       Ok(GrammarConstraint {
                           tokenizer,
                           parser,
@@ -1788,12 +1789,13 @@ local_system:
               assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
               let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
 
-              let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap_or(0);
-              // Build reverse mapping for global vocab
-              let mut internal_to_original_: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-              for (orig, int_id) in &original_to_internal_id_bimap {
-                  internal_to_original_.entry(*int_id).or_default().insert(*orig);
-              }
+
+      		let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap_or(0);
+      		// Build reverse mapping for global vocab
+      		let mut internal_to_original_: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+      		for (orig, int_id) in &original_to_internal_id_bimap {
+      			internal_to_original_.entry(*int_id).or_default().insert(*orig);
+      		}
 
               let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
               for (bytes, original_id) in llm_token_map.iter() {
@@ -2247,30 +2249,32 @@ local_system:
           }
           // Stage-aware conversion (for Trie3)
           pub fn internal_bv_to_original_precompute3(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
-              self.internal_bv_to_original_with_map(internal_bv, &self.precompute3_vocab.internal_to_original, self.precompute3_vocab.internal_max_llm_token)
-          }
+      		self.internal_bv_to_original_with_map(internal_bv, &self.precompute3_vocab.internal_to_original, self.precompute3_vocab.internal_max_llm_token)
+      	}
 
-          fn internal_bv_to_original_with_map(
-              &self,
-              internal_bv: &LLMTokenBV,
-              internal_to_original: &BTreeMap<usize, BTreeSet<usize>>,
-              internal_max_llm_token: usize,
-          ) -> LLMTokenBV {
-              let internal_bv = internal_bv & &LLMTokenBV::max_ones();
-              let mut original_bv = HybridBitset::zeros();
-              for i in 0..=internal_max_llm_token {
-                  if internal_bv.contains(i) {
-                      if let Some(setv) = internal_to_original.get(&i) {
-                          for orig in setv {
-                              original_bv.insert(*orig);
-                          }
-                      }
-                  }
-              }
-              original_bv
-          }
+      	fn internal_bv_to_original_with_map(
+      		&self,
+      		internal_bv: &LLMTokenBV,
+      		internal_to_original: &BTreeMap<usize, LLMTokenBV>,
+      		_internal_max_llm_token: usize,
+      	) -> LLMTokenBV {
+      		let mut original_bv = HybridBitset::zeros();
+      		if internal_bv.is_all() {
+      			// Fast path for "all tokens"
+      			for bv in internal_to_original.values() {
+      				original_bv |= bv;
+      			}
+      		} else {
+      			for i in internal_bv.iter() {
+      				if let Some(bv) = internal_to_original.get(&i) {
+      					original_bv |= bv;
+      				}
+      			}
+      		}
+      		original_bv
+      	}
 
-          pub fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
+      	pub fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
               HybridBitset::ones(self.llm_vocab.internal_max_llm_token + 1)
           }
 
@@ -4646,19 +4650,20 @@ local_system:
                   }
               }
               *w.children_mut() = new_children;
-          }
-          // 5) Update stage vocab
-          // Merge internal_to_original for tokens mapped into representatives
-          for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Updating stage vocab") {
-              if old == new_rep { continue; }
-              let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
-              stage_vocab.internal_to_original.entry(*new_rep).or_default().extend(moved.clone());
-              // Fix original->internal for all affected originals
-              for o in moved {
-                  stage_vocab.original_to_internal.insert(o, *new_rep);
-              }
-          }
-          // internal_max_llm_token stays the same here (holes may appear). A later reorder can compact.
+      	}
+      	// 5) Update stage vocab
+      	// Merge internal_to_original for tokens mapped into representatives
+      	for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Trie1 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
+      		if old == new_rep { continue; }
+      		if let Some(moved) = stage_vocab.internal_to_original.remove(old) {
+      			let entry = stage_vocab.internal_to_original.entry(*new_rep).or_default();
+      			*entry |= &moved;
+      			for o in moved.iter() {
+      				stage_vocab.original_to_internal.insert(o, *new_rep);
+      			}
+      		}
+      	}
+      	// internal_max_llm_token stays the same here (holes may appear). A later reorder can compact.
       }
 
       /// Reorder internal LLM tokens (permutation) to reduce ranges in masks by clustering co-occurring tokens.
@@ -4732,13 +4737,13 @@ local_system:
               w.value.live_tokens = live_tokens.clone();
               *w.children_mut() = children.clone();
           }
-          let ranges_after = count_total_ranges_trie1(&all_nodes, trie1_god);
+      	let ranges_after = count_total_ranges_trie1(&all_nodes, trie1_god);
 
-          // Update stage vocab (pure permutation)
-          let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-          for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie1 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
-              if let Some(new_id) = old_to_new.get(&old_id) {
-                  new_internal_to_original.insert(*new_id, setv);
+      	// Update stage vocab (pure permutation)
+      	let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+      	for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie1 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
+      		if let Some(new_id) = old_to_new.get(&old_id) {
+      			new_internal_to_original.insert(*new_id, setv);
               }
           }
           stage_vocab.internal_to_original = new_internal_to_original;
@@ -5077,18 +5082,20 @@ local_system:
                           .and_modify(|e| *e |= &sid_bv)
                           .or_insert(sid_bv);
                   }
-              }
-              *w.children_mut() = new_children;
-          }
-          // 4) Update StageVocab
-          for (old, rep) in tqdm!(old_to_new.iter(), desc = "Trie3 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-              if old == rep { continue; }
-              let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
-              stage_vocab.internal_to_original.entry(*rep).or_default().extend(moved.clone());
-              for o in moved {
-                  stage_vocab.original_to_internal.insert(o, *rep);
-              }
-          }
+      		}
+      		*w.children_mut() = new_children;
+      	}
+      	// 4) Update StageVocab
+      	for (old, rep) in tqdm!(old_to_new.iter(), desc = "Trie3 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
+      		if old == rep { continue; }
+      		if let Some(moved) = stage_vocab.internal_to_original.remove(old) {
+      			let entry = stage_vocab.internal_to_original.entry(*rep).or_default();
+      			*entry |= &moved;
+      			for o in moved.iter() {
+      				stage_vocab.original_to_internal.insert(o, *rep);
+      			}
+      		}
+      	}
       }
 
       /// Reorder internal LLM tokens in Trie3 with a simple heuristic to cluster co-occurring tokens.
@@ -5154,13 +5161,13 @@ local_system:
               w.value.live_tokens = live_tokens.clone();
               *w.children_mut() = children.clone();
           }
-          let ranges_after = count_total_ranges_trie3(&all_nodes, trie3_god);
+      	let ranges_after = count_total_ranges_trie3(&all_nodes, trie3_god);
 
-          // Update StageVocab under permutation
-          let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-          for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie3 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
-              if let Some(new_id) = old_to_new.get(&old_id) {
-                  new_internal_to_original.insert(*new_id, setv);
+      	// Update StageVocab under permutation
+      	let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+      	for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie3 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
+      		if let Some(new_id) = old_to_new.get(&old_id) {
+      			new_internal_to_original.insert(*new_id, setv);
               }
           }
           stage_vocab.internal_to_original = new_internal_to_original;
@@ -10227,41 +10234,70 @@ local_system:
 
       fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
           if bv.is_empty() { return LLMTokenBV::zeros(); }
-          let mut out = LLMTokenBV::zeros();
+
+          let mut ranges_to_add = Vec::new();
+          let mut elements_to_add = Vec::new();
+
+          let process_range = |range: std::ops::RangeInclusive<usize>,
+                               ranges_to_add: &mut Vec<_>,
+                               elements_to_add: &mut Vec<_>| {
+              let (mut current, end) = (*range.start(), *range.end());
+              for (&k, &v) in map_old_to_new.range(current..=end) {
+                  if current < k {
+                      ranges_to_add.push(current..=k - 1);
+                  }
+                  elements_to_add.push(v);
+                  current = k + 1;
+              }
+              if current <= end {
+                  ranges_to_add.push(current..=end);
+              }
+          };
 
           if *bv == LLMTokenBV::max_ones() {
-              for t in 0..=max_token_id {
-                  let rep = map_old_to_new.get(&t).copied().unwrap_or(t);
-                  out.insert(rep);
+              process_range(0..=max_token_id, &mut ranges_to_add, &mut elements_to_add);
+          } else {
+              for range in bv.inner().ranges() {
+                  process_range(*range.start()..=*range.end(), &mut ranges_to_add, &mut elements_to_add);
               }
-              return out;
           }
 
-          for t in bv.iter() {
-              let ti = t as usize;
-              let rep = map_old_to_new.get(&ti).copied().unwrap_or(ti);
-              out.insert(rep);
-          }
-          out
+          let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
+          new_set.extend(elements_to_add);
+
+          LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
       }
 
       fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, _max_token_id: usize) -> LLMTokenBV {
           // Fast‑paths for empty or full‑universe bitvectors.
-          if bv.is_empty() {
-              return LLMTokenBV::zeros();
+          if bv.is_empty() { return LLMTokenBV::zeros(); }
+          if *bv == LLMTokenBV::max_ones() { return LLMTokenBV::max_ones(); }
+
+          let mut ranges_to_add = Vec::new();
+          let mut elements_to_add = Vec::new();
+
+          for range in bv.inner().ranges() {
+              let (mut current, end) = (*range.start(), *range.end());
+
+              for (&k, &v) in map_old_to_new.range(current..=end) {
+                  if current < k {
+                      // Identity mapping for elements not in map_old_to_new
+                      ranges_to_add.push(current..=k - 1);
+                  }
+                  elements_to_add.push(v);
+                  current = k + 1;
+              }
+
+              if current <= end {
+                  // Identity mapping for the rest of the range
+                  ranges_to_add.push(current..=end);
+              }
           }
-          if *bv == LLMTokenBV::max_ones() {
-              // Permuting a full universe yields the same full universe.
-              return LLMTokenBV::max_ones();
-          }
-          // Map only the present tokens (bijection).
-          let mut out = LLMTokenBV::zeros();
-          for t in bv.iter() {
-              let ti = t as usize;
-              let nt = map_old_to_new.get(&ti).copied().unwrap_or(ti);
-              out.insert(nt);
-          }
-          out
+
+          let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
+          new_set.extend(elements_to_add);
+
+          LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
       }
 
       /// Merge equivalent internal LLM token ids in Trie1:
@@ -10669,40 +10705,70 @@ local_system:
 
       fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
           if bv.is_empty() { return LLMTokenBV::zeros(); }
-          let mut out = LLMTokenBV::zeros();
+
+          let mut ranges_to_add = Vec::new();
+          let mut elements_to_add = Vec::new();
+
+          let process_range = |range: std::ops::RangeInclusive<usize>,
+                               ranges_to_add: &mut Vec<_>,
+                               elements_to_add: &mut Vec<_>| {
+              let (mut current, end) = (*range.start(), *range.end());
+              for (&k, &v) in map_old_to_new.range(current..=end) {
+                  if current < k {
+                      ranges_to_add.push(current..=k - 1);
+                  }
+                  elements_to_add.push(v);
+                  current = k + 1;
+              }
+              if current <= end {
+                  ranges_to_add.push(current..=end);
+              }
+          };
 
           if *bv == LLMTokenBV::max_ones() {
-              for t in 0..=max_token_id {
-                  let rep = map_old_to_new.get(&t).copied().unwrap_or(t);
-                  out.insert(rep);
+              process_range(0..=max_token_id, &mut ranges_to_add, &mut elements_to_add);
+          } else {
+              for range in bv.inner().ranges() {
+                  process_range(*range.start()..=*range.end(), &mut ranges_to_add, &mut elements_to_add);
               }
-              return out;
           }
 
-          for t in bv.iter() {
-              let ti = t as usize;
-              let rep = map_old_to_new.get(&ti).copied().unwrap_or(ti);
-              out.insert(rep);
-          }
-          out
+          let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
+          new_set.extend(elements_to_add);
+
+          LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
       }
 
       fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, _max_token_id: usize) -> LLMTokenBV {
           // Fast‑paths for empty or full‑universe bitvectors.
-          if bv.is_empty() {
-              return LLMTokenBV::zeros();
+          if bv.is_empty() { return LLMTokenBV::zeros(); }
+          if *bv == LLMTokenBV::max_ones() { return LLMTokenBV::max_ones(); }
+
+          let mut ranges_to_add = Vec::new();
+          let mut elements_to_add = Vec::new();
+
+          for range in bv.inner().ranges() {
+              let (mut current, end) = (*range.start(), *range.end());
+
+              for (&k, &v) in map_old_to_new.range(current..=end) {
+                  if current < k {
+                      // Identity mapping for elements not in map_old_to_new
+                      ranges_to_add.push(current..=k - 1);
+                  }
+                  elements_to_add.push(v);
+                  current = k + 1;
+              }
+
+              if current <= end {
+                  // Identity mapping for the rest of the range
+                  ranges_to_add.push(current..=end);
+              }
           }
-          if *bv == LLMTokenBV::max_ones() {
-              return LLMTokenBV::max_ones();
-          }
-          // Map only present tokens (bijection).
-          let mut out = LLMTokenBV::zeros();
-          for t in bv.iter() {
-              let ti = t as usize;
-              let nt = map_old_to_new.get(&ti).copied().unwrap_or(ti);
-              out.insert(nt);
-          }
-          out
+
+          let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
+          new_set.extend(elements_to_add);
+
+          LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
       }
 
       /// Merge equivalent internal LLM token ids in Trie3:
@@ -13079,47 +13145,48 @@ messages:
           pub llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
           pub max_original_llm_token_id: usize,
           // One-to-one original->internal index mapping for the baseline/global view.
-          // Note: this is a simple mapping (not a BiBTreeMap) so we can evolve stage-local
-          // vocabularies independently. Use internal_to_original_ for reverse lookups.
-          pub original_to_internal_id_bimap: BTreeMap<usize, usize>,
-          // Reverse mapping (many-to-one support): internal index -> set of original ids
-          pub internal_to_original_: BTreeMap<usize, BTreeSet<usize>>,
-          pub internal_max_llm_token: usize
+      	// Note: this is a simple mapping (not a BiBTreeMap) so we can evolve stage-local
+      	// vocabularies independently. Use internal_to_original_ for reverse lookups.
+      	pub original_to_internal_id_bimap: BTreeMap<usize, usize>,
+      	// Reverse mapping (many-to-one support): internal index -> set of original ids
+      	pub internal_to_original_: BTreeMap<usize, LLMTokenBV>,
+      	pub internal_max_llm_token: usize
       }
 
       #[derive(Debug, Clone, PartialEq, Eq)]
       pub struct StageVocab {
-          pub original_to_internal: BTreeMap<usize, usize>,
-          pub internal_to_original: BTreeMap<usize, BTreeSet<usize>>,
-          pub internal_max_llm_token: usize,
+      	pub original_to_internal: BTreeMap<usize, usize>,
+      	pub internal_to_original: BTreeMap<usize, LLMTokenBV>,
+      	pub internal_max_llm_token: usize,
       }
+
 
       impl JSONConvertible for StageVocab {
           fn to_json(&self) -> JSONNode {
               let mut m = StdMap::new();
-              m.insert("original_to_internal".to_string(), self.original_to_internal.to_json());
-              // Serialize internal_to_original as Vec<(usize, Vec<usize>)> to keep it compact
-              let mut ito: Vec<(usize, Vec<usize>)> = Vec::new();
-              for (k, setv) in &self.internal_to_original {
-                  ito.push((*k, setv.iter().cloned().collect::<Vec<_>>()));
-              }
-              m.insert("internal_to_original".to_string(), ito.to_json());
-              m.insert("internal_max_llm_token".to_string(), self.internal_max_llm_token.to_json());
-              JSONNode::Object(m)
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Object(mut obj) => {
-                      let original_to_internal = obj.remove("original_to_internal").ok_or("StageVocab: missing original_to_internal".to_string()).and_then(|n| BTreeMap::<usize, usize>::from_json(n))?;
-                      let internal_max_llm_token = obj.remove("internal_max_llm_token").ok_or("StageVocab: missing internal_max_llm_token".to_string()).and_then(usize::from_json)?;
-                      let ito_vec = obj.remove("internal_to_original").ok_or("StageVocab: missing internal_to_original".to_string()).and_then(|n| Vec::<(usize, Vec<usize>)>::from_json(n))?;
-                      let mut internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-                      for (k, v) in ito_vec {
-                          internal_to_original.insert(k, v.into_iter().collect());
-                      }
-                      Ok(StageVocab { original_to_internal, internal_to_original, internal_max_llm_token })
-                  }
-                  _ => Err("StageVocab: expected object".to_string())
+      		m.insert("original_to_internal".to_string(), self.original_to_internal.to_json());
+      		// Serialize internal_to_original as Vec<(usize, Vec<usize>)> to keep it compact
+      		let mut ito: Vec<(usize, Vec<usize>)> = Vec::new();
+      		for (k, bv) in &self.internal_to_original {
+      			ito.push((*k, bv.iter().collect::<Vec<_>>()));
+      		}
+      		m.insert("internal_to_original".to_string(), ito.to_json());
+      		m.insert("internal_max_llm_token".to_string(), self.internal_max_llm_token.to_json());
+      		JSONNode::Object(m)
+      	}
+      	fn from_json(node: JSONNode) -> Result<Self, String> {
+      		match node {
+      			JSONNode::Object(mut obj) => {
+      				let original_to_internal = obj.remove("original_to_internal").ok_or("StageVocab: missing original_to_internal".to_string()).and_then(|n| BTreeMap::<usize, usize>::from_json(n))?;
+      				let internal_max_llm_token = obj.remove("internal_max_llm_token").ok_or("StageVocab: missing internal_max_llm_token".to_string()).and_then(usize::from_json)?;
+      				let ito_vec: Vec<(usize, Vec<usize>)> = obj.remove("internal_to_original").ok_or("StageVocab: missing internal_to_original".to_string()).and_then(|n| Vec::from_json(n))?;
+      				let internal_to_original: BTreeMap<usize, LLMTokenBV> = ito_vec
+      					.into_iter()
+      					.map(|(k, v)| (k, v.into_iter().collect()))
+      					.collect();
+      				Ok(StageVocab { original_to_internal, internal_to_original, internal_max_llm_token })
+      			}
+      			_ => Err("StageVocab: expected object".to_string())
               }
           }
       }
@@ -13278,13 +13345,13 @@ messages:
                       };
                       // Stage vocabs (optional)
                       let precompute_vocab = match obj.remove("precompute_vocab") {
-                          Some(n) => StageVocab::from_json(n)?,
-                          None => {
-                              // Synthesize from global mapping
-                              let mut ito: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-                              for (orig, int_id) in &original_to_internal_id_bimap {
-                                  ito.entry(*int_id).or_default().insert(*orig);
-                              }
+      					Some(n) => StageVocab::from_json(n)?,
+      					None => {
+      						// Synthesize from global mapping
+      						let mut ito: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+      						for (orig, int_id) in &original_to_internal_id_bimap {
+      							ito.entry(*int_id).or_default().insert(*orig);
+      						}
                               StageVocab {
                                   original_to_internal: original_to_internal_id_bimap.clone(),
                                   internal_to_original: ito.clone(),
@@ -13299,13 +13366,13 @@ messages:
                       let precompute3_vocab = match obj.remove("precompute3_vocab") {
                           Some(n) => StageVocab::from_json(n)?,
                           None => precompute_vocab.clone(),
-                      };
+      				};
 
-                      // Build llm_vocab reverse map too
-                      let mut global_ito: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-                      for (o, i) in &original_to_internal_id_bimap {
-                          global_ito.entry(*i).or_default().insert(*o);
-                      }
+      				// Build llm_vocab reverse map too
+      				let mut global_ito: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+      				for (o, i) in &original_to_internal_id_bimap {
+      					global_ito.entry(*i).or_default().insert(*o);
+      				}
                       Ok(GrammarConstraint {
                           tokenizer,
                           parser,
@@ -13419,12 +13486,13 @@ messages:
               assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
               let original_to_internal_id_bimap = Self::setup_llm_token_mappings(&llm_token_map);
 
-              let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap_or(0);
-              // Build reverse mapping for global vocab
-              let mut internal_to_original_: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-              for (orig, int_id) in &original_to_internal_id_bimap {
-                  internal_to_original_.entry(*int_id).or_default().insert(*orig);
-              }
+
+      		let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap_or(0);
+      		// Build reverse mapping for global vocab
+      		let mut internal_to_original_: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+      		for (orig, int_id) in &original_to_internal_id_bimap {
+      			internal_to_original_.entry(*int_id).or_default().insert(*orig);
+      		}
 
               let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
               for (bytes, original_id) in llm_token_map.iter() {
@@ -13878,30 +13946,32 @@ messages:
           }
           // Stage-aware conversion (for Trie3)
           pub fn internal_bv_to_original_precompute3(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
-              self.internal_bv_to_original_with_map(internal_bv, &self.precompute3_vocab.internal_to_original, self.precompute3_vocab.internal_max_llm_token)
-          }
+      		self.internal_bv_to_original_with_map(internal_bv, &self.precompute3_vocab.internal_to_original, self.precompute3_vocab.internal_max_llm_token)
+      	}
 
-          fn internal_bv_to_original_with_map(
-              &self,
-              internal_bv: &LLMTokenBV,
-              internal_to_original: &BTreeMap<usize, BTreeSet<usize>>,
-              internal_max_llm_token: usize,
-          ) -> LLMTokenBV {
-              let internal_bv = internal_bv & &LLMTokenBV::max_ones();
-              let mut original_bv = HybridBitset::zeros();
-              for i in 0..=internal_max_llm_token {
-                  if internal_bv.contains(i) {
-                      if let Some(setv) = internal_to_original.get(&i) {
-                          for orig in setv {
-                              original_bv.insert(*orig);
-                          }
-                      }
-                  }
-              }
-              original_bv
-          }
+      	fn internal_bv_to_original_with_map(
+      		&self,
+      		internal_bv: &LLMTokenBV,
+      		internal_to_original: &BTreeMap<usize, LLMTokenBV>,
+      		_internal_max_llm_token: usize,
+      	) -> LLMTokenBV {
+      		let mut original_bv = HybridBitset::zeros();
+      		if internal_bv.is_all() {
+      			// Fast path for "all tokens"
+      			for bv in internal_to_original.values() {
+      				original_bv |= bv;
+      			}
+      		} else {
+      			for i in internal_bv.iter() {
+      				if let Some(bv) = internal_to_original.get(&i) {
+      					original_bv |= bv;
+      				}
+      			}
+      		}
+      		original_bv
+      	}
 
-          pub fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
+      	pub fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
               HybridBitset::ones(self.llm_vocab.internal_max_llm_token + 1)
           }
 
@@ -16282,19 +16352,20 @@ messages:
                   }
               }
               *w.children_mut() = new_children;
-          }
-          // 5) Update stage vocab
-          // Merge internal_to_original for tokens mapped into representatives
-          for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Updating stage vocab") {
-              if old == new_rep { continue; }
-              let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
-              stage_vocab.internal_to_original.entry(*new_rep).or_default().extend(moved.clone());
-              // Fix original->internal for all affected originals
-              for o in moved {
-                  stage_vocab.original_to_internal.insert(o, *new_rep);
-              }
-          }
-          // internal_max_llm_token stays the same here (holes may appear). A later reorder can compact.
+      	}
+      	// 5) Update stage vocab
+      	// Merge internal_to_original for tokens mapped into representatives
+      	for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Trie1 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
+      		if old == new_rep { continue; }
+      		if let Some(moved) = stage_vocab.internal_to_original.remove(old) {
+      			let entry = stage_vocab.internal_to_original.entry(*new_rep).or_default();
+      			*entry |= &moved;
+      			for o in moved.iter() {
+      				stage_vocab.original_to_internal.insert(o, *new_rep);
+      			}
+      		}
+      	}
+      	// internal_max_llm_token stays the same here (holes may appear). A later reorder can compact.
       }
 
       /// Reorder internal LLM tokens (permutation) to reduce ranges in masks by clustering co-occurring tokens.
@@ -16368,13 +16439,13 @@ messages:
               w.value.live_tokens = live_tokens.clone();
               *w.children_mut() = children.clone();
           }
-          let ranges_after = count_total_ranges_trie1(&all_nodes, trie1_god);
+      	let ranges_after = count_total_ranges_trie1(&all_nodes, trie1_god);
 
-          // Update stage vocab (pure permutation)
-          let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-          for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie1 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
-              if let Some(new_id) = old_to_new.get(&old_id) {
-                  new_internal_to_original.insert(*new_id, setv);
+      	// Update stage vocab (pure permutation)
+      	let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+      	for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie1 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
+      		if let Some(new_id) = old_to_new.get(&old_id) {
+      			new_internal_to_original.insert(*new_id, setv);
               }
           }
           stage_vocab.internal_to_original = new_internal_to_original;
@@ -16718,18 +16789,20 @@ messages:
                           .and_modify(|e| *e |= &sid_bv)
                           .or_insert(sid_bv);
                   }
-              }
-              *w.children_mut() = new_children;
-          }
-          // 4) Update StageVocab
-          for (old, rep) in tqdm!(old_to_new.iter(), desc = "Trie3 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-              if old == rep { continue; }
-              let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
-              stage_vocab.internal_to_original.entry(*rep).or_default().extend(moved.clone());
-              for o in moved {
-                  stage_vocab.original_to_internal.insert(o, *rep);
-              }
-          }
+      		}
+      		*w.children_mut() = new_children;
+      	}
+      	// 4) Update StageVocab
+      	for (old, rep) in tqdm!(old_to_new.iter(), desc = "Trie3 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
+      		if old == rep { continue; }
+      		if let Some(moved) = stage_vocab.internal_to_original.remove(old) {
+      			let entry = stage_vocab.internal_to_original.entry(*rep).or_default();
+      			*entry |= &moved;
+      			for o in moved.iter() {
+      				stage_vocab.original_to_internal.insert(o, *rep);
+      			}
+      		}
+      	}
       }
 
       /// Reorder internal LLM tokens in Trie3 with a simple heuristic to cluster co-occurring tokens.
@@ -16795,13 +16868,13 @@ messages:
               w.value.live_tokens = live_tokens.clone();
               *w.children_mut() = children.clone();
           }
-          let ranges_after = count_total_ranges_trie3(&all_nodes, trie3_god);
+      	let ranges_after = count_total_ranges_trie3(&all_nodes, trie3_god);
 
-          // Update StageVocab under permutation
-          let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-          for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie3 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
-              if let Some(new_id) = old_to_new.get(&old_id) {
-                  new_internal_to_original.insert(*new_id, setv);
+      	// Update StageVocab under permutation
+      	let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+      	for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie3 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
+      		if let Some(new_id) = old_to_new.get(&old_id) {
+      			new_internal_to_original.insert(*new_id, setv);
               }
           }
           stage_vocab.internal_to_original = new_internal_to_original;
@@ -17439,12 +17512,10 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute3_utils.rs
-  - user: |-
-      Modify the `LLMVocab` so we have `pub internal_to_original_: BTreeMap<usize, LLMTokenBV>`. Ensure the JSON conversion is unchanged though - we don't want to have to update code that depends on the JSON.
-
-      See if there's opportunities in src/constraint_precompute1_utils.rs or src/constraint_precompute3_utils.rs, esp in
-      `merge_equivalent_llm_tokens_trie1`, `reorder_llm_tokens_for_range_minimization_trie1`, `merge_equivalent_llm_tokens_trie3`, and `reorder_llm_tokens_for_range_minimization_trie3`
-      to improve performance using `LLMTokenBV` or `StateIDBV` instead of `BTreeSet<usize>`.
+  - user: Make `remap_llm_bv_many_to_one` and `remap_llm_bv_permutation` much much
+      faster. Take advantage of the fact that it's very cheap to insert long ranges
+      into `HybridBitset` relative to inserting each element one-by-one. Try to insert
+      long ranges where possible. Think about how to do this.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -17463,346 +17534,266 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course! Here are the step-by-step instructions to apply the changes, followed by the git diffs.
+      Of course. Here are the step-by-step instructions to optimize the bitvector remapping functions, followed by the git diffs to apply the changes.
 
       ### Step-by-step Instructions
 
-      #### File: `src/constraint.rs`
+      I will optimize the `remap_llm_bv_many_to_one` and `remap_llm_bv_permutation` functions in both `src/constraint_precompute1_utils.rs` and `src/constraint_precompute3_utils.rs`. The current implementations iterate over individual elements, which is inefficient for `HybridBitset`s containing large contiguous ranges. The new implementations will process entire ranges at a time, significantly improving performance.
 
-      1.  **In the `LLMVocab` struct definition (around line 124):**
-          -   Change the type of the `internal_to_original_` field from `BTreeMap<usize, BTreeSet<usize>>` to `BTreeMap<usize, LLMTokenBV>`.
+      1.  **In `src/constraint_precompute1_utils.rs`:**
+          *   Navigate to the function `remap_llm_bv_many_to_one`.
+          *   Replace its entire body with the new implementation below, which iterates over the ranges of the input bitvector. For each range, it identifies sub-ranges that can be identity-mapped and handles individually mapped tokens separately.
+          *   Navigate to the function `remap_llm_bv_permutation`.
+          *   Replace its body with a similarly optimized version that also processes ranges.
 
-      2.  **In the `StageVocab` struct definition (around line 131):**
-          -   Change the type of the `internal_to_original` field from `BTreeMap<usize, BTreeSet<usize>>` to `BTreeMap<usize, LLMTokenBV>`.
+      2.  **In `src/constraint_precompute3_utils.rs`:**
+          *   The functions `remap_llm_bv_many_to_one` and `remap_llm_bv_permutation` are identical to those in the first file.
+          *   Apply the exact same replacements to the bodies of these two functions.
 
-      3.  **In `impl JSONConvertible for StageVocab` (around line 138):**
-          -   In the `to_json` method, update the loop to iterate over the `LLMTokenBV`. Change `setv` to `bv` and remove the `.cloned()` call:
-              ```rust
-              // from:
-              for (k, setv) in &self.internal_to_original {
-                  ito.push((*k, setv.iter().cloned().collect::<Vec<_>>()));
-              }
-              // to:
-              for (k, bv) in &self.internal_to_original {
-                  ito.push((*k, bv.iter().collect::<Vec<_>>()));
-              }
-              ```
-          -   In the `from_json` method, update the deserialization of `internal_to_original` to create a `BTreeMap<usize, LLMTokenBV>` concisely:
-              ```rust
-              // replace:
-              let ito_vec = obj.remove("internal_to_original").ok_or("StageVocab: missing internal_to_original".to_string()).and_then(|n| Vec::<(usize, Vec<usize>)>::from_json(n))?;
-              let mut internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-              for (k, v) in ito_vec {
-                  internal_to_original.insert(k, v.into_iter().collect());
-              }
-              // with:
-              let ito_vec: Vec<(usize, Vec<usize>)> = obj.remove("internal_to_original").ok_or("StageVocab: missing internal_to_original".to_string()).and_then(|n| Vec::from_json(n))?;
-              let internal_to_original: BTreeMap<usize, LLMTokenBV> = ito_vec
-                  .into_iter()
-                  .map(|(k, v)| (k, v.into_iter().collect()))
-                  .collect();
-              ```
-
-      4.  **In `impl JSONConvertible for GrammarConstraint` (around line 313):**
-          -   In the `from_json` method, when synthesizing `precompute_vocab`, change the type of the `ito` variable to `BTreeMap<usize, LLMTokenBV>`.
-          -   Similarly, when building `global_ito` for `llm_vocab`, change its type to `BTreeMap<usize, LLMTokenBV>`.
-
-      5.  **In `GrammarConstraint::new_with_config` (around line 422):**
-          -   Change the type of the `internal_to_original_` variable to `BTreeMap<usize, LLMTokenBV>`.
-
-      6.  **In `GrammarConstraint::internal_bv_to_original_with_map` (around line 1001):**
-          -   Replace the entire function body with a more efficient implementation that iterates over the sparse bitset instead of a full range.
-              ```rust
-              // replace the old function with:
-              fn internal_bv_to_original_with_map(
-                  &self,
-                  internal_bv: &LLMTokenBV,
-                  internal_to_original: &BTreeMap<usize, LLMTokenBV>,
-                  _internal_max_llm_token: usize,
-              ) -> LLMTokenBV {
-                  let mut original_bv = HybridBitset::zeros();
-                  if internal_bv.is_all() {
-                      // Fast path for "all tokens"
-                      for bv in internal_to_original.values() {
-                          original_bv |= bv;
-                      }
-                  } else {
-                      for i in internal_bv.iter() {
-                          if let Some(bv) = internal_to_original.get(&i) {
-                              original_bv |= bv;
-                          }
-                      }
-                  }
-                  original_bv
-              }
-              ```
-
-      #### File: `src/constraint_precompute1_utils.rs`
-
-      1.  **In `merge_equivalent_llm_tokens_trie1` (around line 171):**
-          -   In the loop that updates `stage_vocab`, replace the logic for merging `internal_to_original` sets. Use `if let Some`, bitwise OR-assign (`|=`), and iterate over the `LLMTokenBV` with `.iter()`.
-              ```rust
-              // replace:
-              let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
-              stage_vocab.internal_to_original.entry(*new_rep).or_default().extend(moved.clone());
-              // Fix original->internal for all affected originals
-              for o in moved {
-                  stage_vocab.original_to_internal.insert(o, *new_rep);
-              }
-              // with:
-              if let Some(moved) = stage_vocab.internal_to_original.remove(old) {
-                  let entry = stage_vocab.internal_to_original.entry(*new_rep).or_default();
-                  *entry |= &moved;
-                  for o in moved.iter() {
-                      stage_vocab.original_to_internal.insert(o, *new_rep);
-                  }
-              }
-              ```
-
-      2.  **In `reorder_llm_tokens_for_range_minimization_trie1` (around line 238):**
-          -   Change the type of the `new_internal_to_original` variable from `BTreeMap<usize, BTreeSet<usize>>` to `BTreeMap<usize, LLMTokenBV>`.
-
-      #### File: `src/constraint_precompute3_utils.rs`
-
-      1.  **In `merge_equivalent_llm_tokens_trie3` (around line 181):**
-          -   In the loop that updates `stage_vocab`, apply the same logic change as in the `trie1` version: use `if let Some`, bitwise OR-assign (`|=`), and iterate with `.iter()`.
-              ```rust
-              // replace:
-              let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
-              stage_vocab.internal_to_original.entry(*rep).or_default().extend(moved.clone());
-              for o in moved {
-                  stage_vocab.original_to_internal.insert(o, *rep);
-              }
-              // with:
-              if let Some(moved) = stage_vocab.internal_to_original.remove(old) {
-                  let entry = stage_vocab.internal_to_original.entry(*rep).or_default();
-                  *entry |= &moved;
-                  for o in moved.iter() {
-                      stage_vocab.original_to_internal.insert(o, *rep);
-                  }
-              }
-              ```
-
-      2.  **In `reorder_llm_tokens_for_range_minimization_trie3` (around line 245):**
-          -   Change the type of the `new_internal_to_original` variable from `BTreeMap<usize, BTreeSet<usize>>` to `BTreeMap<usize, LLMTokenBV>`.
-
-      ---
+      This will ensure that bitvector remapping, a key step in the trie optimization process, is performed much more efficiently.
 
       ### Git Diffs
 
-      ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -120,14 +120,14 @@
-       	// Note: this is a simple mapping (not a BiBTreeMap) so we can evolve stage-local
-       	// vocabularies independently. Use internal_to_original_ for reverse lookups.
-       	pub original_to_internal_id_bimap: BTreeMap<usize, usize>,
-       	// Reverse mapping (many-to-one support): internal index -> set of original ids
-      -	pub internal_to_original_: BTreeMap<usize, BTreeSet<usize>>,
-      +	pub internal_to_original_: BTreeMap<usize, LLMTokenBV>,
-       	pub internal_max_llm_token: usize
-       }
-       
-       #[derive(Debug, Clone, PartialEq, Eq)]
-       pub struct StageVocab {
-       	pub original_to_internal: BTreeMap<usize, usize>,
-      -	pub internal_to_original: BTreeMap<usize, BTreeSet<usize>>,
-      +	pub internal_to_original: BTreeMap<usize, LLMTokenBV>,
-       	pub internal_max_llm_token: usize,
-       }
-       
-      @@ -137,22 +137,22 @@
-       		m.insert("original_to_internal".to_string(), self.original_to_internal.to_json());
-       		// Serialize internal_to_original as Vec<(usize, Vec<usize>)> to keep it compact
-       		let mut ito: Vec<(usize, Vec<usize>)> = Vec::new();
-      -		for (k, setv) in &self.internal_to_original {
-      -			ito.push((*k, setv.iter().cloned().collect::<Vec<_>>()));
-      +		for (k, bv) in &self.internal_to_original {
-      +			ito.push((*k, bv.iter().collect::<Vec<_>>()));
-       		}
-       		m.insert("internal_to_original".to_string(), ito.to_json());
-       		m.insert("internal_max_llm_token".to_string(), self.internal_max_llm_token.to_json());
-       		JSONNode::Object(m)
-       	}
-       	fn from_json(node: JSONNode) -> Result<Self, String> {
-       		match node {
-       			JSONNode::Object(mut obj) => {
-       				let original_to_internal = obj.remove("original_to_internal").ok_or("StageVocab: missing original_to_internal".to_string()).and_then(|n| BTreeMap::<usize, usize>::from_json(n))?;
-       				let internal_max_llm_token = obj.remove("internal_max_llm_token").ok_or("StageVocab: missing internal_max_llm_token".to_string()).and_then(usize::from_json)?;
-      -				let ito_vec = obj.remove("internal_to_original").ok_or("StageVocab: missing internal_to_original".to_string()).and_then(|n| Vec::<(usize, Vec<usize>)>::from_json(n))?;
-      -				let mut internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-      -				for (k, v) in ito_vec {
-      -					internal_to_original.insert(k, v.into_iter().collect());
-      -				}
-      +				let ito_vec: Vec<(usize, Vec<usize>)> = obj.remove("internal_to_original").ok_or("StageVocab: missing internal_to_original".to_string()).and_then(|n| Vec::from_json(n))?;
-      +				let internal_to_original: BTreeMap<usize, LLMTokenBV> = ito_vec
-      +					.into_iter()
-      +					.map(|(k, v)| (k, v.into_iter().collect()))
-      +					.collect();
-       				Ok(StageVocab { original_to_internal, internal_to_original, internal_max_llm_token })
-       			}
-       			_ => Err("StageVocab: expected object".to_string())
-      @@ -310,7 +310,7 @@
-       					Some(n) => StageVocab::from_json(n)?,
-       					None => {
-       						// Synthesize from global mapping
-      -						let mut ito: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-      +						let mut ito: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
-       						for (orig, int_id) in &original_to_internal_id_bimap {
-       							ito.entry(*int_id).or_default().insert(*orig);
-       						}
-      @@ -332,7 +332,7 @@
-       				};
-       
-       				// Build llm_vocab reverse map too
-      -				let mut global_ito: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-      +				let mut global_ito: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
-       				for (o, i) in &original_to_internal_id_bimap {
-       					global_ito.entry(*i).or_default().insert(*o);
-       				}
-      @@ -420,7 +420,7 @@
-       
-       		let internal_max_llm_token = original_to_internal_id_bimap.iter().map(|(_, id)| *id).max().unwrap_or(0);
-       		// Build reverse mapping for global vocab
-      -		let mut internal_to_original_: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-      +		let mut internal_to_original_: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
-       		for (orig, int_id) in &original_to_internal_id_bimap {
-       			internal_to_original_.entry(*int_id).or_default().insert(*orig);
-       		}
-      @@ -1001,27 +1001,26 @@
-       		self.internal_bv_to_original_with_map(internal_bv, &self.precompute3_vocab.internal_to_original, self.precompute3_vocab.internal_max_llm_token)
-       	}
-       
-      -	fn internal_bv_to_original_with_map(
-      +	fn internal_bv_to_original_with_map(
-       		&self,
-       		internal_bv: &LLMTokenBV,
-      -		internal_to_original: &BTreeMap<usize, BTreeSet<usize>>,
-      -		internal_max_llm_token: usize,
-      +		internal_to_original: &BTreeMap<usize, LLMTokenBV>,
-      +		_internal_max_llm_token: usize,
-       	) -> LLMTokenBV {
-      -		let internal_bv = internal_bv & &LLMTokenBV::max_ones();
-       		let mut original_bv = HybridBitset::zeros();
-      -		for i in 0..=internal_max_llm_token {
-      -			if internal_bv.contains(i) {
-      -				if let Some(setv) = internal_to_original.get(&i) {
-      -					for orig in setv {
-      -						original_bv.insert(*orig);
-      -					}
-      -				}
-      +		if internal_bv.is_all() {
-      +			// Fast path for "all tokens"
-      +			for bv in internal_to_original.values() {
-      +				original_bv |= bv;
-      +			}
-      +		} else {
-      +			for i in internal_bv.iter() {
-      +				if let Some(bv) = internal_to_original.get(&i) {
-      +					original_bv |= bv;
-      +				}
-       			}
-       		}
-       		original_bv
-       	}
-       
-       	pub fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
+      Here are the git diffs to apply these changes.
 
-      ```
       ```diff
       diff --git a/src/constraint_precompute1_utils.rs b/src/constraint_precompute1_utils.rs
+      index 9111111..2222222 100644
       --- a/src/constraint_precompute1_utils.rs
       +++ b/src/constraint_precompute1_utils.rs
-      @@ -171,13 +171,14 @@
-       	}
-       	// 5) Update stage vocab
-       	// Merge internal_to_original for tokens mapped into representatives
-      -	for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Updating stage vocab") {
-      +	for (old, new_rep) in tqdm!(old_to_new.iter(), desc = "Trie1 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-       		if old == new_rep { continue; }
-      -		let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
-      -		stage_vocab.internal_to_original.entry(*new_rep).or_default().extend(moved.clone());
-      -		// Fix original->internal for all affected originals
-      -		for o in moved {
-      -			stage_vocab.original_to_internal.insert(o, *new_rep);
-      +		if let Some(moved) = stage_vocab.internal_to_original.remove(old) {
-      +			let entry = stage_vocab.internal_to_original.entry(*new_rep).or_default();
-      +			*entry |= &moved;
-      +			for o in moved.iter() {
-      +				stage_vocab.original_to_internal.insert(o, *new_rep);
-      +			}
-       		}
-       	}
-       	// internal_max_llm_token stays the same here (holes may appear). A later reorder can compact.
-      @@ -238,7 +239,7 @@
-       	let ranges_after = count_total_ranges_trie1(&all_nodes, trie1_god);
+      @@ -20,53 +20,53 @@
+       }
        
-       	// Update stage vocab (pure permutation)
-      -	let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-      +	let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
-       	for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie1 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
-       		if let Some(new_id) = old_to_new.get(&old_id) {
-       			new_internal_to_original.insert(*new_id, setv);
+       fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
+      -    if bv.is_empty() { return LLMTokenBV::zeros(); }
+      -    let mut out = LLMTokenBV::zeros();
+      -
+      -    if *bv == LLMTokenBV::max_ones() {
+      -        for t in 0..=max_token_id {
+      -            let rep = map_old_to_new.get(&t).copied().unwrap_or(t);
+      -            out.insert(rep);
+      -        }
+      -        return out;
+      -    }
+      -
+      -    for t in bv.iter() {
+      -        let ti = t as usize;
+      -        let rep = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+      -        out.insert(rep);
+      -    }
+      -    out
+      +    if bv.is_empty() { return LLMTokenBV::zeros(); }
+      +
+      +    let mut ranges_to_add = Vec::new();
+      +    let mut elements_to_add = Vec::new();
+      +
+      +    let process_range = |range: std::ops::RangeInclusive<usize>,
+      +                         ranges_to_add: &mut Vec<_>,
+      +                         elements_to_add: &mut Vec<_>| {
+      +        let (mut current, end) = (*range.start(), *range.end());
+      +        for (&k, &v) in map_old_to_new.range(current..=end) {
+      +            if current < k {
+      +                ranges_to_add.push(current..=k - 1);
+      +            }
+      +            elements_to_add.push(v);
+      +            current = k + 1;
+      +        }
+      +        if current <= end {
+      +            ranges_to_add.push(current..=end);
+      +        }
+      +    };
+      +
+      +    if *bv == LLMTokenBV::max_ones() {
+      +        process_range(0..=max_token_id, &mut ranges_to_add, &mut elements_to_add);
+      +    } else {
+      +        for range in bv.inner().ranges() {
+      +            process_range(*range.start()..=*range.end(), &mut ranges_to_add, &mut elements_to_add);
+      +        }
+      +    }
+      +
+      +    let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
+      +    new_set.extend(elements_to_add);
+      +
+      +    LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+       }
+       
+       fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, _max_token_id: usize) -> LLMTokenBV {
+           // Fast‑paths for empty or full‑universe bitvectors.
+      -    if bv.is_empty() {
+      -        return LLMTokenBV::zeros();
+      -    }
+      -    if *bv == LLMTokenBV::max_ones() {
+      -        // Permuting a full universe yields the same full universe.
+      -        return LLMTokenBV::max_ones();
+      -    }
+      -    // Map only the present tokens (bijection).
+      -    let mut out = LLMTokenBV::zeros();
+      -    for t in bv.iter() {
+      -        let ti = t as usize;
+      -        let nt = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+      -        out.insert(nt);
+      -    }
+      -    out
+      +    if bv.is_empty() { return LLMTokenBV::zeros(); }
+      +    if *bv == LLMTokenBV::max_ones() { return LLMTokenBV::max_ones(); }
+      +
+      +    let mut ranges_to_add = Vec::new();
+      +    let mut elements_to_add = Vec::new();
+      +
+      +    for range in bv.inner().ranges() {
+      +        let (mut current, end) = (*range.start(), *range.end());
+      +
+      +        for (&k, &v) in map_old_to_new.range(current..=end) {
+      +            if current < k {
+      +                // Identity mapping for elements not in map_old_to_new
+      +                ranges_to_add.push(current..=k - 1);
+      +            }
+      +            elements_to_add.push(v);
+      +            current = k + 1;
+      +        }
+      +
+      +        if current <= end {
+      +            // Identity mapping for the rest of the range
+      +            ranges_to_add.push(current..=end);
+      +        }
+      +    }
+      +
+      +    let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
+      +    new_set.extend(elements_to_add);
+      +
+      +    LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+       }
+       
+       /// Merge equivalent internal LLM token ids in Trie1:
 
       ```
+
       ```diff
       diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
+      index 3333333..4444444 100644
       --- a/src/constraint_precompute3_utils.rs
       +++ b/src/constraint_precompute3_utils.rs
-      @@ -181,12 +181,14 @@
-       		}
-       		*w.children_mut() = new_children;
-       	}
-       	// 4) Update StageVocab
-      -	for (old, rep) in tqdm!(old_to_new.iter(), desc = "Trie3 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-      +	for (old, rep) in tqdm!(old_to_new.iter(), desc = "Trie3 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-       		if old == rep { continue; }
-      -		let moved = stage_vocab.internal_to_original.remove(old).unwrap_or_default();
-      -		stage_vocab.internal_to_original.entry(*rep).or_default().extend(moved.clone());
-      -		for o in moved {
-      -			stage_vocab.original_to_internal.insert(o, *rep);
-      +		if let Some(moved) = stage_vocab.internal_to_original.remove(old) {
-      +			let entry = stage_vocab.internal_to_original.entry(*rep).or_default();
-      +			*entry |= &moved;
-      +			for o in moved.iter() {
-      +				stage_vocab.original_to_internal.insert(o, *rep);
-      +			}
-       		}
-       	}
+      @@ -51,49 +51,49 @@
        }
-      @@ -245,7 +247,7 @@
-       	let ranges_after = count_total_ranges_trie3(&all_nodes, trie3_god);
        
-       	// Update StageVocab under permutation
-      -	let mut new_internal_to_original: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-      +	let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
-       	for (old_id, setv) in tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie3 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false) {
-       		if let Some(new_id) = old_to_new.get(&old_id) {
-       			new_internal_to_original.insert(*new_id, setv);
+       fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
+      -    if bv.is_empty() { return LLMTokenBV::zeros(); }
+      -    let mut out = LLMTokenBV::zeros();
+      -
+      -    if *bv == LLMTokenBV::max_ones() {
+      -        for t in 0..=max_token_id {
+      -            let rep = map_old_to_new.get(&t).copied().unwrap_or(t);
+      -            out.insert(rep);
+      -        }
+      -        return out;
+      -    }
+      -
+      -    for t in bv.iter() {
+      -        let ti = t as usize;
+      -        let rep = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+      -        out.insert(rep);
+      -    }
+      -    out
+      +    if bv.is_empty() { return LLMTokenBV::zeros(); }
+      +
+      +    let mut ranges_to_add = Vec::new();
+      +    let mut elements_to_add = Vec::new();
+      +
+      +    let process_range = |range: std::ops::RangeInclusive<usize>,
+      +                         ranges_to_add: &mut Vec<_>,
+      +                         elements_to_add: &mut Vec<_>| {
+      +        let (mut current, end) = (*range.start(), *range.end());
+      +        for (&k, &v) in map_old_to_new.range(current..=end) {
+      +            if current < k {
+      +                ranges_to_add.push(current..=k - 1);
+      +            }
+      +            elements_to_add.push(v);
+      +            current = k + 1;
+      +        }
+      +        if current <= end {
+      +            ranges_to_add.push(current..=end);
+      +        }
+      +    };
+      +
+      +    if *bv == LLMTokenBV::max_ones() {
+      +        process_range(0..=max_token_id, &mut ranges_to_add, &mut elements_to_add);
+      +    } else {
+      +        for range in bv.inner().ranges() {
+      +            process_range(*range.start()..=*range.end(), &mut ranges_to_add, &mut elements_to_add);
+      +        }
+      +    }
+      +
+      +    let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
+      +    new_set.extend(elements_to_add);
+      +
+      +    LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+       }
+       
+       fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, _max_token_id: usize) -> LLMTokenBV {
+           // Fast‑paths for empty or full‑universe bitvectors.
+      -    if bv.is_empty() {
+      -        return LLMTokenBV::zeros();
+      -    }
+      -    if *bv == LLMTokenBV::max_ones() {
+      -        return LLMTokenBV::max_ones();
+      -    }
+      -    // Map only present tokens (bijection).
+      -    let mut out = LLMTokenBV::zeros();
+      -    for t in bv.iter() {
+      -        let ti = t as usize;
+      -        let nt = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+      -        out.insert(nt);
+      -    }
+      -    out
+      +    if bv.is_empty() { return LLMTokenBV::zeros(); }
+      +    if *bv == LLMTokenBV::max_ones() { return LLMTokenBV::max_ones(); }
+      +
+      +    let mut ranges_to_add = Vec::new();
+      +    let mut elements_to_add = Vec::new();
+      +
+      +    for range in bv.inner().ranges() {
+      +        let (mut current, end) = (*range.start(), *range.end());
+      +
+      +        for (&k, &v) in map_old_to_new.range(current..=end) {
+      +            if current < k {
+      +                // Identity mapping for elements not in map_old_to_new
+      +                ranges_to_add.push(current..=k - 1);
+      +            }
+      +            elements_to_add.push(v);
+      +            current = k + 1;
+      +        }
+      +
+      +        if current <= end {
+      +            // Identity mapping for the rest of the range
+      +            ranges_to_add.push(current..=end);
+      +        }
+      +    }
+      +
+      +    let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
+      +    new_set.extend(elements_to_add);
+      +
+      +    LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+       }
+       
+       /// Merge equivalent internal LLM token ids in Trie3:
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 3 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
-
-      --- Processing Diff Block 2 ---
       Identified target file: src/constraint_precompute1_utils.rs
       Applying patch to 'src/constraint_precompute1_utils.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute1_utils.rs.
 
-      --- Processing Diff Block 3 ---
+      --- Processing Diff Block 2 ---
       Identified target file: src/constraint_precompute3_utils.rs
       Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_utils.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Replace BTreeSet<usize> with
-      LLMTokenBV in internal_to_original vocab mappings for efficiency."'
+  - user: 'Changes committed with message: "Perf: Optimize LLM bitvector remapping
+      by processing ranges instead of individual elements in Trie1 and Trie3 utilities"'
     metadata:
 ...

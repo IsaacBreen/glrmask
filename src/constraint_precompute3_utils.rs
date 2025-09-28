@@ -88,40 +88,70 @@ pub fn optimize_trie3_size(
 
 fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
     if bv.is_empty() { return LLMTokenBV::zeros(); }
-    let mut out = LLMTokenBV::zeros();
+
+    let mut ranges_to_add = Vec::new();
+    let mut elements_to_add = Vec::new();
+
+    let process_range = |range: std::ops::RangeInclusive<usize>,
+                         ranges_to_add: &mut Vec<_>,
+                         elements_to_add: &mut Vec<_>| {
+        let (mut current, end) = (*range.start(), *range.end());
+        for (&k, &v) in map_old_to_new.range(current..=end) {
+            if current < k {
+                ranges_to_add.push(current..=k - 1);
+            }
+            elements_to_add.push(v);
+            current = k + 1;
+        }
+        if current <= end {
+            ranges_to_add.push(current..=end);
+        }
+    };
 
     if *bv == LLMTokenBV::max_ones() {
-        for t in 0..=max_token_id {
-            let rep = map_old_to_new.get(&t).copied().unwrap_or(t);
-            out.insert(rep);
+        process_range(0..=max_token_id, &mut ranges_to_add, &mut elements_to_add);
+    } else {
+        for range in bv.inner().ranges() {
+            process_range(*range.start()..=*range.end(), &mut ranges_to_add, &mut elements_to_add);
         }
-        return out;
     }
 
-    for t in bv.iter() {
-        let ti = t as usize;
-        let rep = map_old_to_new.get(&ti).copied().unwrap_or(ti);
-        out.insert(rep);
-    }
-    out
+    let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
+    new_set.extend(elements_to_add);
+
+    LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
 }
 
 fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, _max_token_id: usize) -> LLMTokenBV {
     // Fast‑paths for empty or full‑universe bitvectors.
-    if bv.is_empty() {
-        return LLMTokenBV::zeros();
+    if bv.is_empty() { return LLMTokenBV::zeros(); }
+    if *bv == LLMTokenBV::max_ones() { return LLMTokenBV::max_ones(); }
+
+    let mut ranges_to_add = Vec::new();
+    let mut elements_to_add = Vec::new();
+
+    for range in bv.inner().ranges() {
+        let (mut current, end) = (*range.start(), *range.end());
+
+        for (&k, &v) in map_old_to_new.range(current..=end) {
+            if current < k {
+                // Identity mapping for elements not in map_old_to_new
+                ranges_to_add.push(current..=k - 1);
+            }
+            elements_to_add.push(v);
+            current = k + 1;
+        }
+
+        if current <= end {
+            // Identity mapping for the rest of the range
+            ranges_to_add.push(current..=end);
+        }
     }
-    if *bv == LLMTokenBV::max_ones() {
-        return LLMTokenBV::max_ones();
-    }
-    // Map only present tokens (bijection).
-    let mut out = LLMTokenBV::zeros();
-    for t in bv.iter() {
-        let ti = t as usize;
-        let nt = map_old_to_new.get(&ti).copied().unwrap_or(ti);
-        out.insert(nt);
-    }
-    out
+
+    let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
+    new_set.extend(elements_to_add);
+
+    LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
 }
 
 /// Merge equivalent internal LLM token ids in Trie3:
