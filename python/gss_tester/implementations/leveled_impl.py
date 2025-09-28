@@ -24,6 +24,7 @@ class UpperBranch(Generic[T, Acc]):
     _max_depth: int = field(init=False)
 
     def __hash__(self): raise NotImplementedError
+    def __eq__(self): raise NotImplementedError
 
     def __post_init__(self):
         depth = max(child._max_depth for child in self._all_children()) + 1 if self.children else 0
@@ -43,6 +44,7 @@ class Interface(Generic[T, Acc]):
     _max_depth: int = field(init=False)
 
     def __hash__(self): raise NotImplementedError
+    def __eq__(self): raise NotImplementedError
 
     def __post_init__(self):
         depth = max(child._max_depth for child in self._all_children()) + 1 if self.children else 0
@@ -60,6 +62,7 @@ class Lower(Generic[T]):
     _max_depth: int = field(init=False)
 
     def __hash__(self): raise NotImplementedError
+    def __eq__(self): raise NotImplementedError
 
     def __post_init__(self):
         depth = max(child._max_depth for child in self._all_children()) + 1 if self.children else 0
@@ -172,6 +175,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     inner: Upper[T, Acc]
 
     def __hash__(self): raise NotImplementedError
+    def __eq__(self): raise NotImplementedError
 
     def __post_init__(self):
         if os.environ.get("GSS_TESTER_VALIDATE"):
