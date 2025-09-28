@@ -577,8 +577,6 @@ class Model(GraphProvider):
         is_end = self.is_end
         pmc: Dict[int, Dict[int, LLMTokenSet]] = self.possible_matches_cache or {}
         max_state: int = self.tokenizer_max_state
-        # Parser-universe mask for universal-dest shortcut
-        _parser_universe_set, parser_universe_rs = self._build_parser_state_universe()
 
         # --- Initial GSS Stats ---
         stats.start('get_mask.initial_stats')
@@ -633,12 +631,13 @@ class Model(GraphProvider):
                 llm_mask=allowed_mask,
             )
 
+        cache = {}
         for sid, gss in state_map.items():
             stats.inc('get_mask.seeding.gss_loops')
             r: NodeID = roots_map[int(sid)]
 
             stats.start('get_mask.seeding.gss.apply')
-            gss_initialized: GSS = gss.apply(initialize_acc)
+            gss_initialized: GSS = gss.apply(initialize_acc, cache)
             stats.stop('get_mask.seeding.gss.apply')
 
             if r in values:
@@ -708,55 +707,17 @@ class Model(GraphProvider):
                 continue
             stats.stop('get_mask.zombie_check')
 
-            # Traverse edges and propagate masks (with per-edge precheck + ordering)
+            # Traverse edges and propagate masks
             a_node = arena.get(node)
             edges = a_node.children if a_node else []
             stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
             stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
-            # Compute a common per-node mask once to cheaply skip hopeless edges
-            common_mask = gss_mask_acc.llm_mask if gss_mask_acc else None
-            ordered_edges: List[Tuple[int, int, LLMTokenSet, List[Tuple[int, StateIDSet]]]] = []
-            stats.start('get_mask.edge_ordering.compute')
-            for (pop, llm_bv_raw), dests in edges:
-                # Remove tokens we already accepted
-                candidate = llm_bv_raw.difference(final_mask)
-                if candidate.is_empty():
+            for (pop, llm_bv), dests in edges:
+                llm_bv = llm_bv.difference(final_mask)
+                if llm_bv.is_empty():
                     stats.inc('get_mask.traversal.edge.llm_bv_empty')
                     continue
-                # Per-edge precheck against current GSS mask (common across accs at this node)
-                if common_mask is not None:
-                    cand_masked = candidate.intersection(common_mask)
-                    if cand_masked.is_empty():
-                        stats.inc('get_mask.traversal.edge.precheck_skipped_by_gss_mask')
-                        continue
-                    candidate = cand_masked
-                # Heuristic score:
-                # - massive bonus if any dest is an end node (reach end ASAP)
-                # - prefer edges adding many new tokens
-                # - prefer deeper destinations
-                # - penalize larger pops
-                potential = 0
-                for a, b in candidate.to_ranges():
-                    potential += int(b) - int(a) + 1
-                best_d = 0
-                has_end_dest = False
-                for dest_idx, _state_bv in dests:
-                    d_int = int(dest_idx)
-                    if is_end(d_int):
-                        has_end_dest = True
-                    md = int(max_depth.get(d_int, 0))
-                    if md > best_d:
-                        best_d = md
-                score = potential * 8 + best_d * 1 - int(pop) * 4 + (1000000 if has_end_dest else 0)
-                ordered_edges.append((int(score), int(pop), candidate, dests))
-            stats.stop('get_mask.edge_ordering.compute')
 
-            if ordered_edges:
-                stats.start('get_mask.edge_ordering.sort')
-                ordered_edges.sort(key=lambda x: x[0], reverse=True)
-                stats.stop('get_mask.edge_ordering.sort')
-
-            for _score, pop, llm_bv, dests in ordered_edges:
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
                 stats.start('get_mask.main_loop.edge.popn')
@@ -766,8 +727,9 @@ class Model(GraphProvider):
                     stats.inc('get_mask.traversal.edge.popped_empty')
                     continue
 
-                # Apply edge LLM mask by intersecting per-acc llm_mask with the pre-masked llm_bv
+                # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                 acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
+
                 def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                     stats.inc('get_mask.intersect_and_prune.calls')
                     if acc in acc_memo:
@@ -776,11 +738,15 @@ class Model(GraphProvider):
                     stats.start('get_mask.intersect_and_prune.intersection')
                     new_mask = acc.llm_mask.intersection(llm_bv)
                     stats.stop('get_mask.intersect_and_prune.intersection')
+
                     if new_mask.is_empty():
                         stats.inc('get_mask.intersect_and_prune.pruned_accs')
                         result = None
                     else:
-                        result = PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
+                        result = PyAcc(
+                            terminals_union=acc.terminals_union,
+                            llm_mask=new_mask
+                        )
                     acc_memo[acc] = result
                     return result
 
@@ -799,27 +765,17 @@ class Model(GraphProvider):
                 for dest_idx, state_bv in dests:
                     stats.inc('get_mask.traversal.dests_traversed')
 
-                    # Shortcut: if state mask is universal, no need to peek/filter
-                    is_universal_dest = False
-                    if not state_bv.is_empty() and not parser_universe_rs.is_empty():
-                        if state_bv.issubset(parser_universe_rs) and parser_universe_rs.issubset(state_bv):
-                            is_universal_dest = True
+                    stats.start('get_mask.main_loop.edge.peek_and_filter')
+                    peeked = popped.peek()
+                    values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                    stats.stop('get_mask.main_loop.edge.peek_and_filter')
 
-                    if is_universal_dest:
-                        child_gss = popped
-                        stats.inc('get_mask.main_loop.edge.universal_dest_shortcuts')
-                    else:
-                        stats.start('get_mask.main_loop.edge.peek_and_filter')
-                        peeked = popped.peek()
-                        values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-                        stats.stop('get_mask.main_loop.edge.peek_and_filter')
+                    if not values_to_keep:
+                        continue
 
-                        if not values_to_keep:
-                            continue
-
-                        stats.start('get_mask.main_loop.edge.isolate_many')
-                        child_gss = popped.isolate_many(values_to_keep)
-                        stats.stop('get_mask.main_loop.edge.isolate_many')
+                    stats.start('get_mask.main_loop.edge.isolate_many')
+                    child_gss = popped.isolate_many(values_to_keep)
+                    stats.stop('get_mask.main_loop.edge.isolate_many')
 
                     stats.inc('get_mask.intersect_and_prune.memo_size.sum', len(acc_memo))
                     if child_gss.is_empty():
