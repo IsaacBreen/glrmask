@@ -351,6 +351,13 @@ class Model(GraphProvider):
 
     @profile
     def commit(self, token_id: int):
+        print("commit")
+        for tsid, gss in self.state.items():
+            print(f"  [{tsid}]:")
+            for stack, acc in gss.to_stacks():
+                print(f"    [{stack}]: {acc}")
+
+
         token_bytes = self.id_to_token[token_id]
 
         # Build tokenizer maps
