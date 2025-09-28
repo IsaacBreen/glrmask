@@ -717,12 +717,46 @@ class Model(GraphProvider):
             edges = a_node.children if a_node else []
             stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
             stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
-            for (pop, llm_bv), dests in edges:
-                llm_bv = llm_bv.difference(final_mask)
-                if llm_bv.is_empty():
+
+            # --- SUPERCHARGED ZOMBIE AVOIDANCE ---
+            # Dynamically sort edges to prioritize paths that are most likely to
+            # quickly populate the final_mask, enabling more aggressive pruning.
+            stats.start('get_mask.edge_sorting')
+
+            # Create a list of (sort_key, edge_group, potential_llm_bv) tuples
+            # to avoid recomputing the difference and to pre-filter empty edges.
+            sortable_edges = []
+            for edge_group in edges:
+                (_pop, llm_bv_orig), dests = edge_group
+
+                potential_llm_bv = llm_bv_orig.difference(final_mask)
+                if potential_llm_bv.is_empty():
                     stats.inc('get_mask.traversal.edge.llm_bv_empty')
                     continue
 
+                if not dests:
+                    # Process edges with no destination last
+                    sort_key = (1, float('inf'))
+                else:
+                    # Primary sort key: max depth of destination nodes (higher is better)
+                    max_dest_depth = max(max_depth.get(d[0], 0) for d in dests)
+
+                    # Secondary sort key: number of ranges in the potential new token set.
+                    # This is a cheaper proxy for complexity than counting all tokens.
+                    num_potential_ranges = len(potential_llm_bv.to_ranges())
+
+                    # We want to sort by -max_dest_depth (desc), then num_potential_ranges (asc).
+                    sort_key = (-max_dest_depth, num_potential_ranges)
+
+                sortable_edges.append((sort_key, edge_group, potential_llm_bv))
+
+            # Sort based on the pre-computed key
+            sortable_edges.sort(key=lambda x: x[0])
+            stats.stop('get_mask.edge_sorting')
+
+            for _sort_key, edge_group, llm_bv in sortable_edges:
+                (pop, _), dests = edge_group
+                # llm_bv is now the potential token set, pre-filtered.
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
                 stats.start('get_mask.main_loop.edge.popn')
