@@ -175,7 +175,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     inner: Upper[T, Acc]
 
     def __hash__(self): raise NotImplementedError
-    def __eq__(self): raise NotImplementedError
+    def __eq__(self, other): raise NotImplementedError
 
     def __post_init__(self):
         if os.environ.get("GSS_TESTER_VALIDATE"):
