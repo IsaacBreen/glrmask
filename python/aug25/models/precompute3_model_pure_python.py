@@ -352,6 +352,8 @@ class Model(GraphProvider):
 
     @profile
     def commit(self, token_id: int):
+        memo = {}
+        self.state = {tsid: gss.fuse(1, memo) for tsid, gss in self.state.items()}
         print("commit")
         memo = set()
         for tsid, gss in self.state.items():
