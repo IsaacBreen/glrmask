@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - python/gss_tester/implementations/leveled_impl.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     python/gss_tester/implementations/leveled_impl.py: |
@@ -576,6 +576,7 @@ local_system:
                       return res
 
                   # It's an UpperBranch
+                  assert isinstance(node, UpperBranch)
                   new_empty = func(node.empty) if node.empty is not None else None
                   new_children: Dict[T, Dict[int, Upper[T, NewAcc]]] = {}
 
@@ -751,6 +752,10 @@ local_system:
 
           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
               return LeveledGSS(merge_upper(self.inner, other.inner))
+
+          def fuse(self, levels: Optional[int] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
+              ...
+
           def peek(self) -> Set[T]:
               if isinstance(self.inner, Interface):
                   return set(self.inner.children.keys())
@@ -1786,6 +1791,7 @@ local_system:
                       return res
 
                   # It's an UpperBranch
+                  assert isinstance(node, UpperBranch)
                   new_empty = func(node.empty) if node.empty is not None else None
                   new_children: Dict[T, Dict[int, Upper[T, NewAcc]]] = {}
 
@@ -1962,126 +1968,86 @@ local_system:
           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
               return LeveledGSS(merge_upper(self.inner, other.inner))
 
-          def fuse(self, levels: Optional[int] = None, memo: Optional[Dict[Tuple[int, int], Any]] = None) -> LeveledGSS[T, Acc]:
+          def fuse(self, levels: Optional[int] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
               """
-              Fuse multi-depth edges per value into a single edge, recursively down to the
-              specified number of levels.
-              - levels=None or levels<0: fuse through the entire structure (arbitrarily deep)
-              - levels=0: no-op; return self unchanged
-              - levels=1: fuse only at the root node
-              - levels>1: fuse at root and recurse levels-1 into its children
+              Fuse edges by value so that, at each fused level, there is at most one outgoing
+              edge per value T on a node.
+              - levels=None: fuse all levels (entire structure).
+              - levels=N>0: fuse only the top N levels (root is level 1).
+              - levels<=0: no-op; returns self.
 
-              Semantics:
-              - At any node (UpperBranch, Interface, or Lower), for each value T, if there
-                are multiple children (at different depths), they are merged into a single
-                child using merge_upper (for Upper children) or merge_lower (for Lower
-                children). The resulting child is then recursively fused if more levels
-                remain to be processed.
-              - For UpperBranch nodes that are reconstructed, try_promote is applied to keep
-                the structure canonical.
+              The optional memo allows re-use across shared subgraphs. It should be a dict
+              keyed by tuples:
+                ('U', id(node), remaining_levels) -> Upper node result
+                ('L', id(node), remaining_levels) -> Lower node result
               """
-              if self.is_empty() or levels == 0:
+              if levels is not None and levels <= 0:
                   return self
-
               if memo is None:
                   memo = {}
 
-              ALL = -1
-              rem_tag: int = ALL if levels is None or levels < 0 else int(levels)
-
-              def dec_tag(r: int) -> int:
-                  return r if r == ALL else max(r - 1, 0)
-
-              def _fuse_lower(node: Lower[T], rem: int) -> Lower[T]:
-                  key = (id(node), rem)
-                  if key in memo:
-                      return memo[key]
-                  if rem == 0:
+              def fuse_lower_node(node: Lower[T], remain: Optional[int]) -> Lower[T]:
+                  key = ('L', id(node), remain)
+                  cached = memo.get(key)
+                  if cached is not None:
+                      return cached  # type: ignore[return-value]
+                  if remain == 0:
                       memo[key] = node
                       return node
 
-                  changed = False
+                  next_remain: Optional[int] = None if remain is None else remain - 1
                   new_children: Dict[T, Dict[int, Lower[T]]] = {}
 
+                  # For each value, merge all children (across depths) into a single child
                   for v, kids in node.children.items():
-                      # Merge all Lower children for this value across depths into one.
-                      lowers = list(kids.values())
-                      if not lowers:
+                      fused_kids = [fuse_lower_node(child, next_remain) for child in kids.values()]
+                      if not fused_kids:
                           continue
-                      merged = lowers[0] if len(lowers) == 1 else reduce(merge_lower, lowers[1:], lowers[0])
-                      fused_child = _fuse_lower(merged, dec_tag(rem))
+                      merged_child = reduce(merge_lower, fused_kids[1:], fused_kids[0])
+                      new_children[v] = {merged_child._max_depth: merged_child}
 
-                      # Detect changes: if there was more than one child originally, or if the fused child identity differs
-                      if len(kids) != 1 or next(iter(kids.values())) is not fused_child:
-                          changed = True
-
-                      new_children[v] = {fused_child._max_depth: fused_child}
-
-                  if not changed:
-                      memo[key] = node
-                      return node
-
-                  res = Lower(children=new_children, empty=node.empty)
+                  res = Lower(children=new_children if new_children else {}, empty=node.empty)
                   memo[key] = res
                   return res
 
-              def _fuse_upper(node: Upper[T, Acc], rem: int) -> Upper[T, Acc]:
-                  key = (id(node), rem)
-                  if key in memo:
-                      return memo[key]
-                  if rem == 0:
+              def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int]) -> Upper[T, Acc]:
+                  key = ('U', id(node), remain)
+                  cached = memo.get(key)
+                  if cached is not None:
+                      return cached  # type: ignore[return-value]
+                  if remain == 0:
                       memo[key] = node
                       return node
+
+                  next_remain: Optional[int] = None if remain is None else remain - 1
 
                   if isinstance(node, Interface):
-                      changed = False
+                      # Fuse Lower layer at this boundary: one Lower child per value
                       new_children: Dict[T, Dict[int, Lower[T]]] = {}
-
                       for v, kids in node.children.items():
-                          lowers = list(kids.values())
-                          if not lowers:
+                          fused_kids = [fuse_lower_node(child, next_remain) for child in kids.values()]
+                          if not fused_kids:
                               continue
-                          merged = lowers[0] if len(lowers) == 1 else reduce(merge_lower, lowers[1:], lowers[0])
-                          fused_child = _fuse_lower(merged, dec_tag(rem))
-
-                          if len(kids) != 1 or next(iter(kids.values())) is not fused_child:
-                              changed = True
-
-                          new_children[v] = {fused_child._max_depth: fused_child}
-
-                      if not changed:
-                          memo[key] = node
-                          return node
-
-                      res = Interface(children=new_children, acc=node.acc, empty=node.empty)
+                          merged_child = reduce(merge_lower, fused_kids[1:], fused_kids[0])
+                          new_children[v] = {merged_child._max_depth: merged_child}
+                      res: Upper[T, Acc] = Interface(children=new_children, acc=node.acc, empty=node.empty)
                       memo[key] = res
                       return res
+                  else:
+                      # UpperBranch: fuse Upper/Interface children by value
+                      new_children_u: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+                      for v, kids in node.children.items():
+                          fused_kids = [fuse_upper_node(child, next_remain) for child in kids.values()]
+                          if not fused_kids:
+                              continue
+                          merged_child_u = reduce(merge_upper, fused_kids[1:], fused_kids[0])
+                          new_children_u[v] = {merged_child_u._max_depth: merged_child_u}
+                      res_branch = UpperBranch(children=new_children_u, empty=node.empty)
+                      res_promoted = try_promote(res_branch)
+                      memo[key] = res_promoted
+                      return res_promoted
 
-                  # UpperBranch
-                  changed = False
-                  new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-                  for v, kids in node.children.items():
-                      uppers = list(kids.values())
-                      if not uppers:
-                          continue
-                      merged = uppers[0] if len(uppers) == 1 else reduce(merge_upper, uppers[1:], uppers[0])
-                      fused_child = _fuse_upper(merged, dec_tag(rem))
-
-                      if len(kids) != 1 or next(iter(kids.values())) is not fused_child:
-                          changed = True
-
-                      new_children[v] = {fused_child._max_depth: fused_child}
-
-                  if not changed:
-                      memo[key] = node
-                      return node
-
-                  res_branch = UpperBranch(children=new_children, empty=node.empty)
-                  res = try_promote(res_branch)
-                  memo[key] = res
-                  return res
-
-              new_inner = _fuse_upper(self.inner, rem_tag)
+              new_inner = fuse_upper_node(self.inner, levels)
               return LeveledGSS(new_inner)
 
           def peek(self) -> Set[T]:
@@ -2556,7 +2522,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -3162,6 +3128,7 @@ messages:
                       return res
 
                   # It's an UpperBranch
+                  assert isinstance(node, UpperBranch)
                   new_empty = func(node.empty) if node.empty is not None else None
                   new_children: Dict[T, Dict[int, Upper[T, NewAcc]]] = {}
 
@@ -3337,6 +3304,10 @@ messages:
 
           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
               return LeveledGSS(merge_upper(self.inner, other.inner))
+
+          def fuse(self, levels: Optional[int] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
+              ...
+
           def peek(self) -> Set[T]:
               if isinstance(self.inner, Interface):
                   return set(self.inner.children.keys())
@@ -3809,6 +3780,8 @@ messages:
       Sometimes, we want to make it so there's just one edge for each `T` on a node.
       In these cases we can 'fuse' the top level.
       We may want to fuse down lower as well, arbitrarily low.
+
+      Make the fuser take a memo.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3827,164 +3800,130 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are the precise changes to implement a “fuse” operation that collapses multi-depth edges per value T on each node, recursively down to a specified number of levels.
+      Here’s how to implement fusing in LeveledGSS.
 
       Step-by-step instructions
 
-      1) Open file: python/gss_tester/implementations/leveled_impl.py
+      1. Open the file:
+         - python/gss_tester/implementations/leveled_impl.py
 
-      2) Inside class LeveledGSS, add a new method fuse(self, levels: Optional[int] = None) that:
-         - Fuses multi-depth edges per value on the current node.
-         - Recursively continues down to children for the specified number of levels.
-         - Uses merge_upper and merge_lower to combine children of the same value at a node, producing a single child per value.
-         - Preserves canonical form by calling try_promote on UpperBranch nodes when they are reconstructed.
-         - Uses memoization keyed by (id(node), remaining_levels) to avoid recomputation over shared subgraphs.
-         - Interprets levels as:
-           - None or negative: fuse through the entire graph (arbitrarily deep).
-           - 0: no changes.
-           - 1: fuse only at the root node.
-           - n>1: fuse at the root and recurse with n-1 into its children.
+      2. Locate the method stub inside the LeveledGSS class:
+         - def fuse(self, levels: Optional[int] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
+             ...
 
-         Recommended insertion point: put the method right after the merge method, and before peek (for consistency with other structure transforms in the class). Concretely, place it between def merge(...) and def peek(...).
+      3. Replace the entire stub with a full implementation that:
+         - Fuses (merges) sibling edges by value per node so there is at most one child per value at that node.
+         - Accepts a levels parameter:
+           - None means fuse all levels throughout the structure.
+           - A positive integer N means fuse only the top N levels, counting the root as level 1. N=1 fuses only the root’s immediate children per value.
+           - 0 or less returns the GSS unchanged.
+         - Works across both layers:
+           - In UpperBranch: merge same-value Upper/Interface children via merge_upper.
+           - In Interface: merge same-value Lower children via merge_lower.
+           - In Lower: merge same-value Lower children via merge_lower.
+         - Uses a memo dict to avoid recomputing on shared subgraphs. Keys are tuples:
+           - ('U', id(node), remaining_levels) for Upper/Interface nodes
+           - ('L', id(node), remaining_levels) for Lower nodes
+         - Preserves canonicalization by calling try_promote on rebuilt UpperBranch nodes.
+         - Preserves node semantics (acc, empty) while reconstructing the fused children maps.
 
-      3) Save the file.
+      4. Save the file.
 
-      Git diff patch
+      Patch
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 3f8a9a2..f8c5a64 100644
+      index 0b4a6c0..5b7a3f1 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -516,6 +516,133 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-       
+      @@ -428,7 +428,80 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
            def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
                return LeveledGSS(merge_upper(self.inner, other.inner))
-      +
-      +    def fuse(self, levels: Optional[int] = None) -> LeveledGSS[T, Acc]:
+       
+      -    def fuse(self, levels: Optional[int] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
+      -        ...
+      +    def fuse(self, levels: Optional[int] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
       +        """
-      +        Fuse multi-depth edges per value into a single edge, recursively down to the
-      +        specified number of levels.
-      +        - levels=None or levels<0: fuse through the entire structure (arbitrarily deep)
-      +        - levels=0: no-op; return self unchanged
-      +        - levels=1: fuse only at the root node
-      +        - levels>1: fuse at root and recurse levels-1 into its children
+      +        Fuse edges by value so that, at each fused level, there is at most one outgoing
+      +        edge per value T on a node.
+      +        - levels=None: fuse all levels (entire structure).
+      +        - levels=N>0: fuse only the top N levels (root is level 1).
+      +        - levels<=0: no-op; returns self.
       +
-      +        Semantics:
-      +        - At any node (UpperBranch, Interface, or Lower), for each value T, if there
-      +          are multiple children (at different depths), they are merged into a single
-      +          child using merge_upper (for Upper children) or merge_lower (for Lower
-      +          children). The resulting child is then recursively fused if more levels
-      +          remain to be processed.
-      +        - For UpperBranch nodes that are reconstructed, try_promote is applied to keep
-      +          the structure canonical.
+      +        The optional memo allows re-use across shared subgraphs. It should be a dict
+      +        keyed by tuples:
+      +          ('U', id(node), remaining_levels) -> Upper node result
+      +          ('L', id(node), remaining_levels) -> Lower node result
       +        """
-      +        if self.is_empty() or levels == 0:
+      +        if levels is not None and levels <= 0:
       +            return self
+      +        if memo is None:
+      +            memo = {}
       +
-      +        # Memoization to respect sharing and avoid recomputing on repeated subgraphs.
-      +        # Key: (id(node), rem_tag) where rem_tag is -1 for "infinite" (fuse all) or an int >= 0.
-      +        upper_cache: Dict[Tuple[int, int], Upper[T, Acc]] = {}
-      +        lower_cache: Dict[Tuple[int, int], Lower[T]] = {}
-      +
-      +        ALL = -1
-      +        rem_tag: int = ALL if levels is None or levels < 0 else int(levels)
-      +
-      +        def dec_tag(r: int) -> int:
-      +            return r if r == ALL else max(r - 1, 0)
-      +
-      +        def _fuse_lower(node: Lower[T], rem: int) -> Lower[T]:
-      +            key = (id(node), rem)
-      +            if key in lower_cache:
-      +                return lower_cache[key]
-      +            if rem == 0:
-      +                lower_cache[key] = node
+      +        def fuse_lower_node(node: Lower[T], remain: Optional[int]) -> Lower[T]:
+      +            key = ('L', id(node), remain)
+      +            cached = memo.get(key)
+      +            if cached is not None:
+      +                return cached  # type: ignore[return-value]
+      +            if remain == 0:
+      +                memo[key] = node
       +                return node
       +
-      +            changed = False
+      +            next_remain: Optional[int] = None if remain is None else remain - 1
       +            new_children: Dict[T, Dict[int, Lower[T]]] = {}
       +
+      +            # For each value, merge all children (across depths) into a single child
       +            for v, kids in node.children.items():
-      +                # Merge all Lower children for this value across depths into one.
-      +                lowers = list(kids.values())
-      +                if not lowers:
+      +                fused_kids = [fuse_lower_node(child, next_remain) for child in kids.values()]
+      +                if not fused_kids:
       +                    continue
-      +                merged = lowers[0] if len(lowers) == 1 else reduce(merge_lower, lowers[1:], lowers[0])
-      +                fused_child = _fuse_lower(merged, dec_tag(rem))
+      +                merged_child = reduce(merge_lower, fused_kids[1:], fused_kids[0])
+      +                new_children[v] = {merged_child._max_depth: merged_child}
       +
-      +                # Detect changes: if there was more than one child originally, or if the fused child identity differs
-      +                if len(kids) != 1 or next(iter(kids.values())) is not fused_child:
-      +                    changed = True
-      +
-      +                new_children[v] = {fused_child._max_depth: fused_child}
-      +
-      +            if not changed:
-      +                lower_cache[key] = node
-      +                return node
-      +
-      +            res = Lower(children=new_children, empty=node.empty)
-      +            lower_cache[key] = res
+      +            res = Lower(children=new_children if new_children else {}, empty=node.empty)
+      +            memo[key] = res
       +            return res
       +
-      +        def _fuse_upper(node: Upper[T, Acc], rem: int) -> Upper[T, Acc]:
-      +            key = (id(node), rem)
-      +            if key in upper_cache:
-      +                return upper_cache[key]
-      +            if rem == 0:
-      +                upper_cache[key] = node
+      +        def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int]) -> Upper[T, Acc]:
+      +            key = ('U', id(node), remain)
+      +            cached = memo.get(key)
+      +            if cached is not None:
+      +                return cached  # type: ignore[return-value]
+      +            if remain == 0:
+      +                memo[key] = node
       +                return node
+      +
+      +            next_remain: Optional[int] = None if remain is None else remain - 1
       +
       +            if isinstance(node, Interface):
-      +                changed = False
+      +                # Fuse Lower layer at this boundary: one Lower child per value
       +                new_children: Dict[T, Dict[int, Lower[T]]] = {}
-      +
       +                for v, kids in node.children.items():
-      +                    lowers = list(kids.values())
-      +                    if not lowers:
+      +                    fused_kids = [fuse_lower_node(child, next_remain) for child in kids.values()]
+      +                    if not fused_kids:
       +                        continue
-      +                    merged = lowers[0] if len(lowers) == 1 else reduce(merge_lower, lowers[1:], lowers[0])
-      +                    fused_child = _fuse_lower(merged, dec_tag(rem))
-      +
-      +                    if len(kids) != 1 or next(iter(kids.values())) is not fused_child:
-      +                        changed = True
-      +
-      +                    new_children[v] = {fused_child._max_depth: fused_child}
-      +
-      +                if not changed:
-      +                    upper_cache[key] = node
-      +                    return node
-      +
-      +                res = Interface(children=new_children, acc=node.acc, empty=node.empty)
-      +                upper_cache[key] = res
+      +                    merged_child = reduce(merge_lower, fused_kids[1:], fused_kids[0])
+      +                    new_children[v] = {merged_child._max_depth: merged_child}
+      +                res: Upper[T, Acc] = Interface(children=new_children, acc=node.acc, empty=node.empty)
+      +                memo[key] = res
       +                return res
+      +            else:
+      +                # UpperBranch: fuse Upper/Interface children by value
+      +                new_children_u: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+      +                for v, kids in node.children.items():
+      +                    fused_kids = [fuse_upper_node(child, next_remain) for child in kids.values()]
+      +                    if not fused_kids:
+      +                        continue
+      +                    merged_child_u = reduce(merge_upper, fused_kids[1:], fused_kids[0])
+      +                    new_children_u[v] = {merged_child_u._max_depth: merged_child_u}
+      +                res_branch = UpperBranch(children=new_children_u, empty=node.empty)
+      +                res_promoted = try_promote(res_branch)
+      +                memo[key] = res_promoted
+      +                return res_promoted
       +
-      +            # UpperBranch
-      +            changed = False
-      +            new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
-      +            for v, kids in node.children.items():
-      +                uppers = list(kids.values())
-      +                if not uppers:
-      +                    continue
-      +                merged = uppers[0] if len(uppers) == 1 else reduce(merge_upper, uppers[1:], uppers[0])
-      +                fused_child = _fuse_upper(merged, dec_tag(rem))
-      +
-      +                if len(kids) != 1 or next(iter(kids.values())) is not fused_child:
-      +                    changed = True
-      +
-      +                new_children[v] = {fused_child._max_depth: fused_child}
-      +
-      +            if not changed:
-      +                upper_cache[key] = node
-      +                return node
-      +
-      +            res_branch = UpperBranch(children=new_children, empty=node.empty)
-      +            res = try_promote(res_branch)
-      +            upper_cache[key] = res
-      +            return res
-      +
-      +        new_inner = _fuse_upper(self.inner, rem_tag)
+      +        new_inner = fuse_upper_node(self.inner, levels)
       +        return LeveledGSS(new_inner)
-      +
+       
            def peek(self) -> Set[T]:
                if isinstance(self.inner, Interface):
                    return set(self.inner.children.keys())
@@ -3999,166 +3938,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "feat(leveled_impl): Add fuse method to
-      LeveledGSS to collapse multi-depth edges"'
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/implementations/leveled_impl.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: Make the fuser take a memo.
-    metadata:
-  - assistant: |-
-      Of course. Here are the instructions to modify the `fuse` method to accept an optional memoization dictionary.
-
-      ### Step-by-step instructions
-
-      1.  **Open the file `python/gss_tester/implementations/leveled_impl.py`**.
-
-      2.  **Locate the `fuse` method** within the `LeveledGSS` class.
-
-      3.  **Update the method signature** to accept a `memo` argument.
-          *   Change this line:
-              ```python
-              def fuse(self, levels: Optional[int] = None) -> LeveledGSS[T, Acc]:
-              ```
-          *   To this:
-              ```python
-              def fuse(self, levels: Optional[int] = None, memo: Optional[Dict[Tuple[int, int], Any]] = None) -> LeveledGSS[T, Acc]:
-              ```
-
-      4.  **Adapt the memoization logic** to use the provided `memo` dictionary.
-          *   Remove the internal `upper_cache` and `lower_cache` initializations:
-              ```python
-              # Memoization to respect sharing and avoid recomputing on repeated subgraphs.
-              # Key: (id(node), rem_tag) where rem_tag is -1 for "infinite" (fuse all) or an int >= 0.
-              upper_cache: Dict[Tuple[int, int], Upper[T, Acc]] = {}
-              lower_cache: Dict[Tuple[int, int], Lower[T]] = {}
-              ```
-          *   Replace them with code to initialize the `memo` argument if it's not provided:
-              ```python
-              if memo is None:
-                  memo = {}
-              ```
-
-      5.  **Replace all cache references** inside the `_fuse_lower` and `_fuse_upper` helper functions.
-          *   In `_fuse_lower`, change every instance of `lower_cache` to `memo`.
-          *   In `_fuse_upper`, change every instance of `upper_cache` to `memo`.
-
-      ### Git diff patch
-
-      Here is the git diff for the changes:
-
-      ```diff
-      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index f8c5a64..5501720 100644
-      --- a/python/gss_tester/implementations/leveled_impl.py
-      +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -518,7 +518,7 @@
-           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-               return LeveledGSS(merge_upper(self.inner, other.inner))
-       
-      -    def fuse(self, levels: Optional[int] = None) -> LeveledGSS[T, Acc]:
-      +    def fuse(self, levels: Optional[int] = None, memo: Optional[Dict[Tuple[int, int], Any]] = None) -> LeveledGSS[T, Acc]:
-               """
-               Fuse multi-depth edges per value into a single edge, recursively down to the
-               specified number of levels.
-      @@ -538,11 +538,9 @@
-               if self.is_empty() or levels == 0:
-                   return self
-       
-      -        # Memoization to respect sharing and avoid recomputing on repeated subgraphs.
-      -        # Key: (id(node), rem_tag) where rem_tag is -1 for "infinite" (fuse all) or an int >= 0.
-      -        upper_cache: Dict[Tuple[int, int], Upper[T, Acc]] = {}
-      -        lower_cache: Dict[Tuple[int, int], Lower[T]] = {}
-      +        if memo is None:
-      +            memo = {}
-       
-               ALL = -1
-               rem_tag: int = ALL if levels is None or levels < 0 else int(levels)
-      @@ -552,11 +550,11 @@
-       
-               def _fuse_lower(node: Lower[T], rem: int) -> Lower[T]:
-                   key = (id(node), rem)
-      -            if key in lower_cache:
-      -                return lower_cache[key]
-      +            if key in memo:
-      +                return memo[key]
-                   if rem == 0:
-      -                lower_cache[key] = node
-      +                memo[key] = node
-                       return node
-       
-                   changed = False
-      @@ -576,19 +574,19 @@
-                       new_children[v] = {fused_child._max_depth: fused_child}
-       
-                   if not changed:
-      -                lower_cache[key] = node
-      +                memo[key] = node
-                       return node
-       
-                   res = Lower(children=new_children, empty=node.empty)
-      -            lower_cache[key] = res
-      +            memo[key] = res
-                   return res
-       
-               def _fuse_upper(node: Upper[T, Acc], rem: int) -> Upper[T, Acc]:
-                   key = (id(node), rem)
-      -            if key in upper_cache:
-      -                return upper_cache[key]
-      +            if key in memo:
-      +                return memo[key]
-                   if rem == 0:
-      -                upper_cache[key] = node
-      +                memo[key] = node
-                       return node
-       
-                   if isinstance(node, Interface):
-      @@ -608,12 +606,12 @@
-                           new_children[v] = {fused_child._max_depth: fused_child}
-       
-                       if not changed:
-      -                    upper_cache[key] = node
-      +                    memo[key] = node
-                           return node
-       
-                       res = Interface(children=new_children, acc=node.acc, empty=node.empty)
-      -                upper_cache[key] = res
-      +                memo[key] = res
-                       return res
-       
-                   # UpperBranch
-      @@ -631,12 +629,12 @@
-                       new_children[v] = {fused_child._max_depth: fused_child}
-       
-                   if not changed:
-      -                upper_cache[key] = node
-      +                memo[key] = node
-                       return node
-       
-                   res_branch = UpperBranch(children=new_children, empty=node.empty)
-                   res = try_promote(res_branch)
-      -            upper_cache[key] = res
-      +            memo[key] = res
-                   return res
-       
-               new_inner = _fuse_upper(self.inner, rem_tag)
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/implementations/leveled_impl.py
-      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
-    metadata:
-  - user: 'Changes committed with message: "refactor(leveled_impl): Update fuse to
-      accept and use an optional memoization dictionary"'
+  - user: 'Changes committed with message: "Implement LeveledGSS.fuse to merge sibling
+      edges by value up to a specified level"'
     metadata:
 ...
