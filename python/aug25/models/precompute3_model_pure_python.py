@@ -307,7 +307,7 @@ class Model(GraphProvider):
         # model._post_optimize_merge_subgraphs_and_edges()
         # model._merge_equivalent_llm_tokens()
         # model._reorder_llm_tokens_for_range_minimization()
-        model._recompute_max_depth_from_arena()
+        # model._recompute_max_depth_from_arena()
         return model
 
     @profile
