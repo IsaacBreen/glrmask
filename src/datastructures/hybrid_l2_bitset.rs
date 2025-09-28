@@ -125,6 +125,10 @@ impl HybridL2Bitset {
         }
     }
 
+    pub fn is_all(&self) -> bool {
+        self == &Self::all()
+    }
+
     pub fn is_simple(&self) -> bool {
         self.inner.ranges_len() < cache::SIMPLE_L2_BITSET_THRESHOLD
     }
@@ -208,9 +212,21 @@ impl HybridL2Bitset {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        const L2_FULL_ITER_WARNING_THRESHOLD: usize = 1_000_000;
+        let is_all = self.is_all();
+
         self.inner
             .iter()
             .flat_map(|(l1_index, bitset)| bitset.iter().map(move |l2_index| (l1_index, l2_index)))
+            .enumerate()
+            .map(move |(i, item)| {
+                if is_all && i == L2_FULL_ITER_WARNING_THRESHOLD {
+                    eprintln!(
+                        "Warning: Iterating over a full HybridL2Bitset. This may take a very long time."
+                    );
+                }
+                item
+            })
     }
 
     pub fn iter_l1_bitsets(&self) -> impl Iterator<Item = (usize, &HybridBitset)> {
