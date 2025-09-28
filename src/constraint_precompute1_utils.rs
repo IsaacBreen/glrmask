@@ -6,9 +6,18 @@ use crate::constraint::{StageVocab, PrecomputeNodeIndex, Trie1GodWrapper};
 use crate::datastructures::gss::LLMTokenBV;
 use crate::datastructures::trie::Trie;
 
-fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>) -> LLMTokenBV {
+fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
     if bv.is_empty() { return LLMTokenBV::zeros(); }
     let mut out = LLMTokenBV::zeros();
+
+    if *bv == LLMTokenBV::max_ones() {
+        for t in 0..=max_token_id {
+            let rep = map_old_to_new.get(&t).copied().unwrap_or(t);
+            out.insert(rep);
+        }
+        return out;
+    }
+
     for t in bv.iter() {
         let ti = t as usize;
         let rep = map_old_to_new.get(&ti).copied().unwrap_or(ti);
@@ -17,9 +26,9 @@ fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, us
     out
 }
 
-fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>) -> LLMTokenBV {
+fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
     // Same implementation; map is bijection in permutation case.
-    remap_llm_bv_many_to_one(bv, map_old_to_new)
+    remap_llm_bv_many_to_one(bv, map_old_to_new, max_token_id)
 }
 
 /// Merge equivalent internal LLM token ids in Trie1:
@@ -93,13 +102,13 @@ pub fn merge_equivalent_llm_tokens_trie1(
         let new_live_tokens = if r.value.live_tokens.is_empty() {
             r.value.live_tokens.clone()
         } else {
-            remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new)
+            remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new, max_tok)
         };
         let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
         for (ek, dm) in r.children() {
             let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
             for (dst, bv) in dm {
-                let mapped = remap_llm_bv_many_to_one(&bv, &old_to_new);
+                let mapped = remap_llm_bv_many_to_one(&bv, &old_to_new, max_tok);
                 if !mapped.is_empty() {
                     new_dm.insert(dst.clone(), mapped);
                 }
@@ -176,13 +185,13 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
         let new_live_tokens = if r.value.live_tokens.is_empty() {
             r.value.live_tokens.clone()
         } else {
-            remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new)
+            remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new, max_tok)
         };
         let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
         for (ek, dm) in r.children() {
             let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
             for (dst, bv) in dm {
-                let mapped = remap_llm_bv_permutation(&bv, &old_to_new);
+                let mapped = remap_llm_bv_permutation(&bv, &old_to_new, max_tok);
                 if !mapped.is_empty() {
                     new_dm.insert(dst.clone(), mapped);
                 }

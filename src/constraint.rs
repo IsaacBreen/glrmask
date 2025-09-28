@@ -1089,7 +1089,7 @@ impl<'r> Precomputer<'r> {
             vocab,
             roots,
             possible_matches: RefCell::new(BTreeMap::new()),
-            all_llm_tokens: HybridBitset::max_ones(),
+            all_llm_tokens: HybridBitset::ones(internal_max_llm_token + 1),
             merge_threshold,
             pb,
             stats: PrecomputeStats::default(),

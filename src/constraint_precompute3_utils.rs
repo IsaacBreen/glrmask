@@ -44,7 +44,7 @@ pub fn optimize_trie3_size(
     }
     crate::debug!(2, "Step 5: Compressing edges...");
     if config.optimize_trie2_compress_edges {
-        compress_trie3_edges(roots, &trie3_god);
+        compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
     }
     crate::debug!(2, "Step 6: Merging nodes...");
     if config.optimize_trie2_merge_nodes {
@@ -56,7 +56,7 @@ pub fn optimize_trie3_size(
     }
     crate::debug!(2, "Step 8: Compressing edges (post-merge)...");
     if config.optimize_trie2_compress_edges {
-        compress_trie3_edges(roots, &trie3_god);
+        compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
     }
     if config.optimize_trie2_merge_nodes {
         merge_nodes_trie3(roots, &trie3_god);
@@ -69,9 +69,18 @@ pub fn optimize_trie3_size(
     Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 }
 
-fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>) -> LLMTokenBV {
+fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
     if bv.is_empty() { return LLMTokenBV::zeros(); }
     let mut out = LLMTokenBV::zeros();
+
+    if *bv == LLMTokenBV::max_ones() {
+        for t in 0..=max_token_id {
+            let rep = map_old_to_new.get(&t).copied().unwrap_or(t);
+            out.insert(rep);
+        }
+        return out;
+    }
+
     for t in bv.iter() {
         let ti = t as usize;
         let rep = map_old_to_new.get(&ti).copied().unwrap_or(ti);
@@ -80,8 +89,8 @@ fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, us
     out
 }
 
-fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>) -> LLMTokenBV {
-    remap_llm_bv_many_to_one(bv, map_old_to_new)
+fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
+    remap_llm_bv_many_to_one(bv, map_old_to_new, max_token_id)
 }
 
 /// Merge equivalent internal LLM token ids in Trie3:
@@ -154,11 +163,11 @@ pub fn merge_equivalent_llm_tokens_trie3(
         let new_live_tokens = if r.value.live_tokens.is_empty() {
             r.value.live_tokens.clone()
         } else {
-            remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new)
+            remap_llm_bv_many_to_one(&r.value.live_tokens, &old_to_new, max_tok)
         };
         let mut new_children = BTreeMap::new();
         for ((pop, llm_bv), dm) in r.children() {
-            let mapped_key_bv = remap_llm_bv_many_to_one(&llm_bv, &old_to_new);
+            let mapped_key_bv = remap_llm_bv_many_to_one(&llm_bv, &old_to_new, max_tok);
             if mapped_key_bv.is_empty() { continue; }
             let entry = new_children.entry((*pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
             for (dst, sid_bv) in dm {
@@ -226,11 +235,11 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
         let new_live_tokens = if r.value.live_tokens.is_empty() {
             r.value.live_tokens.clone()
         } else {
-            remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new)
+            remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new, max_tok)
         };
         let mut new_children = BTreeMap::new();
         for ((pop, llm_bv), dm) in r.children() {
-            let mapped_key_bv = remap_llm_bv_permutation(&llm_bv, &old_to_new);
+            let mapped_key_bv = remap_llm_bv_permutation(&llm_bv, &old_to_new, max_tok);
             if mapped_key_bv.is_empty() { continue; }
             let entry = new_children.entry((*pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
             for (dst, sid_bv) in dm {
@@ -532,20 +541,23 @@ pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3I
     Trie::recompute_all_max_depths(trie3_god, &final_roots_vec);
 }
 
-pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
+pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_llm_token_id: usize, max_state_id: usize) {
     crate::debug!(2, "Compressing Trie 3 edges (conservative edge-reducing transforms)...");
 
+    let all_llm_bv = LLMTokenBV::ones(max_llm_token_id + 1);
+    let all_sids_bv = StateIDBV::ones(max_state_id + 1);
+
     // Helper: is the LLM-token BV "all tokens"?
-    fn is_all_llm(bv: &LLMTokenBV) -> bool {
-        bv == &LLMTokenBV::max_ones()
-    }
+    let is_all_llm = |bv: &LLMTokenBV| -> bool {
+        bv.is_superset(&all_llm_bv) || *bv == LLMTokenBV::max_ones()
+    };
     // Helper: is the StateIDBV "all states"?
-    fn is_all_sids(bv: &StateIDBV) -> bool {
-        bv == &StateIDBV::max_ones()
-    }
+    let is_all_sids = |bv: &StateIDBV| -> bool {
+        bv.is_superset(&all_sids_bv) || *bv == StateIDBV::max_ones()
+    };
 
     // Pass 1: local coalesce within each node
-    fn coalesce_edges_within_nodes(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
+    let coalesce_edges_within_nodes = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
         let nodes = Trie::all_nodes(trie3_god, roots_vec);
         if nodes.is_empty() { return false; }
         let mut changed_any = false;
@@ -600,13 +612,13 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
         }
 
         changed_any
-    }
+    };
 
     // Pass 2: shortcut zero-pop chains.
     // Contracts sequences V --(pop 0, L2, S2)--> ... --(pop 0, Lk, Sk)--> Z
     // into U --(p1, L1∩L2∩...∩Lk, S1∩S2∩...∩Sk)--> Z where U --(p1, L1, S1)--> V.
     // Only applies when each intermediate has exactly one outgoing (pop 0) edge with exactly one destination (no fanout), avoiding edge explosion.
-    fn shortcut_zero_pop_chains(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
+    let shortcut_zero_pop_chains = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
         let nodes = Trie::all_nodes(trie3_god, roots_vec);
         if nodes.is_empty() { return false; }
 
@@ -746,12 +758,12 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
         }
 
         changed_any
-    }
+    };
 
     // Pass 3: shortcut when the first edge is "universal" and the middle has a single outgoing edge.
     // A --(p1, ALL_LLM, ALL_SID)--> B and B --(p2, L2, SID2)--> C (only outgoing)
     // becomes A --(p1+p2, L2, SID2)--> C. (Do not apply when p2 == 0; zero-pop handled by pass 2.)
-    fn shortcut_universal_pop_step(trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]) -> bool {
+    let shortcut_universal_pop_step = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
         let nodes = Trie::all_nodes(trie3_god, roots_vec);
         if nodes.is_empty() { return false; }
 
@@ -809,11 +821,11 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
 
             for ((p1, llm1), dests) in &children_snapshot {
                 // Only when the first edge is universal in both LLM and SIDs.
-                if !is_all_llm(llm1) {
+                if !is_all_llm(&llm1) {
                     continue;
                 }
                 for (v, sids1) in dests {
-                    if !is_all_sids(sids1) {
+                    if !is_all_sids(&sids1) {
                         continue;
                     }
                     if let Some((p2, llm2, c, sids2)) = middle_info.get(v).cloned() {
@@ -842,7 +854,7 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
         }
 
         changed_any
-    }
+    };
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     if Trie::all_nodes(trie3_god, &roots_vec).is_empty() {
