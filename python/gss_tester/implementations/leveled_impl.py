@@ -569,6 +569,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 return res
 
             # It's an UpperBranch
+            assert isinstance(node, UpperBranch)
             new_empty = func(node.empty) if node.empty is not None else None
             new_children: Dict[T, Dict[int, Upper[T, NewAcc]]] = {}
 
