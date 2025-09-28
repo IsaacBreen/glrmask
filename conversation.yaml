@@ -4439,70 +4439,41 @@ local_system:
 
       fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
           if bv.is_empty() { return LLMTokenBV::zeros(); }
-
-          let mut ranges_to_add = Vec::new();
-          let mut elements_to_add = Vec::new();
-
-          let process_range = |range: std::ops::RangeInclusive<usize>,
-                               ranges_to_add: &mut Vec<_>,
-                               elements_to_add: &mut Vec<_>| {
-              let (mut current, end) = (*range.start(), *range.end());
-              for (&k, &v) in map_old_to_new.range(current..=end) {
-                  if current < k {
-                      ranges_to_add.push(current..=k - 1);
-                  }
-                  elements_to_add.push(v);
-                  current = k + 1;
-              }
-              if current <= end {
-                  ranges_to_add.push(current..=end);
-              }
-          };
+          let mut out = LLMTokenBV::zeros();
 
           if *bv == LLMTokenBV::max_ones() {
-              process_range(0..=max_token_id, &mut ranges_to_add, &mut elements_to_add);
-          } else {
-              for range in bv.inner().ranges() {
-                  process_range(*range.start()..=*range.end(), &mut ranges_to_add, &mut elements_to_add);
+              for t in 0..=max_token_id {
+                  let rep = map_old_to_new.get(&t).copied().unwrap_or(t);
+                  out.insert(rep);
               }
+              return out;
           }
 
-          let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
-          new_set.extend(elements_to_add);
-
-          LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+          for t in bv.iter() {
+              let ti = t as usize;
+              let rep = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+              out.insert(rep);
+          }
+          out
       }
 
       fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, _max_token_id: usize) -> LLMTokenBV {
           // Fast‑paths for empty or full‑universe bitvectors.
-          if bv.is_empty() { return LLMTokenBV::zeros(); }
-          if *bv == LLMTokenBV::max_ones() { return LLMTokenBV::max_ones(); }
-
-          let mut ranges_to_add = Vec::new();
-          let mut elements_to_add = Vec::new();
-
-          for range in bv.inner().ranges() {
-              let (mut current, end) = (*range.start(), *range.end());
-
-              for (&k, &v) in map_old_to_new.range(current..=end) {
-                  if current < k {
-                      // Identity mapping for elements not in map_old_to_new
-                      ranges_to_add.push(current..=k - 1);
-                  }
-                  elements_to_add.push(v);
-                  current = k + 1;
-              }
-
-              if current <= end {
-                  // Identity mapping for the rest of the range
-                  ranges_to_add.push(current..=end);
-              }
+          if bv.is_empty() {
+              return LLMTokenBV::zeros();
           }
-
-          let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
-          new_set.extend(elements_to_add);
-
-          LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+          if *bv == LLMTokenBV::max_ones() {
+              // Permuting a full universe yields the same full universe.
+              return LLMTokenBV::max_ones();
+          }
+          // Map only the present tokens (bijection).
+          let mut out = LLMTokenBV::zeros();
+          for t in bv.iter() {
+              let ti = t as usize;
+              let nt = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+              out.insert(nt);
+          }
+          out
       }
 
       /// Merge equivalent internal LLM token ids in Trie1:
@@ -4910,70 +4881,40 @@ local_system:
 
       fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
           if bv.is_empty() { return LLMTokenBV::zeros(); }
-
-          let mut ranges_to_add = Vec::new();
-          let mut elements_to_add = Vec::new();
-
-          let process_range = |range: std::ops::RangeInclusive<usize>,
-                               ranges_to_add: &mut Vec<_>,
-                               elements_to_add: &mut Vec<_>| {
-              let (mut current, end) = (*range.start(), *range.end());
-              for (&k, &v) in map_old_to_new.range(current..=end) {
-                  if current < k {
-                      ranges_to_add.push(current..=k - 1);
-                  }
-                  elements_to_add.push(v);
-                  current = k + 1;
-              }
-              if current <= end {
-                  ranges_to_add.push(current..=end);
-              }
-          };
+          let mut out = LLMTokenBV::zeros();
 
           if *bv == LLMTokenBV::max_ones() {
-              process_range(0..=max_token_id, &mut ranges_to_add, &mut elements_to_add);
-          } else {
-              for range in bv.inner().ranges() {
-                  process_range(*range.start()..=*range.end(), &mut ranges_to_add, &mut elements_to_add);
+              for t in 0..=max_token_id {
+                  let rep = map_old_to_new.get(&t).copied().unwrap_or(t);
+                  out.insert(rep);
               }
+              return out;
           }
 
-          let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
-          new_set.extend(elements_to_add);
-
-          LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+          for t in bv.iter() {
+              let ti = t as usize;
+              let rep = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+              out.insert(rep);
+          }
+          out
       }
 
       fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, _max_token_id: usize) -> LLMTokenBV {
           // Fast‑paths for empty or full‑universe bitvectors.
-          if bv.is_empty() { return LLMTokenBV::zeros(); }
-          if *bv == LLMTokenBV::max_ones() { return LLMTokenBV::max_ones(); }
-
-          let mut ranges_to_add = Vec::new();
-          let mut elements_to_add = Vec::new();
-
-          for range in bv.inner().ranges() {
-              let (mut current, end) = (*range.start(), *range.end());
-
-              for (&k, &v) in map_old_to_new.range(current..=end) {
-                  if current < k {
-                      // Identity mapping for elements not in map_old_to_new
-                      ranges_to_add.push(current..=k - 1);
-                  }
-                  elements_to_add.push(v);
-                  current = k + 1;
-              }
-
-              if current <= end {
-                  // Identity mapping for the rest of the range
-                  ranges_to_add.push(current..=end);
-              }
+          if bv.is_empty() {
+              return LLMTokenBV::zeros();
           }
-
-          let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
-          new_set.extend(elements_to_add);
-
-          LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+          if *bv == LLMTokenBV::max_ones() {
+              return LLMTokenBV::max_ones();
+          }
+          // Map only present tokens (bijection).
+          let mut out = LLMTokenBV::zeros();
+          for t in bv.iter() {
+              let ti = t as usize;
+              let nt = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+              out.insert(nt);
+          }
+          out
       }
 
       /// Merge equivalent internal LLM token ids in Trie3:
@@ -10457,22 +10398,53 @@ local_system:
               mapped_universe.insert(rep);
           }
 
-          // Memoization cache for remapping
-          let mut remap_cache: HashMap<LLMTokenBV, LLMTokenBV> = HashMap::new();
+          // Identify which concrete bitvectors are affected (by Arc pointer identity)
+          let mut affected_ptrs: HashSet<*const RangeSetBlaze<usize>> = HashSet::new();
+          for (sig, group) in &sig_map {
+              if group.len() <= 1 { continue; }
+              for &set_idx in sig {
+                  let ptr = Arc::as_ptr(&family[set_idx].inner);
+                  affected_ptrs.insert(ptr);
+              }
+          }
 
           // 4) Apply mapping to trie in‑place, only where needed
           for n in tqdm!(all_nodes.iter(), desc = "Trie1 Merge (Remap In‑Place)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
+              // Quick check: does this node reference any affected bitvector?
+              let needs_update = {
+                  let r = n.read(trie1_god).expect("read");
+                  let lv_ptr = Arc::as_ptr(&r.value.live_tokens.inner);
+                  if affected_ptrs.contains(&lv_ptr) {
+                      true
+                  } else {
+                      let mut touched = false;
+                      for (_ek, dm) in r.children() {
+                          for (_dst, bv) in dm {
+                              let bv_ptr = Arc::as_ptr(&bv.inner);
+                              if affected_ptrs.contains(&bv_ptr) {
+                                  touched = true;
+                                  break;
+                              }
+                          }
+                          if touched { break; }
+                      }
+                      touched
+                  }
+              };
+              if !needs_update { continue; }
+
               let mut w = n.write(trie1_god).expect("write");
 
               // Remap live_tokens if needed
               if !w.value.live_tokens.is_empty() {
-                  w.value.live_tokens = remap_cache.entry(w.value.live_tokens.clone()).or_insert_with_key(|bv| {
-                      if *bv == LLMTokenBV::max_ones() {
-                          mapped_universe.clone()
-                      } else {
-                          remap_llm_bv_many_to_one(bv, &old_to_new, max_tok)
+                  if w.value.live_tokens == LLMTokenBV::max_ones() {
+                      w.value.live_tokens = mapped_universe.clone();
+                  } else {
+                      let lv_ptr = Arc::as_ptr(&w.value.live_tokens.inner);
+                      if affected_ptrs.contains(&lv_ptr) {
+                          w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new, max_tok);
                       }
-                  }).clone();
+                  }
               }
 
               // Remap children edge masks
@@ -10481,16 +10453,15 @@ local_system:
               for (ek, dm) in old_children {
                   let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
                   for (dst, bv) in dm {
+                      let bv_ptr = Arc::as_ptr(&bv.inner);
                       let mapped = if bv.is_empty() {
                           LLMTokenBV::zeros()
+                      } else if bv == LLMTokenBV::max_ones() {
+                          mapped_universe.clone()
+                      } else if affected_ptrs.contains(&bv_ptr) {
+                          remap_llm_bv_many_to_one(&bv, &old_to_new, max_tok)
                       } else {
-                          remap_cache.entry(bv.clone()).or_insert_with_key(|bv| {
-                              if *bv == LLMTokenBV::max_ones() {
-                                  mapped_universe.clone()
-                              } else {
-                                  remap_llm_bv_many_to_one(bv, &old_to_new, max_tok)
-                              }
-                          }).clone()
+                          bv.clone()
                       };
                       if !mapped.is_empty() {
                           new_dm.entry(dst)
@@ -10560,10 +10531,6 @@ local_system:
           for (new_id, old_id) in present.iter().enumerate() {
               old_to_new.insert(*old_id, new_id);
           }
-
-          // Memoization cache for remapping
-          let mut remap_cache: HashMap<LLMTokenBV, LLMTokenBV> = HashMap::new();
-
           // Apply mapping to trie
           let mut new_states = Vec::with_capacity(all_nodes.len());
           for n in tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Remap Read)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
@@ -10571,17 +10538,13 @@ local_system:
               let new_live_tokens = if r.value.live_tokens.is_empty() {
                   r.value.live_tokens.clone()
               } else {
-                  remap_cache.entry(r.value.live_tokens.clone()).or_insert_with_key(|bv| {
-                      remap_llm_bv_permutation(bv, &old_to_new, max_tok)
-                  }).clone()
+                  remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new, max_tok)
               };
               let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
               for (ek, dm) in r.children() {
                   let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
                   for (dst, bv) in dm {
-                      let mapped = remap_cache.entry(bv.clone()).or_insert_with_key(|bv| {
-                          remap_llm_bv_permutation(bv, &old_to_new, max_tok)
-                      }).clone();
+                      let mapped = remap_llm_bv_permutation(&bv, &old_to_new, max_tok);
                       if !mapped.is_empty() {
                           new_dm.insert(dst.clone(), mapped);
                       }
@@ -10904,22 +10867,50 @@ local_system:
               mapped_universe.insert(rep);
           }
 
-          // Memoization cache for remapping
-          let mut remap_cache: HashMap<LLMTokenBV, LLMTokenBV> = HashMap::new();
+          // Identify affected bitvector instances (by Arc pointer identity)
+          let mut affected_ptrs: HashSet<*const RangeSetBlaze<usize>> = HashSet::new();
+          for (sig, group) in &sig_map {
+              if group.len() <= 1 { continue; }
+              for &set_idx in sig {
+                  let ptr = Arc::as_ptr(&family[set_idx].inner);
+                  affected_ptrs.insert(ptr);
+              }
+          }
 
           // 3) Remap trie in‑place, only where needed
           for n in tqdm!(all_nodes.iter(), desc = "Trie3 Merge (Remap In‑Place)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
+              // Quick check whether this node references any affected bitvector.
+              let needs_update = {
+                  let r = n.read(trie3_god).expect("read");
+                  let lv_ptr = Arc::as_ptr(&r.value.live_tokens.inner);
+                  if affected_ptrs.contains(&lv_ptr) {
+                      true
+                  } else {
+                      let mut touched = false;
+                      for ((_, llm_bv), _dm) in r.children() {
+                          let key_ptr = Arc::as_ptr(&llm_bv.inner);
+                          if affected_ptrs.contains(&key_ptr) {
+                              touched = true;
+                              break;
+                          }
+                      }
+                      touched
+                  }
+              };
+              if !needs_update { continue; }
+
               let mut w = n.write(trie3_god).expect("write");
 
               // Remap live_tokens if needed
               if !w.value.live_tokens.is_empty() {
-                  w.value.live_tokens = remap_cache.entry(w.value.live_tokens.clone()).or_insert_with_key(|bv| {
-                      if *bv == LLMTokenBV::max_ones() {
-                          mapped_universe.clone()
-                      } else {
-                          remap_llm_bv_many_to_one(bv, &old_to_new, max_tok)
+                  if w.value.live_tokens == LLMTokenBV::max_ones() {
+                      w.value.live_tokens = mapped_universe.clone();
+                  } else {
+                      let lv_ptr = Arc::as_ptr(&w.value.live_tokens.inner);
+                      if affected_ptrs.contains(&lv_ptr) {
+                          w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new, max_tok);
                       }
-                  }).clone();
+                  }
               }
 
               // Remap edge keys (pop, LLMTokenBV)
@@ -10928,14 +10919,15 @@ local_system:
               for ((pop, llm_bv), dm) in old_children {
                   let mapped_key_bv = if llm_bv.is_empty() {
                       LLMTokenBV::zeros()
+                  } else if llm_bv == LLMTokenBV::max_ones() {
+                      mapped_universe.clone()
                   } else {
-                      remap_cache.entry(llm_bv.clone()).or_insert_with_key(|bv| {
-                          if *bv == LLMTokenBV::max_ones() {
-                              mapped_universe.clone()
-                          } else {
-                              remap_llm_bv_many_to_one(bv, &old_to_new, max_tok)
-                          }
-                      }).clone()
+                      let key_ptr = Arc::as_ptr(&llm_bv.inner);
+                      if affected_ptrs.contains(&key_ptr) {
+                          remap_llm_bv_many_to_one(&llm_bv, &old_to_new, max_tok)
+                      } else {
+                          llm_bv
+                      }
                   };
                   if mapped_key_bv.is_empty() { continue; }
                   let entry = new_children.entry((pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
@@ -10998,24 +10990,17 @@ local_system:
               old_to_new.insert(*old_id, new_id);
           }
 
-          // Memoization cache for remapping
-          let mut remap_cache: HashMap<LLMTokenBV, LLMTokenBV> = HashMap::new();
-
           let mut new_states = Vec::with_capacity(all_nodes.len());
           for n in tqdm!(all_nodes.iter(), desc = "Trie3 Reorder (Remap Read)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
               let r = n.read(trie3_god).expect("read");
               let new_live_tokens = if r.value.live_tokens.is_empty() {
                   r.value.live_tokens.clone()
               } else {
-                  remap_cache.entry(r.value.live_tokens.clone()).or_insert_with_key(|bv| {
-                      remap_llm_bv_permutation(bv, &old_to_new, max_tok)
-                  }).clone()
+                  remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new, max_tok)
               };
               let mut new_children = BTreeMap::new();
               for ((pop, llm_bv), dm) in r.children() {
-                  let mapped_key_bv = remap_cache.entry(llm_bv.clone()).or_insert_with_key(|bv| {
-                      remap_llm_bv_permutation(bv, &old_to_new, max_tok)
-                  }).clone();
+                  let mapped_key_bv = remap_llm_bv_permutation(&llm_bv, &old_to_new, max_tok);
                   if mapped_key_bv.is_empty() { continue; }
                   let entry = new_children.entry((*pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
                   for (dst, sid_bv) in dm {
@@ -16156,70 +16141,41 @@ messages:
 
       fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
           if bv.is_empty() { return LLMTokenBV::zeros(); }
-
-          let mut ranges_to_add = Vec::new();
-          let mut elements_to_add = Vec::new();
-
-          let process_range = |range: std::ops::RangeInclusive<usize>,
-                               ranges_to_add: &mut Vec<_>,
-                               elements_to_add: &mut Vec<_>| {
-              let (mut current, end) = (*range.start(), *range.end());
-              for (&k, &v) in map_old_to_new.range(current..=end) {
-                  if current < k {
-                      ranges_to_add.push(current..=k - 1);
-                  }
-                  elements_to_add.push(v);
-                  current = k + 1;
-              }
-              if current <= end {
-                  ranges_to_add.push(current..=end);
-              }
-          };
+          let mut out = LLMTokenBV::zeros();
 
           if *bv == LLMTokenBV::max_ones() {
-              process_range(0..=max_token_id, &mut ranges_to_add, &mut elements_to_add);
-          } else {
-              for range in bv.inner().ranges() {
-                  process_range(*range.start()..=*range.end(), &mut ranges_to_add, &mut elements_to_add);
+              for t in 0..=max_token_id {
+                  let rep = map_old_to_new.get(&t).copied().unwrap_or(t);
+                  out.insert(rep);
               }
+              return out;
           }
 
-          let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
-          new_set.extend(elements_to_add);
-
-          LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+          for t in bv.iter() {
+              let ti = t as usize;
+              let rep = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+              out.insert(rep);
+          }
+          out
       }
 
       fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, _max_token_id: usize) -> LLMTokenBV {
           // Fast‑paths for empty or full‑universe bitvectors.
-          if bv.is_empty() { return LLMTokenBV::zeros(); }
-          if *bv == LLMTokenBV::max_ones() { return LLMTokenBV::max_ones(); }
-
-          let mut ranges_to_add = Vec::new();
-          let mut elements_to_add = Vec::new();
-
-          for range in bv.inner().ranges() {
-              let (mut current, end) = (*range.start(), *range.end());
-
-              for (&k, &v) in map_old_to_new.range(current..=end) {
-                  if current < k {
-                      // Identity mapping for elements not in map_old_to_new
-                      ranges_to_add.push(current..=k - 1);
-                  }
-                  elements_to_add.push(v);
-                  current = k + 1;
-              }
-
-              if current <= end {
-                  // Identity mapping for the rest of the range
-                  ranges_to_add.push(current..=end);
-              }
+          if bv.is_empty() {
+              return LLMTokenBV::zeros();
           }
-
-          let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
-          new_set.extend(elements_to_add);
-
-          LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+          if *bv == LLMTokenBV::max_ones() {
+              // Permuting a full universe yields the same full universe.
+              return LLMTokenBV::max_ones();
+          }
+          // Map only the present tokens (bijection).
+          let mut out = LLMTokenBV::zeros();
+          for t in bv.iter() {
+              let ti = t as usize;
+              let nt = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+              out.insert(nt);
+          }
+          out
       }
 
       /// Merge equivalent internal LLM token ids in Trie1:
@@ -16632,70 +16588,40 @@ messages:
 
       fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
           if bv.is_empty() { return LLMTokenBV::zeros(); }
-
-          let mut ranges_to_add = Vec::new();
-          let mut elements_to_add = Vec::new();
-
-          let process_range = |range: std::ops::RangeInclusive<usize>,
-                               ranges_to_add: &mut Vec<_>,
-                               elements_to_add: &mut Vec<_>| {
-              let (mut current, end) = (*range.start(), *range.end());
-              for (&k, &v) in map_old_to_new.range(current..=end) {
-                  if current < k {
-                      ranges_to_add.push(current..=k - 1);
-                  }
-                  elements_to_add.push(v);
-                  current = k + 1;
-              }
-              if current <= end {
-                  ranges_to_add.push(current..=end);
-              }
-          };
+          let mut out = LLMTokenBV::zeros();
 
           if *bv == LLMTokenBV::max_ones() {
-              process_range(0..=max_token_id, &mut ranges_to_add, &mut elements_to_add);
-          } else {
-              for range in bv.inner().ranges() {
-                  process_range(*range.start()..=*range.end(), &mut ranges_to_add, &mut elements_to_add);
+              for t in 0..=max_token_id {
+                  let rep = map_old_to_new.get(&t).copied().unwrap_or(t);
+                  out.insert(rep);
               }
+              return out;
           }
 
-          let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
-          new_set.extend(elements_to_add);
-
-          LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+          for t in bv.iter() {
+              let ti = t as usize;
+              let rep = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+              out.insert(rep);
+          }
+          out
       }
 
       fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, _max_token_id: usize) -> LLMTokenBV {
           // Fast‑paths for empty or full‑universe bitvectors.
-          if bv.is_empty() { return LLMTokenBV::zeros(); }
-          if *bv == LLMTokenBV::max_ones() { return LLMTokenBV::max_ones(); }
-
-          let mut ranges_to_add = Vec::new();
-          let mut elements_to_add = Vec::new();
-
-          for range in bv.inner().ranges() {
-              let (mut current, end) = (*range.start(), *range.end());
-
-              for (&k, &v) in map_old_to_new.range(current..=end) {
-                  if current < k {
-                      // Identity mapping for elements not in map_old_to_new
-                      ranges_to_add.push(current..=k - 1);
-                  }
-                  elements_to_add.push(v);
-                  current = k + 1;
-              }
-
-              if current <= end {
-                  // Identity mapping for the rest of the range
-                  ranges_to_add.push(current..=end);
-              }
+          if bv.is_empty() {
+              return LLMTokenBV::zeros();
           }
-
-          let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
-          new_set.extend(elements_to_add);
-
-          LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+          if *bv == LLMTokenBV::max_ones() {
+              return LLMTokenBV::max_ones();
+          }
+          // Map only present tokens (bijection).
+          let mut out = LLMTokenBV::zeros();
+          for t in bv.iter() {
+              let ti = t as usize;
+              let nt = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+              out.insert(nt);
+          }
+          out
       }
 
       /// Merge equivalent internal LLM token ids in Trie3:
@@ -17586,29 +17512,10 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute3_utils.rs
-  - user: |-
-      `````ad-attachment
-      collapse: closed
-
-      ```
-      [DEBUG] 2] src/constraint_precompute1_utils.rs:62: Merging equivalent LLM tokens in Trie1...
-      Building mapping: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 866/866 [00:00<00:00, 174692.19it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:114: Trie1: merged LLM tokens. Before: 50256, After: 866. (49390 merged)
-      Trie1 Reorder (Freq): 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 256/256 [00:00<00:00, 376286.31it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:190: Done computing frequencies.
-      Trie1 Reorder (Vocab 2): 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 50256/50256 [00:00<00:00, 7500009.00it/s][DEBUG] 2] src/constraint_precompute1_utils.rs:250: Trie1 reordering complete. Ranges reduced from 31162 to 7075. New max internal token ID: 865
-      [DEBUG] 2] src/constraint.rs:735: Precomputing Trie 3...
-      Precomputing Trie 3: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 142/142 [00:00<00:00, 258299.23it/s][DEBUG] 2] src/constraint.rs:770: Running special_map_grouped for Trie 3 precomputation
-      Traversing edges: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1284/1284 [00:12<00:00, 104.30it/s][DEBUG] 2] src/constraint.rs:862: Finished precomputing Trie 3.
-      [DEBUG] 2] src/constraint_precompute3_utils.rs:36: Optimizing Trie 3 size...
-      [DEBUG] 2] src/constraint_precompute3_utils.rs:38: Step 1: Merging equivalent LLM tokens...
-      [DEBUG] 2] src/constraint_precompute3_utils.rs:123: Merging equivalent LLM tokens in Trie3...
-      Trie3 Merge Tokens (Build Map): 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 458/458 [00:00<00:00, 4631.52it/s][DEBUG] 2] src/constraint_precompute3_utils.rs:173: Trie3: merged LLM tokens. Before: 866, After: 458. (408 merged)
-      Trie3 Merge (Remap Read):   0%|▌                                                                                                                                      |   2634/870367 [00:26<02:24:27, 100.11it/s]test test_constraint_js::test_js_constraint_integration has been running for over 60 seconds
-      Trie3 Merge (Remap Read):  24%|█████████████████████████████████▊                                                                                                        | 212307/870367 [04:44<14:41, 746.42it/s]
-      ```
-
-      `````
-
-      Make these optimizations (I'm thinking specifically about `merge_equivalent_llm_tokens_trie1`, `reorder_llm_tokens_for_range_minimization_trie1`, `merge_equivalent_llm_tokens_trie3`, and `reorder_llm_tokens_for_range_minimization_trie3`) much faster by using memoization. e.g. we don't need to call `remap_llm_bv_permutation` so many times.
+  - user: Make `remap_llm_bv_many_to_one` and `remap_llm_bv_permutation` much much
+      faster. Take advantage of the fact that it's very cheap to insert long ranges
+      into `HybridBitset` relative to inserting each element one-by-one. Try to insert
+      long ranges where possible. Think about how to do this.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -17627,280 +17534,248 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Dealing with performance bottlenecks in complex data structures can be tricky. Using memoization to avoid recomputing bitvector transformations is an excellent strategy. Here are the step-by-step instructions and corresponding git diffs to apply these optimizations.
+      Of course. Here are the step-by-step instructions to optimize the bitvector remapping functions, followed by the git diffs to apply the changes.
 
       ### Step-by-step Instructions
 
-      1.  **File: `src/constraint_precompute1_utils.rs`**
-          *   **In `merge_equivalent_llm_tokens_trie1`:**
-              1.  After computing the `mapped_universe` bitvector, add a new `HashMap` called `remap_cache` to store the results of remapping `LLMTokenBV`s.
-              2.  Remove the entire block of code that calculates `affected_ptrs`.
-              3.  In the main remapping loop (`Trie1 Merge (Remap In‑Place)`), remove the `needs_update` check.
-              4.  Modify the remapping logic for `w.value.live_tokens` and for each edge bitvector to use `remap_cache.entry(...).or_insert_with_key(...)`. This will compute the remapped bitvector only once for each unique input bitvector.
+      I will optimize the `remap_llm_bv_many_to_one` and `remap_llm_bv_permutation` functions in both `src/constraint_precompute1_utils.rs` and `src/constraint_precompute3_utils.rs`. The current implementations iterate over individual elements, which is inefficient for `HybridBitset`s containing large contiguous ranges. The new implementations will process entire ranges at a time, significantly improving performance.
 
-          *   **In `reorder_llm_tokens_for_range_minimization_trie1`:**
-              1.  After creating the `old_to_new` permutation map, add a new `HashMap` called `remap_cache`.
-              2.  Inside the "Remap Read" loop, when remapping `new_live_tokens` and the edge bitvectors (`mapped`), use `remap_cache.entry(...).or_insert_with_key(...)` to memoize the results of `remap_llm_bv_permutation`.
+      1.  **In `src/constraint_precompute1_utils.rs`:**
+          *   Navigate to the function `remap_llm_bv_many_to_one`.
+          *   Replace its entire body with the new implementation below, which iterates over the ranges of the input bitvector. For each range, it identifies sub-ranges that can be identity-mapped and handles individually mapped tokens separately.
+          *   Navigate to the function `remap_llm_bv_permutation`.
+          *   Replace its body with a similarly optimized version that also processes ranges.
 
-      2.  **File: `src/constraint_precompute3_utils.rs`**
-          *   **In `merge_equivalent_llm_tokens_trie3`:**
-              1.  This function is very similar to the Trie1 version. After computing `mapped_universe`, add a `remap_cache` `HashMap`.
-              2.  Remove the `affected_ptrs` calculation and the `needs_update` check inside the main loop.
-              3.  Update the remapping logic for `w.value.live_tokens` and for the `LLMTokenBV` part of each edge key to use the `remap_cache`.
+      2.  **In `src/constraint_precompute3_utils.rs`:**
+          *   The functions `remap_llm_bv_many_to_one` and `remap_llm_bv_permutation` are identical to those in the first file.
+          *   Apply the exact same replacements to the bodies of these two functions.
 
-          *   **In `reorder_llm_tokens_for_range_minimization_trie3`:**
-              1.  Again, similar to the Trie1 version, add a `remap_cache` `HashMap` after creating the `old_to_new` map.
-              2.  Inside the "Remap Read" loop, use the `remap_cache` to memoize the results of `remap_llm_bv_permutation` for `new_live_tokens` and for the `LLMTokenBV` part of the edge keys (`mapped_key_bv`).
-
-      These changes will ensure that each unique bitvector is remapped only once, with subsequent requests for the same bitvector being served from the cache, which should dramatically improve performance.
+      This will ensure that bitvector remapping, a key step in the trie optimization process, is performed much more efficiently.
 
       ### Git Diffs
 
-      Here are the git diffs to apply the changes:
+      Here are the git diffs to apply these changes.
 
       ```diff
       diff --git a/src/constraint_precompute1_utils.rs b/src/constraint_precompute1_utils.rs
-      index 8111111..2222222 100644
+      index 9111111..2222222 100644
       --- a/src/constraint_precompute1_utils.rs
       +++ b/src/constraint_precompute1_utils.rs
-      @@ -117,61 +117,41 @@
-               mapped_universe.insert(rep);
-           }
+      @@ -20,53 +20,53 @@
+       }
        
-      -    // Identify which concrete bitvectors are affected (by Arc pointer identity)
-      -    let mut affected_ptrs: HashSet<*const RangeSetBlaze<usize>> = HashSet::new();
-      -    for (sig, group) in &sig_map {
-      -        if group.len() <= 1 { continue; }
-      -        for &set_idx in sig {
-      -            let ptr = Arc::as_ptr(&family[set_idx].inner);
-      -            affected_ptrs.insert(ptr);
-      -        }
-      -    }
-      +    // Memoization cache for remapping
-      +    let mut remap_cache: HashMap<LLMTokenBV, LLMTokenBV> = HashMap::new();
-       
-           // 4) Apply mapping to trie in‑place, only where needed
-           for n in tqdm!(all_nodes.iter(), desc = "Trie1 Merge (Remap In‑Place)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-      -        // Quick check: does this node reference any affected bitvector?
-      -        let needs_update = {
-      -            let r = n.read(trie1_god).expect("read");
-      -            let lv_ptr = Arc::as_ptr(&r.value.live_tokens.inner);
-      -            if affected_ptrs.contains(&lv_ptr) {
-      -                true
-      -            } else {
-      -                let mut touched = false;
-      -                for (_ek, dm) in r.children() {
-      -                    for (_dst, bv) in dm {
-      -                        let bv_ptr = Arc::as_ptr(&bv.inner);
-      -                        if affected_ptrs.contains(&bv_ptr) {
-      -                            touched = true;
-      -                            break;
-      -                        }
-      -                    }
-      -                    if touched { break; }
-      -                }
-      -                touched
-      -            }
-      -        };
-      -        if !needs_update { continue; }
+       fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
+      -    if bv.is_empty() { return LLMTokenBV::zeros(); }
+      -    let mut out = LLMTokenBV::zeros();
       -
-               let mut w = n.write(trie1_god).expect("write");
-       
-               // Remap live_tokens if needed
-               if !w.value.live_tokens.is_empty() {
-      -            if w.value.live_tokens == LLMTokenBV::max_ones() {
-      -                w.value.live_tokens = mapped_universe.clone();
-      -            } else {
-      -                let lv_ptr = Arc::as_ptr(&w.value.live_tokens.inner);
-      -                if affected_ptrs.contains(&lv_ptr) {
-      -                    w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new, max_tok);
-      -                }
-      -            }
-      +            w.value.live_tokens = remap_cache.entry(w.value.live_tokens.clone()).or_insert_with_key(|bv| {
-      +                if *bv == LLMTokenBV::max_ones() {
-      +                    mapped_universe.clone()
-      +                } else {
-      +                    remap_llm_bv_many_to_one(bv, &old_to_new, max_tok)
-      +                }
-      +            }).clone();
-               }
-       
-               // Remap children edge masks
-               let old_children = std::mem::take(w.children_mut());
-               let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
-               for (ek, dm) in old_children {
-                   let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
-                   for (dst, bv) in dm {
-      -                let bv_ptr = Arc::as_ptr(&bv.inner);
-      -                let mapped = if bv.is_empty() {
-      -                    LLMTokenBV::zeros()
-      -                } else if bv == LLMTokenBV::max_ones() {
-      -                    mapped_universe.clone()
-      -                } else if affected_ptrs.contains(&bv_ptr) {
-      -                    remap_llm_bv_many_to_one(&bv, &old_to_new, max_tok)
-      +                let mapped = if bv.is_empty() {
-      +                    LLMTokenBV::zeros()
-                       } else {
-      -                    bv.clone()
-      +                    remap_cache.entry(bv.clone()).or_insert_with_key(|bv| {
-      +                        if *bv == LLMTokenBV::max_ones() {
-      +                            mapped_universe.clone()
-      +                        } else {
-      +                            remap_llm_bv_many_to_one(bv, &old_to_new, max_tok)
-      +                        }
-      +                    }).clone()
-                       };
-                       if !mapped.is_empty() {
-                           new_dm.entry(dst)
-      @@ -228,21 +208,29 @@
-           for (new_id, old_id) in present.iter().enumerate() {
-               old_to_new.insert(*old_id, new_id);
-           }
+      -    if *bv == LLMTokenBV::max_ones() {
+      -        for t in 0..=max_token_id {
+      -            let rep = map_old_to_new.get(&t).copied().unwrap_or(t);
+      -            out.insert(rep);
+      -        }
+      -        return out;
+      -    }
+      -
+      -    for t in bv.iter() {
+      -        let ti = t as usize;
+      -        let rep = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+      -        out.insert(rep);
+      -    }
+      -    out
+      +    if bv.is_empty() { return LLMTokenBV::zeros(); }
       +
-      +    // Memoization cache for remapping
-      +    let mut remap_cache: HashMap<LLMTokenBV, LLMTokenBV> = HashMap::new();
+      +    let mut ranges_to_add = Vec::new();
+      +    let mut elements_to_add = Vec::new();
       +
-           // Apply mapping to trie
-           let mut new_states = Vec::with_capacity(all_nodes.len());
-           for n in tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Remap Read)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-               let r = n.read(trie1_god).expect("read");
-               let new_live_tokens = if r.value.live_tokens.is_empty() {
-                   r.value.live_tokens.clone()
-               } else {
-      -            remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new, max_tok)
-      +            remap_cache.entry(r.value.live_tokens.clone()).or_insert_with_key(|bv| {
-      +                remap_llm_bv_permutation(bv, &old_to_new, max_tok)
-      +            }).clone()
-               };
-               let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
-               for (ek, dm) in r.children() {
-                   let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
-                   for (dst, bv) in dm {
-      -                let mapped = remap_llm_bv_permutation(&bv, &old_to_new, max_tok);
-      +                let mapped = remap_cache.entry(bv.clone()).or_insert_with_key(|bv| {
-      +                    remap_llm_bv_permutation(bv, &old_to_new, max_tok)
-      +                }).clone();
-                       if !mapped.is_empty() {
-                           new_dm.insert(dst.clone(), mapped);
-                       }
+      +    let process_range = |range: std::ops::RangeInclusive<usize>,
+      +                         ranges_to_add: &mut Vec<_>,
+      +                         elements_to_add: &mut Vec<_>| {
+      +        let (mut current, end) = (*range.start(), *range.end());
+      +        for (&k, &v) in map_old_to_new.range(current..=end) {
+      +            if current < k {
+      +                ranges_to_add.push(current..=k - 1);
+      +            }
+      +            elements_to_add.push(v);
+      +            current = k + 1;
+      +        }
+      +        if current <= end {
+      +            ranges_to_add.push(current..=end);
+      +        }
+      +    };
+      +
+      +    if *bv == LLMTokenBV::max_ones() {
+      +        process_range(0..=max_token_id, &mut ranges_to_add, &mut elements_to_add);
+      +    } else {
+      +        for range in bv.inner().ranges() {
+      +            process_range(*range.start()..=*range.end(), &mut ranges_to_add, &mut elements_to_add);
+      +        }
+      +    }
+      +
+      +    let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
+      +    new_set.extend(elements_to_add);
+      +
+      +    LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+       }
+       
+       fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, _max_token_id: usize) -> LLMTokenBV {
+           // Fast‑paths for empty or full‑universe bitvectors.
+      -    if bv.is_empty() {
+      -        return LLMTokenBV::zeros();
+      -    }
+      -    if *bv == LLMTokenBV::max_ones() {
+      -        // Permuting a full universe yields the same full universe.
+      -        return LLMTokenBV::max_ones();
+      -    }
+      -    // Map only the present tokens (bijection).
+      -    let mut out = LLMTokenBV::zeros();
+      -    for t in bv.iter() {
+      -        let ti = t as usize;
+      -        let nt = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+      -        out.insert(nt);
+      -    }
+      -    out
+      +    if bv.is_empty() { return LLMTokenBV::zeros(); }
+      +    if *bv == LLMTokenBV::max_ones() { return LLMTokenBV::max_ones(); }
+      +
+      +    let mut ranges_to_add = Vec::new();
+      +    let mut elements_to_add = Vec::new();
+      +
+      +    for range in bv.inner().ranges() {
+      +        let (mut current, end) = (*range.start(), *range.end());
+      +
+      +        for (&k, &v) in map_old_to_new.range(current..=end) {
+      +            if current < k {
+      +                // Identity mapping for elements not in map_old_to_new
+      +                ranges_to_add.push(current..=k - 1);
+      +            }
+      +            elements_to_add.push(v);
+      +            current = k + 1;
+      +        }
+      +
+      +        if current <= end {
+      +            // Identity mapping for the rest of the range
+      +            ranges_to_add.push(current..=end);
+      +        }
+      +    }
+      +
+      +    let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
+      +    new_set.extend(elements_to_add);
+      +
+      +    LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+       }
+       
+       /// Merge equivalent internal LLM token ids in Trie1:
 
       ```
+
       ```diff
       diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
       index 3333333..4444444 100644
       --- a/src/constraint_precompute3_utils.rs
       +++ b/src/constraint_precompute3_utils.rs
-      @@ -176,59 +176,41 @@
-               mapped_universe.insert(rep);
-           }
+      @@ -51,49 +51,49 @@
+       }
        
-      -    // Identify affected bitvector instances (by Arc pointer identity)
-      -    let mut affected_ptrs: HashSet<*const RangeSetBlaze<usize>> = HashSet::new();
-      -    for (sig, group) in &sig_map {
-      -        if group.len() <= 1 { continue; }
-      -        for &set_idx in sig {
-      -            let ptr = Arc::as_ptr(&family[set_idx].inner);
-      -            affected_ptrs.insert(ptr);
-      -        }
-      -    }
-      +    // Memoization cache for remapping
-      +    let mut remap_cache: HashMap<LLMTokenBV, LLMTokenBV> = HashMap::new();
-       
-           // 3) Remap trie in‑place, only where needed
-           for n in tqdm!(all_nodes.iter(), desc = "Trie3 Merge (Remap In‑Place)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-      -        // Quick check whether this node references any affected bitvector.
-      -        let needs_update = {
-      -            let r = n.read(trie3_god).expect("read");
-      -            let lv_ptr = Arc::as_ptr(&r.value.live_tokens.inner);
-      -            if affected_ptrs.contains(&lv_ptr) {
-      -                true
-      -            } else {
-      -                let mut touched = false;
-      -                for ((_, llm_bv), _dm) in r.children() {
-      -                    let key_ptr = Arc::as_ptr(&llm_bv.inner);
-      -                    if affected_ptrs.contains(&key_ptr) {
-      -                        touched = true;
-      -                        break;
-      -                    }
-      -                }
-      -                touched
-      -            }
-      -        };
-      -        if !needs_update { continue; }
+       fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
+      -    if bv.is_empty() { return LLMTokenBV::zeros(); }
+      -    let mut out = LLMTokenBV::zeros();
       -
-               let mut w = n.write(trie3_god).expect("write");
-       
-               // Remap live_tokens if needed
-               if !w.value.live_tokens.is_empty() {
-      -            if w.value.live_tokens == LLMTokenBV::max_ones() {
-      -                w.value.live_tokens = mapped_universe.clone();
-      -            } else {
-      -                let lv_ptr = Arc::as_ptr(&w.value.live_tokens.inner);
-      -                if affected_ptrs.contains(&lv_ptr) {
-      -                    w.value.live_tokens = remap_llm_bv_many_to_one(&w.value.live_tokens, &old_to_new, max_tok);
-      -                }
-      -            }
-      +            w.value.live_tokens = remap_cache.entry(w.value.live_tokens.clone()).or_insert_with_key(|bv| {
-      +                if *bv == LLMTokenBV::max_ones() {
-      +                    mapped_universe.clone()
-      +                } else {
-      +                    remap_llm_bv_many_to_one(bv, &old_to_new, max_tok)
-      +                }
-      +            }).clone();
-               }
-       
-               // Remap edge keys (pop, LLMTokenBV)
-               let old_children = std::mem::take(w.children_mut());
-               let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = BTreeMap::new();
-               for ((pop, llm_bv), dm) in old_children {
-                   let mapped_key_bv = if llm_bv.is_empty() {
-                       LLMTokenBV::zeros()
-      -            } else if llm_bv == LLMTokenBV::max_ones() {
-      -                mapped_universe.clone()
-                   } else {
-      -                let key_ptr = Arc::as_ptr(&llm_bv.inner);
-      -                if affected_ptrs.contains(&key_ptr) {
-      -                    remap_llm_bv_many_to_one(&llm_bv, &old_to_new, max_tok)
-      -                } else {
-      -                    llm_bv
-      -                }
-      +                remap_cache.entry(llm_bv.clone()).or_insert_with_key(|bv| {
-      +                    if *bv == LLMTokenBV::max_ones() {
-      +                        mapped_universe.clone()
-      +                    } else {
-      +                        remap_llm_bv_many_to_one(bv, &old_to_new, max_tok)
-      +                    }
-      +                }).clone()
-                   };
-                   if mapped_key_bv.is_empty() { continue; }
-                   let entry = new_children.entry((pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
-      @@ -284,19 +262,27 @@
-               old_to_new.insert(*old_id, new_id);
-           }
-       
-      +    // Memoization cache for remapping
-      +    let mut remap_cache: HashMap<LLMTokenBV, LLMTokenBV> = HashMap::new();
+      -    if *bv == LLMTokenBV::max_ones() {
+      -        for t in 0..=max_token_id {
+      -            let rep = map_old_to_new.get(&t).copied().unwrap_or(t);
+      -            out.insert(rep);
+      -        }
+      -        return out;
+      -    }
+      -
+      -    for t in bv.iter() {
+      -        let ti = t as usize;
+      -        let rep = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+      -        out.insert(rep);
+      -    }
+      -    out
+      +    if bv.is_empty() { return LLMTokenBV::zeros(); }
       +
-           let mut new_states = Vec::with_capacity(all_nodes.len());
-           for n in tqdm!(all_nodes.iter(), desc = "Trie3 Reorder (Remap Read)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
-               let r = n.read(trie3_god).expect("read");
-               let new_live_tokens = if r.value.live_tokens.is_empty() {
-                   r.value.live_tokens.clone()
-               } else {
-      -            remap_llm_bv_permutation(&r.value.live_tokens, &old_to_new, max_tok)
-      +            remap_cache.entry(r.value.live_tokens.clone()).or_insert_with_key(|bv| {
-      +                remap_llm_bv_permutation(bv, &old_to_new, max_tok)
-      +            }).clone()
-               };
-               let mut new_children = BTreeMap::new();
-               for ((pop, llm_bv), dm) in r.children() {
-      -            let mapped_key_bv = remap_llm_bv_permutation(&llm_bv, &old_to_new, max_tok);
-      +            let mapped_key_bv = remap_cache.entry(llm_bv.clone()).or_insert_with_key(|bv| {
-      +                remap_llm_bv_permutation(bv, &old_to_new, max_tok)
-      +            }).clone();
-                   if mapped_key_bv.is_empty() { continue; }
-                   let entry = new_children.entry((*pop, mapped_key_bv)).or_insert_with(OrderedHashMap::new);
-                   for (dst, sid_bv) in dm {
+      +    let mut ranges_to_add = Vec::new();
+      +    let mut elements_to_add = Vec::new();
+      +
+      +    let process_range = |range: std::ops::RangeInclusive<usize>,
+      +                         ranges_to_add: &mut Vec<_>,
+      +                         elements_to_add: &mut Vec<_>| {
+      +        let (mut current, end) = (*range.start(), *range.end());
+      +        for (&k, &v) in map_old_to_new.range(current..=end) {
+      +            if current < k {
+      +                ranges_to_add.push(current..=k - 1);
+      +            }
+      +            elements_to_add.push(v);
+      +            current = k + 1;
+      +        }
+      +        if current <= end {
+      +            ranges_to_add.push(current..=end);
+      +        }
+      +    };
+      +
+      +    if *bv == LLMTokenBV::max_ones() {
+      +        process_range(0..=max_token_id, &mut ranges_to_add, &mut elements_to_add);
+      +    } else {
+      +        for range in bv.inner().ranges() {
+      +            process_range(*range.start()..=*range.end(), &mut ranges_to_add, &mut elements_to_add);
+      +        }
+      +    }
+      +
+      +    let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
+      +    new_set.extend(elements_to_add);
+      +
+      +    LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+       }
+       
+       fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, _max_token_id: usize) -> LLMTokenBV {
+           // Fast‑paths for empty or full‑universe bitvectors.
+      -    if bv.is_empty() {
+      -        return LLMTokenBV::zeros();
+      -    }
+      -    if *bv == LLMTokenBV::max_ones() {
+      -        return LLMTokenBV::max_ones();
+      -    }
+      -    // Map only present tokens (bijection).
+      -    let mut out = LLMTokenBV::zeros();
+      -    for t in bv.iter() {
+      -        let ti = t as usize;
+      -        let nt = map_old_to_new.get(&ti).copied().unwrap_or(ti);
+      -        out.insert(nt);
+      -    }
+      -    out
+      +    if bv.is_empty() { return LLMTokenBV::zeros(); }
+      +    if *bv == LLMTokenBV::max_ones() { return LLMTokenBV::max_ones(); }
+      +
+      +    let mut ranges_to_add = Vec::new();
+      +    let mut elements_to_add = Vec::new();
+      +
+      +    for range in bv.inner().ranges() {
+      +        let (mut current, end) = (*range.start(), *range.end());
+      +
+      +        for (&k, &v) in map_old_to_new.range(current..=end) {
+      +            if current < k {
+      +                // Identity mapping for elements not in map_old_to_new
+      +                ranges_to_add.push(current..=k - 1);
+      +            }
+      +            elements_to_add.push(v);
+      +            current = k + 1;
+      +        }
+      +
+      +        if current <= end {
+      +            // Identity mapping for the rest of the range
+      +            ranges_to_add.push(current..=end);
+      +        }
+      +    }
+      +
+      +    let mut new_set = RangeSetBlaze::from_iter(ranges_to_add);
+      +    new_set.extend(elements_to_add);
+      +
+      +    LLMTokenBV { inner: crate::datastructures::cache::intern_l1(new_set) }
+       }
+       
+       /// Merge equivalent internal LLM token ids in Trie3:
 
       ```
     metadata:
@@ -17918,7 +17793,7 @@ messages:
       Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_utils.rs.
     metadata:
-  - user: 'Changes committed with message: "Performance: Memoize LLMTokenBV remappings
-      in Trie1/Trie3 precomputation passes"'
+  - user: 'Changes committed with message: "Perf: Optimize LLM bitvector remapping
+      by processing ranges instead of individual elements in Trie1 and Trie3 utilities"'
     metadata:
 ...
