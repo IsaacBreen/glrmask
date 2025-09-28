@@ -291,9 +291,9 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
             data=df_combined,
             x='token_index',
             y='time_sec',
-            hue='operation',
-            style='model',
-            linewidth=0.7
+            hue='model',
+            style='operation',
+            linewidth=0.8
         )
         ax_combined.set_xlabel('Token Index in Sequence')
         ax_combined.set_ylabel('Time (seconds)')
@@ -301,14 +301,14 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
 
         # Linear scale
         ax_combined.set_yscale('linear')
-        ax_combined.set_title('get_mask() vs commit() Performance by Model')
+        ax_combined.set_title('get_mask() (solid) vs commit() (dashed) Performance')
         combined_linear_path = output_dir / "combined_timings_per_token_linear.png"
         plt.savefig(combined_linear_path, dpi=300, bbox_inches='tight')
         print(f"Saved combined linear scale plot to {combined_linear_path}")
 
         # Log scale
         ax_combined.set_yscale('log')
-        ax_combined.set_title('get_mask() vs commit() Performance by Model (Log Scale)')
+        ax_combined.set_title('get_mask() (solid) vs commit() (dashed) Performance (Log Scale)')
         combined_log_path = output_dir / "combined_timings_per_token_log.png"
         plt.savefig(combined_log_path, dpi=300, bbox_inches='tight')
         print(f"Saved combined log scale plot to {combined_log_path}")
@@ -342,7 +342,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
                 y_get_mask = merged['time_sec_get_mask']
                 y_commit = merged['time_sec_commit']
 
-                ax.stackplot(x, y_get_mask, y_commit, labels=['get_mask', 'commit'], alpha=0.75, linewidth=0.5, edgecolor='k')
+                ax.stackplot(x, y_get_mask, y_commit, labels=['get_mask', 'commit'], alpha=0.8)
                 ax.set_title(f'Stacked Timings for {model_name}')
                 ax.set_ylabel('Time (seconds)')
                 ax.grid(True, linestyle='--', linewidth=0.5)
