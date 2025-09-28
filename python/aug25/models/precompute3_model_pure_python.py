@@ -16,10 +16,10 @@ except Exception:  # pragma: no cover
 
 from ..common_interface import GraphProvider
 # from ..common_interface import RangeSet
-# from ..range_set.py_range_set import PyRangeSet as RangeSet
+from ..range_set.py_range_set import PyRangeSet as RangeSet
 # from ..range_set.bitset_range_set import BitsetRangeSet as RangeSet
 # from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
-from ..range_set.roaring_range_set import RoaringRangeSet as RangeSet
+# from ..range_set.roaring_range_set import RoaringRangeSet as RangeSet
 import _sep1 as ffi
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
@@ -351,7 +351,6 @@ class Model(GraphProvider):
 
     @profile
     def commit(self, token_id: int):
-        t0 = time.perf_counter()
         token_bytes = self.id_to_token[token_id]
 
         # Build tokenizer maps
@@ -363,8 +362,6 @@ class Model(GraphProvider):
                 state_map[tokenizer_sid] = end_state
             matched_terminals = [terminal_id for terminal_id, _ in matches]
             terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
-
-        t1 = time.perf_counter()
 
         # Prune and map per-state GSS in a single pass
         temp_states: Dict[int, GSS] = {}
@@ -394,8 +391,6 @@ class Model(GraphProvider):
             if not processed_gss.is_empty():
                 # The GSS is still associated with the old tokenizer_sid for the next step
                 temp_states[tokenizer_sid] = processed_gss
-
-        t2 = time.perf_counter()
 
         current_state_for_processing = temp_states
 
@@ -435,8 +430,6 @@ class Model(GraphProvider):
             if end_state is not None:
                 new_states[end_state].append(gss)
 
-        t3 = time.perf_counter()
-
         merged_states = {
             sid: GSS.merge_many(gss_list)
             for sid, gss_list in new_states.items()
@@ -444,18 +437,7 @@ class Model(GraphProvider):
         }
         merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
 
-        t4 = time.perf_counter()
-
         self.state = merged_states
-
-        t5 = time.perf_counter()
-        print(f"commit({token_id}, {token_bytes!r}):")
-        print(f"  - build tokenizer maps: {t1 - t0:.6f}s")
-        print(f"  - prune and map gss:    {t2 - t1:.6f}s")
-        print(f"  - process queue:        {t3 - t2:.6f}s")
-        print(f"  - merge states:         {t4 - t3:.6f}s")
-        print(f"  - final assignment:     {t5 - t4:.6f}s")
-        print(f"  - TOTAL:                {t5 - t0:.6f}s")
 
     @profile
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
