@@ -40,6 +40,19 @@ pub struct HybridL2Bitset {
 
 impl Debug for HybridL2Bitset {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self.is_all() {
+            return f
+                .debug_struct("HybridL2Bitset")
+                .field(
+                    "inner",
+                    &format_args!(
+                        "RangeMapBlaze {{ 0..=usize::MAX: {:?} }}",
+                        HybridBitset::max_ones()
+                    ),
+                )
+                .finish();
+        }
+
         let f_alternate = f.alternate();
         let mut ds = f.debug_struct("HybridL2Bitset");
 
