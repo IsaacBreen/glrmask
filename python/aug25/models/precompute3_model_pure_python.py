@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import heapq
 import collections
+import textwrap
 import time
 from typing import Dict, List, Tuple, Optional, Union, Any, Set
 from dataclasses import dataclass, field
@@ -361,7 +362,7 @@ class Model(GraphProvider):
             #     print(f"    [{acc}]:")
             #     for stack in sorted(stacks):
             #         print(f"      {stack}")
-            print(gss.to_graph_string())
+            print(textwrap.indent(gss.to_graph_string(), "    "))
 
         token_bytes = self.id_to_token[token_id]
 
