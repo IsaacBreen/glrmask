@@ -353,7 +353,7 @@ class Model(GraphProvider):
     @profile
     def commit(self, token_id: int):
         print("commit")
-        memo = {}
+        memo = set()
         for tsid, gss in self.state.items():
             print(f"  [{tsid}]:")
             # grouped = {}
