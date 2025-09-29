@@ -1,7 +1,7 @@
 import time
 import inspect
 from collections import defaultdict
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, Optional
 
 
 class Stats:
@@ -138,32 +138,30 @@ class Stats:
         # --- Data Preparation Phase ---
         # This phase gathers all data and rows for all tables before printing.
 
-        # 1. Prepare Counts data
-        counts_headers = ("key", "count")
-        counts_formats = (str, self._fmt_int)
-        counts_rows = []
-        if self.counts:
-            sorted_keys = sorted(self.counts.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
-            counts_rows = [(key, self.counts[key]) for key in sorted_keys]
-
-        # 2. Prepare Timings data
-        timings_headers = ("key", "total_ms", "hits", "avg_ms")
-        timings_formats = (str, self._fmt_ms, self._fmt_int, self._fmt_ms)
-        timings_rows = []
-        if self.times:
-            sorted_keys = sorted(self.times.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
+        # 1. Prepare combined stats data
+        stats_headers = ("key", "count", "total_ms", "hits", "avg_ms")
+        stats_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_int_or_blank, self._fmt_ms_or_blank)
+        stats_rows = []
+        all_keys = self.counts.keys() | self.times.keys()
+        if all_keys:
+            sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
             for key in sorted_keys:
-                total_ms = self.times[key] * 1000.0
-                hits = self.time_counts.get(key, 0)
-                avg_ms = (total_ms / hits) if hits else 0.0
-                timings_rows.append((key, total_ms, hits, avg_ms))
+                count = self.counts.get(key)
 
-        # 3. Prepare Groups data
+                total_ms = None
+                hits = None
+                avg_ms = None
+                if key in self.times:
+                    total_ms = self.times[key] * 1000.0
+                    hits = self.time_counts.get(key, 0)
+                    avg_ms = (total_ms / hits) if hits else 0.0
+
+                stats_rows.append((key, count, total_ms, hits, avg_ms))
+
+        # 2. Prepare Groups data
         groups_data = []
-        group_timings_headers = ("member", "total_ms", "hits", "avg_ms", "per_group_hit_ms")
-        group_timings_formats = (str, self._fmt_ms, self._fmt_int, self._fmt_ms, self._fmt_ms)
-        group_counts_headers = ("member", "count", "per_group_hit")
-        group_counts_formats = (str, self._fmt_int, self._fmt_ms)
+        group_members_headers = ("member", "count", "per_group_hit", "total_ms", "hits", "avg_ms", "per_group_hit_ms")
+        group_members_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
         if self.groups:
             group_sort_keys = {}
             for g in self.groups:
@@ -195,25 +193,26 @@ class Stats:
                     "avg_ms": group_avg_ms,
                 }
 
-                timing_rows = []
-                if timing_members:
-                    sorted_members = sorted(timing_members, key=lambda k: self.key_positions.get(k, ("", 0)))
+                member_rows = []
+                if all_members:
+                    sorted_members = sorted(all_members, key=lambda k: self.key_positions.get(k, ("", 0)))
                     for k in sorted_members:
-                        total_ms = self.times[k] * 1000.0
-                        hits = self.time_counts.get(k, 0)
-                        avg_ms = (total_ms / hits) if hits else 0.0
-                        per_group_ms = (total_ms / group_hits) if group_hits else 0.0
-                        timing_rows.append((k, total_ms, hits, avg_ms, per_group_ms))
+                        count = self.counts.get(k)
+                        per_group_hit = (count / group_hits) if count is not None and group_hits else None
 
-                counts_rows = []
-                if count_members:
-                    sorted_members = sorted(count_members, key=lambda k: self.key_positions.get(k, ("", 0)))
-                    for k in sorted_members:
-                        count = self.counts[k]
-                        per_group_hit = (count / group_hits) if group_hits else 0.0
-                        counts_rows.append((k, count, per_group_hit))
+                        total_ms = None
+                        hits = None
+                        avg_ms = None
+                        per_group_ms = None
+                        if k in self.times:
+                            total_ms = self.times[k] * 1000.0
+                            hits = self.time_counts.get(k, 0)
+                            avg_ms = (total_ms / hits) if hits else 0.0
+                            per_group_ms = (total_ms / group_hits) if group_hits else 0.0
 
-                groups_data.append({"info": group_info, "timing_rows": timing_rows, "counts_rows": counts_rows})
+                        member_rows.append((k, count, per_group_hit, total_ms, hits, avg_ms, per_group_ms))
+
+                groups_data.append({"info": group_info, "member_rows": member_rows})
 
         # --- Width Calculation Phase ---
         # This phase determines the max width for each column across all tables.
@@ -230,14 +229,11 @@ class Stats:
                     cell_str = fmts[i](val) if callable(fmts[i]) else str(val)
                     max_widths[h] = max(max_widths[h], len(cell_str))
 
-        if counts_rows: update_widths(counts_headers, counts_rows, counts_formats)
-        if timings_rows: update_widths(timings_headers, timings_rows, timings_formats)
+        if stats_rows: update_widths(stats_headers, stats_rows, stats_formats)
         if groups_data:
             for group in groups_data:
-                if group["timing_rows"]:
-                    update_widths(group_timings_headers, group["timing_rows"], group_timings_formats)
-                if group["counts_rows"]:
-                    update_widths(group_counts_headers, group["counts_rows"], group_counts_formats)
+                if group["member_rows"]:
+                    update_widths(group_members_headers, group["member_rows"], group_members_formats)
 
         # Unify 'key' and 'member' widths for consistent alignment
         if 'key' in max_widths or 'member' in max_widths:
@@ -250,13 +246,9 @@ class Stats:
 
         print("\n--- Performance Stats ---")
 
-        if self.counts:
-            print("--- Counts ---")
-            self._print_table(headers=counts_headers, rows=counts_rows, formats=counts_formats, indent="  ", widths=max_widths)
-
-        if self.times:
-            print("\n--- Timings (ms) ---")
-            self._print_table(headers=timings_headers, rows=timings_rows, formats=timings_formats, indent="  ", widths=max_widths)
+        if stats_rows:
+            print("--- All Stats ---")
+            self._print_table(headers=stats_headers, rows=stats_rows, formats=stats_formats, indent="  ", widths=max_widths)
 
         if self.groups and groups_data:
             print("\n--- Groups (prefix-based) ---")
@@ -270,14 +262,9 @@ class Stats:
                     summary_parts.append(f"per_group_hit: {self._fmt_ms(info['avg_ms'])}")
                 print(f"  {' | '.join(summary_parts)}")
 
-                if group["timing_rows"]:
-                    print("    Timings:")
-                    self._print_table(headers=group_timings_headers, rows=group["timing_rows"], formats=group_timings_formats, indent="      ", widths=max_widths)
-
-                if group["counts_rows"]:
-                    if group["timing_rows"]: print()
-                    print("    Counts:")
-                    self._print_table(headers=group_counts_headers, rows=group["counts_rows"], formats=group_counts_formats, indent="      ", widths=max_widths)
+                if group["member_rows"]:
+                    print("    Members:")
+                    self._print_table(headers=group_members_headers, rows=group["member_rows"], formats=group_members_formats, indent="      ", widths=max_widths)
 
         print("-------------------------\n")
 
@@ -291,6 +278,20 @@ class Stats:
     @staticmethod
     def _fmt_ms(value: float) -> str:
         """Format milliseconds with 3 decimals and thousands separator."""
+        return f"{value:,.3f}"
+
+    @staticmethod
+    def _fmt_int_or_blank(value: Optional[int]) -> str:
+        """Format integer with thousands separator, or return blank string if None."""
+        if value is None:
+            return ""
+        return f"{value:,}"
+
+    @staticmethod
+    def _fmt_ms_or_blank(value: Optional[float]) -> str:
+        """Format ms with 3 decimals and thousands separator, or return blank string if None."""
+        if value is None:
+            return ""
         return f"{value:,.3f}"
 
     def _print_table(
@@ -318,7 +319,7 @@ class Stats:
 
         # Determine which columns are numeric (should be right-aligned)
         # Check against the static formatters defined in the class.
-        numeric_formatters = (self._fmt_int, self._fmt_ms)
+        numeric_formatters = (self._fmt_int, self._fmt_ms, self._fmt_int_or_blank, self._fmt_ms_or_blank)
         is_numeric_col = [f in numeric_formatters for f in fmts]
 
         # Convert cells to strings using provided formatters
