@@ -91,11 +91,11 @@ except NameError:
     def profile(func): return func
 
 # --- Accumulator memoization decorator ---
-def _acc_memoize(stats_prefix: Optional[str] = None):
+def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
     """
     Per-invocation memoization for PyAcc transformers.
     - Caches by id(acc) (including None results).
-    - Caches by value (acc) for non-None results.
+    - Caches by value (acc) for non-None results, if use_value_cache is True.
     If stats_prefix is provided, increments '{prefix}.memo_hits' on cache hits.
     Exposes _acc_memo_size() to inspect id-cache size for stats.
     """
@@ -108,16 +108,19 @@ def _acc_memoize(stats_prefix: Optional[str] = None):
                 if stats_prefix:
                     Stats.get().inc(f'{stats_prefix}.memo_hits')
                 return id_memo[id(acc)]
-            # Structural equality-based cache (only non-None results are useful here)
-            cached = val_memo.get(acc)
-            if cached is not None:
-                id_memo[id(acc)] = cached
-                if stats_prefix:
-                    Stats.get().inc(f'{stats_prefix}.memo_hits')
-                return cached
+
+            if use_value_cache:
+                # Structural equality-based cache (only non-None results are useful here)
+                cached = val_memo.get(acc)
+                if cached is not None:
+                    id_memo[id(acc)] = cached
+                    if stats_prefix:
+                        Stats.get().inc(f'{stats_prefix}.memo_hits')
+                    return cached
             result = fn(acc)
             id_memo[id(acc)] = result
-            val_memo[acc] = result
+            if use_value_cache:
+                val_memo[acc] = result
             return result
         wrapper._acc_memo_size = lambda: len(id_memo)
         return wrapper
@@ -388,7 +391,7 @@ class Model(GraphProvider):
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         terminal_to_add_rs = RangeSet.from_indices([terminal_id])
 
-        @_acc_memoize()
+        @_acc_memoize(use_value_cache=False)
         def apply_disallow(acc: PyAcc) -> PyAcc:
             current_set = acc.terminals_union.get(state_id, RangeSet.empty())
             if current_set.contains(terminal_id):
@@ -665,7 +668,7 @@ class Model(GraphProvider):
 
         stats.start('get_mask.seeding')
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-        @_acc_memoize()
+        @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
             if False:  # placeholder to keep minimal diff context; decorator handles memoization
                 if cached_acc is not None:
@@ -787,7 +790,7 @@ class Model(GraphProvider):
                     continue
 
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune')
+                @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)
                 def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                     p = 'get_mask.main_loop.edge.intersect_and_prune'
                     stats.inc(f'{p}.calls')
