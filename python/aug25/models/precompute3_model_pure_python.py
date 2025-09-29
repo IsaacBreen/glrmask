@@ -755,10 +755,6 @@ class Model(GraphProvider):
         # --- Initial GSS Stats ---
         stats.start('get_mask.initial_stats')
         all_initial_accs = set()
-        # Final mask increment version to avoid recomputing complements too often
-        final_mask_version = 0
-        final_mask_complement = all_ones  # valid when final_mask is empty
-
         for gss in state_map.values():
             # We assume gss.get_all_accs() exists for stats gathering.
             accs = getattr(gss, 'get_all_accs', lambda: [])()
@@ -860,8 +856,6 @@ class Model(GraphProvider):
                         new_tokens = reduced_acc.llm_mask.difference(final_mask)
                         if not new_tokens.is_empty():
                             final_mask |= new_tokens
-                            final_mask_version += 1
-                            final_mask_complement = all_ones.difference(final_mask)
 
                 a_node = arena.get(node)
                 node_llm_bv_union = a_node.llm_bv_union if a_node else RangeSet.empty()
@@ -994,33 +988,37 @@ class Model(GraphProvider):
             B = self.output_block_size
             block_unions = self.output_block_unions
             mapping = self.internal_to_original_map
-            # Iterate ranges for efficiency
+
             for start, end in final_mask.to_ranges():
-                # Prefix (before first full block)
-                first_full_start = ((start + B - 1) // B) * B
-                prefix_end = min(end, first_full_start - 1)
-                if start <= prefix_end:
-                    for i in range(start, prefix_end + 1):
+                start_block_idx = start // B
+                end_block_idx = end // B
+
+                if start_block_idx == end_block_idx:
+                    # The entire range is within a single block
+                    for i in range(start, end + 1):
                         s = mapping.get(i)
                         if s is not None:
                             original_indices |= s
-                # Full blocks
-                if end >= first_full_start:
-                    last_full_start = (end // B) * B
-                    block = first_full_start
-                    while block <= last_full_start:
-                        bid = block // B
-                        bu = block_unions.get(bid)
+                else:
+                    # Process the first partial block (suffix)
+                    first_block_end = (start_block_idx + 1) * B
+                    for i in range(start, first_block_end):
+                        s = mapping.get(i)
+                        if s is not None:
+                            original_indices |= s
+
+                    # Process full blocks in between
+                    for block_idx in range(start_block_idx + 1, end_block_idx):
+                        bu = block_unions.get(block_idx)
                         if bu is not None:
                             original_indices |= bu
-                        block += B
-                    # Suffix (after last full block)
-                    suffix_start = last_full_start + B
-                    if suffix_start <= end:
-                        for i in range(suffix_start, end + 1):
-                            s = mapping.get(i)
-                            if s is not None:
-                                original_indices |= s
+
+                    # Process the last partial block (prefix)
+                    last_block_start = end_block_idx * B
+                    for i in range(last_block_start, end + 1):
+                        s = mapping.get(i)
+                        if s is not None:
+                            original_indices |= s
         stats.stop('get_mask.final_conversion')
 
         stats.stop('get_mask')
