@@ -482,9 +482,10 @@ class Model(GraphProvider):
     @profile
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
         stats = Stats.get()
-        stats.start('_process_token.total')
-        stats.inc('_process_token.calls')
-        stats.inc('_process_token.initial_heads', len(gss.peek()))
+        p = 'commit.main_loop._process_token'
+        stats.start(f'{p}.total')
+        stats.inc(f'{p}.calls')
+        stats.inc(f'{p}.initial_heads', len(gss.peek()))
 
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
         for state_id in gss.peek():
@@ -494,11 +495,11 @@ class Model(GraphProvider):
         reduces_handled = 0
 
         while heads_by_state:
-            stats.inc('_process_token.loop_iterations')
+            stats.inc(f'{p}.loop_iterations')
             state_id, state_gsss = heads_by_state.popitem()
-            stats.start('_process_token.merge_many.heads')
+            stats.start(f'{p}.merge_many.heads')
             state_gss = GSS.merge_many(state_gsss)
-            stats.stop('_process_token.merge_many.heads')
+            stats.stop(f'{p}.merge_many.heads')
             row = self.parser_table.table.get(state_id)
             if not row:
                 continue
@@ -507,39 +508,39 @@ class Model(GraphProvider):
                 continue
 
             def handle_shift(shift_to_state_id, gss_to_shift):
-                stats.inc('_process_token.shifts')
+                stats.inc(f'{p}.shifts')
                 shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
 
             def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
-                stats.inc('_process_token.reduces')
-                stats.start('_process_token.reduce.pop')
+                stats.inc(f'{p}.reduces')
+                stats.start(f'{p}.reduce.pop')
                 popped_gss = gss_to_reduce
                 for _ in range(reduce_action.len):
                     popped_gss = popped_gss.pop()
-                stats.stop('_process_token.reduce.pop')
+                stats.stop(f'{p}.reduce.pop')
                 for from_state_id in popped_gss.peek():
                     goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
                     goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
                     heads_by_state[goto_state_id].append(goto_gss)
-                    stats.inc('_process_token.reduce.new_heads')
+                    stats.inc(f'{p}.reduce.new_heads')
 
             if isinstance(action, int):
                 handle_shift(action, state_gss)
             elif isinstance(action, Reduce):
                 handle_reduce(action, state_gss)
             elif isinstance(action, Split):
-                stats.inc('_process_token.splits')
+                stats.inc(f'{p}.splits')
                 if action.shift is not None:
                     handle_shift(action.shift, state_gss)
                 for length, nts in action.reduces.items():
                     for nt_id, pids in nts.items():
                         handle_reduce(Reduce(nt_id, length, pids), state_gss)
 
-        stats.start('_process_token.merge_many.final')
+        stats.start(f'{p}.merge_many.final')
         result = GSS.merge_many(shifted_gsses)
-        stats.stop('_process_token.merge_many.final')
-        stats.inc('_process_token.final_heads', len(result.peek()))
-        stats.stop('_process_token.total')
+        stats.stop(f'{p}.merge_many.final')
+        stats.inc(f'{p}.final_heads', len(result.peek()))
+        stats.stop(f'{p}.total')
         return result
     def get_mask(self) -> LLMTokenSet:
         """
@@ -589,38 +590,39 @@ class Model(GraphProvider):
         stats.start('get_mask.seeding')
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
         def initialize_acc(acc: PyAcc) -> PyAcc:
-            stats.inc('get_mask.initialize_acc.calls')
-            stats.start('get_mask.initialize_acc.total')
+            p = 'get_mask.seeding.initialize_acc'
+            stats.inc(f'{p}.calls')
+            stats.start(f'{p}.total')
             # Compute allowed LLM tokens from disallowed terminals for this accumulator
             disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
             disallowed_map = acc.terminals_union
-            stats.inc('get_mask.initialize_acc.disallowed_map_size.sum', len(disallowed_map))
+            stats.inc(f'{p}.disallowed_map_size.sum', len(disallowed_map))
 
             for tsid, disallowed_terminals in disallowed_map.items():
-                stats.inc('get_mask.initialize_acc.disallowed_terminals_loops')
+                stats.inc(f'{p}.disallowed_terminals_loops')
                 if tsid > max_state or tsid not in pmc:
                     continue
                 terminals_to_llm = pmc[tsid]
 
-                stats.start('get_mask.initialize_acc.to_indices')
+                stats.start(f'{p}.to_indices')
                 indices = disallowed_terminals.to_indices()
-                stats.stop('get_mask.initialize_acc.to_indices')
+                stats.stop(f'{p}.to_indices')
 
-                stats.inc('get_mask.initialize_acc.disallowed_terminals_count.sum', len(indices))
+                stats.inc(f'{p}.disallowed_terminals_count.sum', len(indices))
                 for terminal_id in indices:
-                    stats.inc('get_mask.initialize_acc.disallowed_terminals_inner_loops')
+                    stats.inc(f'{p}.disallowed_terminals_inner_loops')
                     if terminal_id in terminals_to_llm:
-                        stats.start('get_mask.initialize_acc.union')
+                        stats.start(f'{p}.union')
                         disallowed_llm_mask = disallowed_llm_mask.union(
                             terminals_to_llm[terminal_id]
                         )
-                        stats.stop('get_mask.initialize_acc.union')
+                        stats.stop(f'{p}.union')
 
-            stats.start('get_mask.initialize_acc.difference')
+            stats.start(f'{p}.difference')
             allowed_mask = all_ones.difference(disallowed_llm_mask)
-            stats.stop('get_mask.initialize_acc.difference')
+            stats.stop(f'{p}.difference')
 
-            stats.stop('get_mask.initialize_acc.total')
+            stats.stop(f'{p}.total')
             return PyAcc(
                 terminals_union={},  # consume
                 llm_mask=allowed_mask,
@@ -726,16 +728,17 @@ class Model(GraphProvider):
                 acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
 
                 def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                    stats.inc('get_mask.intersect_and_prune.calls')
+                    p = 'get_mask.main_loop.edge.intersect_and_prune'
+                    stats.inc(f'{p}.calls')
                     if acc in acc_memo:
-                        stats.inc('get_mask.intersect_and_prune.memo_hits')
+                        stats.inc(f'{p}.memo_hits')
                         return acc_memo[acc]
-                    stats.start('get_mask.intersect_and_prune.intersection')
+                    stats.start(f'{p}.intersection')
                     new_mask = acc.llm_mask.intersection(llm_bv)
-                    stats.stop('get_mask.intersect_and_prune.intersection')
+                    stats.stop(f'{p}.intersection')
 
                     if new_mask.is_empty():
-                        stats.inc('get_mask.intersect_and_prune.pruned_accs')
+                        stats.inc(f'{p}.pruned_accs')
                         result = None
                     else:
                         result = PyAcc(
@@ -772,7 +775,7 @@ class Model(GraphProvider):
                     child_gss = popped.isolate_many(values_to_keep)
                     stats.stop('get_mask.main_loop.edge.isolate_many')
 
-                    stats.inc('get_mask.intersect_and_prune.memo_size.sum', len(acc_memo))
+                    stats.inc('get_mask.main_loop.edge.intersect_and_prune.memo_size.sum', len(acc_memo))
                     if child_gss.is_empty():
                         stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
                         continue
@@ -798,17 +801,17 @@ class Model(GraphProvider):
         # allowed internal token.
         result = RangeSet.empty()
         stats.start('get_mask.final_conversion.union_loop')
-        for start, end in final_mask.intervals:
-            for i in range(start, end + 1):
-                # Mapped RangeSet for the internal token i
-                mapped_rs = self.internal_to_original_map.get(i)
-                if mapped_rs:
+        for i in final_mask.to_indices():
+            # Mapped RangeSet for the internal token i
+            mapped_rs = self.internal_to_original_map.get(i)
+            if mapped_rs:
                     result = result.union(mapped_rs)
         stats.stop('get_mask.final_conversion.union_loop')
 
-        stats.inc('get_mask.final_mask.internal_indices', len(final_mask))
+        stats.inc('get_mask.final_conversion.internal_indices', len(final_mask))
 
         stats.stop('get_mask.final_conversion')
+
 
         stats.stop('get_mask')
         return result
