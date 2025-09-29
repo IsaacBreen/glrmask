@@ -282,6 +282,21 @@ class Model(GraphProvider):
             )
             for uid, node_data in arena_dict.items()
         }
+        # --- Edge reordering optimization ---
+        for node in arena.values():
+            # Sort inner destination lists first, by max_depth descending
+            for _, dests in node.children:
+                dests.sort(key=lambda d: max_depth.get(d[0], 0), reverse=True)
+
+            # Then sort the outer edge list based on the now-first (best) destination
+            def get_max_depth_for_edge(edge):
+                _edge_key, dests = edge
+                if not dests:
+                    return -1
+                return max_depth.get(dests[0][0], 0)
+
+            node.children.sort(key=get_max_depth_for_edge, reverse=True)
+
         # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
         tokenizer = constraint.tokenizer()
