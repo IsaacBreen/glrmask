@@ -483,11 +483,11 @@ class Model(GraphProvider):
         stats.start('commit.fuse')
         # memo = {}
         # merged_states = {tsid: gss.fuse("to_interface", memo) for tsid, gss in merged_states.items()}
-        memo = {}
-        merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
+        # memo = {}
+        # merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
         stats.stop('commit.fuse')
-        print(GSS.merge_many(merged_states.values()).stats())
-        print(GSS.merge_many(merged_states.values()).to_graph_string(upper_only=True))
+        # print(GSS.merge_many(merged_states.values()).stats())
+        # print(GSS.merge_many(merged_states.values()).to_graph_string(upper_only=True))
 
 
         stats.inc('commit.tokenizer_states_out', len(merged_states))
