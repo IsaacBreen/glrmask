@@ -246,7 +246,6 @@ def run_benchmark(args):
         if not os.environ.get("NO_GET_MASK") == '1':
             gc.disable()
             t_start_mask = time.perf_counter()
-            progress_bar.set_postfix_str("get_mask")
             mask_rs = model.get_mask()
             t_end_mask = time.perf_counter()
             gc.enable()
@@ -255,7 +254,6 @@ def run_benchmark(args):
             masks_ranges.append(mask_rs.to_ranges())
 
         # Advance the state
-        progress_bar.set_postfix_str("commit")
         gc.disable()
         t_start_commit = time.perf_counter()
         model.commit(token_id)
