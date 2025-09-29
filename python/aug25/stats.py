@@ -96,17 +96,25 @@ class Stats:
                 self.times[k] += now - self.timers[k]
 
             # --- Expensive operation ---
+            caller_frame = None
             try:
                 frame = inspect.currentframe()
-                if frame and frame.f_back:
-                    # We want the caller of inc() or start(), which is one level up.
-                    info = inspect.getframeinfo(frame.f_back)
+                # The call stack is:
+                #   - model code (the one we want)
+                #   - inc() or start() in this class
+                #   - _record_key_position() (current frame)
+                # So we need to go up two levels.
+                if frame and frame.f_back and frame.f_back.f_back:
+                    caller_frame = frame.f_back.f_back
+                    info = inspect.getframeinfo(caller_frame)
                     self.key_positions[key] = (info.filename, info.lineno)
                 else:
                     self.key_positions[key] = ("<unknown>", 0)
             finally:
                 # Avoid reference cycles
                 del frame
+                if caller_frame:
+                    del caller_frame
             # --- End of expensive operation ---
 
             # Resume timers
