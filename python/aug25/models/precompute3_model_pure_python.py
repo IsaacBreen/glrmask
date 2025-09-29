@@ -18,9 +18,9 @@ except Exception:  # pragma: no cover
 from ..common_interface import GraphProvider
 from ..stats import Stats
 # from ..common_interface import RangeSet
-from ..range_set.py_range_set import PyRangeSet as RangeSet
+# from ..range_set.py_range_set import PyRangeSet as RangeSet
 # from ..range_set.bitset_range_set import BitsetRangeSet as RangeSet
-# from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
+from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
 # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSet
 import _sep1 as ffi
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
@@ -800,8 +800,11 @@ class Model(GraphProvider):
         # Convert internal mask back to original IDs by uniting the RangeSet for each
         # allowed internal token.
         result = RangeSet.empty()
+        stats.start("get_mask.final_conversion.iter_indices")
+        indices = final_mask.iter_indices()
+        stats.stop("get_mask.final_conversion.iter_indices")
         stats.start('get_mask.final_conversion.union_loop')
-        for i in final_mask.iter_indices():
+        for i in indices:
             # Mapped RangeSet for the internal token i
             mapped_rs = self.internal_to_original_map.get(i)
             if mapped_rs:
