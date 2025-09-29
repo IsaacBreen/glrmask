@@ -34,6 +34,11 @@ class FFIRangeSet(RangeSet[int]):
             pass
         return res
 
+    def iter_indices(self) -> Iterable[int]:
+        """Iterates over all individual indices in the set."""
+        for start, end in self.intervals:
+            yield from range(start, end + 1)
+
     @time_method
     def contains(self, x: int) -> bool:
         """Return True if x is contained in the set."""

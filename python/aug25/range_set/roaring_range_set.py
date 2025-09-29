@@ -53,6 +53,10 @@ class RoaringRangeSet(RangeSet[int]):
     def to_indices(self) -> List[int]:
         return list(self._rb)
 
+    def iter_indices(self) -> Iterable[int]:
+        """Iterates over all individual indices in the set."""
+        yield from self._rb
+
     def contains(self, x: int) -> bool:
         if x < 0:
             return False

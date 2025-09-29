@@ -76,6 +76,15 @@ class BitsetRangeSet(RangeSet[int]):
                 indices.append(i)
         return indices
 
+    def iter_indices(self) -> Iterable[int]:
+        """Iterates over all individual indices in the set."""
+        for byte_idx, byte in enumerate(self._bitset):
+            if byte == 0:
+                continue
+            for bit_idx in range(8):
+                if (byte >> bit_idx) & 1:
+                    yield (byte_idx * 8) + bit_idx
+
     def contains(self, x: int) -> bool:
         if x < 0:
             return False

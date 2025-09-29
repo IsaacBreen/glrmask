@@ -1,233 +1,438 @@
 local_system:
   attached_files:
+    - python/aug25/range_set/__init__.py
+    - python/aug25/range_set/bitset_range_set.py
+    - python/aug25/range_set/ffi_range_set.py
     - python/aug25/range_set/py_range_set.py
+    - python/aug25/range_set/range_set_abc.py
+    - python/aug25/range_set/rangeset_stats.py
+    - python/aug25/range_set/roaring_range_set.py
   conversation_file:
   compile_command:
   initial_file_contents:
-    python/aug25/range_set/py_range_set.py: |
+    python/aug25/range_set/__init__.py: |+
+      from .py_range_set import PyRangeSet
+      from .ffi_range_set import FFIRangeSet
+      from .bitset_range_set import BitsetRangeSet
+      from .roaring_range_set import RoaringRangeSet
+
+      # RangeSet = PyRangeSet
+      RangeSet = FFIRangeSet
+
+      __all__ = ["RangeSet", "PyRangeSet", "FFIRangeSet", "BitsetRangeSet", "RoaringRangeSet"]
+
+    python/aug25/range_set/bitset_range_set.py: |
       from __future__ import annotations
       from typing import Iterable, Optional, Tuple, List
-      from .range_set_abc import RangeSet
 
-      class PyRangeSet(RangeSet[int]):
+      from .range_set_abc import RangeSet
+      from .py_range_set import PyRangeSet
+
+      BIT_COUNTS = tuple(bin(i).count('1') for i in range(256))
+
+      class BitsetRangeSet(RangeSet[int]):
           """
-          Represents a set of integers as a sorted, disjoint list of closed intervals.
+          Represents a set of non-negative integers using a bitset.
           Implements the generic RangeSet[int] interface.
+          This implementation is efficient for dense sets within a small range of integers.
           """
-          __slots__ = ('_intervals',)
+          __slots__ = ('_bitset', '_len')
 
           def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
-              if intervals:
-                  self._intervals = self._normalize(intervals)
-              else:
-                  self._intervals = tuple()
+              if not intervals:
+                  self._bitset = bytearray()
+                  self._len = 0
+                  return
+
+              # Using PyRangeSet's logic to handle unsorted/overlapping intervals
+              normalized_intervals = PyRangeSet._normalize(intervals)
+
+              if not normalized_intervals:
+                  self._bitset = bytearray()
+                  self._len = 0
+                  return
+
+              max_val = normalized_intervals[-1][1]
+              if max_val < 0:
+                  raise ValueError("BitsetRangeSet only supports non-negative integers.")
+
+              size = (max_val // 8) + 1
+              self._bitset = bytearray(size)
+
+              for start, end in normalized_intervals:
+                  if start < 0:
+                      raise ValueError("BitsetRangeSet only supports non-negative integers.")
+                  
+                  start_byte = start // 8
+                  start_bit = start % 8
+                  end_byte = end // 8
+                  end_bit = end % 8
+
+                  if start_byte == end_byte:
+                      mask = (0xff >> (8 - (end_bit - start_bit + 1))) << start_bit
+                      self._bitset[start_byte] |= mask
+                  else:
+                      # First byte
+                      self._bitset[start_byte] |= (0xff << start_bit) & 0xff
+                      # Middle bytes
+                      for i in range(start_byte + 1, end_byte):
+                          self._bitset[i] = 0xff
+                      # Last byte
+                      self._bitset[end_byte] |= (0xff >> (7 - end_bit))
+              
+              self._len = sum(BIT_COUNTS[byte] for byte in self._bitset)
 
           @property
           def intervals(self) -> Tuple[Tuple[int, int], ...]:
-              return self._intervals
-
-          @staticmethod
-          def _normalize(intervals: Iterable[Tuple[int, int]]) -> Tuple[Tuple[int, int], ...]:
-              """
-              Normalizes a list of [start, end] intervals into a sorted, merged, disjoint tuple of pairs.
-              """
-              items = sorted(intervals)
-              if not items:
-                  return tuple()
-
-              merged: List[Tuple[int, int]] = []
-              cs, ce = items[0]
-              for ns, ne in items[1:]:
-                  if ns <= ce + 1:
-                      ce = max(ce, ne)
-                  else:
-                      merged.append((cs, ce))
-                      cs, ce = ns, ne
-              merged.append((cs, ce))
-              return tuple(merged)
-
-          @staticmethod
-          def _merge_unsorted(intervals: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
-              """
-              Same as normalize but returns a list. Used by optimizer.
-              """
-              items = sorted(intervals)
-              if not items:
-                  return []
-
-              merged: List[Tuple[int, int]] = []
-              cs, ce = items[0]
-              for ns, ne in items[1:]:
-                  if ns <= ce + 1:
-                      ce = max(ce, ne)
-                  else:
-                      merged.append((cs, ce))
-                      cs, ce = ns, ne
-              merged.append((cs, ce))
-              return merged
-
-          @staticmethod
-          def from_ranges(ranges: List[List[int]]) -> 'PyRangeSet':
-              """Creates a PyRangeSet from a list of [start, end] lists."""
-              return PyRangeSet(iter(map(tuple, ranges)))
+              # This is not efficient, but it is correct.
+              # A more performant implementation would scan bits directly.
+              return PyRangeSet.from_indices(self.to_indices()).intervals
 
           def to_ranges(self) -> List[Tuple[int]]:
-              """Converts the PyRangeSet to a list of [start, end] lists."""
-              return [tuple(interval) for interval in self.intervals]
-
-          @staticmethod
-          def from_json(data: List[List[int]]) -> 'PyRangeSet':
-              """Creates a PyRangeSet from a list of [start, end] lists (JSON format)."""
-              return PyRangeSet(iter(map(tuple, data)))
-
-          def to_json(self) -> List[List[int]]:
-              """Converts the PyRangeSet to a list of [start, end] lists (JSON format)."""
-              return self.to_ranges()
-
-          @staticmethod
-          def from_indices(indices: Iterable[int]) -> 'PyRangeSet':
-              """Creates a PyRangeSet from an iterable of individual indices."""
-              indices_sorted = sorted(set(indices))
-              if not indices_sorted:
-                  return PyRangeSet.empty()
-              intervals: List[Tuple[int, int]] = []
-              start = indices_sorted[0]
-              prev = start
-              for i in indices_sorted[1:]:
-                  if i == prev + 1:
-                      prev = i
-                  else:
-                      intervals.append((start, prev))
-                      start = i
-                      prev = i
-              intervals.append((start, prev))
-              return PyRangeSet(intervals)
-
-          @staticmethod
-          def empty() -> 'PyRangeSet':
-              """Creates an empty PyRangeSet."""
-              return PyRangeSet()
+              return list(self.intervals)
 
           def to_indices(self) -> List[int]:
-              """Converts the PyRangeSet to a list of individual indices."""
-              result = []
-              for start, end in self.intervals:
-                  result.extend(range(start, end + 1))
-              return result
+              indices = []
+              for i in range(len(self._bitset) * 8):
+                  byte_idx = i // 8
+                  bit_idx = i % 8
+                  if (self._bitset[byte_idx] >> bit_idx) & 1:
+                      indices.append(i)
+              return indices
 
-          def iter_indices(self) -> Iterable[int]:
-              ...
+          def contains(self, x: int) -> bool:
+              if x < 0:
+                  return False
+              byte_idx = x // 8
+              if byte_idx >= len(self._bitset):
+                  return False
+              bit_idx = x % 8
+              return (self._bitset[byte_idx] >> bit_idx) & 1 != 0
 
-          @staticmethod
-          def from_numpy(bv) -> 'PyRangeSet':
-              """Creates a PyRangeSet from a numpy array of booleans."""
-              intervals = []
-              in_range = False
-              start = 0
-              for i in range(len(bv)):
-                  if bv[i] and not in_range:
-                      start = i
-                      in_range = True
-                  elif not bv[i] and in_range:
-                      intervals.append((start, i - 1))
-                      in_range = False
-              if in_range:
-                  intervals.append((start, len(bv) - 1))
-              return PyRangeSet(intervals)
+          def union(self, other: RangeSet[int]) -> "BitsetRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              
+              if isinstance(other, BitsetRangeSet):
+                  len_a = len(self._bitset)
+                  len_b = len(other._bitset)
+                  new_len = max(len_a, len_b)
+                  new_bitset = bytearray(new_len)
+                  
+                  new_bitset[:len_a] = self._bitset
+                  
+                  for i in range(len_b):
+                      new_bitset[i] |= other._bitset[i]
+                      
+                  res = BitsetRangeSet()
+                  res._bitset = new_bitset
+                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
+                  return res
+              else:
+                  # Generic path for other RangeSet types
+                  return BitsetRangeSet(self.intervals + other.intervals)
 
-          def __eq__(self, other):
-              if isinstance(other, PyRangeSet):
-                  return self.intervals == other.intervals
+          def intersection(self, other: RangeSet[int]) -> "BitsetRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              
+              if isinstance(other, BitsetRangeSet):
+                  len_a = len(self._bitset)
+                  len_b = len(other._bitset)
+                  new_len = min(len_a, len_b)
+                  new_bitset = bytearray(new_len)
+                  
+                  for i in range(new_len):
+                      new_bitset[i] = self._bitset[i] & other._bitset[i]
+                      
+                  res = BitsetRangeSet()
+                  res._bitset = new_bitset
+                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
+                  return res
+              else:
+                  # Generic path
+                  py_self = PyRangeSet(self.intervals)
+                  intersected = py_self.intersection(other)
+                  return BitsetRangeSet(intersected.intervals)
+
+          def difference(self, other: RangeSet[int]) -> "BitsetRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              
+              if isinstance(other, BitsetRangeSet):
+                  len_a = len(self._bitset)
+                  len_b = len(other._bitset)
+                  new_bitset = self._bitset[:]
+                  
+                  limit = min(len_a, len_b)
+                  for i in range(limit):
+                      new_bitset[i] &= ~other._bitset[i]
+                      
+                  res = BitsetRangeSet()
+                  res._bitset = new_bitset
+                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
+                  return res
+              else:
+                  py_self = PyRangeSet(self.intervals)
+                  differenced = py_self.difference(other)
+                  return BitsetRangeSet(differenced.intervals)
+
+          def is_empty(self) -> bool:
+              return self._len == 0
+
+          def __len__(self) -> int:
+              return self._len
+
+          def __repr__(self) -> str:
+              return f"BitsetRangeSet({self.intervals!r})"
+
+          def __eq__(self, other) -> bool:
+              if isinstance(other, BitsetRangeSet):
+                  a, b = self._bitset, other._bitset
+                  if len(a) > len(b):
+                      a, b = b, a
+                  
+                  if a != b[:len(a)]:
+                      return False
+                  
+                  for i in range(len(a), len(b)):
+                      if b[i] != 0:
+                          return False
+                  return True
+
               if isinstance(other, RangeSet):
-                  # Compare by normalized intervals for any RangeSet implementation
                   return self.intervals == other.intervals
               return NotImplemented
 
-          def __hash__(self):
+          def __hash__(self) -> int:
               return hash(self.intervals)
 
-          def __repr__(self):
-              return f"PyRangeSet({self.intervals!r})"
+          @classmethod
+          def from_ranges(cls, ranges: List[List[int]]) -> 'BitsetRangeSet':
+              return cls(iter(map(tuple, ranges)))
 
-          # New utilities for set-like operations
-          def is_empty(self) -> bool:
-              """Return True if no indices are present."""
-              return not self.intervals
+          @classmethod
+          def from_indices(cls, indices: Iterable[int]) -> 'BitsetRangeSet':
+              indices = list(indices)
+              if not indices:
+                  return cls()
+              
+              if any(i < 0 for i in indices):
+                  raise ValueError("BitsetRangeSet only supports non-negative integers.")
+              
+              max_val = max(indices)
+              
+              size = (max_val // 8) + 1
+              bitset = bytearray(size)
+              
+              unique_indices = set(indices)
+              for i in unique_indices:
+                  byte_idx = i // 8
+                  bit_idx = i % 8
+                  bitset[byte_idx] |= (1 << bit_idx)
+                  
+              res = cls()
+              res._bitset = bitset
+              res._len = len(unique_indices)
+              return res
 
-          def __len__(self) -> int:
-              """Return the total number of elements in the set."""
-              return sum(e - s + 1 for s, e in self._intervals)
+          @classmethod
+          def empty(cls) -> 'BitsetRangeSet':
+              return cls()
 
+          @classmethod
+          def from_json(cls, data: List[List[int]]) -> 'BitsetRangeSet':
+              return cls.from_ranges(data)
+
+          def to_json(self) -> List[List[int]]:
+              return [list(r) for r in self.intervals]
+    python/aug25/range_set/ffi_range_set.py: |
+      import _sep1 as ffi
+      from typing import List, Tuple, Iterable, cast
+
+      from .range_set_abc import RangeSet
+      from .rangeset_stats import time_method, time_func, record_metric
+
+
+
+      class FFIRangeSet(RangeSet[int]):
+          """A FFIRangeSet implementation backed by the Rust ffi.Bitset."""
+
+          __slots__ = ('_bitset',)
+
+          def __init__(self, intervals: Iterable[Tuple[int, int]] = ()):
+              # ffi.Bitset.from_ranges expects a list of [start, end] lists/tuples
+              self._bitset = ffi.Bitset.from_ranges(list(intervals))
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              """Returns the intervals as a tuple of tuples."""
+              return tuple(cast(List[Tuple[int, int]], self._bitset.to_ranges()))
+
+          def to_ranges(self) -> List[Tuple[int]]:
+              """Returns the intervals as a list of lists for JSON serialization."""
+              return [tuple(r) for r in self._bitset.to_ranges()]
+
+          @time_method
+          def to_indices(self) -> List[int]:
+              """Returns the elements of the set as a list."""
+              res = self._bitset.to_indices()
+              try:
+                  record_metric('FFIRangeSet.to_indices.out_len', len(res))
+              except Exception:
+                  pass
+              return res
+
+          @time_method
           def contains(self, x: int) -> bool:
               """Return True if x is contained in the set."""
-              for s, e in self.intervals:
-                  if s <= x <= e:
-                      return True
-                  if x < s:
-                      return False
-              return False
+              res = self._bitset.contains(x)
+              record_metric('FFIRangeSet.contains.true' if res else 'FFIRangeSet.contains.false', 1)
+              return res
 
-          def union(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+          @time_method
+          def union(self, other: RangeSet[int]) -> "FFIRangeSet":
               """Return the union of two RangeSets."""
-              if not isinstance(other, RangeSet):
-                  return NotImplemented
-              if self.is_empty():
-                  return PyRangeSet(other.intervals)
-              if other.is_empty():
-                  return self
-              return PyRangeSet(self.intervals + other.intervals)
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              try:
+                  record_metric('FFIRangeSet.union.in_len_a', len(self))
+                  record_metric('FFIRangeSet.union.in_len_b', len(other))
+              except Exception:
+                  pass
+              new_bs = self._bitset.union(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
+              try:
+                  record_metric('FFIRangeSet.union.out_len', len(res))
+              except Exception:
+                  pass
+              return res
 
-          def intersection(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+          @time_method
+          def intersection(self, other: RangeSet[int]) -> "FFIRangeSet":
               """Return the intersection of two RangeSets."""
-              if not isinstance(other, RangeSet):
-                  return NotImplemented
-              if self.is_empty() or other.is_empty():
-                  return PyRangeSet.empty()
-              a = list(self.intervals)
-              b = list(other.intervals)
-              i = j = 0
-              res: List[Tuple[int, int]] = []
-              while i < len(a) and j < len(b):
-                  s1, e1 = a[i]
-                  s2, e2 = b[j]
-                  s = max(s1, s2)
-                  e = min(e1, e2)
-                  if s <= e:
-                      res.append((s, e))
-                  if e1 < e2:
-                      i += 1
-                  else:
-                      j += 1
-              return PyRangeSet(res)
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              try:
+                  record_metric('FFIRangeSet.intersection.in_len_a', len(self))
+                  record_metric('FFIRangeSet.intersection.in_len_b', len(other))
+              except Exception:
+                  pass
+              new_bs = self._bitset.intersection(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
+              try:
+                  record_metric('FFIRangeSet.intersection.out_len', len(res))
+              except Exception:
+                  pass
+              return res
 
-          def difference(self, other: 'RangeSet[int]') -> 'PyRangeSet':
-              """Return the set difference self \\ other as a PyRangeSet."""
-              if self.is_empty():
-                  return PyRangeSet.empty()
-              if other.is_empty():
-                  return self
-              a = list(self.intervals)
-              b = list(other.intervals)
-              res: List[Tuple[int, int]] = []
-              j = 0
-              for s1, e1 in a:
-                  curr = s1
-                  while j < len(b) and b[j][1] < curr:
-                      j += 1
-                  k = j
-                  while k < len(b) and b[k][0] <= e1:
-                      s2, e2 = b[k]
-                      if s2 > curr:
-                          res.append((curr, s2 - 1))
-                      if e2 + 1 > curr:
-                          curr = e2 + 1
-                      if curr > e1:
-                          break
-                      k += 1
-                  if curr <= e1:
-                      res.append((curr, e1))
-              return PyRangeSet(res)
-  prev_file_contents:
+          @time_method
+          def difference(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the set difference self \\ other."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              try:
+                  record_metric('FFIRangeSet.difference.in_len_a', len(self))
+                  record_metric('FFIRangeSet.difference.in_len_b', len(other))
+              except Exception:
+                  pass
+              new_bs = self._bitset.difference(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
+              try:
+                  record_metric('FFIRangeSet.difference.out_len', len(res))
+              except Exception:
+                  pass
+              return res
+
+          @time_method
+          def is_empty(self) -> bool:
+              res = self._bitset.is_empty()
+              record_metric('FFIRangeSet.is_empty.true' if res else 'FFIRangeSet.is_empty.false', 1)
+              return res
+
+          @time_method
+          def __len__(self) -> int:
+              v = self._bitset.len()
+              # Sum of cardinalities observed; you can divide by calls to get an average size
+              record_metric('FFIRangeSet.__len__.sum', v)
+              return v
+
+          def __repr__(self) -> str:
+              return f"FFIRangeSet.from_ranges({self.intervals!r})"
+
+          @time_method
+          def __eq__(self, other) -> bool:
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              res = self._bitset == other._bitset
+              record_metric('FFIRangeSet.__eq__.true' if res else 'FFIRangeSet.__eq__.false', 1)
+              return res
+
+          @time_method
+          def __hash__(self) -> int:
+              # The PyHybridBitset has a __hash__ method
+              h = hash(self._bitset)
+              record_metric('FFIRangeSet.__hash__', 1)
+              return h
+
+          @staticmethod
+          def _merge_unsorted(ranges: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
+              """
+              Normalizes a list of [start, end] intervals into a sorted, merged, disjoint list of pairs.
+              This can be achieved by creating a temporary FFIRangeSet.
+              """
+              # The ffi.Bitset constructor handles merging and sorting.
+              temp_rs = FFIRangeSet.from_ranges(ranges)
+              return temp_rs._bitset.to_ranges()
+
+          @staticmethod
+          @time_func('FFIRangeSet.from_ranges')
+          def from_ranges(ranges: List[List[int]]) -> 'FFIRangeSet':
+              """Creates a FFIRangeSet from a list of [start, end] lists."""
+              # return FFIRangeSet(tuple(map(tuple, ranges)))
+              self = FFIRangeSet()
+              try:
+                  record_metric('FFIRangeSet.from_ranges.in_ranges_count', len(ranges))
+              except Exception:
+                  pass
+              self._bitset = ffi.Bitset.from_ranges(ranges)
+              try:
+                  record_metric('FFIRangeSet.from_ranges.out_len', len(self))
+              except Exception:
+                  pass
+              return self
+
+          @staticmethod
+          @time_func('FFIRangeSet.from_indices')
+          def from_indices(indices: Iterable[int]) -> 'FFIRangeSet':
+              """Creates a FFIRangeSet from an iterable of individual indices."""
+              new_set = FFIRangeSet.from_ranges([])
+              # The FFI function expects a list.
+              idx_list = list(indices)
+              record_metric('FFIRangeSet.from_indices.in_len', len(idx_list))
+              new_set._bitset = ffi.Bitset.from_indices(idx_list)
+              try:
+                  record_metric('FFIRangeSet.from_indices.out_len', len(new_set))
+              except Exception:
+                  pass
+              return new_set
+
+          @staticmethod
+          @time_func('FFIRangeSet.empty')
+          def empty() -> 'FFIRangeSet':
+              """Creates an empty FFIRangeSet."""
+              record_metric('FFIRangeSet.empty.calls', 1)
+              return FFIRangeSet.from_ranges([])
+
+          @staticmethod
+          def from_json(data: List[List[int]]) -> 'FFIRangeSet':
+              return FFIRangeSet.from_ranges(tuple(map(tuple, data)))
+
+          def to_json(self) -> List[List[int]]:
+              return self.to_ranges()
     python/aug25/range_set/py_range_set.py: |
       from __future__ import annotations
       from typing import Iterable, Optional, Tuple, List
@@ -453,6 +658,1454 @@ local_system:
                   if curr <= e1:
                       res.append((curr, e1))
               return PyRangeSet(res)
+    python/aug25/range_set/range_set_abc.py: |
+      from __future__ import annotations
+
+      from abc import ABC, abstractmethod
+      from typing import Generic, Iterable, List, Tuple, TypeVar
+
+      T = TypeVar("T")
+
+
+      class RangeSet(ABC, Generic[T]):
+          """
+          Abstract base class for range-based sets of comparable elements.
+          Implementations represent sets as normalized, sorted, disjoint closed intervals.
+          """
+
+          @property
+          @abstractmethod
+          def intervals(self) -> Tuple[Tuple[T, T], ...]:
+              """
+              The normalized, sorted, disjoint closed intervals representing the set.
+              Implementations should guarantee:
+              - intervals are sorted by start
+              - no overlaps and no gaps of size 0 (i.e., [a,b] and [b+1,c] should be merged where applicable)
+              """
+              raise NotImplementedError
+
+          @abstractmethod
+          def is_empty(self) -> bool:
+              """Return True if the set is empty."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def __len__(self) -> int:
+              """Return the total number of elements in the set."""
+              raise NotImplementedError
+
+          def __or__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.union(other)
+
+          def __ror__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.union(other)
+
+          def __and__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.intersection(other)
+
+          def __rand__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.intersection(other)
+
+          def __sub__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.difference(other)
+
+          def __rsub__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return other.difference(self)
+
+          def issubset(self, other: "RangeSet[T]") -> bool:
+              """Return True if self is a subset of other."""
+              return self.difference(other).is_empty()
+
+          @abstractmethod
+          def contains(self, x: T) -> bool:
+              """Return True if x is contained in the set."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def union(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the union of two RangeSets."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def intersection(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the intersection of two RangeSets."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def difference(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the set difference self \\ other."""
+              raise NotImplementedError
+
+          @classmethod
+          def union_many(cls, sets: Iterable["RangeSet[T]"]) -> "RangeSet[T]":
+              """Return the union of many RangeSets."""
+              result: RangeSet[T] = cls.empty()
+              for s in sets:
+                  result = result.union(s)
+              return result
+
+          @abstractmethod
+          def to_ranges(self) -> List[Tuple[T]]:
+              """Returns the intervals as a list of lists for JSON serialization."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def to_indices(self) -> List[T]:
+              """Returns the elements of the set as a list."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def from_json(cls, data: List[List[T]]) -> "RangeSet[T]":
+              """Creates a RangeSet from a list of [start, end] lists (JSON format)."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def to_json(self) -> List[List[T]]:
+              """Converts the RangeSet to a list of [start, end] lists (JSON format)."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def from_ranges(cls, ranges: List[List[T]]) -> "RangeSet[T]":
+              """Creates a RangeSet from a list of [start, end] lists."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def from_indices(cls, indices: Iterable[T]) -> "RangeSet[T]":
+              """Creates a RangeSet from an iterable of individual indices."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def empty(cls) -> "RangeSet[T]":
+              """Creates an empty RangeSet."""
+              raise NotImplementedError
+    python/aug25/range_set/rangeset_stats.py: |
+      import os
+      from typing import Callable, Any
+
+      PROFILING_ENABLED = os.environ.get('RANGESET_PROFILING', '0') == '1'
+
+      if PROFILING_ENABLED:
+          import time
+          import collections
+
+          # Wall-time per labeled operation
+          RANGESET_STATS = collections.defaultdict(float)   # label -> seconds
+          # Call counts per labeled operation
+          RANGESET_CALLS = collections.defaultdict(int)     # label -> calls
+          # Additional numeric metrics (sums/counters); keys are arbitrary metric names
+          RANGESET_METRICS = collections.defaultdict(float) # metric_name -> value
+
+          def reset_rangeset_stats() -> None:
+              RANGESET_STATS.clear()
+              RANGESET_CALLS.clear()
+              RANGESET_METRICS.clear()
+
+          def record_metric(name: str, value: float = 1.0) -> None:
+              RANGESET_METRICS[name] += float(value)
+
+          def time_method(func: Callable) -> Callable:
+              """
+              Decorator for instance methods; label includes the runtime class name.
+              """
+              def wrapper(*args, **kwargs):
+                  # Expecting instance method, so args[0] is self
+                  self = args[0] if args else None
+                  cls_name = type(self).__name__ if self is not None else "<unknown>"
+                  label = f"{cls_name}.{func.__name__}"
+                  t0 = time.time()
+                  try:
+                      return func(*args, **kwargs)
+                  finally:
+                      RANGESET_STATS[label] += time.time() - t0
+                      RANGESET_CALLS[label] += 1
+              return wrapper
+
+          def time_func(label: str) -> Callable[[Callable], Callable]:
+              """
+              Decorator for static functions or for forcing a specific label.
+              """
+              def deco(func: Callable) -> Callable:
+                  def wrapper(*args, **kwargs):
+                      t0 = time.time()
+                      try:
+                          return func(*args, **kwargs)
+                      finally:
+                          RANGESET_STATS[label] += time.time() - t0
+                          RANGESET_CALLS[label] += 1
+                  return wrapper
+              return deco
+
+          def print_rangeset_stats() -> None:
+              print("\n--- RangeSet stats ---")
+              total_time = sum(RANGESET_STATS.values())
+              # Times and calls
+              for label in sorted(RANGESET_STATS.keys()):
+                  v = RANGESET_STATS[label]
+                  calls = RANGESET_CALLS.get(label, 0)
+                  if total_time > 1e-6:
+                      print(f"t_{label:<30}: {v:8.4f}s ({v/total_time*100:5.1f}%) | calls: {calls}")
+                  else:
+                      print(f"t_{label:<30}: {v:8.4f}s | calls: {calls}")
+              # Additional metrics
+              if RANGESET_METRICS:
+                  print("\nRangeSet metrics (sums/counters):")
+                  for k in sorted(RANGESET_METRICS.keys()):
+                      v = RANGESET_METRICS[k]
+                      # print ints where applicable
+                      if abs(v - int(v)) < 1e-9:
+                          print(f"{k:<35}: {int(v)}")
+                      else:
+                          print(f"{k:<35}: {v:.4f}")
+              print("----------------------\n")
+
+      else:
+          # No-op versions for when profiling is disabled.
+          def reset_rangeset_stats() -> None:
+              pass
+
+          def record_metric(name: str, value: float = 1.0) -> None:
+              pass
+
+          def time_method(func: Callable) -> Callable:
+              return func
+
+          def time_func(label: str) -> Callable[[Callable], Callable]:
+              def deco(func: Callable) -> Callable:
+                  return func
+              return deco
+
+          def print_rangeset_stats() -> None:
+              print("\n--- RangeSet stats (profiling disabled) ---\n")
+    python/aug25/range_set/roaring_range_set.py: |
+      from __future__ import annotations
+      from typing import Iterable, Optional, Tuple, List
+
+      try:
+          from pyroaring import BitMap as RoaringBitmap
+      except ImportError:
+          raise ImportError("RoaringRangeSet requires the 'roaringbitmap' library. Please install it with 'pip install pyroaring'.")
+
+      from .range_set_abc import RangeSet
+
+
+      class RoaringRangeSet(RangeSet[int]):
+          """
+          A RangeSet implementation backed by the 'roaringbitmap' library.
+          This implementation is very fast and memory-efficient, especially for sparse sets.
+          It only supports non-negative integers.
+          """
+          __slots__ = ('_rb',)
+
+          def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
+              self._rb = RoaringBitmap()
+              if intervals:
+                  for start, end in intervals:
+                      if start < 0:
+                          raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                      # RoaringBitmap.add_range is [start, end)
+                      self._rb.add_range(start, end + 1)
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              # This is not the most efficient way, but it's correct.
+              # It leverages the logic from other implementations.
+              indices = list(self._rb)
+              if not indices:
+                  return tuple()
+              
+              intervals: List[Tuple[int, int]] = []
+              start = indices[0]
+              prev = start
+              for i in indices[1:]:
+                  if i == prev + 1:
+                      prev = i
+                  else:
+                      intervals.append((start, prev))
+                      start = i
+                      prev = i
+              intervals.append((start, prev))
+              return tuple(intervals)
+
+          def to_ranges(self) -> List[Tuple[int]]:
+              return list(self.intervals)
+
+          def to_indices(self) -> List[int]:
+              return list(self._rb)
+
+          def contains(self, x: int) -> bool:
+              if x < 0:
+                  return False
+              return x in self._rb
+
+          def _new_from_rb(self, rb: RoaringBitmap) -> "RoaringRangeSet":
+              new_set = RoaringRangeSet()
+              new_set._rb = rb
+              return new_set
+
+          def union(self, other: RangeSet[int]) -> "RoaringRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+
+              if isinstance(other, RoaringRangeSet):
+                  return self._new_from_rb(self._rb | other._rb)
+              else:
+                  # Generic path
+                  other_rb = RoaringBitmap()
+                  for start, end in other.intervals:
+                      if start < 0:
+                          raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                      other_rb.add_range(start, end + 1)
+                  return self._new_from_rb(self._rb | other_rb)
+
+          def intersection(self, other: RangeSet[int]) -> "RoaringRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+
+              if isinstance(other, RoaringRangeSet):
+                  return self._new_from_rb(self._rb & other._rb)
+              else:
+                  # Generic path
+                  other_rb = RoaringBitmap()
+                  for start, end in other.intervals:
+                      if start < 0:
+                          raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                      other_rb.add_range(start, end + 1)
+                  return self._new_from_rb(self._rb & other_rb)
+
+          def difference(self, other: RangeSet[int]) -> "RoaringRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+
+              if isinstance(other, RoaringRangeSet):
+                  return self._new_from_rb(self._rb - other._rb)
+              else:
+                  # Generic path
+                  other_rb = RoaringBitmap()
+                  for start, end in other.intervals:
+                      if start < 0:
+                          raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                      other_rb.add_range(start, end + 1)
+                  return self._new_from_rb(self._rb - other_rb)
+
+          def is_empty(self) -> bool:
+              return len(self._rb) == 0
+
+          def __len__(self) -> int:
+              return len(self._rb)
+
+          def __repr__(self) -> str:
+              return f"RoaringRangeSet({self.intervals!r})"
+
+          def __eq__(self, other) -> bool:
+              if isinstance(other, RoaringRangeSet):
+                  return self._rb == other._rb
+              if isinstance(other, RangeSet):
+                  return self.intervals == other.intervals
+              return NotImplemented
+
+          def __hash__(self) -> int:
+              # RoaringBitmap is not hashable.
+              return hash(self.intervals)
+
+          @classmethod
+          def from_ranges(cls, ranges: List[List[int]]) -> 'RoaringRangeSet':
+              return cls(iter(map(tuple, ranges)))
+
+          @classmethod
+          def from_indices(cls, indices: Iterable[int]) -> 'RoaringRangeSet':
+              if any(i < 0 for i in indices):
+                  raise ValueError("RoaringRangeSet only supports non-negative integers.")
+              
+              new_set = cls()
+              new_set._rb = RoaringBitmap(indices)
+              return new_set
+
+          @classmethod
+          def empty(cls) -> 'RoaringRangeSet':
+              return cls()
+
+          @classmethod
+          def from_json(cls, data: List[List[int]]) -> 'RoaringRangeSet':
+              return cls.from_ranges(data)
+
+          def to_json(self) -> List[List[int]]:
+              return [list(r) for r in self.intervals]
+  prev_file_contents:
+    python/aug25/range_set/__init__.py: |+
+      from .py_range_set import PyRangeSet
+      from .ffi_range_set import FFIRangeSet
+      from .bitset_range_set import BitsetRangeSet
+      from .roaring_range_set import RoaringRangeSet
+
+      # RangeSet = PyRangeSet
+      RangeSet = FFIRangeSet
+
+      __all__ = ["RangeSet", "PyRangeSet", "FFIRangeSet", "BitsetRangeSet", "RoaringRangeSet"]
+
+    python/aug25/range_set/bitset_range_set.py: |
+      from __future__ import annotations
+      from typing import Iterable, Optional, Tuple, List
+
+      from .range_set_abc import RangeSet
+      from .py_range_set import PyRangeSet
+
+      BIT_COUNTS = tuple(bin(i).count('1') for i in range(256))
+
+      class BitsetRangeSet(RangeSet[int]):
+          """
+          Represents a set of non-negative integers using a bitset.
+          Implements the generic RangeSet[int] interface.
+          This implementation is efficient for dense sets within a small range of integers.
+          """
+          __slots__ = ('_bitset', '_len')
+
+          def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
+              if not intervals:
+                  self._bitset = bytearray()
+                  self._len = 0
+                  return
+
+              # Using PyRangeSet's logic to handle unsorted/overlapping intervals
+              normalized_intervals = PyRangeSet._normalize(intervals)
+
+              if not normalized_intervals:
+                  self._bitset = bytearray()
+                  self._len = 0
+                  return
+
+              max_val = normalized_intervals[-1][1]
+              if max_val < 0:
+                  raise ValueError("BitsetRangeSet only supports non-negative integers.")
+
+              size = (max_val // 8) + 1
+              self._bitset = bytearray(size)
+
+              for start, end in normalized_intervals:
+                  if start < 0:
+                      raise ValueError("BitsetRangeSet only supports non-negative integers.")
+                  
+                  start_byte = start // 8
+                  start_bit = start % 8
+                  end_byte = end // 8
+                  end_bit = end % 8
+
+                  if start_byte == end_byte:
+                      mask = (0xff >> (8 - (end_bit - start_bit + 1))) << start_bit
+                      self._bitset[start_byte] |= mask
+                  else:
+                      # First byte
+                      self._bitset[start_byte] |= (0xff << start_bit) & 0xff
+                      # Middle bytes
+                      for i in range(start_byte + 1, end_byte):
+                          self._bitset[i] = 0xff
+                      # Last byte
+                      self._bitset[end_byte] |= (0xff >> (7 - end_bit))
+              
+              self._len = sum(BIT_COUNTS[byte] for byte in self._bitset)
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              # This is not efficient, but it is correct.
+              # A more performant implementation would scan bits directly.
+              return PyRangeSet.from_indices(self.to_indices()).intervals
+
+          def to_ranges(self) -> List[Tuple[int]]:
+              return list(self.intervals)
+
+          def to_indices(self) -> List[int]:
+              indices = []
+              for i in range(len(self._bitset) * 8):
+                  byte_idx = i // 8
+                  bit_idx = i % 8
+                  if (self._bitset[byte_idx] >> bit_idx) & 1:
+                      indices.append(i)
+              return indices
+
+          def iter_indices(self) -> Iterable[int]:
+              """Iterates over all individual indices in the set."""
+              for byte_idx, byte in enumerate(self._bitset):
+                  if byte == 0:
+                      continue
+                  for bit_idx in range(8):
+                      if (byte >> bit_idx) & 1:
+                          yield (byte_idx * 8) + bit_idx
+
+          def contains(self, x: int) -> bool:
+              if x < 0:
+                  return False
+              byte_idx = x // 8
+              if byte_idx >= len(self._bitset):
+                  return False
+              bit_idx = x % 8
+              return (self._bitset[byte_idx] >> bit_idx) & 1 != 0
+
+          def union(self, other: RangeSet[int]) -> "BitsetRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              
+              if isinstance(other, BitsetRangeSet):
+                  len_a = len(self._bitset)
+                  len_b = len(other._bitset)
+                  new_len = max(len_a, len_b)
+                  new_bitset = bytearray(new_len)
+                  
+                  new_bitset[:len_a] = self._bitset
+                  
+                  for i in range(len_b):
+                      new_bitset[i] |= other._bitset[i]
+                      
+                  res = BitsetRangeSet()
+                  res._bitset = new_bitset
+                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
+                  return res
+              else:
+                  # Generic path for other RangeSet types
+                  return BitsetRangeSet(self.intervals + other.intervals)
+
+          def intersection(self, other: RangeSet[int]) -> "BitsetRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              
+              if isinstance(other, BitsetRangeSet):
+                  len_a = len(self._bitset)
+                  len_b = len(other._bitset)
+                  new_len = min(len_a, len_b)
+                  new_bitset = bytearray(new_len)
+                  
+                  for i in range(new_len):
+                      new_bitset[i] = self._bitset[i] & other._bitset[i]
+                      
+                  res = BitsetRangeSet()
+                  res._bitset = new_bitset
+                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
+                  return res
+              else:
+                  # Generic path
+                  py_self = PyRangeSet(self.intervals)
+                  intersected = py_self.intersection(other)
+                  return BitsetRangeSet(intersected.intervals)
+
+          def difference(self, other: RangeSet[int]) -> "BitsetRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              
+              if isinstance(other, BitsetRangeSet):
+                  len_a = len(self._bitset)
+                  len_b = len(other._bitset)
+                  new_bitset = self._bitset[:]
+                  
+                  limit = min(len_a, len_b)
+                  for i in range(limit):
+                      new_bitset[i] &= ~other._bitset[i]
+                      
+                  res = BitsetRangeSet()
+                  res._bitset = new_bitset
+                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
+                  return res
+              else:
+                  py_self = PyRangeSet(self.intervals)
+                  differenced = py_self.difference(other)
+                  return BitsetRangeSet(differenced.intervals)
+
+          def is_empty(self) -> bool:
+              return self._len == 0
+
+          def __len__(self) -> int:
+              return self._len
+
+          def __repr__(self) -> str:
+              return f"BitsetRangeSet({self.intervals!r})"
+
+          def __eq__(self, other) -> bool:
+              if isinstance(other, BitsetRangeSet):
+                  a, b = self._bitset, other._bitset
+                  if len(a) > len(b):
+                      a, b = b, a
+                  
+                  if a != b[:len(a)]:
+                      return False
+                  
+                  for i in range(len(a), len(b)):
+                      if b[i] != 0:
+                          return False
+                  return True
+
+              if isinstance(other, RangeSet):
+                  return self.intervals == other.intervals
+              return NotImplemented
+
+          def __hash__(self) -> int:
+              return hash(self.intervals)
+
+          @classmethod
+          def from_ranges(cls, ranges: List[List[int]]) -> 'BitsetRangeSet':
+              return cls(iter(map(tuple, ranges)))
+
+          @classmethod
+          def from_indices(cls, indices: Iterable[int]) -> 'BitsetRangeSet':
+              indices = list(indices)
+              if not indices:
+                  return cls()
+              
+              if any(i < 0 for i in indices):
+                  raise ValueError("BitsetRangeSet only supports non-negative integers.")
+              
+              max_val = max(indices)
+              
+              size = (max_val // 8) + 1
+              bitset = bytearray(size)
+              
+              unique_indices = set(indices)
+              for i in unique_indices:
+                  byte_idx = i // 8
+                  bit_idx = i % 8
+                  bitset[byte_idx] |= (1 << bit_idx)
+                  
+              res = cls()
+              res._bitset = bitset
+              res._len = len(unique_indices)
+              return res
+
+          @classmethod
+          def empty(cls) -> 'BitsetRangeSet':
+              return cls()
+
+          @classmethod
+          def from_json(cls, data: List[List[int]]) -> 'BitsetRangeSet':
+              return cls.from_ranges(data)
+
+          def to_json(self) -> List[List[int]]:
+              return [list(r) for r in self.intervals]
+    python/aug25/range_set/ffi_range_set.py: |
+      import _sep1 as ffi
+      from typing import List, Tuple, Iterable, cast
+
+      from .range_set_abc import RangeSet
+      from .rangeset_stats import time_method, time_func, record_metric
+
+
+
+      class FFIRangeSet(RangeSet[int]):
+          """A FFIRangeSet implementation backed by the Rust ffi.Bitset."""
+
+          __slots__ = ('_bitset',)
+
+          def __init__(self, intervals: Iterable[Tuple[int, int]] = ()):
+              # ffi.Bitset.from_ranges expects a list of [start, end] lists/tuples
+              self._bitset = ffi.Bitset.from_ranges(list(intervals))
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              """Returns the intervals as a tuple of tuples."""
+              return tuple(cast(List[Tuple[int, int]], self._bitset.to_ranges()))
+
+          def to_ranges(self) -> List[Tuple[int]]:
+              """Returns the intervals as a list of lists for JSON serialization."""
+              return [tuple(r) for r in self._bitset.to_ranges()]
+
+          @time_method
+          def to_indices(self) -> List[int]:
+              """Returns the elements of the set as a list."""
+              res = self._bitset.to_indices()
+              try:
+                  record_metric('FFIRangeSet.to_indices.out_len', len(res))
+              except Exception:
+                  pass
+              return res
+
+          def iter_indices(self) -> Iterable[int]:
+              """Iterates over all individual indices in the set."""
+              for start, end in self.intervals:
+                  yield from range(start, end + 1)
+
+          @time_method
+          def contains(self, x: int) -> bool:
+              """Return True if x is contained in the set."""
+              res = self._bitset.contains(x)
+              record_metric('FFIRangeSet.contains.true' if res else 'FFIRangeSet.contains.false', 1)
+              return res
+
+          @time_method
+          def union(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the union of two RangeSets."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              try:
+                  record_metric('FFIRangeSet.union.in_len_a', len(self))
+                  record_metric('FFIRangeSet.union.in_len_b', len(other))
+              except Exception:
+                  pass
+              new_bs = self._bitset.union(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
+              try:
+                  record_metric('FFIRangeSet.union.out_len', len(res))
+              except Exception:
+                  pass
+              return res
+
+          @time_method
+          def intersection(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the intersection of two RangeSets."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              try:
+                  record_metric('FFIRangeSet.intersection.in_len_a', len(self))
+                  record_metric('FFIRangeSet.intersection.in_len_b', len(other))
+              except Exception:
+                  pass
+              new_bs = self._bitset.intersection(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
+              try:
+                  record_metric('FFIRangeSet.intersection.out_len', len(res))
+              except Exception:
+                  pass
+              return res
+
+          @time_method
+          def difference(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the set difference self \\ other."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              try:
+                  record_metric('FFIRangeSet.difference.in_len_a', len(self))
+                  record_metric('FFIRangeSet.difference.in_len_b', len(other))
+              except Exception:
+                  pass
+              new_bs = self._bitset.difference(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
+              try:
+                  record_metric('FFIRangeSet.difference.out_len', len(res))
+              except Exception:
+                  pass
+              return res
+
+          @time_method
+          def is_empty(self) -> bool:
+              res = self._bitset.is_empty()
+              record_metric('FFIRangeSet.is_empty.true' if res else 'FFIRangeSet.is_empty.false', 1)
+              return res
+
+          @time_method
+          def __len__(self) -> int:
+              v = self._bitset.len()
+              # Sum of cardinalities observed; you can divide by calls to get an average size
+              record_metric('FFIRangeSet.__len__.sum', v)
+              return v
+
+          def __repr__(self) -> str:
+              return f"FFIRangeSet.from_ranges({self.intervals!r})"
+
+          @time_method
+          def __eq__(self, other) -> bool:
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              res = self._bitset == other._bitset
+              record_metric('FFIRangeSet.__eq__.true' if res else 'FFIRangeSet.__eq__.false', 1)
+              return res
+
+          @time_method
+          def __hash__(self) -> int:
+              # The PyHybridBitset has a __hash__ method
+              h = hash(self._bitset)
+              record_metric('FFIRangeSet.__hash__', 1)
+              return h
+
+          @staticmethod
+          def _merge_unsorted(ranges: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
+              """
+              Normalizes a list of [start, end] intervals into a sorted, merged, disjoint list of pairs.
+              This can be achieved by creating a temporary FFIRangeSet.
+              """
+              # The ffi.Bitset constructor handles merging and sorting.
+              temp_rs = FFIRangeSet.from_ranges(ranges)
+              return temp_rs._bitset.to_ranges()
+
+          @staticmethod
+          @time_func('FFIRangeSet.from_ranges')
+          def from_ranges(ranges: List[List[int]]) -> 'FFIRangeSet':
+              """Creates a FFIRangeSet from a list of [start, end] lists."""
+              # return FFIRangeSet(tuple(map(tuple, ranges)))
+              self = FFIRangeSet()
+              try:
+                  record_metric('FFIRangeSet.from_ranges.in_ranges_count', len(ranges))
+              except Exception:
+                  pass
+              self._bitset = ffi.Bitset.from_ranges(ranges)
+              try:
+                  record_metric('FFIRangeSet.from_ranges.out_len', len(self))
+              except Exception:
+                  pass
+              return self
+
+          @staticmethod
+          @time_func('FFIRangeSet.from_indices')
+          def from_indices(indices: Iterable[int]) -> 'FFIRangeSet':
+              """Creates a FFIRangeSet from an iterable of individual indices."""
+              new_set = FFIRangeSet.from_ranges([])
+              # The FFI function expects a list.
+              idx_list = list(indices)
+              record_metric('FFIRangeSet.from_indices.in_len', len(idx_list))
+              new_set._bitset = ffi.Bitset.from_indices(idx_list)
+              try:
+                  record_metric('FFIRangeSet.from_indices.out_len', len(new_set))
+              except Exception:
+                  pass
+              return new_set
+
+          @staticmethod
+          @time_func('FFIRangeSet.empty')
+          def empty() -> 'FFIRangeSet':
+              """Creates an empty FFIRangeSet."""
+              record_metric('FFIRangeSet.empty.calls', 1)
+              return FFIRangeSet.from_ranges([])
+
+          @staticmethod
+          def from_json(data: List[List[int]]) -> 'FFIRangeSet':
+              return FFIRangeSet.from_ranges(tuple(map(tuple, data)))
+
+          def to_json(self) -> List[List[int]]:
+              return self.to_ranges()
+    python/aug25/range_set/py_range_set.py: |
+      from __future__ import annotations
+      from typing import Iterable, Optional, Tuple, List
+      from .range_set_abc import RangeSet
+
+      class PyRangeSet(RangeSet[int]):
+          """
+          Represents a set of integers as a sorted, disjoint list of closed intervals.
+          Implements the generic RangeSet[int] interface.
+          """
+          __slots__ = ('_intervals',)
+
+          def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
+              if intervals:
+                  self._intervals = self._normalize(intervals)
+              else:
+                  self._intervals = tuple()
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              return self._intervals
+
+          @staticmethod
+          def _normalize(intervals: Iterable[Tuple[int, int]]) -> Tuple[Tuple[int, int], ...]:
+              """
+              Normalizes a list of [start, end] intervals into a sorted, merged, disjoint tuple of pairs.
+              """
+              items = sorted(intervals)
+              if not items:
+                  return tuple()
+
+              merged: List[Tuple[int, int]] = []
+              cs, ce = items[0]
+              for ns, ne in items[1:]:
+                  if ns <= ce + 1:
+                      ce = max(ce, ne)
+                  else:
+                      merged.append((cs, ce))
+                      cs, ce = ns, ne
+              merged.append((cs, ce))
+              return tuple(merged)
+
+          @staticmethod
+          def _merge_unsorted(intervals: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
+              """
+              Same as normalize but returns a list. Used by optimizer.
+              """
+              items = sorted(intervals)
+              if not items:
+                  return []
+
+              merged: List[Tuple[int, int]] = []
+              cs, ce = items[0]
+              for ns, ne in items[1:]:
+                  if ns <= ce + 1:
+                      ce = max(ce, ne)
+                  else:
+                      merged.append((cs, ce))
+                      cs, ce = ns, ne
+              merged.append((cs, ce))
+              return merged
+
+          @staticmethod
+          def from_ranges(ranges: List[List[int]]) -> 'PyRangeSet':
+              """Creates a PyRangeSet from a list of [start, end] lists."""
+              return PyRangeSet(iter(map(tuple, ranges)))
+
+          def to_ranges(self) -> List[Tuple[int]]:
+              """Converts the PyRangeSet to a list of [start, end] lists."""
+              return [tuple(interval) for interval in self.intervals]
+
+          @staticmethod
+          def from_json(data: List[List[int]]) -> 'PyRangeSet':
+              """Creates a PyRangeSet from a list of [start, end] lists (JSON format)."""
+              return PyRangeSet(iter(map(tuple, data)))
+
+          def to_json(self) -> List[List[int]]:
+              """Converts the PyRangeSet to a list of [start, end] lists (JSON format)."""
+              return self.to_ranges()
+
+          @staticmethod
+          def from_indices(indices: Iterable[int]) -> 'PyRangeSet':
+              """Creates a PyRangeSet from an iterable of individual indices."""
+              indices_sorted = sorted(set(indices))
+              if not indices_sorted:
+                  return PyRangeSet.empty()
+              intervals: List[Tuple[int, int]] = []
+              start = indices_sorted[0]
+              prev = start
+              for i in indices_sorted[1:]:
+                  if i == prev + 1:
+                      prev = i
+                  else:
+                      intervals.append((start, prev))
+                      start = i
+                      prev = i
+              intervals.append((start, prev))
+              return PyRangeSet(intervals)
+
+          @staticmethod
+          def empty() -> 'PyRangeSet':
+              """Creates an empty PyRangeSet."""
+              return PyRangeSet()
+
+          def to_indices(self) -> List[int]:
+              """Converts the PyRangeSet to a list of individual indices."""
+              result = []
+              for start, end in self.intervals:
+                  result.extend(range(start, end + 1))
+              return result
+
+          def iter_indices(self) -> Iterable[int]:
+              """Iterates over all individual indices in the set."""
+              for start, end in self.intervals:
+                  yield from range(start, end + 1)
+
+          @staticmethod
+          def from_numpy(bv) -> 'PyRangeSet':
+              """Creates a PyRangeSet from a numpy array of booleans."""
+              intervals = []
+              in_range = False
+              start = 0
+              for i in range(len(bv)):
+                  if bv[i] and not in_range:
+                      start = i
+                      in_range = True
+                  elif not bv[i] and in_range:
+                      intervals.append((start, i - 1))
+                      in_range = False
+              if in_range:
+                  intervals.append((start, len(bv) - 1))
+              return PyRangeSet(intervals)
+
+          def __eq__(self, other):
+              if isinstance(other, PyRangeSet):
+                  return self.intervals == other.intervals
+              if isinstance(other, RangeSet):
+                  # Compare by normalized intervals for any RangeSet implementation
+                  return self.intervals == other.intervals
+              return NotImplemented
+
+          def __hash__(self):
+              return hash(self.intervals)
+
+          def __repr__(self):
+              return f"PyRangeSet({self.intervals!r})"
+
+          # New utilities for set-like operations
+          def is_empty(self) -> bool:
+              """Return True if no indices are present."""
+              return not self.intervals
+
+          def __len__(self) -> int:
+              """Return the total number of elements in the set."""
+              return sum(e - s + 1 for s, e in self._intervals)
+
+          def contains(self, x: int) -> bool:
+              """Return True if x is contained in the set."""
+              for s, e in self.intervals:
+                  if s <= x <= e:
+                      return True
+                  if x < s:
+                      return False
+              return False
+
+          def union(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+              """Return the union of two RangeSets."""
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              if self.is_empty():
+                  return PyRangeSet(other.intervals)
+              if other.is_empty():
+                  return self
+              return PyRangeSet(self.intervals + other.intervals)
+
+          def intersection(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+              """Return the intersection of two RangeSets."""
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              if self.is_empty() or other.is_empty():
+                  return PyRangeSet.empty()
+              a = list(self.intervals)
+              b = list(other.intervals)
+              i = j = 0
+              res: List[Tuple[int, int]] = []
+              while i < len(a) and j < len(b):
+                  s1, e1 = a[i]
+                  s2, e2 = b[j]
+                  s = max(s1, s2)
+                  e = min(e1, e2)
+                  if s <= e:
+                      res.append((s, e))
+                  if e1 < e2:
+                      i += 1
+                  else:
+                      j += 1
+              return PyRangeSet(res)
+
+          def difference(self, other: 'RangeSet[int]') -> 'PyRangeSet':
+              """Return the set difference self \\ other as a PyRangeSet."""
+              if self.is_empty():
+                  return PyRangeSet.empty()
+              if other.is_empty():
+                  return self
+              a = list(self.intervals)
+              b = list(other.intervals)
+              res: List[Tuple[int, int]] = []
+              j = 0
+              for s1, e1 in a:
+                  curr = s1
+                  while j < len(b) and b[j][1] < curr:
+                      j += 1
+                  k = j
+                  while k < len(b) and b[k][0] <= e1:
+                      s2, e2 = b[k]
+                      if s2 > curr:
+                          res.append((curr, s2 - 1))
+                      if e2 + 1 > curr:
+                          curr = e2 + 1
+                      if curr > e1:
+                          break
+                      k += 1
+                  if curr <= e1:
+                      res.append((curr, e1))
+              return PyRangeSet(res)
+    python/aug25/range_set/range_set_abc.py: |
+      from __future__ import annotations
+
+      from abc import ABC, abstractmethod
+      from typing import Generic, Iterable, List, Tuple, TypeVar
+
+      T = TypeVar("T")
+
+
+      class RangeSet(ABC, Generic[T]):
+          """
+          Abstract base class for range-based sets of comparable elements.
+          Implementations represent sets as normalized, sorted, disjoint closed intervals.
+          """
+
+          @property
+          @abstractmethod
+          def intervals(self) -> Tuple[Tuple[T, T], ...]:
+              """
+              The normalized, sorted, disjoint closed intervals representing the set.
+              Implementations should guarantee:
+              - intervals are sorted by start
+              - no overlaps and no gaps of size 0 (i.e., [a,b] and [b+1,c] should be merged where applicable)
+              """
+              raise NotImplementedError
+
+          @abstractmethod
+          def is_empty(self) -> bool:
+              """Return True if the set is empty."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def __len__(self) -> int:
+              """Return the total number of elements in the set."""
+              raise NotImplementedError
+
+          def __or__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.union(other)
+
+          def __ror__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.union(other)
+
+          def __and__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.intersection(other)
+
+          def __rand__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.intersection(other)
+
+          def __sub__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.difference(other)
+
+          def __rsub__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return other.difference(self)
+
+          def issubset(self, other: "RangeSet[T]") -> bool:
+              """Return True if self is a subset of other."""
+              return self.difference(other).is_empty()
+
+          @abstractmethod
+          def contains(self, x: T) -> bool:
+              """Return True if x is contained in the set."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def union(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the union of two RangeSets."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def intersection(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the intersection of two RangeSets."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def difference(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the set difference self \\ other."""
+              raise NotImplementedError
+
+          @classmethod
+          def union_many(cls, sets: Iterable["RangeSet[T]"]) -> "RangeSet[T]":
+              """Return the union of many RangeSets."""
+              result: RangeSet[T] = cls.empty()
+              for s in sets:
+                  result = result.union(s)
+              return result
+
+          @abstractmethod
+          def to_ranges(self) -> List[Tuple[T]]:
+              """Returns the intervals as a list of lists for JSON serialization."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def to_indices(self) -> List[T]:
+              """Returns the elements of the set as a list."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def iter_indices(self) -> Iterable[T]:
+              """Iterates over all individual indices in the set."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def from_json(cls, data: List[List[T]]) -> "RangeSet[T]":
+              """Creates a RangeSet from a list of [start, end] lists (JSON format)."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def to_json(self) -> List[List[T]]:
+              """Converts the RangeSet to a list of [start, end] lists (JSON format)."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def from_ranges(cls, ranges: List[List[T]]) -> "RangeSet[T]":
+              """Creates a RangeSet from a list of [start, end] lists."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def from_indices(cls, indices: Iterable[T]) -> "RangeSet[T]":
+              """Creates a RangeSet from an iterable of individual indices."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def empty(cls) -> "RangeSet[T]":
+              """Creates an empty RangeSet."""
+              raise NotImplementedError
+    python/aug25/range_set/rangeset_stats.py: |
+      import os
+      from typing import Callable, Any
+
+      PROFILING_ENABLED = os.environ.get('RANGESET_PROFILING', '0') == '1'
+
+      if PROFILING_ENABLED:
+          import time
+          import collections
+
+          # Wall-time per labeled operation
+          RANGESET_STATS = collections.defaultdict(float)   # label -> seconds
+          # Call counts per labeled operation
+          RANGESET_CALLS = collections.defaultdict(int)     # label -> calls
+          # Additional numeric metrics (sums/counters); keys are arbitrary metric names
+          RANGESET_METRICS = collections.defaultdict(float) # metric_name -> value
+
+          def reset_rangeset_stats() -> None:
+              RANGESET_STATS.clear()
+              RANGESET_CALLS.clear()
+              RANGESET_METRICS.clear()
+
+          def record_metric(name: str, value: float = 1.0) -> None:
+              RANGESET_METRICS[name] += float(value)
+
+          def time_method(func: Callable) -> Callable:
+              """
+              Decorator for instance methods; label includes the runtime class name.
+              """
+              def wrapper(*args, **kwargs):
+                  # Expecting instance method, so args[0] is self
+                  self = args[0] if args else None
+                  cls_name = type(self).__name__ if self is not None else "<unknown>"
+                  label = f"{cls_name}.{func.__name__}"
+                  t0 = time.time()
+                  try:
+                      return func(*args, **kwargs)
+                  finally:
+                      RANGESET_STATS[label] += time.time() - t0
+                      RANGESET_CALLS[label] += 1
+              return wrapper
+
+          def time_func(label: str) -> Callable[[Callable], Callable]:
+              """
+              Decorator for static functions or for forcing a specific label.
+              """
+              def deco(func: Callable) -> Callable:
+                  def wrapper(*args, **kwargs):
+                      t0 = time.time()
+                      try:
+                          return func(*args, **kwargs)
+                      finally:
+                          RANGESET_STATS[label] += time.time() - t0
+                          RANGESET_CALLS[label] += 1
+                  return wrapper
+              return deco
+
+          def print_rangeset_stats() -> None:
+              print("\n--- RangeSet stats ---")
+              total_time = sum(RANGESET_STATS.values())
+              # Times and calls
+              for label in sorted(RANGESET_STATS.keys()):
+                  v = RANGESET_STATS[label]
+                  calls = RANGESET_CALLS.get(label, 0)
+                  if total_time > 1e-6:
+                      print(f"t_{label:<30}: {v:8.4f}s ({v/total_time*100:5.1f}%) | calls: {calls}")
+                  else:
+                      print(f"t_{label:<30}: {v:8.4f}s | calls: {calls}")
+              # Additional metrics
+              if RANGESET_METRICS:
+                  print("\nRangeSet metrics (sums/counters):")
+                  for k in sorted(RANGESET_METRICS.keys()):
+                      v = RANGESET_METRICS[k]
+                      # print ints where applicable
+                      if abs(v - int(v)) < 1e-9:
+                          print(f"{k:<35}: {int(v)}")
+                      else:
+                          print(f"{k:<35}: {v:.4f}")
+              print("----------------------\n")
+
+      else:
+          # No-op versions for when profiling is disabled.
+          def reset_rangeset_stats() -> None:
+              pass
+
+          def record_metric(name: str, value: float = 1.0) -> None:
+              pass
+
+          def time_method(func: Callable) -> Callable:
+              return func
+
+          def time_func(label: str) -> Callable[[Callable], Callable]:
+              def deco(func: Callable) -> Callable:
+                  return func
+              return deco
+
+          def print_rangeset_stats() -> None:
+              print("\n--- RangeSet stats (profiling disabled) ---\n")
+    python/aug25/range_set/roaring_range_set.py: |
+      from __future__ import annotations
+      from typing import Iterable, Optional, Tuple, List
+
+      try:
+          from pyroaring import BitMap as RoaringBitmap
+      except ImportError:
+          raise ImportError("RoaringRangeSet requires the 'roaringbitmap' library. Please install it with 'pip install pyroaring'.")
+
+      from .range_set_abc import RangeSet
+
+
+      class RoaringRangeSet(RangeSet[int]):
+          """
+          A RangeSet implementation backed by the 'roaringbitmap' library.
+          This implementation is very fast and memory-efficient, especially for sparse sets.
+          It only supports non-negative integers.
+          """
+          __slots__ = ('_rb',)
+
+          def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
+              self._rb = RoaringBitmap()
+              if intervals:
+                  for start, end in intervals:
+                      if start < 0:
+                          raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                      # RoaringBitmap.add_range is [start, end)
+                      self._rb.add_range(start, end + 1)
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              # This is not the most efficient way, but it's correct.
+              # It leverages the logic from other implementations.
+              indices = list(self._rb)
+              if not indices:
+                  return tuple()
+              
+              intervals: List[Tuple[int, int]] = []
+              start = indices[0]
+              prev = start
+              for i in indices[1:]:
+                  if i == prev + 1:
+                      prev = i
+                  else:
+                      intervals.append((start, prev))
+                      start = i
+                      prev = i
+              intervals.append((start, prev))
+              return tuple(intervals)
+
+          def to_ranges(self) -> List[Tuple[int]]:
+              return list(self.intervals)
+
+          def to_indices(self) -> List[int]:
+              return list(self._rb)
+
+          def iter_indices(self) -> Iterable[int]:
+              """Iterates over all individual indices in the set."""
+              yield from self._rb
+
+          def contains(self, x: int) -> bool:
+              if x < 0:
+                  return False
+              return x in self._rb
+
+          def _new_from_rb(self, rb: RoaringBitmap) -> "RoaringRangeSet":
+              new_set = RoaringRangeSet()
+              new_set._rb = rb
+              return new_set
+
+          def union(self, other: RangeSet[int]) -> "RoaringRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+
+              if isinstance(other, RoaringRangeSet):
+                  return self._new_from_rb(self._rb | other._rb)
+              else:
+                  # Generic path
+                  other_rb = RoaringBitmap()
+                  for start, end in other.intervals:
+                      if start < 0:
+                          raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                      other_rb.add_range(start, end + 1)
+                  return self._new_from_rb(self._rb | other_rb)
+
+          def intersection(self, other: RangeSet[int]) -> "RoaringRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+
+              if isinstance(other, RoaringRangeSet):
+                  return self._new_from_rb(self._rb & other._rb)
+              else:
+                  # Generic path
+                  other_rb = RoaringBitmap()
+                  for start, end in other.intervals:
+                      if start < 0:
+                          raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                      other_rb.add_range(start, end + 1)
+                  return self._new_from_rb(self._rb & other_rb)
+
+          def difference(self, other: RangeSet[int]) -> "RoaringRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+
+              if isinstance(other, RoaringRangeSet):
+                  return self._new_from_rb(self._rb - other._rb)
+              else:
+                  # Generic path
+                  other_rb = RoaringBitmap()
+                  for start, end in other.intervals:
+                      if start < 0:
+                          raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                      other_rb.add_range(start, end + 1)
+                  return self._new_from_rb(self._rb - other_rb)
+
+          def is_empty(self) -> bool:
+              return len(self._rb) == 0
+
+          def __len__(self) -> int:
+              return len(self._rb)
+
+          def __repr__(self) -> str:
+              return f"RoaringRangeSet({self.intervals!r})"
+
+          def __eq__(self, other) -> bool:
+              if isinstance(other, RoaringRangeSet):
+                  return self._rb == other._rb
+              if isinstance(other, RangeSet):
+                  return self.intervals == other.intervals
+              return NotImplemented
+
+          def __hash__(self) -> int:
+              # RoaringBitmap is not hashable.
+              return hash(self.intervals)
+
+          @classmethod
+          def from_ranges(cls, ranges: List[List[int]]) -> 'RoaringRangeSet':
+              return cls(iter(map(tuple, ranges)))
+
+          @classmethod
+          def from_indices(cls, indices: Iterable[int]) -> 'RoaringRangeSet':
+              if any(i < 0 for i in indices):
+                  raise ValueError("RoaringRangeSet only supports non-negative integers.")
+              
+              new_set = cls()
+              new_set._rb = RoaringBitmap(indices)
+              return new_set
+
+          @classmethod
+          def empty(cls) -> 'RoaringRangeSet':
+              return cls()
+
+          @classmethod
+          def from_json(cls, data: List[List[int]]) -> 'RoaringRangeSet':
+              return cls.from_ranges(data)
+
+          def to_json(self) -> List[List[int]]:
+              return [list(r) for r in self.intervals]
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -463,7 +2116,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gf
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -496,6 +2149,444 @@ messages:
       kind: core-guidance
       role: developer
       ephemeral: false
+  - user: |-
+      ```python 'python/aug25/range_set/__init__.py'
+      from .py_range_set import PyRangeSet
+      from .ffi_range_set import FFIRangeSet
+      from .bitset_range_set import BitsetRangeSet
+      from .roaring_range_set import RoaringRangeSet
+
+      # RangeSet = PyRangeSet
+      RangeSet = FFIRangeSet
+
+      __all__ = ["RangeSet", "PyRangeSet", "FFIRangeSet", "BitsetRangeSet", "RoaringRangeSet"]
+
+
+      ```
+    metadata:
+      filename: python/aug25/range_set/__init__.py
+  - user: |-
+      ```python 'python/aug25/range_set/bitset_range_set.py'
+      from __future__ import annotations
+      from typing import Iterable, Optional, Tuple, List
+
+      from .range_set_abc import RangeSet
+      from .py_range_set import PyRangeSet
+
+      BIT_COUNTS = tuple(bin(i).count('1') for i in range(256))
+
+      class BitsetRangeSet(RangeSet[int]):
+          """
+          Represents a set of non-negative integers using a bitset.
+          Implements the generic RangeSet[int] interface.
+          This implementation is efficient for dense sets within a small range of integers.
+          """
+          __slots__ = ('_bitset', '_len')
+
+          def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
+              if not intervals:
+                  self._bitset = bytearray()
+                  self._len = 0
+                  return
+
+              # Using PyRangeSet's logic to handle unsorted/overlapping intervals
+              normalized_intervals = PyRangeSet._normalize(intervals)
+
+              if not normalized_intervals:
+                  self._bitset = bytearray()
+                  self._len = 0
+                  return
+
+              max_val = normalized_intervals[-1][1]
+              if max_val < 0:
+                  raise ValueError("BitsetRangeSet only supports non-negative integers.")
+
+              size = (max_val // 8) + 1
+              self._bitset = bytearray(size)
+
+              for start, end in normalized_intervals:
+                  if start < 0:
+                      raise ValueError("BitsetRangeSet only supports non-negative integers.")
+                  
+                  start_byte = start // 8
+                  start_bit = start % 8
+                  end_byte = end // 8
+                  end_bit = end % 8
+
+                  if start_byte == end_byte:
+                      mask = (0xff >> (8 - (end_bit - start_bit + 1))) << start_bit
+                      self._bitset[start_byte] |= mask
+                  else:
+                      # First byte
+                      self._bitset[start_byte] |= (0xff << start_bit) & 0xff
+                      # Middle bytes
+                      for i in range(start_byte + 1, end_byte):
+                          self._bitset[i] = 0xff
+                      # Last byte
+                      self._bitset[end_byte] |= (0xff >> (7 - end_bit))
+              
+              self._len = sum(BIT_COUNTS[byte] for byte in self._bitset)
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              # This is not efficient, but it is correct.
+              # A more performant implementation would scan bits directly.
+              return PyRangeSet.from_indices(self.to_indices()).intervals
+
+          def to_ranges(self) -> List[Tuple[int]]:
+              return list(self.intervals)
+
+          def to_indices(self) -> List[int]:
+              indices = []
+              for i in range(len(self._bitset) * 8):
+                  byte_idx = i // 8
+                  bit_idx = i % 8
+                  if (self._bitset[byte_idx] >> bit_idx) & 1:
+                      indices.append(i)
+              return indices
+
+          def contains(self, x: int) -> bool:
+              if x < 0:
+                  return False
+              byte_idx = x // 8
+              if byte_idx >= len(self._bitset):
+                  return False
+              bit_idx = x % 8
+              return (self._bitset[byte_idx] >> bit_idx) & 1 != 0
+
+          def union(self, other: RangeSet[int]) -> "BitsetRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              
+              if isinstance(other, BitsetRangeSet):
+                  len_a = len(self._bitset)
+                  len_b = len(other._bitset)
+                  new_len = max(len_a, len_b)
+                  new_bitset = bytearray(new_len)
+                  
+                  new_bitset[:len_a] = self._bitset
+                  
+                  for i in range(len_b):
+                      new_bitset[i] |= other._bitset[i]
+                      
+                  res = BitsetRangeSet()
+                  res._bitset = new_bitset
+                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
+                  return res
+              else:
+                  # Generic path for other RangeSet types
+                  return BitsetRangeSet(self.intervals + other.intervals)
+
+          def intersection(self, other: RangeSet[int]) -> "BitsetRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              
+              if isinstance(other, BitsetRangeSet):
+                  len_a = len(self._bitset)
+                  len_b = len(other._bitset)
+                  new_len = min(len_a, len_b)
+                  new_bitset = bytearray(new_len)
+                  
+                  for i in range(new_len):
+                      new_bitset[i] = self._bitset[i] & other._bitset[i]
+                      
+                  res = BitsetRangeSet()
+                  res._bitset = new_bitset
+                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
+                  return res
+              else:
+                  # Generic path
+                  py_self = PyRangeSet(self.intervals)
+                  intersected = py_self.intersection(other)
+                  return BitsetRangeSet(intersected.intervals)
+
+          def difference(self, other: RangeSet[int]) -> "BitsetRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+              
+              if isinstance(other, BitsetRangeSet):
+                  len_a = len(self._bitset)
+                  len_b = len(other._bitset)
+                  new_bitset = self._bitset[:]
+                  
+                  limit = min(len_a, len_b)
+                  for i in range(limit):
+                      new_bitset[i] &= ~other._bitset[i]
+                      
+                  res = BitsetRangeSet()
+                  res._bitset = new_bitset
+                  res._len = sum(BIT_COUNTS[byte] for byte in new_bitset)
+                  return res
+              else:
+                  py_self = PyRangeSet(self.intervals)
+                  differenced = py_self.difference(other)
+                  return BitsetRangeSet(differenced.intervals)
+
+          def is_empty(self) -> bool:
+              return self._len == 0
+
+          def __len__(self) -> int:
+              return self._len
+
+          def __repr__(self) -> str:
+              return f"BitsetRangeSet({self.intervals!r})"
+
+          def __eq__(self, other) -> bool:
+              if isinstance(other, BitsetRangeSet):
+                  a, b = self._bitset, other._bitset
+                  if len(a) > len(b):
+                      a, b = b, a
+                  
+                  if a != b[:len(a)]:
+                      return False
+                  
+                  for i in range(len(a), len(b)):
+                      if b[i] != 0:
+                          return False
+                  return True
+
+              if isinstance(other, RangeSet):
+                  return self.intervals == other.intervals
+              return NotImplemented
+
+          def __hash__(self) -> int:
+              return hash(self.intervals)
+
+          @classmethod
+          def from_ranges(cls, ranges: List[List[int]]) -> 'BitsetRangeSet':
+              return cls(iter(map(tuple, ranges)))
+
+          @classmethod
+          def from_indices(cls, indices: Iterable[int]) -> 'BitsetRangeSet':
+              indices = list(indices)
+              if not indices:
+                  return cls()
+              
+              if any(i < 0 for i in indices):
+                  raise ValueError("BitsetRangeSet only supports non-negative integers.")
+              
+              max_val = max(indices)
+              
+              size = (max_val // 8) + 1
+              bitset = bytearray(size)
+              
+              unique_indices = set(indices)
+              for i in unique_indices:
+                  byte_idx = i // 8
+                  bit_idx = i % 8
+                  bitset[byte_idx] |= (1 << bit_idx)
+                  
+              res = cls()
+              res._bitset = bitset
+              res._len = len(unique_indices)
+              return res
+
+          @classmethod
+          def empty(cls) -> 'BitsetRangeSet':
+              return cls()
+
+          @classmethod
+          def from_json(cls, data: List[List[int]]) -> 'BitsetRangeSet':
+              return cls.from_ranges(data)
+
+          def to_json(self) -> List[List[int]]:
+              return [list(r) for r in self.intervals]
+
+      ```
+    metadata:
+      filename: python/aug25/range_set/bitset_range_set.py
+  - user: |-
+      ```python 'python/aug25/range_set/ffi_range_set.py'
+      import _sep1 as ffi
+      from typing import List, Tuple, Iterable, cast
+
+      from .range_set_abc import RangeSet
+      from .rangeset_stats import time_method, time_func, record_metric
+
+
+
+      class FFIRangeSet(RangeSet[int]):
+          """A FFIRangeSet implementation backed by the Rust ffi.Bitset."""
+
+          __slots__ = ('_bitset',)
+
+          def __init__(self, intervals: Iterable[Tuple[int, int]] = ()):
+              # ffi.Bitset.from_ranges expects a list of [start, end] lists/tuples
+              self._bitset = ffi.Bitset.from_ranges(list(intervals))
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              """Returns the intervals as a tuple of tuples."""
+              return tuple(cast(List[Tuple[int, int]], self._bitset.to_ranges()))
+
+          def to_ranges(self) -> List[Tuple[int]]:
+              """Returns the intervals as a list of lists for JSON serialization."""
+              return [tuple(r) for r in self._bitset.to_ranges()]
+
+          @time_method
+          def to_indices(self) -> List[int]:
+              """Returns the elements of the set as a list."""
+              res = self._bitset.to_indices()
+              try:
+                  record_metric('FFIRangeSet.to_indices.out_len', len(res))
+              except Exception:
+                  pass
+              return res
+
+          @time_method
+          def contains(self, x: int) -> bool:
+              """Return True if x is contained in the set."""
+              res = self._bitset.contains(x)
+              record_metric('FFIRangeSet.contains.true' if res else 'FFIRangeSet.contains.false', 1)
+              return res
+
+          @time_method
+          def union(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the union of two RangeSets."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              try:
+                  record_metric('FFIRangeSet.union.in_len_a', len(self))
+                  record_metric('FFIRangeSet.union.in_len_b', len(other))
+              except Exception:
+                  pass
+              new_bs = self._bitset.union(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
+              try:
+                  record_metric('FFIRangeSet.union.out_len', len(res))
+              except Exception:
+                  pass
+              return res
+
+          @time_method
+          def intersection(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the intersection of two RangeSets."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              try:
+                  record_metric('FFIRangeSet.intersection.in_len_a', len(self))
+                  record_metric('FFIRangeSet.intersection.in_len_b', len(other))
+              except Exception:
+                  pass
+              new_bs = self._bitset.intersection(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
+              try:
+                  record_metric('FFIRangeSet.intersection.out_len', len(res))
+              except Exception:
+                  pass
+              return res
+
+          @time_method
+          def difference(self, other: RangeSet[int]) -> "FFIRangeSet":
+              """Return the set difference self \\ other."""
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              try:
+                  record_metric('FFIRangeSet.difference.in_len_a', len(self))
+                  record_metric('FFIRangeSet.difference.in_len_b', len(other))
+              except Exception:
+                  pass
+              new_bs = self._bitset.difference(other._bitset)
+              res = FFIRangeSet()
+              res._bitset = new_bs
+              try:
+                  record_metric('FFIRangeSet.difference.out_len', len(res))
+              except Exception:
+                  pass
+              return res
+
+          @time_method
+          def is_empty(self) -> bool:
+              res = self._bitset.is_empty()
+              record_metric('FFIRangeSet.is_empty.true' if res else 'FFIRangeSet.is_empty.false', 1)
+              return res
+
+          @time_method
+          def __len__(self) -> int:
+              v = self._bitset.len()
+              # Sum of cardinalities observed; you can divide by calls to get an average size
+              record_metric('FFIRangeSet.__len__.sum', v)
+              return v
+
+          def __repr__(self) -> str:
+              return f"FFIRangeSet.from_ranges({self.intervals!r})"
+
+          @time_method
+          def __eq__(self, other) -> bool:
+              if not isinstance(other, FFIRangeSet):
+                  raise TypeError("other must be a FFIRangeSet")
+              res = self._bitset == other._bitset
+              record_metric('FFIRangeSet.__eq__.true' if res else 'FFIRangeSet.__eq__.false', 1)
+              return res
+
+          @time_method
+          def __hash__(self) -> int:
+              # The PyHybridBitset has a __hash__ method
+              h = hash(self._bitset)
+              record_metric('FFIRangeSet.__hash__', 1)
+              return h
+
+          @staticmethod
+          def _merge_unsorted(ranges: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
+              """
+              Normalizes a list of [start, end] intervals into a sorted, merged, disjoint list of pairs.
+              This can be achieved by creating a temporary FFIRangeSet.
+              """
+              # The ffi.Bitset constructor handles merging and sorting.
+              temp_rs = FFIRangeSet.from_ranges(ranges)
+              return temp_rs._bitset.to_ranges()
+
+          @staticmethod
+          @time_func('FFIRangeSet.from_ranges')
+          def from_ranges(ranges: List[List[int]]) -> 'FFIRangeSet':
+              """Creates a FFIRangeSet from a list of [start, end] lists."""
+              # return FFIRangeSet(tuple(map(tuple, ranges)))
+              self = FFIRangeSet()
+              try:
+                  record_metric('FFIRangeSet.from_ranges.in_ranges_count', len(ranges))
+              except Exception:
+                  pass
+              self._bitset = ffi.Bitset.from_ranges(ranges)
+              try:
+                  record_metric('FFIRangeSet.from_ranges.out_len', len(self))
+              except Exception:
+                  pass
+              return self
+
+          @staticmethod
+          @time_func('FFIRangeSet.from_indices')
+          def from_indices(indices: Iterable[int]) -> 'FFIRangeSet':
+              """Creates a FFIRangeSet from an iterable of individual indices."""
+              new_set = FFIRangeSet.from_ranges([])
+              # The FFI function expects a list.
+              idx_list = list(indices)
+              record_metric('FFIRangeSet.from_indices.in_len', len(idx_list))
+              new_set._bitset = ffi.Bitset.from_indices(idx_list)
+              try:
+                  record_metric('FFIRangeSet.from_indices.out_len', len(new_set))
+              except Exception:
+                  pass
+              return new_set
+
+          @staticmethod
+          @time_func('FFIRangeSet.empty')
+          def empty() -> 'FFIRangeSet':
+              """Creates an empty FFIRangeSet."""
+              record_metric('FFIRangeSet.empty.calls', 1)
+              return FFIRangeSet.from_ranges([])
+
+          @staticmethod
+          def from_json(data: List[List[int]]) -> 'FFIRangeSet':
+              return FFIRangeSet.from_ranges(tuple(map(tuple, data)))
+
+          def to_json(self) -> List[List[int]]:
+              return self.to_ranges()
+
+      ```
+    metadata:
+      filename: python/aug25/range_set/ffi_range_set.py
   - user: |-
       ```python 'python/aug25/range_set/py_range_set.py'
       from __future__ import annotations
@@ -609,7 +2700,9 @@ messages:
               return result
 
           def iter_indices(self) -> Iterable[int]:
-              ...
+              """Iterates over all individual indices in the set."""
+              for start, end in self.intervals:
+                  yield from range(start, end + 1)
 
           @staticmethod
           def from_numpy(bv) -> 'PyRangeSet':
@@ -724,7 +2817,410 @@ messages:
       ```
     metadata:
       filename: python/aug25/range_set/py_range_set.py
-  - user: Complete iter_indices
+  - user: |-
+      ```python 'python/aug25/range_set/range_set_abc.py'
+      from __future__ import annotations
+
+      from abc import ABC, abstractmethod
+      from typing import Generic, Iterable, List, Tuple, TypeVar
+
+      T = TypeVar("T")
+
+
+      class RangeSet(ABC, Generic[T]):
+          """
+          Abstract base class for range-based sets of comparable elements.
+          Implementations represent sets as normalized, sorted, disjoint closed intervals.
+          """
+
+          @property
+          @abstractmethod
+          def intervals(self) -> Tuple[Tuple[T, T], ...]:
+              """
+              The normalized, sorted, disjoint closed intervals representing the set.
+              Implementations should guarantee:
+              - intervals are sorted by start
+              - no overlaps and no gaps of size 0 (i.e., [a,b] and [b+1,c] should be merged where applicable)
+              """
+              raise NotImplementedError
+
+          @abstractmethod
+          def is_empty(self) -> bool:
+              """Return True if the set is empty."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def __len__(self) -> int:
+              """Return the total number of elements in the set."""
+              raise NotImplementedError
+
+          def __or__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.union(other)
+
+          def __ror__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.union(other)
+
+          def __and__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.intersection(other)
+
+          def __rand__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.intersection(other)
+
+          def __sub__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return self.difference(other)
+
+          def __rsub__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              if other is None:
+                  return self
+              return other.difference(self)
+
+          def issubset(self, other: "RangeSet[T]") -> bool:
+              """Return True if self is a subset of other."""
+              return self.difference(other).is_empty()
+
+          @abstractmethod
+          def contains(self, x: T) -> bool:
+              """Return True if x is contained in the set."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def union(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the union of two RangeSets."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def intersection(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the intersection of two RangeSets."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def difference(self, other: "RangeSet[T]") -> "RangeSet[T]":
+              """Return the set difference self \\ other."""
+              raise NotImplementedError
+
+          @classmethod
+          def union_many(cls, sets: Iterable["RangeSet[T]"]) -> "RangeSet[T]":
+              """Return the union of many RangeSets."""
+              result: RangeSet[T] = cls.empty()
+              for s in sets:
+                  result = result.union(s)
+              return result
+
+          @abstractmethod
+          def to_ranges(self) -> List[Tuple[T]]:
+              """Returns the intervals as a list of lists for JSON serialization."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def to_indices(self) -> List[T]:
+              """Returns the elements of the set as a list."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def from_json(cls, data: List[List[T]]) -> "RangeSet[T]":
+              """Creates a RangeSet from a list of [start, end] lists (JSON format)."""
+              raise NotImplementedError
+
+          @abstractmethod
+          def to_json(self) -> List[List[T]]:
+              """Converts the RangeSet to a list of [start, end] lists (JSON format)."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def from_ranges(cls, ranges: List[List[T]]) -> "RangeSet[T]":
+              """Creates a RangeSet from a list of [start, end] lists."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def from_indices(cls, indices: Iterable[T]) -> "RangeSet[T]":
+              """Creates a RangeSet from an iterable of individual indices."""
+              raise NotImplementedError
+
+          @classmethod
+          @abstractmethod
+          def empty(cls) -> "RangeSet[T]":
+              """Creates an empty RangeSet."""
+              raise NotImplementedError
+
+      ```
+    metadata:
+      filename: python/aug25/range_set/range_set_abc.py
+  - user: |-
+      ```python 'python/aug25/range_set/rangeset_stats.py'
+      import os
+      from typing import Callable, Any
+
+      PROFILING_ENABLED = os.environ.get('RANGESET_PROFILING', '0') == '1'
+
+      if PROFILING_ENABLED:
+          import time
+          import collections
+
+          # Wall-time per labeled operation
+          RANGESET_STATS = collections.defaultdict(float)   # label -> seconds
+          # Call counts per labeled operation
+          RANGESET_CALLS = collections.defaultdict(int)     # label -> calls
+          # Additional numeric metrics (sums/counters); keys are arbitrary metric names
+          RANGESET_METRICS = collections.defaultdict(float) # metric_name -> value
+
+          def reset_rangeset_stats() -> None:
+              RANGESET_STATS.clear()
+              RANGESET_CALLS.clear()
+              RANGESET_METRICS.clear()
+
+          def record_metric(name: str, value: float = 1.0) -> None:
+              RANGESET_METRICS[name] += float(value)
+
+          def time_method(func: Callable) -> Callable:
+              """
+              Decorator for instance methods; label includes the runtime class name.
+              """
+              def wrapper(*args, **kwargs):
+                  # Expecting instance method, so args[0] is self
+                  self = args[0] if args else None
+                  cls_name = type(self).__name__ if self is not None else "<unknown>"
+                  label = f"{cls_name}.{func.__name__}"
+                  t0 = time.time()
+                  try:
+                      return func(*args, **kwargs)
+                  finally:
+                      RANGESET_STATS[label] += time.time() - t0
+                      RANGESET_CALLS[label] += 1
+              return wrapper
+
+          def time_func(label: str) -> Callable[[Callable], Callable]:
+              """
+              Decorator for static functions or for forcing a specific label.
+              """
+              def deco(func: Callable) -> Callable:
+                  def wrapper(*args, **kwargs):
+                      t0 = time.time()
+                      try:
+                          return func(*args, **kwargs)
+                      finally:
+                          RANGESET_STATS[label] += time.time() - t0
+                          RANGESET_CALLS[label] += 1
+                  return wrapper
+              return deco
+
+          def print_rangeset_stats() -> None:
+              print("\n--- RangeSet stats ---")
+              total_time = sum(RANGESET_STATS.values())
+              # Times and calls
+              for label in sorted(RANGESET_STATS.keys()):
+                  v = RANGESET_STATS[label]
+                  calls = RANGESET_CALLS.get(label, 0)
+                  if total_time > 1e-6:
+                      print(f"t_{label:<30}: {v:8.4f}s ({v/total_time*100:5.1f}%) | calls: {calls}")
+                  else:
+                      print(f"t_{label:<30}: {v:8.4f}s | calls: {calls}")
+              # Additional metrics
+              if RANGESET_METRICS:
+                  print("\nRangeSet metrics (sums/counters):")
+                  for k in sorted(RANGESET_METRICS.keys()):
+                      v = RANGESET_METRICS[k]
+                      # print ints where applicable
+                      if abs(v - int(v)) < 1e-9:
+                          print(f"{k:<35}: {int(v)}")
+                      else:
+                          print(f"{k:<35}: {v:.4f}")
+              print("----------------------\n")
+
+      else:
+          # No-op versions for when profiling is disabled.
+          def reset_rangeset_stats() -> None:
+              pass
+
+          def record_metric(name: str, value: float = 1.0) -> None:
+              pass
+
+          def time_method(func: Callable) -> Callable:
+              return func
+
+          def time_func(label: str) -> Callable[[Callable], Callable]:
+              def deco(func: Callable) -> Callable:
+                  return func
+              return deco
+
+          def print_rangeset_stats() -> None:
+              print("\n--- RangeSet stats (profiling disabled) ---\n")
+
+      ```
+    metadata:
+      filename: python/aug25/range_set/rangeset_stats.py
+  - user: |-
+      ```python 'python/aug25/range_set/roaring_range_set.py'
+      from __future__ import annotations
+      from typing import Iterable, Optional, Tuple, List
+
+      try:
+          from pyroaring import BitMap as RoaringBitmap
+      except ImportError:
+          raise ImportError("RoaringRangeSet requires the 'roaringbitmap' library. Please install it with 'pip install pyroaring'.")
+
+      from .range_set_abc import RangeSet
+
+
+      class RoaringRangeSet(RangeSet[int]):
+          """
+          A RangeSet implementation backed by the 'roaringbitmap' library.
+          This implementation is very fast and memory-efficient, especially for sparse sets.
+          It only supports non-negative integers.
+          """
+          __slots__ = ('_rb',)
+
+          def __init__(self, intervals: Optional[Iterable[Tuple[int, int]]] = None):
+              self._rb = RoaringBitmap()
+              if intervals:
+                  for start, end in intervals:
+                      if start < 0:
+                          raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                      # RoaringBitmap.add_range is [start, end)
+                      self._rb.add_range(start, end + 1)
+
+          @property
+          def intervals(self) -> Tuple[Tuple[int, int], ...]:
+              # This is not the most efficient way, but it's correct.
+              # It leverages the logic from other implementations.
+              indices = list(self._rb)
+              if not indices:
+                  return tuple()
+              
+              intervals: List[Tuple[int, int]] = []
+              start = indices[0]
+              prev = start
+              for i in indices[1:]:
+                  if i == prev + 1:
+                      prev = i
+                  else:
+                      intervals.append((start, prev))
+                      start = i
+                      prev = i
+              intervals.append((start, prev))
+              return tuple(intervals)
+
+          def to_ranges(self) -> List[Tuple[int]]:
+              return list(self.intervals)
+
+          def to_indices(self) -> List[int]:
+              return list(self._rb)
+
+          def contains(self, x: int) -> bool:
+              if x < 0:
+                  return False
+              return x in self._rb
+
+          def _new_from_rb(self, rb: RoaringBitmap) -> "RoaringRangeSet":
+              new_set = RoaringRangeSet()
+              new_set._rb = rb
+              return new_set
+
+          def union(self, other: RangeSet[int]) -> "RoaringRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+
+              if isinstance(other, RoaringRangeSet):
+                  return self._new_from_rb(self._rb | other._rb)
+              else:
+                  # Generic path
+                  other_rb = RoaringBitmap()
+                  for start, end in other.intervals:
+                      if start < 0:
+                          raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                      other_rb.add_range(start, end + 1)
+                  return self._new_from_rb(self._rb | other_rb)
+
+          def intersection(self, other: RangeSet[int]) -> "RoaringRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+
+              if isinstance(other, RoaringRangeSet):
+                  return self._new_from_rb(self._rb & other._rb)
+              else:
+                  # Generic path
+                  other_rb = RoaringBitmap()
+                  for start, end in other.intervals:
+                      if start < 0:
+                          raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                      other_rb.add_range(start, end + 1)
+                  return self._new_from_rb(self._rb & other_rb)
+
+          def difference(self, other: RangeSet[int]) -> "RoaringRangeSet":
+              if not isinstance(other, RangeSet):
+                  return NotImplemented
+
+              if isinstance(other, RoaringRangeSet):
+                  return self._new_from_rb(self._rb - other._rb)
+              else:
+                  # Generic path
+                  other_rb = RoaringBitmap()
+                  for start, end in other.intervals:
+                      if start < 0:
+                          raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                      other_rb.add_range(start, end + 1)
+                  return self._new_from_rb(self._rb - other_rb)
+
+          def is_empty(self) -> bool:
+              return len(self._rb) == 0
+
+          def __len__(self) -> int:
+              return len(self._rb)
+
+          def __repr__(self) -> str:
+              return f"RoaringRangeSet({self.intervals!r})"
+
+          def __eq__(self, other) -> bool:
+              if isinstance(other, RoaringRangeSet):
+                  return self._rb == other._rb
+              if isinstance(other, RangeSet):
+                  return self.intervals == other.intervals
+              return NotImplemented
+
+          def __hash__(self) -> int:
+              # RoaringBitmap is not hashable.
+              return hash(self.intervals)
+
+          @classmethod
+          def from_ranges(cls, ranges: List[List[int]]) -> 'RoaringRangeSet':
+              return cls(iter(map(tuple, ranges)))
+
+          @classmethod
+          def from_indices(cls, indices: Iterable[int]) -> 'RoaringRangeSet':
+              if any(i < 0 for i in indices):
+                  raise ValueError("RoaringRangeSet only supports non-negative integers.")
+              
+              new_set = cls()
+              new_set._rb = RoaringBitmap(indices)
+              return new_set
+
+          @classmethod
+          def empty(cls) -> 'RoaringRangeSet':
+              return cls()
+
+          @classmethod
+          def from_json(cls, data: List[List[int]]) -> 'RoaringRangeSet':
+              return cls.from_ranges(data)
+
+          def to_json(self) -> List[List[int]]:
+              return [list(r) for r in self.intervals]
+
+      ```
+    metadata:
+      filename: python/aug25/range_set/roaring_range_set.py
+  - user: Make `iter_indices` part of the abc
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -743,60 +3239,187 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      The `iter_indices` method should be implemented as a generator that yields all individual integers within the set's intervals.
+      Of course. Here are the step-by-step instructions to make `iter_indices` part of the `RangeSet` abstract base class and implement it in the concrete subclasses, followed by the corresponding git diffs.
 
-      ### Step-by-step instructions
+      ### Step-by-step Instructions
 
-      1.  Open the file `python/aug25/range_set/py_range_set.py`.
-      2.  Locate the definition of the `iter_indices` method around line 133.
-      3.  Replace the placeholder (`...`) with the implementation that iterates over the intervals and yields the indices using `yield from range(start, end + 1)`.
+      1.  **Update the Abstract Base Class**
 
-      **In `python/aug25/range_set/py_range_set.py`:**
+          In `python/aug25/range_set/range_set_abc.py`, add an abstract `iter_indices` method to the `RangeSet` class. This will enforce its implementation in all subclasses.
 
-      Change the following lines:
+          -   **File:** `python/aug25/range_set/range_set_abc.py`
+          -   **Location:** After the `to_indices` method definition.
+          -   **Action:** Insert the following abstract method:
 
-      ```python
-          def iter_indices(self) -> Iterable[int]:
-              ...
-      ```
+          ```python
+              @abstractmethod
+              def iter_indices(self) -> Iterable[T]:
+                  """Iterates over all individual indices in the set."""
+                  raise NotImplementedError
+          ```
 
-      To:
+      2.  **Implement `iter_indices` in `BitsetRangeSet`**
 
-      ```python
-          def iter_indices(self) -> Iterable[int]:
-              """Iterates over all individual indices in the set."""
-              for start, end in self.intervals:
-                  yield from range(start, end + 1)
-      ```
+          In `python/aug25/range_set/bitset_range_set.py`, add the `iter_indices` method. This implementation will iterate through the bitset and yield each set bit's corresponding integer value.
+
+          -   **File:** `python/aug25/range_set/bitset_range_set.py`
+          -   **Location:** After the `to_indices` method.
+          -   **Action:** Insert the following method:
+
+          ```python
+              def iter_indices(self) -> Iterable[int]:
+                  """Iterates over all individual indices in the set."""
+                  for byte_idx, byte in enumerate(self._bitset):
+                      if byte == 0:
+                          continue
+                      for bit_idx in range(8):
+                          if (byte >> bit_idx) & 1:
+                              yield (byte_idx * 8) + bit_idx
+          ```
+
+      3.  **Implement `iter_indices` in `FFIRangeSet`**
+
+          In `python/aug25/range_set/ffi_range_set.py`, add the `iter_indices` method. This implementation will iterate over the set's intervals and yield integers from each range, which is more memory-efficient than calling `to_indices()`.
+
+          -   **File:** `python/aug25/range_set/ffi_range_set.py`
+          -   **Location:** After the `to_indices` method.
+          -   **Action:** Insert the following method:
+
+          ```python
+              def iter_indices(self) -> Iterable[int]:
+                  """Iterates over all individual indices in the set."""
+                  for start, end in self.intervals:
+                      yield from range(start, end + 1)
+          ```
+
+      4.  **Implement `iter_indices` in `RoaringRangeSet`**
+
+          In `python/aug25/range_set/roaring_range_set.py`, add the `iter_indices` method. This implementation will leverage the native iterator of the underlying `RoaringBitmap` object for high efficiency.
+
+          -   **File:** `python/aug25/range_set/roaring_range_set.py`
+          -   **Location:** After the `to_indices` method.
+          -   **Action:** Insert the following method:
+
+          ```python
+              def iter_indices(self) -> Iterable[int]:
+                  """Iterates over all individual indices in the set."""
+                  yield from self._rb
+          ```
+
+      The `PyRangeSet` class in `python/aug25/range_set/py_range_set.py` already has a suitable `iter_indices` method, so no changes are needed for that file.
 
       ### Git Diffs
 
+      Here are the git diffs to apply these changes:
+
       ```diff
-      diff --git a/python/aug25/range_set/py_range_set.py b/python/aug25/range_set/py_range_set.py
-      --- a/python/aug25/range_set/py_range_set.py
-      +++ b/python/aug25/range_set/py_range_set.py
-      @@ -130,7 +130,9 @@
-               return result
+      diff --git a/python/aug25/range_set/bitset_range_set.py b/python/aug25/range_set/bitset_range_set.py
+      index 611111c..111111c 100644
+      --- a/python/aug25/range_set/bitset_range_set.py
+      +++ b/python/aug25/range_set/bitset_range_set.py
+      @@ -70,6 +70,16 @@
+                       indices.append(i)
+               return indices
        
-           def iter_indices(self) -> Iterable[int]:
-      -        ...
+      +    def iter_indices(self) -> Iterable[int]:
+      +        """Iterates over all individual indices in the set."""
+      +        for byte_idx, byte in enumerate(self._bitset):
+      +            if byte == 0:
+      +                continue
+      +            for bit_idx in range(8):
+      +                if (byte >> bit_idx) & 1:
+      +                    yield (byte_idx * 8) + bit_idx
+      +
+           def contains(self, x: int) -> bool:
+               if x < 0:
+                   return False
+
+      ```
+
+      ```diff
+      diff --git a/python/aug25/range_set/ffi_range_set.py b/python/aug25/range_set/ffi_range_set.py
+      index 611111c..111111c 100644
+      --- a/python/aug25/range_set/ffi_range_set.py
+      +++ b/python/aug25/range_set/ffi_range_set.py
+      @@ -31,6 +31,11 @@
+                   pass
+               return res
+       
+      +    def iter_indices(self) -> Iterable[int]:
       +        """Iterates over all individual indices in the set."""
       +        for start, end in self.intervals:
       +            yield from range(start, end + 1)
+      +
+           @time_method
+           def contains(self, x: int) -> bool:
+               """Return True if x is contained in the set."""
+
+      ```
+
+      ```diff
+      diff --git a/python/aug25/range_set/range_set_abc.py b/python/aug25/range_set/range_set_abc.py
+      index 611111c..111111c 100644
+      --- a/python/aug25/range_set/range_set_abc.py
+      +++ b/python/aug25/range_set/range_set_abc.py
+      @@ -110,6 +110,12 @@
+               """Returns the elements of the set as a list."""
+               raise NotImplementedError
        
-           @staticmethod
-           def from_numpy(bv) -> 'PyRangeSet':
+      +    @abstractmethod
+      +    def iter_indices(self) -> Iterable[T]:
+      +        """Iterates over all individual indices in the set."""
+      +        raise NotImplementedError
+      +
+           @classmethod
+           @abstractmethod
+           def from_json(cls, data: List[List[T]]) -> "RangeSet[T]":
+
+      ```
+
+      ```diff
+      diff --git a/python/aug25/range_set/roaring_range_set.py b/python/aug25/range_set/roaring_range_set.py
+      index 611111c..111111c 100644
+      --- a/python/aug25/range_set/roaring_range_set.py
+      +++ b/python/aug25/range_set/roaring_range_set.py
+      @@ -51,6 +51,10 @@
+           def to_indices(self) -> List[int]:
+               return list(self._rb)
+       
+      +    def iter_indices(self) -> Iterable[int]:
+      +        """Iterates over all individual indices in the set."""
+      +        yield from self._rb
+      +
+           def contains(self, x: int) -> bool:
+               if x < 0:
+                   return False
+
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 4 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: python/aug25/range_set/py_range_set.py
-      Applying patch to 'python/aug25/range_set/py_range_set.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/range_set/py_range_set.py.
+      Identified target file: python/aug25/range_set/bitset_range_set.py
+      Applying patch to 'python/aug25/range_set/bitset_range_set.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/range_set/bitset_range_set.py.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/aug25/range_set/ffi_range_set.py
+      Applying patch to 'python/aug25/range_set/ffi_range_set.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/range_set/ffi_range_set.py.
+
+      --- Processing Diff Block 3 ---
+      Identified target file: python/aug25/range_set/range_set_abc.py
+      Applying patch to 'python/aug25/range_set/range_set_abc.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/range_set/range_set_abc.py.
+
+      --- Processing Diff Block 4 ---
+      Identified target file: python/aug25/range_set/roaring_range_set.py
+      Applying patch to 'python/aug25/range_set/roaring_range_set.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/range_set/roaring_range_set.py.
     metadata:
-  - user: 'Changes committed with message: "Implement iter_indices for PyRangeSet"'
+  - user: 'Changes committed with message: "Feat: Add abstract iter_indices to RangeSet
+      and implement in concrete classes"'
     metadata:
 ...

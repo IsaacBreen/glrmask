@@ -105,6 +105,11 @@ class RangeSet(ABC, Generic[T]):
         """Returns the elements of the set as a list."""
         raise NotImplementedError
 
+    @abstractmethod
+    def iter_indices(self) -> Iterable[T]:
+        """Iterates over all individual indices in the set."""
+        raise NotImplementedError
+
     @classmethod
     @abstractmethod
     def from_json(cls, data: List[List[T]]) -> "RangeSet[T]":
