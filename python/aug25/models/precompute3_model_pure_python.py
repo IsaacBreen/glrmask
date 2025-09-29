@@ -570,6 +570,31 @@ class Model(GraphProvider):
         stats.inc(f'{p}.final_heads', len(result.peek()))
         stats.stop(f'{p}.total')
         return result
+
+    def _is_zombie_path(self, gss: GSS, path_token_union: LLMTokenSet, final_mask: LLMTokenSet, stat_context: str) -> bool:
+        """
+        Checks if a given traversal path is a "zombie" path, meaning it cannot
+        contribute any new tokens to the final_mask.
+        """
+        stats = Stats.get()
+        p = f'get_mask.zombie_check.{stat_context}'
+        stats.start(p)
+
+        # We only care about tokens that are not yet in the final mask.
+        potential_new_tokens = path_token_union.difference(final_mask)
+        if potential_new_tokens.is_empty():
+            stats.inc(f'{p}.skipped_no_potential')
+            stats.stop(p)
+            return True
+
+        gss_mask_acc = gss.reduce_acc()
+        if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
+            stats.inc(f'{p}.skipped_no_overlap_disjoint')
+            stats.stop(p)
+            return True
+
+        stats.stop(p)
+        return False
     def get_mask(self) -> LLMTokenSet:
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
@@ -717,22 +742,10 @@ class Model(GraphProvider):
 
             # Zombie traversal avoidance: if this node's edges can't possibly add
             # to the final mask given the current GSS mask, skip it.
-            stats.start('get_mask.zombie_check')
             a_node = arena.get(node)
             node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-            # We only care about tokens that are not yet in the final mask.
-            potential_new_tokens = node_llm_bv_union.difference(final_mask)
-            if potential_new_tokens.is_empty():
-                stats.inc('get_mask.zombie_check.skipped_nodes_no_potential')
-                stats.stop('get_mask.zombie_check')
+            if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask, 'node'):
                 continue
-
-            gss_mask_acc = gss_node.reduce_acc()
-            if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
-                stats.inc('get_mask.zombie_check.skipped_nodes_no_overlap_disjoint')
-                stats.stop('get_mask.zombie_check')
-                continue
-            stats.stop('get_mask.zombie_check')
 
             # Traverse edges and propagate masks
             a_node = arena.get(node)
@@ -740,11 +753,6 @@ class Model(GraphProvider):
             stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
             stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
             for (pop, llm_bv), dests in edges:
-                llm_bv = llm_bv.difference(final_mask)
-                if llm_bv.is_empty():
-                    stats.inc('get_mask.traversal.edge.llm_bv_empty')
-                    continue
-
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
                 stats.start('get_mask.main_loop.edge.popn')
@@ -753,6 +761,11 @@ class Model(GraphProvider):
                 if popped.is_empty():
                     stats.inc('get_mask.traversal.edge.popped_empty')
                     continue
+
+                if self._is_zombie_path(popped, llm_bv, final_mask, 'edge'):
+                    continue
+
+                llm_bv = llm_bv.difference(final_mask)
 
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                 acc_memo: Dict[int, Optional[PyAcc]] = {}
@@ -816,6 +829,11 @@ class Model(GraphProvider):
                         continue
 
                     d: NodeID = int(dest_idx)
+                    dest_node = arena.get(d)
+                    dest_llm_bv_union = dest_node.llm_bv_union if dest_node else RangeSet.empty()
+                    if self._is_zombie_path(child_gss, dest_llm_bv_union, final_mask, 'dest'):
+                        continue
+
                     if d in values:
                         stats.inc('get_mask.traversal.edge.gss_merges')
                         stats.start('get_mask.main_loop.edge.gss_merge')
