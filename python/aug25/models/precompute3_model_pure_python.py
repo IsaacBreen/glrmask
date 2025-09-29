@@ -789,24 +789,14 @@ class Model(GraphProvider):
 
         stats.start('get_mask.final_conversion')
         # Convert internal mask back to original IDs
-        original_indices: List[int] = []
-        stats.start('get_mask.final_conversion.iter_indices')
-        final_indices = final_mask.iter_indices()
-        stats.stop('get_mask.final_conversion.iter_indices')
-
-        for i in final_indices:
+        original_indices: RangeSet = RangeSet.empty()
+        for i in final_mask.iter_indices():
             if i in self.internal_to_original_map:
-                original_indices.extend(self.internal_to_original_map[i])
-
-        stats.start('get_mask.final_conversion.from_indices')
-        result = RangeSet.from_indices(original_indices)
-        stats.stop('get_mask.final_conversion.from_indices')
-
+                original_indices |= self.internal_to_original_map[i]
         stats.stop('get_mask.final_conversion')
 
-
         stats.stop('get_mask')
-        return result
+        return original_indices
 
     def finalize(self):
         """Called at the end of a benchmark run to perform any final actions, like printing stats."""
