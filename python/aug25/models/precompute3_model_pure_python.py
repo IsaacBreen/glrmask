@@ -486,6 +486,8 @@ class Model(GraphProvider):
         memo = {}
         merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
         stats.stop('commit.fuse')
+        print(GSS.merge_many(merged_states.values()).stats())
+
 
         stats.inc('commit.tokenizer_states_out', len(merged_states))
         self.state = merged_states
