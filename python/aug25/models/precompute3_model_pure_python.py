@@ -32,10 +32,10 @@ from ..range_set.set_range_set import SetRangeSet as RangeSetOut
 # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetOut
 
 # from ..common_interface import RangeSetStates
-# from ..range_set.set_range_set import SetRangeSet as RangeSetStates
+from ..range_set.set_range_set import SetRangeSet as RangeSetStates
 # from ..range_set.py_range_set import PyRangeSet as RangeSetStates
 # from ..range_set.bitset_range_set import BitsetRangeSet as RangeSetStates
-from ..range_set.ffi_range_set import FFIRangeSet as RangeSetStates
+# from ..range_set.ffi_range_set import FFIRangeSet as RangeSetStates
 # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetStates
 
 import _sep1 as ffi
