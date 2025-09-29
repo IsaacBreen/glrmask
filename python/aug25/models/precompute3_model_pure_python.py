@@ -785,7 +785,6 @@ class Model(GraphProvider):
 
                 if self._is_zombie_path(popped, llm_bv, final_mask, 'edge'):
                     continue
-
                 llm_bv = llm_bv.difference(final_mask)
 
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
@@ -856,9 +855,7 @@ class Model(GraphProvider):
                         continue
 
                     d: NodeID = int(dest_idx)
-                    dest_node = arena.get(d)
-                    dest_llm_bv_union = dest_node.llm_bv_union if dest_node else RangeSet.empty()
-                    if self._is_zombie_path(child_gss, dest_llm_bv_union, final_mask, 'dest'):
+                    if self._is_zombie_path(child_gss, arena.get(d).llm_bv_union if arena.get(d) else RangeSet.empty(), final_mask, 'dest'):
                         continue
 
                     if d in values:
