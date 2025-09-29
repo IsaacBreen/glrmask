@@ -170,8 +170,8 @@ class Stats:
 
         # 2. Prepare Groups data
         groups_data = []
-        group_members_headers = ("member", "hits", "total_ms", "avg_ms", "ms/group_hit")
-        group_members_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
+        group_members_headers = ("member", "hits", "hits/group_hit", "total_ms", "avg_ms", "ms/group_hit")
+        group_members_formats = (str, self._fmt_int_or_blank, self._fmt_ratio_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
         if self.groups:
             group_sort_keys = {}
             for g in self.groups:
@@ -210,6 +210,10 @@ class Stats:
                         if hits is None:
                             hits = self.counts.get(k)
 
+                        hits_per_group_hit = None
+                        if hits is not None and group_hits > 0:
+                            hits_per_group_hit = hits / group_hits
+
                         total_ms = None
                         avg_ms = None
                         per_group_ms = None
@@ -219,7 +223,7 @@ class Stats:
                             avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
                             per_group_ms = (total_ms / group_hits) if group_hits else 0.0
 
-                        member_rows.append((k, hits, total_ms, avg_ms, per_group_ms))
+                        member_rows.append((k, hits, hits_per_group_hit, total_ms, avg_ms, per_group_ms))
 
                 groups_data.append({"info": group_info, "member_rows": member_rows})
 
@@ -303,6 +307,13 @@ class Stats:
             return ""
         return f"{value:,.3f}"
 
+    @staticmethod
+    def _fmt_ratio_or_blank(value: Optional[float]) -> str:
+        """Format a ratio with 2 decimals, or return blank string if None."""
+        if value is None:
+            return ""
+        return f"{value:.2f}"
+
     def _print_table(
         self,
         headers: Tuple[str, ...],
@@ -328,7 +339,7 @@ class Stats:
 
         # Determine which columns are numeric (should be right-aligned)
         # Check against the static formatters defined in the class.
-        numeric_formatters = (self._fmt_int, self._fmt_ms, self._fmt_int_or_blank, self._fmt_ms_or_blank)
+        numeric_formatters = (self._fmt_int, self._fmt_ms, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ratio_or_blank)
         is_numeric_col = [f in numeric_formatters for f in fmts]
 
         # Convert cells to strings using provided formatters
