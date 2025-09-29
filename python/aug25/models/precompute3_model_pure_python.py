@@ -18,11 +18,19 @@ except Exception:  # pragma: no cover
 from ..common_interface import GraphProvider
 from ..stats import Stats
 # from ..common_interface import RangeSet
-from ..range_set.set_range_set import SetRangeSet as RangeSet
+# from ..range_set.set_range_set import SetRangeSet as RangeSet
 # from ..range_set.py_range_set import PyRangeSet as RangeSet
 # from ..range_set.bitset_range_set import BitsetRangeSet as RangeSet
-# from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
+from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
 # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSet
+
+# from ..common_interface import RangeSetOut
+from ..range_set.set_range_set import SetRangeSet as RangeSetOut
+# from ..range_set.py_range_set import PyRangeSet as RangeSetOut
+# from ..range_set.bitset_range_set import BitsetRangeSet as RangeSetOut
+# from ..range_set.ffi_range_set import FFIRangeSet as RangeSetOut
+# from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetOut
+
 import _sep1 as ffi
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
@@ -172,7 +180,7 @@ class Model(GraphProvider):
 
     # Token/Terminal mapping fields
     id_to_token: Dict[int, bytes]
-    internal_to_original_map: Dict[int, RangeSet]
+    internal_to_original_map: Dict[int, RangeSetOut]
     all_internal_llm_tokens_bitset: LLMTokenSet
     all_terminals_bitset: TerminalIdSet
     ignore_terminal_id: Optional[int]
@@ -310,7 +318,7 @@ class Model(GraphProvider):
         vocab = data['precompute3_vocab']
         internal_to_original_map_raw = dict(vocab['internal_to_original'])
         internal_to_original_map = {
-            int(k): RangeSet.from_indices(v) for k, v in internal_to_original_map_raw.items()
+            int(k): RangeSetOut.from_indices(v) for k, v in internal_to_original_map_raw.items()
         }
         internal_max = vocab['internal_max_llm_token']
         all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, internal_max)])
@@ -790,7 +798,7 @@ class Model(GraphProvider):
 
         stats.start('get_mask.final_conversion')
         # Convert internal mask back to original IDs
-        original_indices: RangeSet = RangeSet.empty()
+        original_indices = RangeSetOut.empty()
         for i in final_mask.iter_indices():
             if i in self.internal_to_original_map:
                 original_indices |= self.internal_to_original_map[i]
