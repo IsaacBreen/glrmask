@@ -96,7 +96,13 @@ local_system:
           def _record_key_position(self, key: str):
               """If seeing a key for the first time, record its call site (file, line)."""
               if self.enabled and key not in self.key_positions:
-                  # Inspection is expensive, so we only do it once per key.
+                  # Inspection is expensive. Pause all active timers while it runs.
+                  now = time.perf_counter()
+                  active_timer_keys = list(self.timers.keys())
+                  for k in active_timer_keys:
+                      self.times[k] += now - self.timers[k]
+
+                  # --- Expensive operation ---
                   try:
                       frame = inspect.currentframe()
                       if frame and frame.f_back:
@@ -108,6 +114,12 @@ local_system:
                   finally:
                       # Avoid reference cycles
                       del frame
+                  # --- End of expensive operation ---
+
+                  # Resume timers
+                  new_start_time = time.perf_counter()
+                  for k in active_timer_keys:
+                      self.timers[k] = new_start_time
 
           # -------- Group management --------
 
@@ -448,64 +460,58 @@ local_system:
               if not self.enabled:
                   return
 
-              print("\n--- Performance Stats ---")
+              # --- Data Preparation Phase ---
+              # This phase gathers all data and rows for all tables before printing.
 
-              # General counts (manual inc()).
+              # 1. Prepare Counts data
+              counts_headers = ("key", "count")
+              counts_formats = (str, self._fmt_int)
+              counts_rows = []
               if self.counts:
-                  print("--- Counts ---")
                   sorted_keys = sorted(self.counts.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
-                  rows = [(key, self.counts[key]) for key in sorted_keys]
-                  self._print_table(
-                      headers=("key", "count"),
-                      rows=rows,
-                      formats=(str, self._fmt_int),
-                      indent="  "
-                  )
+                  counts_rows = [(key, self.counts[key]) for key in sorted_keys]
 
-              # Timings with counts and per-hit averages.
+              # 2. Prepare Timings data
+              timings_headers = ("key", "total_ms", "hits", "avg_ms")
+              timings_formats = (str, self._fmt_ms, self._fmt_int, self._fmt_ms)
+              timings_rows = []
               if self.times:
-                  print("\n--- Timings (ms) ---")
-                  rows = []
                   sorted_keys = sorted(self.times.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
                   for key in sorted_keys:
                       total_ms = self.times[key] * 1000.0
                       hits = self.time_counts.get(key, 0)
                       avg_ms = (total_ms / hits) if hits else 0.0
-                      rows.append((key, total_ms, hits, avg_ms))
+                      timings_rows.append((key, total_ms, hits, avg_ms))
 
-                  self._print_table(
-                      headers=("key", "total_ms", "hits", "avg_ms"),
-                      rows=rows,
-                      formats=(str, self._fmt_ms, self._fmt_int, self._fmt_ms),
-                      indent="  "
-                  )
-
-              # Grouped reporting (if any groups are defined)
+              # 3. Prepare Groups data
+              groups_data = []
+              group_headers = ("member", "total_ms", "hits", "avg_ms", "per_group_hit_ms")
+              group_formats = (str, self._fmt_ms, self._fmt_int, self._fmt_ms, self._fmt_ms)
               if self.groups:
-                  print("\n--- Groups (prefix-based) ---")
                   group_sort_keys = {}
                   for g in self.groups:
                       members = self._group_members(g)
                       if members:
-                          # Sort key for a group is the minimum position of its members.
                           min_pos = min(self.key_positions.get(m, ("~", float("inf"))) for m in members)
                           group_sort_keys[g] = min_pos
 
                   sorted_groups = sorted(self.groups, key=lambda g: group_sort_keys.get(g, ("~", float("inf"))))
                   for g in sorted_groups:
                       members = self._group_members(g)
-                      if not members:
-                          # No timed members under this prefix; skip for brevity
-                          continue
+                      if not members: continue
 
                       group_hits = self._group_hits(g, members)
                       group_total_ms = sum(self.times[k] for k in members) * 1000.0
                       group_avg_ms = (group_total_ms / group_hits) if group_hits else 0.0
 
-                      print(f"\nGroup: {g}")
-                      print(f"  members: {len(members)} | group_hits: {self._fmt_int(group_hits)} | group_total_ms: {self._fmt_ms(group_total_ms)} | per_group_hit: {self._fmt_ms(group_avg_ms)}")
+                      group_info = {
+                          "name": g,
+                          "members_count": len(members),
+                          "hits": group_hits,
+                          "total_ms": group_total_ms,
+                          "avg_ms": group_avg_ms,
+                      }
 
-                      # For each member, show both per-hit and per-group-hit metrics.
                       rows = []
                       sorted_members = sorted(members, key=lambda k: self.key_positions.get(k, ("", 0)))
                       for k in sorted_members:
@@ -514,13 +520,55 @@ local_system:
                           avg_ms = (total_ms / hits) if hits else 0.0
                           per_group_ms = (total_ms / group_hits) if group_hits else 0.0
                           rows.append((k, total_ms, hits, avg_ms, per_group_ms))
+                      groups_data.append({"info": group_info, "rows": rows})
 
-                      self._print_table(
-                          headers=("member", "total_ms", "hits", "avg_ms", "per_group_hit_ms"),
-                          rows=rows,
-                          formats=(str, self._fmt_ms, self._fmt_int, self._fmt_ms, self._fmt_ms),
-                          indent="    "
-                      )
+              # --- Width Calculation Phase ---
+              # This phase determines the max width for each column across all tables.
+
+              max_widths = defaultdict(int)
+
+              def update_widths(headers, rows, formats):
+                  fmts = formats if formats is not None else tuple([str] * len(headers))
+                  for i, h in enumerate(headers):
+                      max_widths[h] = max(max_widths[h], len(h))
+                  for r in rows:
+                      for i, h in enumerate(headers):
+                          val = r[i]
+                          cell_str = fmts[i](val) if callable(fmts[i]) else str(val)
+                          max_widths[h] = max(max_widths[h], len(cell_str))
+
+              if counts_rows: update_widths(counts_headers, counts_rows, counts_formats)
+              if timings_rows: update_widths(timings_headers, timings_rows, timings_formats)
+              if groups_data:
+                  for group in groups_data:
+                      update_widths(group_headers, group["rows"], group_formats)
+
+              # Unify 'key' and 'member' widths for consistent alignment
+              if 'key' in max_widths or 'member' in max_widths:
+                  unified_width = max(max_widths.get('key', 0), max_widths.get('member', 0))
+                  max_widths['key'] = unified_width
+                  max_widths['member'] = unified_width
+
+              # --- Printing Phase ---
+              # This phase prints all the tables using the pre-calculated widths.
+
+              print("\n--- Performance Stats ---")
+
+              if self.counts:
+                  print("--- Counts ---")
+                  self._print_table(headers=counts_headers, rows=counts_rows, formats=counts_formats, indent="  ", widths=max_widths)
+
+              if self.times:
+                  print("\n--- Timings (ms) ---")
+                  self._print_table(headers=timings_headers, rows=timings_rows, formats=timings_formats, indent="  ", widths=max_widths)
+
+              if self.groups and groups_data:
+                  print("\n--- Groups (prefix-based) ---")
+                  for group in groups_data:
+                      info = group["info"]
+                      print(f"\nGroup: {info['name']}")
+                      print(f"  members: {info['members_count']} | group_hits: {self._fmt_int(info['hits'])} | group_total_ms: {self._fmt_ms(info['total_ms'])} | per_group_hit: {self._fmt_ms(info['avg_ms'])}")
+                      self._print_table(headers=group_headers, rows=group["rows"], formats=group_formats, indent="    ", widths=max_widths)
 
               print("-------------------------\n")
 
@@ -542,6 +590,7 @@ local_system:
               rows: List[Tuple],
               formats: Tuple = None,
               indent: str = "",
+              widths: Dict[str, int] = None,
           ):
               """Print a simple aligned table.
 
@@ -550,6 +599,7 @@ local_system:
               formats: tuple of formatter callables (len == len(headers)), applied to each cell.
                        If None, str() is used.
               indent: left indentation for each printed row.
+              widths: optional dict of {header: width} to enforce column widths.
               """
               if not rows:
                   return
@@ -572,17 +622,20 @@ local_system:
                   str_rows.append(str_row)
 
               # Compute column widths
-              widths = [len(h) for h in headers]
-              for r in str_rows:
-                  for i, cell in enumerate(r):
-                      widths[i] = max(widths[i], len(cell))
+              if widths:
+                  col_widths = [widths[h] for h in headers]
+              else:
+                  col_widths = [len(h) for h in headers]
+                  for r in str_rows:
+                      for i, cell in enumerate(r):
+                          col_widths[i] = max(col_widths[i], len(cell))
 
               # Print header
               header_line = indent + " | ".join(
-                  h.rjust(widths[i]) if is_numeric_col[i] else h.ljust(widths[i])
+                  h.rjust(col_widths[i]) if is_numeric_col[i] else h.ljust(col_widths[i])
                   for i, h in enumerate(headers)
               )
-              sep_line = indent + "-+-".join("-" * widths[i] for i in range(ncols))
+              sep_line = indent + "-+-".join("-" * col_widths[i] for i in range(ncols))
               print(header_line)
               print(sep_line)
 
@@ -590,7 +643,7 @@ local_system:
               for r in str_rows:
                   print(
                       indent + " | ".join(
-                          r[i].rjust(widths[i]) if is_numeric_col[i] else r[i].ljust(widths[i])
+                          r[i].rjust(col_widths[i]) if is_numeric_col[i] else r[i].ljust(col_widths[i])
                           for i in range(ncols)
                       )
                   )
@@ -763,7 +816,13 @@ messages:
           def _record_key_position(self, key: str):
               """If seeing a key for the first time, record its call site (file, line)."""
               if self.enabled and key not in self.key_positions:
-                  # Inspection is expensive, so we only do it once per key.
+                  # Inspection is expensive. Pause all active timers while it runs.
+                  now = time.perf_counter()
+                  active_timer_keys = list(self.timers.keys())
+                  for k in active_timer_keys:
+                      self.times[k] += now - self.timers[k]
+
+                  # --- Expensive operation ---
                   try:
                       frame = inspect.currentframe()
                       if frame and frame.f_back:
@@ -775,6 +834,12 @@ messages:
                   finally:
                       # Avoid reference cycles
                       del frame
+                  # --- End of expensive operation ---
+
+                  # Resume timers
+                  new_start_time = time.perf_counter()
+                  for k in active_timer_keys:
+                      self.timers[k] = new_start_time
 
           # -------- Group management --------
 
@@ -980,8 +1045,30 @@ messages:
       ```
     metadata:
       filename: python/aug25/stats.py
-  - user: "`_record_key_position` is very computationally expensive. Make sure it
-      'pauses' the timers when it runs."
+  - user: |-
+      Group: commit
+        members: 6 | group_hits: 3,620 | group_total_ms: 17,135.859 | per_group_hit: 4.734
+          member                      |  total_ms |  hits | avg_ms | per_group_hit_ms
+          ----------------------------+-----------+-------+--------+-----------------
+          commit                      | 8,619.890 | 3,620 |  2.381 |            2.381
+          commit.build_tokenizer_maps |    80.893 | 3,620 |  0.022 |            0.022
+          commit.prune_and_map_gss    | 2,479.374 | 3,620 |  0.685 |            0.685
+          commit.main_loop            | 5,147.995 | 3,620 |  1.422 |            1.422
+          commit.merge_states         |   610.135 | 3,620 |  0.169 |            0.169
+          commit.fuse                 |   197.572 | 3,620 |  0.055 |            0.055
+
+      Group: get_mask
+        members: 22 | group_hits: 3,620 | group_total_ms: 86,443.149 | per_group_hit: 23.879
+          member                                       |   total_ms |      hits | avg_ms | per_group_hit_ms
+          ---------------------------------------------+------------+-----------+--------+-----------------
+          get_mask                                     | 29,699.990 |     3,620 |  8.204 |            8.204
+          get_mask.initial_stats                       |     18.903 |     3,620 |  0.005 |            0.005
+          get_mask.seeding                             |  3,316.251 |     3,620 |  0.916 |            0.916
+          get_mask.seeding.gss.apply                   |  3,253.741 |    10,567 |  0.308 |            0.899
+          get_mask.initialize_acc.total                |  1,107.904 |   403,538 |  0.003 |            0.306
+          get_mask.initialize_acc.difference           |    115.091 |   403,538 |  0.000 |            0.032
+    metadata:
+  - user: Make it so columns are aligned even between the different tables where possible.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1000,61 +1087,269 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. To prevent the expensive `inspect` call in `_record_key_position` from affecting active timers, we'll wrap it with logic to pause and resume them. Here are the step-by-step instructions and the corresponding git diff.
+      Of course. To align the columns across different tables in your report, we'll need to refactor the `report` method to calculate the maximum width for each column across all tables *before* printing any of them. This involves a three-phase approach within the `report` method: data preparation, width calculation, and then printing.
+
+      Here are the step-by-step instructions to achieve this:
 
       ### Step-by-step Instructions
 
-      In the file `python/aug25/stats.py`, you will modify the `_record_key_position` method to ensure that the time spent on frame inspection is not counted by any running timers.
+      #### 1. In `python/aug25/stats.py`, modify the `_print_table` method:
 
-      1.  **Navigate to the `_record_key_position` method** inside the `Stats` class.
+      1.  **Update the method signature** to accept a new optional dictionary argument, `widths: Dict[str, int] = None`. This dictionary will map column headers to their required widths.
+      2.  **Update the docstring** to explain the new `widths` parameter.
+      3.  **Modify the width calculation logic**:
+          *   If the `widths` dictionary is provided, use it to look up the width for each header in the `headers` tuple.
+          *   If `widths` is `None`, retain the existing behavior of calculating widths based on the content of the current table.
+          *   Store the resulting list of integer widths in a new variable, e.g., `col_widths`.
+      4.  **Update the printing logic** to use `col_widths` instead of the old `widths` variable to format the table rows.
 
-      2.  **Inside the `if self.enabled and key not in self.key_positions:` block, add timer-pausing logic before the `try...finally` block.** This involves:
-          *   Getting the current time with `time.perf_counter()`.
-          *   Getting a list of all currently active timer keys from `self.timers`.
-          *   Iterating over these keys to update their total accumulated time in `self.times`. This effectively "stops" them for the duration of the inspection.
+      #### 2. In `python/aug25/stats.py`, refactor the `report` method:
 
-      3.  **Add timer-resuming logic after the `try...finally` block.** This involves:
-          *   Getting a new current time after the inspection is complete.
-          *   Iterating over the same list of active timer keys and updating their start time in `self.timers` to this new time. This "restarts" them.
+      The entire body of the `report` method will be replaced to implement a new three-phase process.
 
-      The existing `try...finally` block containing the `inspect` calls will remain, but it will now be surrounded by this new timer management logic.
+      1.  **Data Preparation Phase**:
+          *   Instead of printing each table immediately, first, gather all the data.
+          *   Prepare the rows for the "Counts" table and store them in a `counts_rows` list.
+          *   Prepare the rows for the "Timings" table and store them in a `timings_rows` list.
+          *   Prepare the data for all "Groups" tables. For each group, store its summary info and its member rows in a list called `groups_data`.
 
-      ### Git Diff
+      2.  **Width Calculation Phase**:
+          *   Initialize a `defaultdict(int)` called `max_widths` to store the maximum width found for each column header (e.g., 'key', 'total_ms', 'hits').
+          *   Define a local helper function, `update_widths`, that iterates through a table's headers and rows to update `max_widths`.
+          *   Call `update_widths` for the "Counts" data, the "Timings" data, and for each table in `groups_data`.
+          *   To align the `key` and `member` columns, find the maximum width between them and assign it to both `max_widths['key']` and `max_widths['member']`.
+
+      3.  **Printing Phase**:
+          *   Now that all data is ready and all column widths are calculated, print the report.
+          *   Print the "Counts" table by calling `_print_table`, passing it the prepared `counts_rows` and the final `max_widths` dictionary.
+          *   Print the "Timings" table similarly.
+          *   Finally, iterate through the `groups_data` list and print each group's summary header and its member table, passing `max_widths` to each `_print_table` call.
+
+      ---
+
+      ### Git Diffs
 
       Here is the git diff to apply these changes to `python/aug25/stats.py`.
 
       ```diff
       diff --git a/python/aug25/stats.py b/python/aug25/stats.py
-      index 211111c..111811e 100644
+      index 241115c..131115e 100644
       --- a/python/aug25/stats.py
       +++ b/python/aug25/stats.py
-      @@ -80,8 +80,16 @@
-           def _record_key_position(self, key: str):
-               """If seeing a key for the first time, record its call site (file, line)."""
-               if self.enabled and key not in self.key_positions:
-      -            # Inspection is expensive, so we only do it once per key.
-      +            # Inspection is expensive. Pause all active timers while it runs.
-      +            now = time.perf_counter()
-      +            active_timer_keys = list(self.timers.keys())
-      +            for k in active_timer_keys:
-      +                self.times[k] += now - self.timers[k]
-      +
-      +            # --- Expensive operation ---
-                   try:
-                       frame = inspect.currentframe()
-                       if frame and frame.f_back:
-      @@ -93,6 +101,12 @@
-                   finally:
-                       # Avoid reference cycles
-                       del frame
-      +            # --- End of expensive operation ---
-      +
-      +            # Resume timers
-      +            new_start_time = time.perf_counter()
-      +            for k in active_timer_keys:
-      +                self.timers[k] = new_start_time
+      @@ -133,81 +133,111 @@
+           def report(self):
+               """Print a formatted report of all collected stats."""
+               if not self.enabled:
+                   return
        
-           # -------- Group management --------
+      -        print("\n--- Performance Stats ---")
+      -
+      -        # General counts (manual inc()).
+      +        # --- Data Preparation Phase ---
+      +        # This phase gathers all data and rows for all tables before printing.
+      +
+      +        # 1. Prepare Counts data
+      +        counts_headers = ("key", "count")
+      +        counts_formats = (str, self._fmt_int)
+      +        counts_rows = []
+               if self.counts:
+      -            print("--- Counts ---")
+                   sorted_keys = sorted(self.counts.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
+      -            rows = [(key, self.counts[key]) for key in sorted_keys]
+      -            self._print_table(
+      -                headers=("key", "count"),
+      -                rows=rows,
+      -                formats=(str, self._fmt_int),
+      -                indent="  "
+      -            )
+      -
+      -        # Timings with counts and per-hit averages.
+      +            counts_rows = [(key, self.counts[key]) for key in sorted_keys]
+      +
+      +        # 2. Prepare Timings data
+      +        timings_headers = ("key", "total_ms", "hits", "avg_ms")
+      +        timings_formats = (str, self._fmt_ms, self._fmt_int, self._fmt_ms)
+      +        timings_rows = []
+               if self.times:
+      -            print("\n--- Timings (ms) ---")
+      -            rows = []
+                   sorted_keys = sorted(self.times.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
+                   for key in sorted_keys:
+                       total_ms = self.times[key] * 1000.0
+                       hits = self.time_counts.get(key, 0)
+                       avg_ms = (total_ms / hits) if hits else 0.0
+      -                rows.append((key, total_ms, hits, avg_ms))
+      -
+      -            self._print_table(
+      -                headers=("key", "total_ms", "hits", "avg_ms"),
+      -                rows=rows,
+      -                formats=(str, self._fmt_ms, self._fmt_int, self._fmt_ms),
+      -                indent="  "
+      -            )
+      -
+      -        # Grouped reporting (if any groups are defined)
+      +                timings_rows.append((key, total_ms, hits, avg_ms))
+      +
+      +        # 3. Prepare Groups data
+      +        groups_data = []
+      +        group_headers = ("member", "total_ms", "hits", "avg_ms", "per_group_hit_ms")
+      +        group_formats = (str, self._fmt_ms, self._fmt_int, self._fmt_ms, self._fmt_ms)
+               if self.groups:
+      -            print("\n--- Groups (prefix-based) ---")
+                   group_sort_keys = {}
+                   for g in self.groups:
+                       members = self._group_members(g)
+                       if members:
+      -                    # Sort key for a group is the minimum position of its members.
+                           min_pos = min(self.key_positions.get(m, ("~", float("inf"))) for m in members)
+                           group_sort_keys[g] = min_pos
+       
+                   sorted_groups = sorted(self.groups, key=lambda g: group_sort_keys.get(g, ("~", float("inf"))))
+                   for g in sorted_groups:
+                       members = self._group_members(g)
+      -                if not members:
+      -                    # No timed members under this prefix; skip for brevity
+      -                    continue
+      +                if not members: continue
+       
+                       group_hits = self._group_hits(g, members)
+                       group_total_ms = sum(self.times[k] for k in members) * 1000.0
+                       group_avg_ms = (group_total_ms / group_hits) if group_hits else 0.0
+       
+      -                print(f"\nGroup: {g}")
+      -                print(f"  members: {len(members)} | group_hits: {self._fmt_int(group_hits)} | group_total_ms: {self._fmt_ms(group_total_ms)} | per_group_hit: {self._fmt_ms(group_avg_ms)}")
+      -
+      -                # For each member, show both per-hit and per-group-hit metrics.
+      +                group_info = {
+      +                    "name": g,
+      +                    "members_count": len(members),
+      +                    "hits": group_hits,
+      +                    "total_ms": group_total_ms,
+      +                    "avg_ms": group_avg_ms,
+      +                }
+      +
+                       rows = []
+                       sorted_members = sorted(members, key=lambda k: self.key_positions.get(k, ("", 0)))
+                       for k in sorted_members:
+                           total_ms = self.times[k] * 1000.0
+                           hits = self.time_counts.get(k, 0)
+                           avg_ms = (total_ms / hits) if hits else 0.0
+                           per_group_ms = (total_ms / group_hits) if group_hits else 0.0
+                           rows.append((k, total_ms, hits, avg_ms, per_group_ms))
+      -
+      -                self._print_table(
+      -                    headers=("member", "total_ms", "hits", "avg_ms", "per_group_hit_ms"),
+      -                    rows=rows,
+      -                    formats=(str, self._fmt_ms, self._fmt_int, self._fmt_ms, self._fmt_ms),
+      -                    indent="    "
+      -                )
+      +                groups_data.append({"info": group_info, "rows": rows})
+      +
+      +        # --- Width Calculation Phase ---
+      +        # This phase determines the max width for each column across all tables.
+      +
+      +        max_widths = defaultdict(int)
+      +
+      +        def update_widths(headers, rows, formats):
+      +            fmts = formats if formats is not None else tuple([str] * len(headers))
+      +            for i, h in enumerate(headers):
+      +                max_widths[h] = max(max_widths[h], len(h))
+      +            for r in rows:
+      +                for i, h in enumerate(headers):
+      +                    val = r[i]
+      +                    cell_str = fmts[i](val) if callable(fmts[i]) else str(val)
+      +                    max_widths[h] = max(max_widths[h], len(cell_str))
+      +
+      +        if counts_rows: update_widths(counts_headers, counts_rows, counts_formats)
+      +        if timings_rows: update_widths(timings_headers, timings_rows, timings_formats)
+      +        if groups_data:
+      +            for group in groups_data:
+      +                update_widths(group_headers, group["rows"], group_formats)
+      +
+      +        # Unify 'key' and 'member' widths for consistent alignment
+      +        if 'key' in max_widths or 'member' in max_widths:
+      +            unified_width = max(max_widths.get('key', 0), max_widths.get('member', 0))
+      +            max_widths['key'] = unified_width
+      +            max_widths['member'] = unified_width
+      +
+      +        # --- Printing Phase ---
+      +        # This phase prints all the tables using the pre-calculated widths.
+      +
+      +        print("\n--- Performance Stats ---")
+      +
+      +        if self.counts:
+      +            print("--- Counts ---")
+      +            self._print_table(headers=counts_headers, rows=counts_rows, formats=counts_formats, indent="  ", widths=max_widths)
+      +
+      +        if self.times:
+      +            print("\n--- Timings (ms) ---")
+      +            self._print_table(headers=timings_headers, rows=timings_rows, formats=timings_formats, indent="  ", widths=max_widths)
+      +
+      +        if self.groups and groups_data:
+      +            print("\n--- Groups (prefix-based) ---")
+      +            for group in groups_data:
+      +                info = group["info"]
+      +                print(f"\nGroup: {info['name']}")
+      +                print(f"  members: {info['members_count']} | group_hits: {self._fmt_int(info['hits'])} | group_total_ms: {self._fmt_ms(info['total_ms'])} | per_group_hit: {self._fmt_ms(info['avg_ms'])}")
+      +                self._print_table(headers=group_headers, rows=group["rows"], formats=group_formats, indent="    ", widths=max_widths)
+       
+               print("-------------------------\n")
+       
+      @@ -220,16 +250,18 @@
+               self,
+               headers: Tuple[str, ...],
+               rows: List[Tuple],
+               formats: Tuple = None,
+               indent: str = "",
+      +        widths: Dict[str, int] = None,
+           ):
+               """Print a simple aligned table.
+       
+               headers: tuple of column names.
+               rows: list of tuples aligned with headers.
+               formats: tuple of formatter callables (len == len(headers)), applied to each cell.
+                        If None, str() is used.
+               indent: left indentation for each printed row.
+      +        widths: optional dict of {header: width} to enforce column widths.
+               """
+               if not rows:
+                   return
+      @@ -252,28 +284,29 @@
+                   str_rows.append(str_row)
+       
+               # Compute column widths
+      -        widths = [len(h) for h in headers]
+      -        for r in str_rows:
+      -            for i, cell in enumerate(r):
+      -                widths[i] = max(widths[i], len(cell))
+      +        if widths:
+      +            col_widths = [widths[h] for h in headers]
+      +        else:
+      +            col_widths = [len(h) for h in headers]
+      +            for r in str_rows:
+      +                for i, cell in enumerate(r):
+      +                    col_widths[i] = max(col_widths[i], len(cell))
+       
+               # Print header
+               header_line = indent + " | ".join(
+      -            h.rjust(widths[i]) if is_numeric_col[i] else h.ljust(widths[i])
+      +            h.rjust(col_widths[i]) if is_numeric_col[i] else h.ljust(col_widths[i])
+                   for i, h in enumerate(headers)
+               )
+      -        sep_line = indent + "-+-".join("-" * widths[i] for i in range(ncols))
+      +        sep_line = indent + "-+-".join("-" * col_widths[i] for i in range(ncols))
+               print(header_line)
+               print(sep_line)
+       
+               # Print rows
+               for r in str_rows:
+                   print(
+                       indent + " | ".join(
+      -                    r[i].rjust(widths[i]) if is_numeric_col[i] else r[i].ljust(widths[i])
+      +                    r[i].rjust(col_widths[i]) if is_numeric_col[i] else r[i].ljust(col_widths[i])
+                           for i in range(ncols)
+                       )
+                   )
        
 
       ```
@@ -1068,7 +1363,7 @@ messages:
       Applying patch to 'python/aug25/stats.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/stats.py.
     metadata:
-  - user: 'Changes committed with message: "Pause and resume active timers around
-      expensive _record_key_position inspection"'
+  - user: 'Changes committed with message: "Refactor report generation to calculate
+      max column widths across all tables for consistent alignment"'
     metadata:
 ...
