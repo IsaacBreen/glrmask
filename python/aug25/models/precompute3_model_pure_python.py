@@ -32,10 +32,10 @@ from ..range_set.set_range_set import SetRangeSet as RangeSetOut
 # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetOut
 
 # from ..common_interface import RangeSetStates
-from ..range_set.set_range_set import SetRangeSet as RangeSetStates
+# from ..range_set.set_range_set import SetRangeSet as RangeSetStates
 # from ..range_set.py_range_set import PyRangeSet as RangeSetStates
 # from ..range_set.bitset_range_set import BitsetRangeSet as RangeSetStates
-# from ..range_set.ffi_range_set import FFIRangeSet as RangeSetStates
+from ..range_set.ffi_range_set import FFIRangeSet as RangeSetStates
 # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetStates
 
 import _sep1 as ffi
@@ -767,13 +767,14 @@ class Model(GraphProvider):
                     stats.inc('get_mask.traversal.edge.popped_reduced_empty')
                     continue
 
-                peeked = RangeSetStates.from_indices(popped.peek())
+                peeked = popped.peek()
+                # peeked = RangeSetStates.from_indices(popped.peek())
                 for dest_idx, state_bv in dests:
                     stats.inc('get_mask.traversal.dests_traversed')
 
                     stats.start('get_mask.main_loop.edge.peek_and_filter')
-                    # values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-                    values_to_keep = peeked & state_bv
+                    values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                    # values_to_keep = peeked & state_bv
                     stats.stop('get_mask.main_loop.edge.peek_and_filter')
 
                     if not values_to_keep:
