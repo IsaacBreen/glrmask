@@ -210,6 +210,7 @@ class Model(GraphProvider):
     arena: Dict[NodeID, ArenaNode]
     roots_map: Dict[int, NodeID]
     max_depth: Dict[NodeID, int]
+    min_end_distance: Dict[NodeID, int] = field(default_factory=dict)
 
     # Parser-related fields
     parser_table: ParserTable
@@ -283,20 +284,6 @@ class Model(GraphProvider):
             for uid, node_data in arena_dict.items()
         }
 
-        # Sort edges to prioritize paths to end nodes
-        for node in arena.values():
-            # Sort inner dests list by max_depth
-            for _edge_key, dests in node.children:
-                dests.sort(key=lambda item: max_depth.get(item[0], 0), reverse=True)
-
-            # Sort outer children list based on the best (first) destination's max_depth
-            def get_best_child_depth(edge):
-                _edge_key, dests = edge
-                if not dests:
-                    return -1
-                # After inner sort, the first destination is the one with the highest max_depth
-                return max_depth.get(dests[0][0], 0)
-            node.children.sort(key=get_best_child_depth, reverse=True)
         # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
         tokenizer = constraint.tokenizer()
@@ -401,7 +388,82 @@ class Model(GraphProvider):
             state=state,
         )
 
+        # Perform traversal optimizations: compute min-end distances and reorder edges/dests.
+        model.optimize_traversal()
         return model
+
+    def optimize_traversal(self):
+        """
+        Compute min_end_distance (in edges) from every node to the nearest end node,
+        and reorder edges and their destination lists so that get_mask reaches end
+        nodes as quickly as possible.
+        """
+        stats = Stats.get()
+        stats.start('optimize_traversal')
+        INF = 10**9
+
+        arena = self.arena
+        max_depth = self.max_depth
+
+        # Build reverse adjacency: dest -> set(preds)
+        preds: Dict[NodeID, Set[NodeID]] = collections.defaultdict(set)
+        for nid, a_node in arena.items():
+            for (_edge_key, dests) in a_node.children:
+                for dest_idx, _state_bv in dests:
+                    preds[int(dest_idx)].add(nid)
+
+        # Multi-source BFS from end nodes
+        dist: Dict[NodeID, int] = {nid: INF for nid in arena.keys()}
+        dq = collections.deque()
+        for nid, a_node in arena.items():
+            if a_node.clean_end:
+                dist[nid] = 0
+                dq.append(nid)
+
+        while dq:
+            cur = dq.popleft()
+            next_d = dist[cur] + 1
+            for pred in preds.get(cur, ()):
+                if dist[pred] > next_d:
+                    dist[pred] = next_d
+                    dq.append(pred)
+
+        self.min_end_distance = dist
+
+        # Helper: estimate llm_bv size for tie-breaking
+        def llm_bv_cardinality(bv: LLMTokenSet) -> int:
+            try:
+                # Some RangeSet impls may have faster cardinality
+                return bv.cardinality()  # type: ignore[attr-defined]
+            except Exception:
+                total = 0
+                for s, e in bv.to_ranges():
+                    total += (e - s + 1)
+                return total
+
+        # Reorder inner 'dests' lists (by min_end_distance) and outer edges accordingly
+        for _nid, a_node in arena.items():
+            new_children_with_keys = []
+            for (edge_key, dests) in a_node.children:
+                pop, llm_bv = edge_key
+                # Sort destinations by closeness to an end node, then by higher max_depth
+                dests.sort(key=lambda item: (dist.get(int(item[0]), INF), -max_depth.get(int(item[0]), 0)))
+                if dests:
+                    best_dest = int(dests[0][0])
+                    best_dist = dist.get(best_dest, INF)
+                    best_depth = max_depth.get(best_dest, 0)
+                else:
+                    best_dest = None
+                    best_dist = INF
+                    best_depth = -1
+                llm_size = llm_bv_cardinality(llm_bv)
+                # Edge ordering key: min distance to end first, then deeper paths, then broader token coverage, then fewer pops
+                edge_key_sort = (best_dist, -best_depth, -llm_size, pop)
+                new_children_with_keys.append(((pop, llm_bv), dests, edge_key_sort))
+
+            new_children_with_keys.sort(key=lambda item: item[2])
+            a_node.children = [ (edge_key, dests) for (edge_key, dests, _k) in new_children_with_keys ]
+        stats.stop('optimize_traversal')
     @profile
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         terminal_to_add_rs = RangeSet.from_indices([terminal_id])
@@ -655,16 +717,37 @@ class Model(GraphProvider):
         all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
         final_mask: LLMTokenSet = RangeSet.empty()
 
-        # We store (GSS, next_edge_idx) per node.
-        values: Dict[NodeID, Tuple[GSS, int]] = {}
-        depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-priority, node_id)
+        # We store (GSS, next_edge_idx, next_dest_idx) per node to process only one destination per pop.
+        values: Dict[NodeID, Tuple[GSS, int, int]] = {}
+        # Heap stores (priority, node_id); smaller priority first. We use min_end_distance as priority.
+        depth_heap: List[Tuple[int, NodeID]] = []
 
         roots_map: Dict[int, NodeID] = self.roots_map
         max_depth: Dict[NodeID, int] = self.max_depth
+        min_end_distance: Dict[NodeID, int] = self.min_end_distance or {}
         arena: Dict[NodeID, ArenaNode] = self.arena
         is_end = self.is_end
         pmc: Dict[int, Dict[int, LLMTokenSet]] = self.possible_matches_cache or {}
         max_state: int = self.tokenizer_max_state
+        INF = 10**9
+
+        # Priority helpers
+        def child_priority(nid: NodeID) -> int:
+            return min_end_distance.get(nid, INF)
+
+        def node_next_work_priority(nid: NodeID, edge_idx: int, dest_idx: int) -> Optional[int]:
+            a_node = arena.get(nid)
+            edges = a_node.children if a_node else []
+            if edge_idx < len(edges):
+                _edge, dests = edges[edge_idx]
+                if dest_idx < len(dests):
+                    return child_priority(int(dests[dest_idx][0]))
+                # Find first remaining edge with any dest
+                for _ei in range(edge_idx + 1, len(edges)):
+                    _e2, d2 = edges[_ei]
+                    if d2:
+                        return child_priority(int(d2[0][0]))
+            return None
 
         hp, hpop = heapq.heappush, heapq.heappop
         # --- Initial GSS Stats ---
@@ -739,24 +822,31 @@ class Model(GraphProvider):
         for r, gss_list in initial_gss_map.items():
             merged_gss = GSS.merge_many(gss_list)
             if not merged_gss.is_empty():
-                values[r] = (merged_gss, 0)
-                hp(depth_heap, (-max_depth.get(r, 0), r))
+                values[r] = (merged_gss, 0, 0)
+                pr = node_next_work_priority(r, 0, 0)
+                if pr is None:
+                    pr = child_priority(r)
+                hp(depth_heap, (pr, r))
         stats.stop('get_mask.seeding')
 
         # Main loop
         stats.start('get_mask.main_loop')
         visited_nodes = set()
+        # Cache intersect-and-prune mutators per llm_bv identity, and popped GSS per (node, edge_idx, id(gss))
+        intersector_cache: Dict[int, Any] = {}
+        popped_cache: Dict[Tuple[NodeID, int, int], GSS] = {}
+
         while depth_heap:
-            neg_p, node = hpop(depth_heap)
+            _p, node = hpop(depth_heap)
 
             if node not in values:
                 stats.inc('get_mask.traversal.stale_pops')
                 continue
 
-            gss_node, edge_idx = values[node]
+            gss_node, edge_idx, dest_cursor = values[node]
             stats.inc('get_mask.traversal.depth_heap.pops')
 
-            if edge_idx == 0:  # First time processing this node
+            if edge_idx == 0 and dest_cursor == 0:  # First time processing this node
                 stats.inc('get_mask.traversal.nodes_processed')
                 visited_nodes.add(node)
                 stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
@@ -785,45 +875,92 @@ class Model(GraphProvider):
             stats.inc('get_mask.traversal.edges_traversed')
             stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
 
-            popped = gss_node.popn(pop)
-            if not popped.is_empty():
-                @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)
-                def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                    new_mask = acc.llm_mask.intersection(llm_bv)
-                    if new_mask.is_empty():
-                        return None
-                    return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
+            # Pop and intersect/prune once per (node, edge_idx, gss) triple
+            popped_key = (node, edge_idx, id(gss_node))
+            popped = popped_cache.get(popped_key)
+            if popped is None:
+                popped = gss_node.popn(pop)
+                if not popped.is_empty():
+                    intersector = intersector_cache.get(id(llm_bv))
+                    if intersector is None:
+                        @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)
+                        def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                            new_mask = acc.llm_mask.intersection(llm_bv)
+                            if new_mask.is_empty():
+                                return None
+                            return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
+                        intersector = intersect_and_prune
+                        intersector_cache[id(llm_bv)] = intersector
+                    popped = popped.apply_and_prune(intersector)
+                popped_cache[popped_key] = popped
 
-                popped = popped.apply_and_prune(intersect_and_prune)
-
-                if not popped.is_empty() and not popped.reduce_acc().is_empty():
-                    peeked = popped.peek()
-                    for dest_idx, state_bv in dests:
-                        values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-                        if not values_to_keep:
-                            continue
-
+            if not popped.is_empty() and not popped.reduce_acc().is_empty():
+                peeked = popped.peek()
+                # Process only one viable destination per heap pop, starting from dest_cursor
+                chosen = False
+                i = dest_cursor
+                while i < len(dests):
+                    dest_idx, state_bv = dests[i]
+                    values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                    if values_to_keep:
                         child_gss = popped.isolate_many(values_to_keep)
-                        if child_gss.is_empty() or child_gss.reduce_acc().is_empty():
-                            continue
+                        if not child_gss.is_empty() and not child_gss.reduce_acc().is_empty():
+                            d: NodeID = int(dest_idx)
+                            if d in values:
+                                stats.inc('get_mask.traversal.edge.gss_merges')
+                                old_gss, old_edge_idx, old_dest_cursor = values[d]
+                                values[d] = (old_gss.merge(child_gss), old_edge_idx, old_dest_cursor)
+                            else:
+                                values[d] = (child_gss, 0, 0)
+                            # Schedule the child with priority based on closeness to end
+                            hp(depth_heap, (child_priority(d), d))
 
-                        d: NodeID = int(dest_idx)
-                        if d in values:
-                            stats.inc('get_mask.traversal.edge.gss_merges')
-                            old_gss, old_edge_idx = values[d]
-                            values[d] = (old_gss.merge(child_gss), old_edge_idx)
-                        else:
-                            values[d] = (child_gss, 0)
-                            hp(depth_heap, (-max_depth.get(d, 0), d))
+                            # Advance the cursor to the next destination within the same edge
+                            next_dest_cursor = i + 1
+                            if next_dest_cursor < len(dests):
+                                values[node] = (gss_node, edge_idx, next_dest_cursor)
+                                pr = node_next_work_priority(node, edge_idx, next_dest_cursor)
+                                if pr is None:
+                                    pr = child_priority(node)
+                                hp(depth_heap, (pr, node))
+                            else:
+                                # Move to next edge
+                                next_edge_idx = edge_idx + 1
+                                if next_edge_idx < len(edges):
+                                    values[node] = (gss_node, next_edge_idx, 0)
+                                    pr = node_next_work_priority(node, next_edge_idx, 0)
+                                    if pr is None:
+                                        pr = child_priority(node)
+                                    hp(depth_heap, (pr, node))
+                                else:
+                                    # No more work at this node
+                                    del values[node]
+                            chosen = True
+                            break
+                    i += 1
 
-            # Re-schedule for next edge
-            values[node] = (gss_node, edge_idx + 1)
-            if edge_idx + 1 < len(edges):
-                next_edge = edges[edge_idx + 1]
-                if next_edge[1]: # has destinations
-                    next_dest = next_edge[1][0][0]
-                    priority = max_depth.get(next_dest, 0)
-                    hp(depth_heap, (-priority, node))
+                if not chosen:
+                    # No viable destination in this edge: advance to next edge
+                    next_edge_idx = edge_idx + 1
+                    if next_edge_idx < len(edges):
+                        values[node] = (gss_node, next_edge_idx, 0)
+                        pr = node_next_work_priority(node, next_edge_idx, 0)
+                        if pr is None:
+                            pr = child_priority(node)
+                        hp(depth_heap, (pr, node))
+                    else:
+                        del values[node]
+            else:
+                # Popped path is dead: advance to next edge
+                next_edge_idx = edge_idx + 1
+                if next_edge_idx < len(edges):
+                    values[node] = (gss_node, next_edge_idx, 0)
+                    pr = node_next_work_priority(node, next_edge_idx, 0)
+                    if pr is None:
+                        pr = child_priority(node)
+                    hp(depth_heap, (pr, node))
+                else:
+                    del values[node]
 
         stats.stop('get_mask.main_loop')
         stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
