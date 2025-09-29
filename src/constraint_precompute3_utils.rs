@@ -368,12 +368,29 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
     #[cfg(rustrover)] let it = all_nodes.iter();
     for n in it {
         let g = n.read(trie3_god).expect("read");
-        for t in g.value.live_tokens.iter() {
-            if t as usize <= max_tok { freq[t as usize] += 1; }
+        let live_tokens = &g.value.live_tokens;
+        if live_tokens.is_all() {
+            for t in 0..=max_tok {
+                freq[t] += 1;
+            }
+        } else {
+            for t in live_tokens.iter() {
+                if t <= max_tok {
+                    freq[t] += 1;
+                }
+            }
         }
         for ((_, llm_bv), _dm) in g.children() {
-            for t in llm_bv.iter() {
-                if t as usize <= max_tok { freq[t as usize] += 1; }
+            if llm_bv.is_all() {
+                for t in 0..=max_tok {
+                    freq[t] += 1;
+                }
+            } else {
+                for t in llm_bv.iter() {
+                    if t <= max_tok {
+                        freq[t] += 1;
+                    }
+                }
             }
         }
     }

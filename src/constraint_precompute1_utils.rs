@@ -305,13 +305,30 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     let mut freq: Vec<usize> = vec![0; max_tok + 1];
     for n in tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Freq)", total = all_nodes.len()) {
         let g = n.read(trie1_god).expect("read");
-        for t in g.value.live_tokens.iter() {
-            if t as usize <= max_tok { freq[t as usize] += 1; }
+        let live_tokens = &g.value.live_tokens;
+        if live_tokens.is_all() {
+            for t in 0..=max_tok {
+                freq[t] += 1;
+            }
+        } else {
+            for t in live_tokens.iter() {
+                if t <= max_tok {
+                    freq[t] += 1;
+                }
+            }
         }
         for (_ek, dm) in g.children() {
             for (_dst, bv) in dm {
-                for t in bv.iter() {
-                    if t as usize <= max_tok { freq[t as usize] += 1; }
+                if bv.is_all() {
+                    for t in 0..=max_tok {
+                        freq[t] += 1;
+                    }
+                } else {
+                    for t in bv.iter() {
+                        if t <= max_tok {
+                            freq[t] += 1;
+                        }
+                    }
                 }
             }
         }
