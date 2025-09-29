@@ -482,6 +482,8 @@ class Model(GraphProvider):
 
         stats.start('commit.fuse')
         memo = {}
+        merged_states = {tsid: gss.fuse("to_interface", memo) for tsid, gss in merged_states.items()}
+        memo = {}
         merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
         stats.stop('commit.fuse')
 
