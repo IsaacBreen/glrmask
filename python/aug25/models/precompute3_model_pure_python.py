@@ -982,43 +982,11 @@ class Model(GraphProvider):
         stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
 
         stats.start('get_mask.final_conversion')
-        # Convert internal mask back to original IDs using block unions
-        original_indices: RangeSetOut = RangeSetOut.empty()
-        if not final_mask.is_empty():
-            B = self.output_block_size
-            block_unions = self.output_block_unions
-            mapping = self.internal_to_original_map
-
-            for start, end in final_mask.to_ranges():
-                start_block_idx = start // B
-                end_block_idx = end // B
-
-                if start_block_idx == end_block_idx:
-                    # The entire range is within a single block
-                    for i in range(start, end + 1):
-                        s = mapping.get(i)
-                        if s is not None:
-                            original_indices |= s
-                else:
-                    # Process the first partial block (suffix)
-                    first_block_end = (start_block_idx + 1) * B
-                    for i in range(start, first_block_end):
-                        s = mapping.get(i)
-                        if s is not None:
-                            original_indices |= s
-
-                    # Process full blocks in between
-                    for block_idx in range(start_block_idx + 1, end_block_idx):
-                        bu = block_unions.get(block_idx)
-                        if bu is not None:
-                            original_indices |= bu
-
-                    # Process the last partial block (prefix)
-                    last_block_start = end_block_idx * B
-                    for i in range(last_block_start, end + 1):
-                        s = mapping.get(i)
-                        if s is not None:
-                            original_indices |= s
+        # Convert internal mask back to original IDs
+        original_indices = RangeSetOut.empty()
+        for i in final_mask.iter_indices():
+            if i in self.internal_to_original_map:
+                original_indices |= self.internal_to_original_map[i]
         stats.stop('get_mask.final_conversion')
 
         stats.stop('get_mask')
