@@ -85,6 +85,14 @@ class RangeSet(ABC, Generic[T]):
         """Return True if self is a subset of other."""
         return self.difference(other).is_empty()
 
+    def issuperset(self, other: "RangeSet[T]") -> bool:
+        """Return True if self is a superset of other."""
+        return other.issubset(self)
+
+    def isdisjoint(self, other: "RangeSet[T]") -> bool:
+        """Return True if self has no elements in common with other."""
+        return self.intersection(other).is_empty()
+
     @abstractmethod
     def contains(self, x: T) -> bool:
         """Return True if x is contained in the set."""

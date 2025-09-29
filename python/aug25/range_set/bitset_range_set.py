@@ -162,6 +162,44 @@ class BitsetRangeSet(RangeSet[int]):
             differenced = py_self.difference(other)
             return BitsetRangeSet(differenced.intervals)
 
+    def issuperset(self, other: RangeSet[int]) -> bool:
+        """Return True if self is a superset of other."""
+        if not isinstance(other, RangeSet):
+            return NotImplemented
+        
+        if isinstance(other, BitsetRangeSet):
+            len_a = len(self._bitset)
+            len_b = len(other._bitset)
+            if len_b > len_a:
+                # Check if the extra part of other's bitset is all zeros
+                for i in range(len_a, len_b):
+                    if other._bitset[i] != 0:
+                        return False
+            
+            limit = min(len_a, len_b)
+            for i in range(limit):
+                if (self._bitset[i] & other._bitset[i]) != other._bitset[i]:
+                    return False
+            return True
+        else:
+            # Generic path
+            return other.issubset(self)
+
+    def isdisjoint(self, other: RangeSet[int]) -> bool:
+        """Return True if self has no elements in common with other."""
+        if not isinstance(other, RangeSet):
+            return NotImplemented
+        
+        if isinstance(other, BitsetRangeSet):
+            limit = min(len(self._bitset), len(other._bitset))
+            for i in range(limit):
+                if (self._bitset[i] & other._bitset[i]) != 0:
+                    return False
+            return True
+        else:
+            # Generic path
+            return self.intersection(other).is_empty()
+
     def union_update(self, other: RangeSet[int]) -> None:
         """Update self with the union of self and other."""
         if not isinstance(other, RangeSet):

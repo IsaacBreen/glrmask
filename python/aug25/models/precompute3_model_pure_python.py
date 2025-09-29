@@ -404,7 +404,7 @@ class Model(GraphProvider):
             disallowed_terminals_map = acc.terminals_union
             for tsid, matched_bv in terminals_map.items():
                 disallowed_for_state = disallowed_terminals_map.get(tsid)
-                if disallowed_for_state and not matched_bv.intersection(disallowed_for_state).is_empty():
+                if disallowed_for_state and not matched_bv.isdisjoint(disallowed_for_state):
                     return None
 
             # Map
@@ -696,8 +696,8 @@ class Model(GraphProvider):
                 continue
 
             gss_mask_acc = gss_node.reduce_acc()
-            if gss_mask_acc and gss_mask_acc.llm_mask.intersection(potential_new_tokens).is_empty():
-                stats.inc('get_mask.zombie_check.skipped_nodes_no_overlap')
+            if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
+                stats.inc('get_mask.zombie_check.skipped_nodes_no_overlap_disjoint')
                 stats.stop('get_mask.zombie_check')
                 continue
             stats.stop('get_mask.zombie_check')

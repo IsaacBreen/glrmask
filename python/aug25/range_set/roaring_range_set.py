@@ -112,6 +112,32 @@ class RoaringRangeSet(RangeSet[int]):
                 other_rb.add_range(start, end + 1)
             return self._new_from_rb(self._rb - other_rb)
 
+    def issuperset(self, other: RangeSet[int]) -> bool:
+        """Return True if self is a superset of other."""
+        if not isinstance(other, RangeSet):
+            return NotImplemented
+        
+        if isinstance(other, RoaringRangeSet):
+            return self._rb.issuperset(other._rb)
+        else:
+            other_rb = RoaringBitmap()
+            for start, end in other.intervals:
+                if start < 0:
+                    raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                other_rb.add_range(start, end + 1)
+            return self._rb.issuperset(other_rb)
+
+    def isdisjoint(self, other: RangeSet[int]) -> bool:
+        """Return True if self has no elements in common with other."""
+        if not isinstance(other, RangeSet):
+            return NotImplemented
+
+        if isinstance(other, RoaringRangeSet):
+            return self._rb.isdisjoint(other._rb)
+        else:
+            other_rb = RoaringBitmap(other.iter_indices())
+            return self._rb.isdisjoint(other_rb)
+
     def union_update(self, other: RangeSet[int]) -> None:
         """Update self with the union of self and other."""
         if not isinstance(other, RangeSet):

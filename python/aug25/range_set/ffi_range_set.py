@@ -104,6 +104,24 @@ class FFIRangeSet(RangeSet[int]):
         return res
 
     @time_method
+    def issuperset(self, other: RangeSet[int]) -> bool:
+        """Return True if self is a superset of other."""
+        if not isinstance(other, FFIRangeSet):
+            raise TypeError("other must be a FFIRangeSet")
+        res = self._bitset.is_superset(other._bitset)
+        record_metric('FFIRangeSet.issuperset.true' if res else 'FFIRangeSet.issuperset.false', 1)
+        return res
+
+    @time_method
+    def isdisjoint(self, other: RangeSet[int]) -> bool:
+        """Return True if self has no elements in common with other."""
+        if not isinstance(other, FFIRangeSet):
+            raise TypeError("other must be a FFIRangeSet")
+        res = self._bitset.is_disjoint(other._bitset)
+        record_metric('FFIRangeSet.isdisjoint.true' if res else 'FFIRangeSet.isdisjoint.false', 1)
+        return res
+
+    @time_method
     def union_update(self, other: RangeSet[int]) -> None:
         """Update self with the union of self and other."""
         if not isinstance(other, FFIRangeSet):

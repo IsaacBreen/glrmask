@@ -195,6 +195,26 @@ class PyRangeSet(RangeSet[int]):
                 j += 1
         return PyRangeSet(res)
 
+    def isdisjoint(self, other: 'RangeSet[int]') -> bool:
+        """Return True if self has no elements in common with other."""
+        if not isinstance(other, RangeSet):
+            return NotImplemented
+        if self.is_empty() or other.is_empty():
+            return True
+        a = list(self.intervals)
+        b = list(other.intervals)
+        i = j = 0
+        while i < len(a) and j < len(b):
+            s1, e1 = a[i]
+            s2, e2 = b[j]
+            if max(s1, s2) <= min(e1, e2):
+                return False  # Found an intersection
+            if e1 < e2:
+                i += 1
+            else:
+                j += 1
+        return True
+
     def difference(self, other: 'RangeSet[int]') -> 'PyRangeSet':
         """Return the set difference self \\ other as a PyRangeSet."""
         if self.is_empty():
