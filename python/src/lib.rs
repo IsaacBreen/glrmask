@@ -14,6 +14,7 @@ use pyo3::basic::CompareOp;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::Mutex;
 use ouroboros::self_referencing;
 use numpy::{IntoPyArray, PyArray1};
 use sep1::datastructures::u8set::U8Set;
@@ -551,7 +552,7 @@ impl PyGrammarConstraint {
 
 #[pyclass(name = "HybridBitsetIterator")]
 struct PyHybridBitsetIterator {
-    inner: Box<dyn Iterator<Item = usize> + Send>,
+    inner: Mutex<Box<dyn Iterator<Item = usize> + Send>>,
 }
 
 #[pymethods]
@@ -561,7 +562,7 @@ impl PyHybridBitsetIterator {
     }
 
     fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<usize> {
-        slf.inner.next()
+        slf.inner.lock().unwrap().next()
     }
 }
 
@@ -612,13 +613,13 @@ impl PyHybridBitset {
 
     fn __iter__(&self) -> PyHybridBitsetIterator {
         PyHybridBitsetIterator {
-            inner: Box::new(self.inner.clone().into_iter()),
+            inner: Mutex::new(Box::new(self.inner.clone().into_iter())),
         }
     }
 
     fn iter_ranges<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyIterator>> {
         let ranges: Vec<(usize, usize)> = self.inner.iter_ranges().collect();
-        pyo3::types::PyList::new_bound(py, &ranges).iter()
+        pyo3::types::PyList::new_bound(py, &ranges).as_ref().iter()
     }
 
     fn contains(&self, idx: usize) -> bool {
