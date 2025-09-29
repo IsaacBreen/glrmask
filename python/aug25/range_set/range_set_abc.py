@@ -147,6 +147,9 @@ class RangeSet(ABC, Generic[T]):
         """Returns the elements of the set as a list."""
         raise NotImplementedError
 
+    def __iter__(self):
+        return self.iter_indices()
+
     @abstractmethod
     def iter_indices(self) -> Iterable[T]:
         """Iterates over all individual indices in the set."""
