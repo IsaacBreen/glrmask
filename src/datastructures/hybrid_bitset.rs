@@ -226,6 +226,10 @@ impl HybridBitset {
         }
     }
 
+    pub fn iter(&self) -> Iter<'_> {
+        self.iter_indices()
+    }
+
     /// Returns an iterator over the inclusive [start, end] ranges of the set.
     pub fn iter_ranges(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
         self.inner.ranges().map(|r| (*r.start(), *r.end()))
