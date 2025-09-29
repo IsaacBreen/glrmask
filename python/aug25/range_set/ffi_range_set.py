@@ -230,7 +230,7 @@ class FFIRangeSet(RangeSet[int]):
 
     @staticmethod
     @time_func('FFIRangeSet.empty')
-    def empty() -> 'FFIRangeSet':
+    def empty(self) -> 'FFIRangeSet':
         """Creates an empty FFIRangeSet."""
         record_metric('FFIRangeSet.empty.calls', 1)
         return FFIRangeSet.from_ranges([])

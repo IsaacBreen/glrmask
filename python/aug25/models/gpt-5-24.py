@@ -49,7 +49,7 @@ class FastRangeSet:
         self._bs = bs
 
     @staticmethod
-    def empty() -> "FastRangeSet":
+    def empty(self) -> "FastRangeSet":
         # Rely on from_ranges([]) to create empty bitset
         return FastRangeSet(ffi.Bitset.from_ranges([]))
 
