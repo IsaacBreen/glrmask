@@ -39,9 +39,9 @@ from ..range_set.set_range_set import SetRangeSet as RangeSetStates
 # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetStates
 
 import _sep1 as ffi
-# from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+# from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
 # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
-from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
 
 
 # --- Monkey-patch RangeSet to collect stats on union/intersection ---
