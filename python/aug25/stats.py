@@ -138,30 +138,30 @@ class Stats:
         # --- Data Preparation Phase ---
         # This phase gathers all data and rows for all tables before printing.
 
-        # 1. Prepare combined stats data
-        stats_headers = ("key", "count", "total_ms", "hits", "avg_ms")
-        stats_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_int_or_blank, self._fmt_ms_or_blank)
+        # 1. Prepare combined stats data  
+        stats_headers = ("key", "counter", "timer_hits", "total_ms", "avg_ms")
+        stats_formats = (str, self._fmt_int_or_blank, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
         stats_rows = []
         all_keys = self.counts.keys() | self.times.keys()
         if all_keys:
             sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
             for key in sorted_keys:
-                count = self.counts.get(key)
+                counter = self.counts.get(key)
 
                 total_ms = None
-                hits = None
+                timer_hits = None
                 avg_ms = None
                 if key in self.times:
                     total_ms = self.times[key] * 1000.0
-                    hits = self.time_counts.get(key, 0)
-                    avg_ms = (total_ms / hits) if hits else 0.0
+                    timer_hits = self.time_counts.get(key, 0)
+                    avg_ms = (total_ms / timer_hits) if timer_hits else 0.0
 
-                stats_rows.append((key, count, total_ms, hits, avg_ms))
+                stats_rows.append((key, counter, timer_hits, total_ms, avg_ms))
 
         # 2. Prepare Groups data
         groups_data = []
-        group_members_headers = ("member", "count", "per_group_hit", "total_ms", "hits", "avg_ms", "per_group_hit_ms")
-        group_members_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
+        group_members_headers = ("member", "timer_hits", "total_ms", "avg_ms", "ms/group_hit")
+        group_members_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
         if self.groups:
             group_sort_keys = {}
             for g in self.groups:
@@ -177,7 +177,6 @@ class Stats:
                     continue
 
                 timing_members = [m for m in all_members if m in self.times]
-                count_members = [m for m in all_members if m in self.counts]
 
                 group_hits = self._group_hits(g, timing_members)
                 group_total_ms = sum(self.times[k] for k in timing_members) * 1000.0
@@ -187,7 +186,6 @@ class Stats:
                     "name": g,
                     "members_count": len(all_members),
                     "timing_members_count": len(timing_members),
-                    "count_members_count": len(count_members),
                     "hits": group_hits,
                     "total_ms": group_total_ms,
                     "avg_ms": group_avg_ms,
@@ -197,20 +195,17 @@ class Stats:
                 if all_members:
                     sorted_members = sorted(all_members, key=lambda k: self.key_positions.get(k, ("", 0)))
                     for k in sorted_members:
-                        count = self.counts.get(k)
-                        per_group_hit = (count / group_hits) if count is not None and group_hits else None
-
+                        timer_hits = None
                         total_ms = None
-                        hits = None
                         avg_ms = None
                         per_group_ms = None
                         if k in self.times:
                             total_ms = self.times[k] * 1000.0
-                            hits = self.time_counts.get(k, 0)
-                            avg_ms = (total_ms / hits) if hits else 0.0
+                            timer_hits = self.time_counts.get(k, 0)
+                            avg_ms = (total_ms / timer_hits) if timer_hits else 0.0
                             per_group_ms = (total_ms / group_hits) if group_hits else 0.0
 
-                        member_rows.append((k, count, per_group_hit, total_ms, hits, avg_ms, per_group_ms))
+                        member_rows.append((k, timer_hits, total_ms, avg_ms, per_group_ms))
 
                 groups_data.append({"info": group_info, "member_rows": member_rows})
 
@@ -244,29 +239,29 @@ class Stats:
         # --- Printing Phase ---
         # This phase prints all the tables using the pre-calculated widths.
 
-        print("\n--- Performance Stats ---")
+        print("\n═══ Performance Stats ═══")
 
         if stats_rows:
-            print("--- All Stats ---")
+            print("\n▶ All Stats")
             self._print_table(headers=stats_headers, rows=stats_rows, formats=stats_formats, indent="  ", widths=max_widths)
 
         if self.groups and groups_data:
-            print("\n--- Groups (prefix-based) ---")
+            print("\n▶ Groups")
             for group in groups_data:
                 info = group["info"]
-                print(f"\nGroup: {info['name']}")
-                summary_parts = [f"members: {info['members_count']}"]
+                print(f"\n  [{info['name']}]")
+                summary_parts = []
                 if info['timing_members_count'] > 0:
-                    summary_parts.append(f"group_hits: {self._fmt_int(info['hits'])}")
-                    summary_parts.append(f"group_total_ms: {self._fmt_ms(info['total_ms'])}")
-                    summary_parts.append(f"per_group_hit: {self._fmt_ms(info['avg_ms'])}")
-                print(f"  {' | '.join(summary_parts)}")
+                    summary_parts.append(f"{info['members_count']} members")
+                    summary_parts.append(f"{self._fmt_int(info['hits'])} hits")
+                    summary_parts.append(f"{self._fmt_ms(info['total_ms'])}ms total")
+                    summary_parts.append(f"{self._fmt_ms(info['avg_ms'])}ms/hit")
+                print(f"    {' · '.join(summary_parts)}")
 
                 if group["member_rows"]:
-                    print("    Members:")
-                    self._print_table(headers=group_members_headers, rows=group["member_rows"], formats=group_members_formats, indent="      ", widths=max_widths)
+                    self._print_table(headers=group_members_headers, rows=group["member_rows"], formats=group_members_formats, indent="    ", widths=max_widths)
 
-        print("-------------------------\n")
+        print("\n═════════════════════════\n")
 
     # -------- Helpers --------
 
