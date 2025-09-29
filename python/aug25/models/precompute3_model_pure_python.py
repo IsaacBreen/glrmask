@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import heapq
 import collections
 import textwrap
@@ -237,10 +236,6 @@ class Model(GraphProvider):
     # Minimum steps from node to any end (clean_end=True)
     node_min_dist: Dict[NodeID, int] = field(default_factory=dict)
 
-    # --- Precomputed output mapping optimization ---
-    output_block_size: int = 512
-    output_block_unions: Dict[int, RangeSetOut] = field(default_factory=dict)
-
     @staticmethod
     def from_json_string(s: str) -> 'Model':
         Stats.get().reset()
@@ -398,8 +393,6 @@ class Model(GraphProvider):
         # Pre-optimization passes to make get_mask fast
         # 1) reorder edges/dests to approach end nodes ASAP and compute node_min_dist
         model._optimize_graph_for_end_bfs()
-        # 2) build block unions for fast final conversion of internal->original IDs
-        model._optimize_output_mapping()
 
         return model
     @profile
@@ -635,36 +628,6 @@ class Model(GraphProvider):
 
         stats.stop(p)
         return False
-
-    def _optimize_output_mapping(self):
-        """
-        Build per-block unions of internal_to_original_map to accelerate final conversion.
-        Uses FFIRangeSet unions for speed.
-        """
-        stats = Stats.get()
-        stats.start('optimize_output_mapping')
-
-        if self.output_block_unions:
-            # Already built
-            stats.stop('optimize_output_mapping')
-            return
-
-        # Derive internal_max from all_internal_llm_tokens_bitset
-        internal_max = 0
-        for start, end in self.all_internal_llm_tokens_bitset.to_ranges():
-            internal_max = max(internal_max, end)
-
-        B = self.output_block_size
-        block_unions: Dict[int, RangeSetOut] = {}
-        # Aggregate by block using existing mapping only
-        for internal_id, orig_set in self.internal_to_original_map.items():
-            bid = internal_id // B
-            if bid not in block_unions:
-                block_unions[bid] = RangeSetOut.empty()
-            block_unions[bid] |= orig_set
-
-        self.output_block_unions = block_unions
-        stats.stop('optimize_output_mapping')
 
     def _optimize_graph_for_end_bfs(self):
         """
