@@ -1108,7 +1108,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             promotable_upper_nodes=promotable_upper_nodes,
         )
 
-    def to_graph_string(self, memo: Optional[Set[int]] = None) -> str:
+    def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
         """
         Generates a pretty, indented string representation of the GSS structure.
         Nodes are expanded inline on first appearance. Subsequent encounters are
@@ -1119,6 +1119,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                   printed. This method will mutate the set by adding IDs of
                   nodes it prints. This allows for coherent printing of multiple
                   GSS structures that share nodes.
+            upper_only: If True, do not expand Lower nodes from Interface nodes.
         """
         if memo is None:
             memo = set()
@@ -1153,12 +1154,13 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             # Collect children edges to be printed for this node
             children_to_print = []
             if hasattr(node, 'children') and node.children:
-                sorted_children = sorted(node.children.items())
-                for v, kids_at_depths in sorted_children:
-                    sorted_kids = sorted(kids_at_depths.items())
-                    for depth, child in sorted_kids:
-                        label = f"Edge {repr(v)} (d={depth})"
-                        children_to_print.append((label, child))
+                if not (upper_only and isinstance(node, Interface)):
+                    sorted_children = sorted(node.children.items())
+                    for v, kids_at_depths in sorted_children:
+                        sorted_kids = sorted(kids_at_depths.items())
+                        for depth, child in sorted_kids:
+                            label = f"Edge {repr(v)} (d={depth})"
+                            children_to_print.append((label, child))
 
             # Iterate through the collected children and format them
             for i, (label, child) in enumerate(children_to_print):
@@ -1178,6 +1180,12 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     # Prepare prefix for the next level of recursion
                     child_prefix = current_prefix + ("    " if is_last else "│   ")
                     _format_recursive(child, child_prefix)
+
+            if upper_only and isinstance(node, Interface) and node.children:
+                prefix_char = "└── "
+                num_lower_edges = sum(len(kids) for kids in node.children.values())
+                line = current_prefix + prefix_char + f"[{num_lower_edges} lower edges omitted]"
+                output_lines.append(line)
 
         # Start the process from the root node
         root = self.inner

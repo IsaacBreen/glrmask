@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - python/gss_tester/implementations/leveled_impl.py
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     python/gss_tester/implementations/leveled_impl.py: |
@@ -11,7 +11,7 @@ local_system:
       from dataclasses import dataclass, field
       from functools import reduce
       from itertools import chain
-      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable, Type
+      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable, Type, Literal
       from collections import Counter, defaultdict
 
       from ..interface import GSS, T, Acc, NewAcc, Mergeable
@@ -753,22 +753,28 @@ local_system:
           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
               return LeveledGSS(merge_upper(self.inner, other.inner))
 
-          def fuse(self, levels: Optional[int] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
-              if levels is not None and levels <= 0:
+          def fuse(self, levels: Optional[int | Literal["to_interface"]] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
+              if isinstance(levels, int) and levels <= 0:
                   return self
               if memo is None:
                   memo = {}
 
-              def fuse_lower_node(node: Lower[T], remain: Optional[int]) -> Lower[T]:
+              def fuse_lower_node(node: Lower[T], remain: Optional[int | Literal["to_interface"]]) -> Lower[T]:
+                  if remain == "to_interface":
+                      return node
                   key = ('L', id(node), remain)
                   cached = memo.get(key)
                   if cached is not None:
                       return cached
-                  if remain == 0:
+                  if isinstance(remain, int) and remain == 0:
                       memo[key] = node
                       return node
 
-                  next_remain: Optional[int] = None if remain is None else remain - 1
+                  next_remain: Optional[int | Literal["to_interface"]]
+                  if isinstance(remain, int):
+                      next_remain = None if remain is None else remain - 1
+                  else:
+                      next_remain = remain
 
                   has_multi_depth_slots = any(len(kids) > 1 for kids in node.children.values())
 
@@ -796,16 +802,20 @@ local_system:
                   memo[key] = res
                   return res
 
-              def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int]) -> Upper[T, Acc]:
+              def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int | Literal["to_interface"]]) -> Upper[T, Acc]:
                   key = ('U', id(node), remain)
                   cached = memo.get(key)
                   if cached is not None:
                       return cached
-                  if remain == 0:
+                  if isinstance(remain, int) and remain == 0:
                       memo[key] = node
                       return node
 
-                  next_remain: Optional[int] = None if remain is None else remain - 1
+                  next_remain: Optional[int | Literal["to_interface"]]
+                  if isinstance(remain, int):
+                      next_remain = None if remain is None else remain - 1
+                  else:
+                      next_remain = remain
 
                   if isinstance(node, Interface):
                       has_multi_depth_slots = any(len(kids) > 1 for kids in node.children.values())
@@ -2440,7 +2450,7 @@ local_system:
                   promotable_upper_nodes=promotable_upper_nodes,
               )
 
-          def to_graph_string(self, memo: Optional[Set[int]] = None) -> str:
+          def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
               """
               Generates a pretty, indented string representation of the GSS structure.
               Nodes are expanded inline on first appearance. Subsequent encounters are
@@ -2451,6 +2461,7 @@ local_system:
                         printed. This method will mutate the set by adding IDs of
                         nodes it prints. This allows for coherent printing of multiple
                         GSS structures that share nodes.
+                  upper_only: If True, do not expand Lower nodes from Interface nodes.
               """
               if memo is None:
                   memo = set()
@@ -2485,12 +2496,13 @@ local_system:
                   # Collect children edges to be printed for this node
                   children_to_print = []
                   if hasattr(node, 'children') and node.children:
-                      sorted_children = sorted(node.children.items())
-                      for v, kids_at_depths in sorted_children:
-                          sorted_kids = sorted(kids_at_depths.items())
-                          for depth, child in sorted_kids:
-                              label = f"Edge {repr(v)} (d={depth})"
-                              children_to_print.append((label, child))
+                      if not (upper_only and isinstance(node, Interface)):
+                          sorted_children = sorted(node.children.items())
+                          for v, kids_at_depths in sorted_children:
+                              sorted_kids = sorted(kids_at_depths.items())
+                              for depth, child in sorted_kids:
+                                  label = f"Edge {repr(v)} (d={depth})"
+                                  children_to_print.append((label, child))
 
                   # Iterate through the collected children and format them
                   for i, (label, child) in enumerate(children_to_print):
@@ -2510,6 +2522,12 @@ local_system:
                           # Prepare prefix for the next level of recursion
                           child_prefix = current_prefix + ("    " if is_last else "│   ")
                           _format_recursive(child, child_prefix)
+
+                  if upper_only and isinstance(node, Interface) and node.children:
+                      prefix_char = "└── "
+                      num_lower_edges = sum(len(kids) for kids in node.children.values())
+                      line = current_prefix + prefix_char + f"[{num_lower_edges} lower edges omitted]"
+                      output_lines.append(line)
 
               # Start the process from the root node
               root = self.inner
@@ -2673,7 +2691,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gf
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -2714,7 +2732,7 @@ messages:
       from dataclasses import dataclass, field
       from functools import reduce
       from itertools import chain
-      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable, Type
+      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable, Type, Literal
       from collections import Counter, defaultdict
 
       from ..interface import GSS, T, Acc, NewAcc, Mergeable
@@ -3456,22 +3474,28 @@ messages:
           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
               return LeveledGSS(merge_upper(self.inner, other.inner))
 
-          def fuse(self, levels: Optional[int] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
-              if levels is not None and levels <= 0:
+          def fuse(self, levels: Optional[int | Literal["to_interface"]] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
+              if isinstance(levels, int) and levels <= 0:
                   return self
               if memo is None:
                   memo = {}
 
-              def fuse_lower_node(node: Lower[T], remain: Optional[int]) -> Lower[T]:
+              def fuse_lower_node(node: Lower[T], remain: Optional[int | Literal["to_interface"]]) -> Lower[T]:
+                  if remain == "to_interface":
+                      return node
                   key = ('L', id(node), remain)
                   cached = memo.get(key)
                   if cached is not None:
                       return cached
-                  if remain == 0:
+                  if isinstance(remain, int) and remain == 0:
                       memo[key] = node
                       return node
 
-                  next_remain: Optional[int] = None if remain is None else remain - 1
+                  next_remain: Optional[int | Literal["to_interface"]]
+                  if isinstance(remain, int):
+                      next_remain = None if remain is None else remain - 1
+                  else:
+                      next_remain = remain
 
                   has_multi_depth_slots = any(len(kids) > 1 for kids in node.children.values())
 
@@ -3499,16 +3523,20 @@ messages:
                   memo[key] = res
                   return res
 
-              def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int]) -> Upper[T, Acc]:
+              def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int | Literal["to_interface"]]) -> Upper[T, Acc]:
                   key = ('U', id(node), remain)
                   cached = memo.get(key)
                   if cached is not None:
                       return cached
-                  if remain == 0:
+                  if isinstance(remain, int) and remain == 0:
                       memo[key] = node
                       return node
 
-                  next_remain: Optional[int] = None if remain is None else remain - 1
+                  next_remain: Optional[int | Literal["to_interface"]]
+                  if isinstance(remain, int):
+                      next_remain = None if remain is None else remain - 1
+                  else:
+                      next_remain = remain
 
                   if isinstance(node, Interface):
                       has_multi_depth_slots = any(len(kids) > 1 for kids in node.children.values())
@@ -4035,8 +4063,8 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/implementations/leveled_impl.py
-  - user: Add an option to `fuse` that lets us fuse down to the `Interface` level,
-      wherever that is, but not to fuse 'lowers'. Make it a string literal for `levels`.
+  - user: Add an option to `to_graph_string` that shows only the upper part, ie no
+      lower nodes.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4055,113 +4083,152 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add the requested `fuse` option, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to add an `upper_only` option to `to_graph_string`, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      I will modify the `fuse` method in `python/gss_tester/implementations/leveled_impl.py` to accept a string literal and adjust its internal helpers to handle this new behavior.
-
       1.  **File:** `python/gss_tester/implementations/leveled_impl.py`
+      2.  **Method:** `LeveledGSS.to_graph_string`
 
-      2.  **Update `fuse` method signature and initial check:**
-          -   Locate the `fuse` method definition around line 822.
-          -   Change the signature to accept `Optional[int | str]` for the `levels` parameter.
-          -   Update the initial check to only apply to integer `levels`.
+      #### 1. Update Method Signature and Docstring
 
-      3.  **Update `fuse_lower_node` helper function:**
-          -   Change the signature of `fuse_lower_node` to accept `Optional[int | str]` for its `remain` parameter.
-          -   Add a condition at the beginning to return immediately if `remain` is `"to_interface"`.
-          -   Update the `remain == 0` check to handle integers specifically.
-          -   Modify the `next_remain` calculation to correctly handle both integer and string `remain` values.
+      First, modify the signature of `to_graph_string` to accept a new boolean argument `upper_only` with a default value of `False`. Also, update the docstring to describe this new parameter.
 
-      4.  **Update `fuse_upper_node` helper function:**
-          -   Similarly, change the signature of `fuse_upper_node` to accept `Optional[int | str]` for its `remain` parameter.
-          -   Update its `remain == 0` check.
-          -   Modify its `next_remain` calculation to handle both types.
+      -   **Change from:**
+          ```python
+          def to_graph_string(self, memo: Optional[Set[int]] = None) -> str:
+              """
+              Generates a pretty, indented string representation of the GSS structure.
+              Nodes are expanded inline on first appearance. Subsequent encounters are
+              represented as references to avoid redundancy and cycles.
 
-      These changes will enable `fuse(levels="to_interface")` to fuse the upper part of the GSS structure down to the `Interface` nodes, without fusing the `Lower` node subtrees.
+              Args:
+                  memo: An optional set of node IDs (from id()) that have already been
+                        printed. This method will mutate the set by adding IDs of
+                        nodes it prints. This allows for coherent printing of multiple
+                        GSS structures that share nodes.
+              """
+          ```
+      -   **Change to:**
+          ```python
+          def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
+              """
+              Generates a pretty, indented string representation of the GSS structure.
+              Nodes are expanded inline on first appearance. Subsequent encounters are
+              represented as references to avoid redundancy and cycles.
+
+              Args:
+                  memo: An optional set of node IDs (from id()) that have already been
+                        printed. This method will mutate the set by adding IDs of
+                        nodes it prints. This allows for coherent printing of multiple
+                        GSS structures that share nodes.
+                  upper_only: If True, do not expand Lower nodes from Interface nodes.
+              """
+          ```
+
+      #### 2. Modify Child Collection Logic in `_format_recursive`
+
+      Inside the `to_graph_string` method, locate the nested function `_format_recursive`. Modify the section that collects children to prevent it from traversing into `Lower` nodes when `upper_only` is `True`.
+
+      -   **Change from:**
+          ```python
+                  # Collect children edges to be printed for this node
+                  children_to_print = []
+                  if hasattr(node, 'children') and node.children:
+                      sorted_children = sorted(node.children.items())
+                      for v, kids_at_depths in sorted_children:
+                          sorted_kids = sorted(kids_at_depths.items())
+                          for depth, child in sorted_kids:
+                              label = f"Edge {repr(v)} (d={depth})"
+                              children_to_print.append((label, child))
+          ```
+      -   **Change to:**
+          ```python
+                  # Collect children edges to be printed for this node
+                  children_to_print = []
+                  if hasattr(node, 'children') and node.children:
+                      if not (upper_only and isinstance(node, Interface)):
+                          sorted_children = sorted(node.children.items())
+                          for v, kids_at_depths in sorted_children:
+                              sorted_kids = sorted(kids_at_depths.items())
+                              for depth, child in sorted_kids:
+                                  label = f"Edge {repr(v)} (d={depth})"
+                                  children_to_print.append((label, child))
+          ```
+
+      #### 3. Add Summary for Omitted Lower Nodes
+
+      Finally, at the end of the `_format_recursive` function (after the `for` loop that iterates through `children_to_print`), add a new block of code. This will print a summary line for any `Interface` node whose `Lower` children are being omitted.
+
+      -   **Add the following code block:**
+          ```python
+                  if upper_only and isinstance(node, Interface) and node.children:
+                      prefix_char = "└── "
+                      num_lower_edges = sum(len(kids) for kids in node.children.values())
+                      line = current_prefix + prefix_char + f"[{num_lower_edges} lower edges omitted]"
+                      output_lines.append(line)
+          ```
 
       ### Git Diff
 
-      Here is the git diff to apply these changes:
+      Here is the git diff that applies the changes described above.
 
       ```diff
       diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 455c826..99252c4 100644
       --- a/python/gss_tester/implementations/leveled_impl.py
       +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -819,26 +819,36 @@
-           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-               return LeveledGSS(merge_upper(self.inner, other.inner))
+      @@ -1025,7 +1025,7 @@
+                   promotable_upper_nodes=promotable_upper_nodes,
+               )
        
-      -    def fuse(self, levels: Optional[int] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
-      -        if levels is not None and levels <= 0:
-      +    def fuse(self, levels: Optional[int | str] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
-      +        if isinstance(levels, int) and levels <= 0:
-                   return self
+      -    def to_graph_string(self, memo: Optional[Set[int]] = None) -> str:
+      +    def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
+               """
+               Generates a pretty, indented string representation of the GSS structure.
+               Nodes are expanded inline on first appearance. Subsequent encounters are
+      @@ -1035,7 +1035,7 @@
+                   memo: An optional set of node IDs (from id()) that have already been
+                         printed. This method will mutate the set by adding IDs of
+                         nodes it prints. This allows for coherent printing of multiple
+      -                  GSS structures that share nodes.
+      +                  GSS structures that share nodes.
+      +            upper_only: If True, do not expand Lower nodes from Interface nodes.
+               """
                if memo is None:
-                   memo = {}
+                   memo = set()
+      @@ -1071,12 +1071,13 @@
+                   # Collect children edges to be printed for this node
+                   children_to_print = []
+                   if hasattr(node, 'children') and node.children:
+      -                sorted_children = sorted(node.children.items())
+      -                for v, kids_at_depths in sorted_children:
+      -                    sorted_kids = sorted(kids_at_depths.items())
+      -                    for depth, child in sorted_kids:
+      -                        label = f"Edge {repr(v)} (d={depth})"
+      -                        children_to_print.append((label, child))
+      +                if not (upper_only and isinstance(node, Interface)):
+      +                    sorted_children = sorted(node.children.items())
+      +                    for v, kids_at_depths in sorted_children:
+      +                        sorted_kids = sorted(kids_at_depths.items())
+      +                        for depth, child in sorted_kids:
+      +                            label = f"Edge {repr(v)} (d={depth})"
+      +                            children_to_print.append((label, child))
        
-      -        def fuse_lower_node(node: Lower[T], remain: Optional[int]) -> Lower[T]:
-      +        def fuse_lower_node(node: Lower[T], remain: Optional[int | str]) -> Lower[T]:
-      +            if remain == "to_interface":
-      +                return node
-                   key = ('L', id(node), remain)
-                   cached = memo.get(key)
-                   if cached is not None:
-                       return cached
-      -            if remain == 0:
-      -                memo[key] = node
-      -                return node
-      -
-      -            next_remain: Optional[int] = None if remain is None else remain - 1
-      +            if isinstance(remain, int) and remain == 0:
-      +                memo[key] = node
-      +                return node
+                   # Iterate through the collected children and format them
+                   for i, (label, child) in enumerate(children_to_print):
+      @@ -1095,6 +1096,12 @@
+                           # Prepare prefix for the next level of recursion
+                           child_prefix = current_prefix + ("    " if is_last else "│   ")
+                           _format_recursive(child, child_prefix)
       +
-      +            next_remain: Optional[int | str]
-      +            if isinstance(remain, int):
-      +                next_remain = None if remain is None else remain - 1
-      +            else:
-      +                next_remain = remain
+      +            if upper_only and isinstance(node, Interface) and node.children:
+      +                prefix_char = "└── "
+      +                num_lower_edges = sum(len(kids) for kids in node.children.values())
+      +                line = current_prefix + prefix_char + f"[{num_lower_edges} lower edges omitted]"
+      +                output_lines.append(line)
        
-                   has_multi_depth_slots = any(len(kids) > 1 for kids in node.children.values())
-       
-                   new_children_by_value: Dict[T, List[Lower[T]]] = defaultdict(list)
-                   children_changed = False
-                   for v, kids in node.children.items():
-                       for child in kids.values():
-                           fused_child = fuse_lower_node(child, next_remain)
-                           if fused_child is not child:
-                               children_changed = True
-      @@ -858,17 +868,22 @@
-                   memo[key] = res
-                   return res
-       
-      -        def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int]) -> Upper[T, Acc]:
-      +        def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int | str]) -> Upper[T, Acc]:
-                   key = ('U', id(node), remain)
-                   cached = memo.get(key)
-                   if cached is not None:
-                       return cached
-      -            if remain == 0:
-      -                memo[key] = node
-      -                return node
-      -
-      -            next_remain: Optional[int] = None if remain is None else remain - 1
-      +            if isinstance(remain, int) and remain == 0:
-      +                memo[key] = node
-      +                return node
-      +
-      +            next_remain: Optional[int | str]
-      +            if isinstance(remain, int):
-      +                next_remain = None if remain is None else remain - 1
-      +            else:
-      +                next_remain = remain
-       
-                   if isinstance(node, Interface):
-                       has_multi_depth_slots = any(len(kids) > 1 for kids in node.children.values())
-       
+               # Start the process from the root node
+               root = self.inner
 
       ```
     metadata:
@@ -4174,114 +4241,7 @@ messages:
       Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
       Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: "Changes committed with message: \"Feat: Allow fuse to stop at Interface
-      level using 'to_interface' string for levels\""
-    metadata:
-  - user: |-
-      Diff of python/gss_tester/implementations/leveled_impl.py since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: Make it a `typing.Literal`.
-    metadata:
-  - assistant: |-
-      This is a good refinement for type safety and clarity. I will update the type hints to use `typing.Literal["to_interface"]`.
-
-      ### Step-by-step Instructions
-
-      1.  **File:** `python/gss_tester/implementations/leveled_impl.py`
-
-      2.  **Update `typing` import:**
-          -   Locate the `from typing import ...` line around line 7.
-          -   Add `Literal` to the list of imported names.
-
-      3.  **Update `fuse` method signature:**
-          -   Locate the `fuse` method definition around line 822.
-          -   Change the type hint for `levels` from `Optional[int | str]` to `Optional[int | Literal["to_interface"]]`.
-
-      4.  **Update `fuse_lower_node` helper function signature:**
-          -   Locate the `fuse_lower_node` definition around line 828.
-          -   Change the type hint for `remain` from `Optional[int | str]` to `Optional[int | Literal["to_interface"]]`.
-
-      5.  **Update `fuse_upper_node` helper function signature:**
-          -   Locate the `fuse_upper_node` definition around line 868.
-          -   Change the type hint for `remain` from `Optional[int | str]` to `Optional[int | Literal["to_interface"]]`.
-
-      ### Git Diff
-
-      ```diff
-      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
-      index 99252c4..9807212 100644
-      --- a/python/gss_tester/implementations/leveled_impl.py
-      +++ b/python/gss_tester/implementations/leveled_impl.py
-      @@ -5,7 +5,7 @@
-       from dataclasses import dataclass, field
-       from functools import reduce
-       from itertools import chain
-      -from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable, Type
-      +from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable, Type, Literal
-       from collections import Counter, defaultdict
-       
-       from ..interface import GSS, T, Acc, NewAcc, Mergeable
-      @@ -822,18 +822,18 @@
-           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
-               return LeveledGSS(merge_upper(self.inner, other.inner))
-       
-      -    def fuse(self, levels: Optional[int | str] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
-      +    def fuse(self, levels: Optional[int | Literal["to_interface"]] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
-               if isinstance(levels, int) and levels <= 0:
-                   return self
-               if memo is None:
-                   memo = {}
-       
-      -        def fuse_lower_node(node: Lower[T], remain: Optional[int | str]) -> Lower[T]:
-      +        def fuse_lower_node(node: Lower[T], remain: Optional[int | Literal["to_interface"]]) -> Lower[T]:
-                   if remain == "to_interface":
-                       return node
-                   key = ('L', id(node), remain)
-                   cached = memo.get(key)
-                   if cached is not None:
-                       return cached
-                   if isinstance(remain, int) and remain == 0:
-      @@ -841,7 +841,7 @@
-                       return node
-       
-      -            next_remain: Optional[int | str]
-      +            next_remain: Optional[int | Literal["to_interface"]]
-                   if isinstance(remain, int):
-                       next_remain = None if remain is None else remain - 1
-                   else:
-      @@ -867,7 +867,7 @@
-                   memo[key] = res
-                   return res
-       
-      -        def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int | str]) -> Upper[T, Acc]:
-      +        def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int | Literal["to_interface"]]) -> Upper[T, Acc]:
-                   key = ('U', id(node), remain)
-                   cached = memo.get(key)
-                   if cached is not None:
-      @@ -876,7 +876,7 @@
-                       memo[key] = node
-                       return node
-       
-      -            next_remain: Optional[int | str]
-      +            next_remain: Optional[int | Literal["to_interface"]]
-                   if isinstance(remain, int):
-                       next_remain = None if remain is None else remain - 1
-                   else:
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: python/gss_tester/implementations/leveled_impl.py
-      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
-      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
-    metadata:
-  - user: "Changes committed with message: \"Refactor: Use Literal for 'to_interface'
-      level in fuse method and update internal helpers\""
+  - user: 'Changes committed with message: "Feat: Add `upper_only` option to `to_graph_string`
+      to suppress lower node expansion"'
     metadata:
 ...
