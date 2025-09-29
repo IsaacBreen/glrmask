@@ -1,83 +1,9 @@
 local_system:
   attached_files:
-    - python/gss_tester/implementations/__init__.py
-    - python/gss_tester/implementations/leveled_impl_cpp.py
     - python/gss_tester/implementations/leveled_impl.py
-    - python/gss_tester/implementations/reference_impl.py
-    - python/gss_tester/implementations/acc_map_impl.py
   conversation_file:
   compile_command:
   initial_file_contents:
-    python/gss_tester/implementations/__init__.py: |
-      # This file makes 'implementations' a Python sub-package.
-    python/gss_tester/implementations/leveled_impl_cpp.py: |
-      from __future__ import annotations
-      from typing import List, Tuple, Callable, Optional, Iterable, Any, Type, Dict
-
-      from ..interface import GSS, T, Acc, NewAcc
-      # This will be the name of the compiled C++ module
-      from leveled_gss_cpp import LeveledGssCpp
-
-      class Leveled_impl_cppGSS(GSS[T, Acc]):
-          """
-          A wrapper around the C++ LeveledGSS implementation.
-          """
-          _cpp_gss: LeveledGssCpp
-
-          def __init__(self, cpp_gss_instance: LeveledGssCpp):
-              self._cpp_gss = cpp_gss_instance
-
-          @classmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> Leveled_impl_cppGSS[T, Acc]:
-              cpp_gss = LeveledGssCpp.from_stacks(stacks)
-              return cls(cpp_gss)
-
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              stacks = self._cpp_gss.to_stacks()
-              # Use ReferenceGSS to get canonical sorting for test comparison
-              from .reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(stacks).to_stacks()
-
-          def push(self, value: T) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.push(value))
-
-          def pop(self) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.pop())
-
-          def popn(self, n: int) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.popn(n))
-
-          def is_empty(self) -> bool:
-              return self._cpp_gss.is_empty()
-
-          def isolate(self, value: Optional[T]) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.isolate(value))
-
-          def isolate_many(self, values: Iterable[Optional[T]]) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.isolate_many(list(values)))
-
-          def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.apply(func))
-
-          def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.prune(predicate))
-
-          def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.apply_and_prune(mutator))
-
-          def merge(self, other: Leveled_impl_cppGSS[T, Acc]) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.merge(other._cpp_gss))
-
-          @classmethod
-          def merge_many(cls, gss_list: Iterable[Leveled_impl_cppGSS[T, Acc]]) -> Leveled_impl_cppGSS[T, Acc]:
-              cpp_gss_list = [g._cpp_gss for g in gss_list]
-              return cls(LeveledGssCpp.merge_many(cpp_gss_list))
-
-          def peek(self) -> set[T]:
-              return self._cpp_gss.peek()
-
-          def reduce_acc(self) -> Optional[Acc]:
-              return self._cpp_gss.reduce_acc()
     python/gss_tester/implementations/leveled_impl.py: |
       from __future__ import annotations
 
@@ -1189,7 +1115,7 @@ local_system:
                   promotable_upper_nodes=promotable_upper_nodes,
               )
 
-          def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
+          def to_graph_string(self, memo: Optional[Set[int]] = None) -> str:
               """
               Generates a pretty, indented string representation of the GSS structure.
               Nodes are expanded inline on first appearance. Subsequent encounters are
@@ -1200,7 +1126,6 @@ local_system:
                         printed. This method will mutate the set by adding IDs of
                         nodes it prints. This allows for coherent printing of multiple
                         GSS structures that share nodes.
-                  upper_only: If True, do not expand Lower nodes from Interface nodes.
               """
               if memo is None:
                   memo = set()
@@ -1235,13 +1160,12 @@ local_system:
                   # Collect children edges to be printed for this node
                   children_to_print = []
                   if hasattr(node, 'children') and node.children:
-                      if not (upper_only and isinstance(node, Interface)):
-                          sorted_children = sorted(node.children.items())
-                          for v, kids_at_depths in sorted_children:
-                              sorted_kids = sorted(kids_at_depths.items())
-                              for depth, child in sorted_kids:
-                                  label = f"Edge {repr(v)} (d={depth})"
-                                  children_to_print.append((label, child))
+                      sorted_children = sorted(node.children.items())
+                      for v, kids_at_depths in sorted_children:
+                          sorted_kids = sorted(kids_at_depths.items())
+                          for depth, child in sorted_kids:
+                              label = f"Edge {repr(v)} (d={depth})"
+                              children_to_print.append((label, child))
 
                   # Iterate through the collected children and format them
                   for i, (label, child) in enumerate(children_to_print):
@@ -1261,12 +1185,6 @@ local_system:
                           # Prepare prefix for the next level of recursion
                           child_prefix = current_prefix + ("    " if is_last else "│   ")
                           _format_recursive(child, child_prefix)
-
-                  if upper_only and isinstance(node, Interface) and node.children:
-                      prefix_char = "└── "
-                      num_lower_edges = sum(len(kids) for kids in node.children.values())
-                      line = current_prefix + prefix_char + f"[{num_lower_edges} lower edges omitted]"
-                      output_lines.append(line)
 
               # Start the process from the root node
               root = self.inner
@@ -1420,474 +1338,7 @@ local_system:
                   children[v] = v_map
           ub = UpperBranch(children=children, empty=(acc if l.empty else None))
           return try_promote(ub)
-    python/gss_tester/implementations/reference_impl.py: |
-      from __future__ import annotations
-      import json
-      from dataclasses import dataclass
-      from functools import reduce
-      from typing import List, Tuple, Callable, Set, Any, Type, Optional, Dict, TypeVar
-
-      from ..interface import GSS, T, Acc, NewAcc
-
-
-      @dataclass(eq=False)
-      class ReferenceGSS(GSS[T, Acc]):
-          """
-          A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
-          Each stack is represented as a pair: (list_of_values, accumulator).
-
-          This implementation ensures that for any given stack content, there is at most
-          one entry, with accumulators merged. This canonical form is enforced on
-          creation and after any operation that could produce duplicate stacks (like pop).
-
-          Notes on semantics (aligned with GSS interface):
-          - from_stacks: constructs a new GSS from explicit stacks.
-          - push(value): pushes `value` onto all active stack heads; returns a new GSS.
-          - pop(): for all non-empty stacks, pops the top element. Empty stacks are discarded.
-                   Returns a new GSS with the resulting stacks.
-          - isolate(value): keeps only stacks whose top value equals `value` (does not modify the stacks).
-          - apply(func): transforms each accumulator independently; returns a new GSS.
-          - prune(predicate): removes stacks whose accumulator does not satisfy predicate.
-          - peek(): returns the set of top values across all stacks (ignores empty stacks).
-          - reduce_acc(merge_func): reduces/merges all accumulators into one using `merge_func`, or None
-                                    if there are no active stacks.
-          - merge(gss_list, merge_func): merges multiple GSS instances into one, combining accumulators for
-                                         identical stacks using `merge_func`.
-          - is_empty(): True iff there are no active stacks.
-          """
-
-          _stacks: List[Tuple[List[T], Acc]]
-
-          def __post_init__(self):
-              # On creation, merge any stacks with identical values by merging their accumulators.
-              # This ensures the GSS is always in a canonical form.
-              merged: Dict[Tuple[T, ...], Acc] = {}
-              for vals, acc in self._stacks:
-                  key = tuple(vals)
-                  if key in merged:
-                      merged[key] = merged[key].merge(acc)
-                  else:
-                      merged[key] = acc
-              self._stacks = [(list(key), acc) for key, acc in merged.items()]
-
-          @classmethod
-          def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
-              # The dataclass __init__ will be called, and __post_init__ will handle copying.
-              return cls(stacks)
-
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """Returns a canonical, sorted list of stacks."""
-              return self._get_canonical_sorted_stacks()
-
-          def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              # Push `value` onto all stacks (copy each list to avoid mutating original)
-              new_stacks: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  new_vals = list(vals)
-                  new_vals.append(value)
-                  new_stacks.append((new_vals, acc))
-              return ReferenceGSS(new_stacks)
-
-          def pop(self) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks. Empty stacks are discarded.
-              # If multiple stacks become identical, they are merged by the constructor.
-              new_stacks: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  if vals:
-                      new_stacks.append((vals[:-1], acc))
-              return ReferenceGSS(new_stacks)
-
-          def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
-              # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
-              filtered: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  if value is None:
-                      if not vals:
-                          filtered.append((list(vals), acc))
-                  else:
-                      if vals and vals[-1] == value:
-                          filtered.append((list(vals), acc))
-              return ReferenceGSS(filtered)
-
-          def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> 'ReferenceGSS[T, NewAcc]':
-              # Apply func to each accumulator independently
-              transformed: List[Tuple[List[T], NewAcc]] = []
-              for vals, acc in self._stacks:
-                  transformed.append((list(vals), func(acc)))
-              return ReferenceGSS(transformed) # type: ignore[arg-type]
-
-          def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> 'ReferenceGSS[T, Acc]':
-              # Keep only stacks where predicate(acc) is True
-              kept: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  if predicate(acc):
-                      kept.append((list(vals), acc))
-              return ReferenceGSS(kept)
-
-          def merge(self, other: ReferenceGSS[T, Acc]) -> ReferenceGSS[T, Acc]:
-              # The __post_init__ of ReferenceGSS handles merging of duplicate stacks.
-              return ReferenceGSS(self._stacks + other._stacks)
-
-          def peek(self) -> Set[T]:
-              # Return all top values across non-empty stacks
-              tops: Set[T] = set()
-              for vals, _ in self._stacks:
-                  if vals:
-                      tops.add(vals[-1])
-              return tops
-
-          def reduce_acc(self) -> Optional[Acc]:
-              # Reduce all accumulators into a single Acc (or None if no stacks)
-              if not self._stacks:
-                  return None
-              accs = [acc for _, acc in self._stacks]
-              return reduce(lambda a, b: a.merge(b), accs)
-
-          def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
-              """Returns a canonical ReferenceGSS. Since this implementation is always canonical, this returns a copy."""
-              return ReferenceGSS(self._stacks)
-
-          def _get_canonical_sorted_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """Helper to sort stacks for deterministic representations."""
-              # With __post_init__ merging, self is always canonical. We just need to
-              # sort for deterministic output.
-              items = self._stacks[:] # Create a shallow copy to sort in-place
-
-              def _encode_for_sort(obj: Any) -> str:
-                  try:
-                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
-                  except Exception:
-                      return repr(obj)
-
-              items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
-              return items
-
-          def __str__(self) -> str:
-              """Provides a human-readable, deterministic string representation."""
-              items = self.to_stacks()
-              if not items:
-                  return f"{self.__class__.__name__}(empty)"
-
-              lines = [f"{self.__class__.__name__}:"]
-              for vals, acc in items:
-                  lines.append(f"  - Stack: {vals}, Acc: {acc!r}")
-              return "\n".join(lines)
-
-          def __repr__(self) -> str:
-              """Provides an unambiguous, deterministic string representation."""
-              items = self.to_stacks()
-              return f"{self.__class__.__name__}(_stacks={items!r})"
-
-          def is_empty(self) -> bool:
-              # True iff there are no active stacks.
-              return not self._stacks
-
-          def __eq__(self, other: object) -> bool:
-              if not isinstance(other, ReferenceGSS):
-                  return NotImplemented
-              # Sort stacks to ensure comparison is order-independent.
-              return self._get_canonical_sorted_stacks() == other._get_canonical_sorted_stacks()
-    python/gss_tester/implementations/acc_map_impl.py: |
-      from __future__ import annotations
-
-      from collections import defaultdict
-      from dataclasses import dataclass
-      from functools import reduce
-      from typing import (
-          Any,
-          Callable,
-          Dict,
-          Generic,
-          Iterable,
-          List,
-          Literal,
-          Optional,
-          Set,
-          Tuple,
-      )
-
-      from ..interface import GSS, T, Acc, NewAcc
-      from .leveled_impl import LeveledGSS, LeveledGSSStats
-      from .reference_impl import ReferenceGSS
-
-
-      @dataclass(frozen=True, eq=True)
-      class AccMapGSS(GSS[T, Acc], Generic[T, Acc]):
-          """
-          A GSS implementation that partitions the GSS by accumulator.
-
-          The inner representation is a dictionary mapping each accumulator to a
-          LeveledGSS instance. Each of these inner GSSs uses `NoneType` for its
-          accumulator type, effectively only storing the stack structure.
-
-          This approach may be more efficient when the number of unique accumulators
-          is small, but the structural sharing between stacks with different
-          accumulators is low.
-          """
-
-          inner: Dict[Acc, LeveledGSS[T, NoneType]]
-
-          @classmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> AccMapGSS[T, Acc]:
-              stacks_by_acc: Dict[Acc, List[Tuple[List[T], NoneType]]] = defaultdict(list)
-              for vals, acc in stacks:
-                  stacks_by_acc[acc].append((vals, None))
-
-              inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, acc_stacks in stacks_by_acc.items():
-                  inner[acc] = LeveledGSS.from_stacks(acc_stacks)
-
-              return cls(inner)
-
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              all_stacks: List[Tuple[List[T], Acc]] = []
-              for acc, gss in self.inner.items():
-                  for vals, _ in gss.to_stacks():
-                      all_stacks.append((vals, acc))
-              return ReferenceGSS(all_stacks).to_stacks()
-
-          def push(self, value: T) -> AccMapGSS[T, Acc]:
-              if self.is_empty():
-                  return self
-              new_inner = {acc: gss.push(value) for acc, gss in self.inner.items()}
-              return AccMapGSS(new_inner)
-
-          def pop(self) -> AccMapGSS[T, Acc]:
-              new_inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, gss in self.inner.items():
-                  popped_gss = gss.pop()
-                  if not popped_gss.is_empty():
-                      new_inner[acc] = popped_gss
-              return AccMapGSS(new_inner)
-
-          def popn(self, n: int) -> AccMapGSS[T, Acc]:
-              if n <= 0:
-                  return self
-              new_inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, gss in self.inner.items():
-                  popped_gss = gss.popn(n)
-                  if not popped_gss.is_empty():
-                      new_inner[acc] = popped_gss
-              return AccMapGSS(new_inner)
-
-          def is_empty(self) -> bool:
-              return not self.inner
-
-          def isolate(self, value: Optional[T]) -> AccMapGSS[T, Acc]:
-              new_inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, gss in self.inner.items():
-                  isolated_gss = gss.isolate(value)
-                  if not isolated_gss.is_empty():
-                      new_inner[acc] = isolated_gss
-              return AccMapGSS(new_inner)
-
-          def isolate_many(self, values: Iterable[Optional[T]]) -> AccMapGSS[T, Acc]:
-              new_inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, gss in self.inner.items():
-                  isolated_gss = gss.isolate_many(values)
-                  if not isolated_gss.is_empty():
-                      new_inner[acc] = isolated_gss
-              return AccMapGSS(new_inner)
-
-          def apply(
-              self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None
-          ) -> AccMapGSS[T, NewAcc]:
-              new_inner: Dict[NewAcc, LeveledGSS[T, NoneType]] = defaultdict(
-                  lambda: LeveledGSS.from_stacks([])
-              )
-              for old_acc, gss in self.inner.items():
-                  new_acc = func(old_acc)
-                  new_inner[new_acc] = new_inner[new_acc].merge(gss)
-              return AccMapGSS(dict(new_inner))
-
-          def prune(
-              self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None
-          ) -> AccMapGSS[T, Acc]:
-              new_inner = {acc: gss for acc, gss in self.inner.items() if predicate(acc)}
-              return AccMapGSS(new_inner)
-
-          def apply_and_prune(
-              self, mutator: Callable[[Acc], Optional[NewAcc]], memo: Optional[Dict[int, Any]] = None
-          ) -> AccMapGSS[T, NewAcc]:
-              new_inner: Dict[NewAcc, LeveledGSS[T, NoneType]] = defaultdict(
-                  lambda: LeveledGSS.from_stacks([])
-              )
-              for old_acc, gss in self.inner.items():
-                  new_acc_opt = mutator(old_acc)
-                  if new_acc_opt is not None:
-                      new_inner[new_acc_opt] = new_inner[new_acc_opt].merge(gss)
-              return AccMapGSS(dict(new_inner))
-
-          def merge(self, other: AccMapGSS[T, Acc]) -> AccMapGSS[T, Acc]:
-              new_inner = self.inner.copy()
-              for acc, other_gss in other.inner.items():
-                  if acc in new_inner:
-                      new_inner[acc] = new_inner[acc].merge(other_gss)
-                  else:
-                      new_inner[acc] = other_gss
-              return AccMapGSS(new_inner)
-
-          def peek(self) -> Set[T]:
-              all_peeks: Set[T] = set()
-              for gss in self.inner.values():
-                  all_peeks.update(gss.peek())
-              return all_peeks
-
-          def reduce_acc(self) -> Optional[Acc]:
-              if not self.inner:
-                  return None
-              accs = list(self.inner.keys())
-              return reduce(lambda a, b: a.merge(b), accs)
-
-          def stats(self) -> LeveledGSSStats[T, Acc]:
-              if self.is_empty():
-                  empty_set: Set[Any] = set()
-                  return LeveledGSSStats(
-                      top_values=empty_set,
-                      num_upperbranch_nodes=0, num_interface_nodes=0, num_lower_nodes=0, total_unique_nodes=0,
-                      upper_edges=0, interface_to_lower_edges=0, lower_edges=0, total_edges=0,
-                      max_upper_depth=0, max_lower_depth=0,
-                      distinct_values_count=0, distinct_values=empty_set,
-                      unique_accumulators_count=0, unique_accumulators=empty_set, total_accumulator_instances=0,
-                      num_upper_with_empty=0, num_interfaces_with_empty=0, num_lower_terminal_nodes=0, num_interface_implicit_terminals=0,
-                      num_multi_depth_slots_upper=0, num_multi_depth_slots_lower=0,
-                      max_multiplicity_per_value_upper=0, max_multiplicity_per_value_lower=0,
-                      average_in_degree=0.0, max_in_degree=0, structural_sharing_factor=0.0,
-                      promotable_upper_nodes=0
-                  )
-
-              all_stats = [gss.stats() for gss in self.inner.values()]
-
-              total_unique_nodes = sum(s.total_unique_nodes for s in all_stats)
-              total_edges = sum(s.total_edges for s in all_stats)
-
-              if total_unique_nodes > 0:
-                  avg_in_degree = sum(s.average_in_degree * s.total_unique_nodes for s in all_stats) / total_unique_nodes
-              else:
-                  avg_in_degree = 0.0
-
-              return LeveledGSSStats(
-                  top_values=set().union(*(s.top_values for s in all_stats)),
-                  num_upperbranch_nodes=sum(s.num_upperbranch_nodes for s in all_stats),
-                  num_interface_nodes=sum(s.num_interface_nodes for s in all_stats),
-                  num_lower_nodes=sum(s.num_lower_nodes for s in all_stats),
-                  total_unique_nodes=total_unique_nodes,
-                  upper_edges=sum(s.upper_edges for s in all_stats),
-                  interface_to_lower_edges=sum(s.interface_to_lower_edges for s in all_stats),
-                  lower_edges=sum(s.lower_edges for s in all_stats),
-                  total_edges=total_edges,
-                  max_upper_depth=max((s.max_upper_depth for s in all_stats), default=0),
-                  max_lower_depth=max((s.max_lower_depth for s in all_stats), default=0),
-                  distinct_values=set().union(*(s.distinct_values for s in all_stats)),
-                  distinct_values_count=len(set().union(*(s.distinct_values for s in all_stats))),
-                  unique_accumulators_count=len(self.inner),
-                  unique_accumulators=set(self.inner.keys()),
-                  total_accumulator_instances=len(self.inner),
-                  num_upper_with_empty=sum(s.num_upper_with_empty for s in all_stats),
-                  num_interfaces_with_empty=sum(s.num_interfaces_with_empty for s in all_stats),
-                  num_lower_terminal_nodes=sum(s.num_lower_terminal_nodes for s in all_stats),
-                  num_interface_implicit_terminals=sum(s.num_interface_implicit_terminals for s in all_stats),
-                  num_multi_depth_slots_upper=sum(s.num_multi_depth_slots_upper for s in all_stats),
-                  num_multi_depth_slots_lower=sum(s.num_multi_depth_slots_lower for s in all_stats),
-                  max_multiplicity_per_value_upper=max((s.max_multiplicity_per_value_upper for s in all_stats), default=0),
-                  max_multiplicity_per_value_lower=max((s.max_multiplicity_per_value_lower for s in all_stats), default=0),
-                  average_in_degree=avg_in_degree,
-                  max_in_degree=max((s.max_in_degree for s in all_stats), default=0),
-                  structural_sharing_factor=total_edges / float(max(1, total_unique_nodes - len(self.inner))) if total_unique_nodes > len(self.inner) else 0.0,
-                  promotable_upper_nodes=sum(s.promotable_upper_nodes for s in all_stats),
-              )
-
-          def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
-              output_lines: List[str] = []
-              if memo is None:
-                  memo = set()
-
-              # Sort by accumulator representation for deterministic output
-              sorted_items = sorted(self.inner.items(), key=lambda item: repr(item[0]))
-
-              for i, (acc, gss) in enumerate(sorted_items):
-                  if i > 0:
-                      output_lines.append("")
-                  output_lines.append(f"--- Graph for Acc: {acc!r} ---")
-                  output_lines.append(gss.to_graph_string(memo=memo, upper_only=upper_only))
-              return "\n".join(output_lines)
-
-          def fuse(
-              self, levels: Optional[int | Literal["to_interface"]] = None, memo: Optional[Dict] = None
-          ) -> AccMapGSS[T, Acc]:
-              new_inner = {acc: gss.fuse(levels=levels) for acc, gss in self.inner.items()}
-              return AccMapGSS(new_inner)
   prev_file_contents:
-    python/gss_tester/implementations/__init__.py: |
-      # This file makes 'implementations' a Python sub-package.
-    python/gss_tester/implementations/leveled_impl_cpp.py: |
-      from __future__ import annotations
-      from typing import List, Tuple, Callable, Optional, Iterable, Any, Type, Dict
-
-      from ..interface import GSS, T, Acc, NewAcc
-      # This will be the name of the compiled C++ module
-      from leveled_gss_cpp import LeveledGssCpp
-
-      class Leveled_impl_cppGSS(GSS[T, Acc]):
-          """
-          A wrapper around the C++ LeveledGSS implementation.
-          """
-          _cpp_gss: LeveledGssCpp
-
-          def __init__(self, cpp_gss_instance: LeveledGssCpp):
-              self._cpp_gss = cpp_gss_instance
-
-          @classmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> Leveled_impl_cppGSS[T, Acc]:
-              cpp_gss = LeveledGssCpp.from_stacks(stacks)
-              return cls(cpp_gss)
-
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              stacks = self._cpp_gss.to_stacks()
-              # Use ReferenceGSS to get canonical sorting for test comparison
-              from .reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(stacks).to_stacks()
-
-          def push(self, value: T) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.push(value))
-
-          def pop(self) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.pop())
-
-          def popn(self, n: int) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.popn(n))
-
-          def is_empty(self) -> bool:
-              return self._cpp_gss.is_empty()
-
-          def isolate(self, value: Optional[T]) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.isolate(value))
-
-          def isolate_many(self, values: Iterable[Optional[T]]) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.isolate_many(list(values)))
-
-          def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.apply(func))
-
-          def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.prune(predicate))
-
-          def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.apply_and_prune(mutator))
-
-          def merge(self, other: Leveled_impl_cppGSS[T, Acc]) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.merge(other._cpp_gss))
-
-          @classmethod
-          def merge_many(cls, gss_list: Iterable[Leveled_impl_cppGSS[T, Acc]]) -> Leveled_impl_cppGSS[T, Acc]:
-              cpp_gss_list = [g._cpp_gss for g in gss_list]
-              return cls(LeveledGssCpp.merge_many(cpp_gss_list))
-
-          def peek(self) -> set[T]:
-              return self._cpp_gss.peek()
-
-          def reduce_acc(self) -> Optional[Acc]:
-              return self._cpp_gss.reduce_acc()
     python/gss_tester/implementations/leveled_impl.py: |
       from __future__ import annotations
 
@@ -3230,406 +2681,9 @@ local_system:
                   children[v] = v_map
           ub = UpperBranch(children=children, empty=(acc if l.empty else None))
           return try_promote(ub)
-    python/gss_tester/implementations/reference_impl.py: |
-      from __future__ import annotations
-      import json
-      from dataclasses import dataclass
-      from functools import reduce
-      from typing import List, Tuple, Callable, Set, Any, Type, Optional, Dict, TypeVar
-
-      from ..interface import GSS, T, Acc, NewAcc
-
-
-      @dataclass(eq=False)
-      class ReferenceGSS(GSS[T, Acc]):
-          """
-          A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
-          Each stack is represented as a pair: (list_of_values, accumulator).
-
-          This implementation ensures that for any given stack content, there is at most
-          one entry, with accumulators merged. This canonical form is enforced on
-          creation and after any operation that could produce duplicate stacks (like pop).
-
-          Notes on semantics (aligned with GSS interface):
-          - from_stacks: constructs a new GSS from explicit stacks.
-          - push(value): pushes `value` onto all active stack heads; returns a new GSS.
-          - pop(): for all non-empty stacks, pops the top element. Empty stacks are discarded.
-                   Returns a new GSS with the resulting stacks.
-          - isolate(value): keeps only stacks whose top value equals `value` (does not modify the stacks).
-          - apply(func): transforms each accumulator independently; returns a new GSS.
-          - prune(predicate): removes stacks whose accumulator does not satisfy predicate.
-          - peek(): returns the set of top values across all stacks (ignores empty stacks).
-          - reduce_acc(merge_func): reduces/merges all accumulators into one using `merge_func`, or None
-                                    if there are no active stacks.
-          - merge(gss_list, merge_func): merges multiple GSS instances into one, combining accumulators for
-                                         identical stacks using `merge_func`.
-          - is_empty(): True iff there are no active stacks.
-          """
-
-          _stacks: List[Tuple[List[T], Acc]]
-
-          def __post_init__(self):
-              # On creation, merge any stacks with identical values by merging their accumulators.
-              # This ensures the GSS is always in a canonical form.
-              merged: Dict[Tuple[T, ...], Acc] = {}
-              for vals, acc in self._stacks:
-                  key = tuple(vals)
-                  if key in merged:
-                      merged[key] = merged[key].merge(acc)
-                  else:
-                      merged[key] = acc
-              self._stacks = [(list(key), acc) for key, acc in merged.items()]
-
-          @classmethod
-          def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
-              # The dataclass __init__ will be called, and __post_init__ will handle copying.
-              return cls(stacks)
-
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """Returns a canonical, sorted list of stacks."""
-              return self._get_canonical_sorted_stacks()
-
-          def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              # Push `value` onto all stacks (copy each list to avoid mutating original)
-              new_stacks: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  new_vals = list(vals)
-                  new_vals.append(value)
-                  new_stacks.append((new_vals, acc))
-              return ReferenceGSS(new_stacks)
-
-          def pop(self) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks. Empty stacks are discarded.
-              # If multiple stacks become identical, they are merged by the constructor.
-              new_stacks: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  if vals:
-                      new_stacks.append((vals[:-1], acc))
-              return ReferenceGSS(new_stacks)
-
-          def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
-              # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
-              filtered: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  if value is None:
-                      if not vals:
-                          filtered.append((list(vals), acc))
-                  else:
-                      if vals and vals[-1] == value:
-                          filtered.append((list(vals), acc))
-              return ReferenceGSS(filtered)
-
-          def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> 'ReferenceGSS[T, NewAcc]':
-              # Apply func to each accumulator independently
-              transformed: List[Tuple[List[T], NewAcc]] = []
-              for vals, acc in self._stacks:
-                  transformed.append((list(vals), func(acc)))
-              return ReferenceGSS(transformed) # type: ignore[arg-type]
-
-          def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> 'ReferenceGSS[T, Acc]':
-              # Keep only stacks where predicate(acc) is True
-              kept: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  if predicate(acc):
-                      kept.append((list(vals), acc))
-              return ReferenceGSS(kept)
-
-          def merge(self, other: ReferenceGSS[T, Acc]) -> ReferenceGSS[T, Acc]:
-              # The __post_init__ of ReferenceGSS handles merging of duplicate stacks.
-              return ReferenceGSS(self._stacks + other._stacks)
-
-          def peek(self) -> Set[T]:
-              # Return all top values across non-empty stacks
-              tops: Set[T] = set()
-              for vals, _ in self._stacks:
-                  if vals:
-                      tops.add(vals[-1])
-              return tops
-
-          def reduce_acc(self) -> Optional[Acc]:
-              # Reduce all accumulators into a single Acc (or None if no stacks)
-              if not self._stacks:
-                  return None
-              accs = [acc for _, acc in self._stacks]
-              return reduce(lambda a, b: a.merge(b), accs)
-
-          def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
-              """Returns a canonical ReferenceGSS. Since this implementation is always canonical, this returns a copy."""
-              return ReferenceGSS(self._stacks)
-
-          def _get_canonical_sorted_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """Helper to sort stacks for deterministic representations."""
-              # With __post_init__ merging, self is always canonical. We just need to
-              # sort for deterministic output.
-              items = self._stacks[:] # Create a shallow copy to sort in-place
-
-              def _encode_for_sort(obj: Any) -> str:
-                  try:
-                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
-                  except Exception:
-                      return repr(obj)
-
-              items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
-              return items
-
-          def __str__(self) -> str:
-              """Provides a human-readable, deterministic string representation."""
-              items = self.to_stacks()
-              if not items:
-                  return f"{self.__class__.__name__}(empty)"
-
-              lines = [f"{self.__class__.__name__}:"]
-              for vals, acc in items:
-                  lines.append(f"  - Stack: {vals}, Acc: {acc!r}")
-              return "\n".join(lines)
-
-          def __repr__(self) -> str:
-              """Provides an unambiguous, deterministic string representation."""
-              items = self.to_stacks()
-              return f"{self.__class__.__name__}(_stacks={items!r})"
-
-          def is_empty(self) -> bool:
-              # True iff there are no active stacks.
-              return not self._stacks
-
-          def __eq__(self, other: object) -> bool:
-              if not isinstance(other, ReferenceGSS):
-                  return NotImplemented
-              # Sort stacks to ensure comparison is order-independent.
-              return self._get_canonical_sorted_stacks() == other._get_canonical_sorted_stacks()
-    python/gss_tester/implementations/acc_map_impl.py: |
-      from __future__ import annotations
-
-      from collections import defaultdict
-      from dataclasses import dataclass
-      from functools import reduce
-      from typing import (
-          Any,
-          Callable,
-          Dict,
-          Generic,
-          Iterable,
-          List,
-          Literal,
-          Optional,
-          Set,
-          Tuple,
-      )
-
-      from ..interface import GSS, T, Acc, NewAcc
-      from .leveled_impl import LeveledGSS, LeveledGSSStats
-      from .reference_impl import ReferenceGSS
-
-
-      @dataclass(frozen=True, eq=True)
-      class AccMapGSS(GSS[T, Acc], Generic[T, Acc]):
-          """
-          A GSS implementation that partitions the GSS by accumulator.
-
-          The inner representation is a dictionary mapping each accumulator to a
-          LeveledGSS instance. Each of these inner GSSs uses `NoneType` for its
-          accumulator type, effectively only storing the stack structure.
-
-          This approach may be more efficient when the number of unique accumulators
-          is small, but the structural sharing between stacks with different
-          accumulators is low.
-          """
-
-          inner: Dict[Acc, LeveledGSS[T, NoneType]]
-
-          @classmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> AccMapGSS[T, Acc]:
-              stacks_by_acc: Dict[Acc, List[Tuple[List[T], NoneType]]] = defaultdict(list)
-              for vals, acc in stacks:
-                  stacks_by_acc[acc].append((vals, None))
-
-              inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, acc_stacks in stacks_by_acc.items():
-                  inner[acc] = LeveledGSS.from_stacks(acc_stacks)
-
-              return cls(inner)
-
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              all_stacks: List[Tuple[List[T], Acc]] = []
-              for acc, gss in self.inner.items():
-                  for vals, _ in gss.to_stacks():
-                      all_stacks.append((vals, acc))
-              return ReferenceGSS(all_stacks).to_stacks()
-
-          def push(self, value: T) -> AccMapGSS[T, Acc]:
-              if self.is_empty():
-                  return self
-              new_inner = {acc: gss.push(value) for acc, gss in self.inner.items()}
-              return AccMapGSS(new_inner)
-
-          def pop(self) -> AccMapGSS[T, Acc]:
-              new_inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, gss in self.inner.items():
-                  popped_gss = gss.pop()
-                  if not popped_gss.is_empty():
-                      new_inner[acc] = popped_gss
-              return AccMapGSS(new_inner)
-
-          def popn(self, n: int) -> AccMapGSS[T, Acc]:
-              if n <= 0:
-                  return self
-              new_inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, gss in self.inner.items():
-                  popped_gss = gss.popn(n)
-                  if not popped_gss.is_empty():
-                      new_inner[acc] = popped_gss
-              return AccMapGSS(new_inner)
-
-          def is_empty(self) -> bool:
-              return not self.inner
-
-          def isolate(self, value: Optional[T]) -> AccMapGSS[T, Acc]:
-              new_inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, gss in self.inner.items():
-                  isolated_gss = gss.isolate(value)
-                  if not isolated_gss.is_empty():
-                      new_inner[acc] = isolated_gss
-              return AccMapGSS(new_inner)
-
-          def isolate_many(self, values: Iterable[Optional[T]]) -> AccMapGSS[T, Acc]:
-              new_inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, gss in self.inner.items():
-                  isolated_gss = gss.isolate_many(values)
-                  if not isolated_gss.is_empty():
-                      new_inner[acc] = isolated_gss
-              return AccMapGSS(new_inner)
-
-          def apply(
-              self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None
-          ) -> AccMapGSS[T, NewAcc]:
-              new_inner: Dict[NewAcc, LeveledGSS[T, NoneType]] = defaultdict(
-                  lambda: LeveledGSS.from_stacks([])
-              )
-              for old_acc, gss in self.inner.items():
-                  new_acc = func(old_acc)
-                  new_inner[new_acc] = new_inner[new_acc].merge(gss)
-              return AccMapGSS(dict(new_inner))
-
-          def prune(
-              self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None
-          ) -> AccMapGSS[T, Acc]:
-              new_inner = {acc: gss for acc, gss in self.inner.items() if predicate(acc)}
-              return AccMapGSS(new_inner)
-
-          def apply_and_prune(
-              self, mutator: Callable[[Acc], Optional[NewAcc]], memo: Optional[Dict[int, Any]] = None
-          ) -> AccMapGSS[T, NewAcc]:
-              new_inner: Dict[NewAcc, LeveledGSS[T, NoneType]] = defaultdict(
-                  lambda: LeveledGSS.from_stacks([])
-              )
-              for old_acc, gss in self.inner.items():
-                  new_acc_opt = mutator(old_acc)
-                  if new_acc_opt is not None:
-                      new_inner[new_acc_opt] = new_inner[new_acc_opt].merge(gss)
-              return AccMapGSS(dict(new_inner))
-
-          def merge(self, other: AccMapGSS[T, Acc]) -> AccMapGSS[T, Acc]:
-              new_inner = self.inner.copy()
-              for acc, other_gss in other.inner.items():
-                  if acc in new_inner:
-                      new_inner[acc] = new_inner[acc].merge(other_gss)
-                  else:
-                      new_inner[acc] = other_gss
-              return AccMapGSS(new_inner)
-
-          def peek(self) -> Set[T]:
-              all_peeks: Set[T] = set()
-              for gss in self.inner.values():
-                  all_peeks.update(gss.peek())
-              return all_peeks
-
-          def reduce_acc(self) -> Optional[Acc]:
-              if not self.inner:
-                  return None
-              accs = list(self.inner.keys())
-              return reduce(lambda a, b: a.merge(b), accs)
-
-          def stats(self) -> LeveledGSSStats[T, Acc]:
-              if self.is_empty():
-                  empty_set: Set[Any] = set()
-                  return LeveledGSSStats(
-                      top_values=empty_set,
-                      num_upperbranch_nodes=0, num_interface_nodes=0, num_lower_nodes=0, total_unique_nodes=0,
-                      upper_edges=0, interface_to_lower_edges=0, lower_edges=0, total_edges=0,
-                      max_upper_depth=0, max_lower_depth=0,
-                      distinct_values_count=0, distinct_values=empty_set,
-                      unique_accumulators_count=0, unique_accumulators=empty_set, total_accumulator_instances=0,
-                      num_upper_with_empty=0, num_interfaces_with_empty=0, num_lower_terminal_nodes=0, num_interface_implicit_terminals=0,
-                      num_multi_depth_slots_upper=0, num_multi_depth_slots_lower=0,
-                      max_multiplicity_per_value_upper=0, max_multiplicity_per_value_lower=0,
-                      average_in_degree=0.0, max_in_degree=0, structural_sharing_factor=0.0,
-                      promotable_upper_nodes=0
-                  )
-
-              all_stats = [gss.stats() for gss in self.inner.values()]
-
-              total_unique_nodes = sum(s.total_unique_nodes for s in all_stats)
-              total_edges = sum(s.total_edges for s in all_stats)
-
-              if total_unique_nodes > 0:
-                  avg_in_degree = sum(s.average_in_degree * s.total_unique_nodes for s in all_stats) / total_unique_nodes
-              else:
-                  avg_in_degree = 0.0
-
-              return LeveledGSSStats(
-                  top_values=set().union(*(s.top_values for s in all_stats)),
-                  num_upperbranch_nodes=sum(s.num_upperbranch_nodes for s in all_stats),
-                  num_interface_nodes=sum(s.num_interface_nodes for s in all_stats),
-                  num_lower_nodes=sum(s.num_lower_nodes for s in all_stats),
-                  total_unique_nodes=total_unique_nodes,
-                  upper_edges=sum(s.upper_edges for s in all_stats),
-                  interface_to_lower_edges=sum(s.interface_to_lower_edges for s in all_stats),
-                  lower_edges=sum(s.lower_edges for s in all_stats),
-                  total_edges=total_edges,
-                  max_upper_depth=max((s.max_upper_depth for s in all_stats), default=0),
-                  max_lower_depth=max((s.max_lower_depth for s in all_stats), default=0),
-                  distinct_values=set().union(*(s.distinct_values for s in all_stats)),
-                  distinct_values_count=len(set().union(*(s.distinct_values for s in all_stats))),
-                  unique_accumulators_count=len(self.inner),
-                  unique_accumulators=set(self.inner.keys()),
-                  total_accumulator_instances=len(self.inner),
-                  num_upper_with_empty=sum(s.num_upper_with_empty for s in all_stats),
-                  num_interfaces_with_empty=sum(s.num_interfaces_with_empty for s in all_stats),
-                  num_lower_terminal_nodes=sum(s.num_lower_terminal_nodes for s in all_stats),
-                  num_interface_implicit_terminals=sum(s.num_interface_implicit_terminals for s in all_stats),
-                  num_multi_depth_slots_upper=sum(s.num_multi_depth_slots_upper for s in all_stats),
-                  num_multi_depth_slots_lower=sum(s.num_multi_depth_slots_lower for s in all_stats),
-                  max_multiplicity_per_value_upper=max((s.max_multiplicity_per_value_upper for s in all_stats), default=0),
-                  max_multiplicity_per_value_lower=max((s.max_multiplicity_per_value_lower for s in all_stats), default=0),
-                  average_in_degree=avg_in_degree,
-                  max_in_degree=max((s.max_in_degree for s in all_stats), default=0),
-                  structural_sharing_factor=total_edges / float(max(1, total_unique_nodes - len(self.inner))) if total_unique_nodes > len(self.inner) else 0.0,
-                  promotable_upper_nodes=sum(s.promotable_upper_nodes for s in all_stats),
-              )
-
-          def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
-              output_lines: List[str] = []
-              if memo is None:
-                  memo = set()
-
-              # Sort by accumulator representation for deterministic output
-              sorted_items = sorted(self.inner.items(), key=lambda item: repr(item[0]))
-
-              for i, (acc, gss) in enumerate(sorted_items):
-                  if i > 0:
-                      output_lines.append("")
-                  output_lines.append(f"--- Graph for Acc: {acc!r} ---")
-                  output_lines.append(gss.to_graph_string(memo=memo, upper_only=upper_only))
-              return "\n".join(output_lines)
-
-          def fuse(
-              self, levels: Optional[int | Literal["to_interface"]] = None, memo: Optional[Dict] = None
-          ) -> AccMapGSS[T, Acc]:
-              new_inner = {acc: gss.fuse(levels=levels) for acc, gss in self.inner.items()}
-              return AccMapGSS(new_inner)
   diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode: simple
+  prev_apply_mode: git-llm
 system:
   message: |-
     You are a helpful assistant.
@@ -3648,7 +2702,7 @@ system:
     - cp
   max_completion_tokens:
   temperature: 0.0
-  apply_mode: simple
+  apply_mode: git-llm
   llm_context_mode: full
 messages:
   - user: |-
@@ -3670,86 +2724,6 @@ messages:
       kind: core-guidance
       role: developer
       ephemeral: false
-  - user: |-
-      ```python 'python/gss_tester/implementations/__init__.py'
-      # This file makes 'implementations' a Python sub-package.
-
-      ```
-    metadata:
-      filename: python/gss_tester/implementations/__init__.py
-  - user: |-
-      ```python 'python/gss_tester/implementations/leveled_impl_cpp.py'
-      from __future__ import annotations
-      from typing import List, Tuple, Callable, Optional, Iterable, Any, Type, Dict
-
-      from ..interface import GSS, T, Acc, NewAcc
-      # This will be the name of the compiled C++ module
-      from leveled_gss_cpp import LeveledGssCpp
-
-      class Leveled_impl_cppGSS(GSS[T, Acc]):
-          """
-          A wrapper around the C++ LeveledGSS implementation.
-          """
-          _cpp_gss: LeveledGssCpp
-
-          def __init__(self, cpp_gss_instance: LeveledGssCpp):
-              self._cpp_gss = cpp_gss_instance
-
-          @classmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> Leveled_impl_cppGSS[T, Acc]:
-              cpp_gss = LeveledGssCpp.from_stacks(stacks)
-              return cls(cpp_gss)
-
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              stacks = self._cpp_gss.to_stacks()
-              # Use ReferenceGSS to get canonical sorting for test comparison
-              from .reference_impl import ReferenceGSS
-              return ReferenceGSS.from_stacks(stacks).to_stacks()
-
-          def push(self, value: T) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.push(value))
-
-          def pop(self) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.pop())
-
-          def popn(self, n: int) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.popn(n))
-
-          def is_empty(self) -> bool:
-              return self._cpp_gss.is_empty()
-
-          def isolate(self, value: Optional[T]) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.isolate(value))
-
-          def isolate_many(self, values: Iterable[Optional[T]]) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.isolate_many(list(values)))
-
-          def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.apply(func))
-
-          def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.prune(predicate))
-
-          def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.apply_and_prune(mutator))
-
-          def merge(self, other: Leveled_impl_cppGSS[T, Acc]) -> Leveled_impl_cppGSS[T, Acc]:
-              return Leveled_impl_cppGSS(self._cpp_gss.merge(other._cpp_gss))
-
-          @classmethod
-          def merge_many(cls, gss_list: Iterable[Leveled_impl_cppGSS[T, Acc]]) -> Leveled_impl_cppGSS[T, Acc]:
-              cpp_gss_list = [g._cpp_gss for g in gss_list]
-              return cls(LeveledGssCpp.merge_many(cpp_gss_list))
-
-          def peek(self) -> set[T]:
-              return self._cpp_gss.peek()
-
-          def reduce_acc(self) -> Optional[Acc]:
-              return self._cpp_gss.reduce_acc()
-
-      ```
-    metadata:
-      filename: python/gss_tester/implementations/leveled_impl_cpp.py
   - user: |-
       ```python 'python/gss_tester/implementations/leveled_impl.py'
       from __future__ import annotations
@@ -4862,7 +3836,7 @@ messages:
                   promotable_upper_nodes=promotable_upper_nodes,
               )
 
-          def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
+          def to_graph_string(self, memo: Optional[Set[int]] = None) -> str:
               """
               Generates a pretty, indented string representation of the GSS structure.
               Nodes are expanded inline on first appearance. Subsequent encounters are
@@ -4873,7 +3847,6 @@ messages:
                         printed. This method will mutate the set by adding IDs of
                         nodes it prints. This allows for coherent printing of multiple
                         GSS structures that share nodes.
-                  upper_only: If True, do not expand Lower nodes from Interface nodes.
               """
               if memo is None:
                   memo = set()
@@ -4908,13 +3881,12 @@ messages:
                   # Collect children edges to be printed for this node
                   children_to_print = []
                   if hasattr(node, 'children') and node.children:
-                      if not (upper_only and isinstance(node, Interface)):
-                          sorted_children = sorted(node.children.items())
-                          for v, kids_at_depths in sorted_children:
-                              sorted_kids = sorted(kids_at_depths.items())
-                              for depth, child in sorted_kids:
-                                  label = f"Edge {repr(v)} (d={depth})"
-                                  children_to_print.append((label, child))
+                      sorted_children = sorted(node.children.items())
+                      for v, kids_at_depths in sorted_children:
+                          sorted_kids = sorted(kids_at_depths.items())
+                          for depth, child in sorted_kids:
+                              label = f"Edge {repr(v)} (d={depth})"
+                              children_to_print.append((label, child))
 
                   # Iterate through the collected children and format them
                   for i, (label, child) in enumerate(children_to_print):
@@ -4934,12 +3906,6 @@ messages:
                           # Prepare prefix for the next level of recursion
                           child_prefix = current_prefix + ("    " if is_last else "│   ")
                           _format_recursive(child, child_prefix)
-
-                  if upper_only and isinstance(node, Interface) and node.children:
-                      prefix_char = "└── "
-                      num_lower_edges = sum(len(kids) for kids in node.children.values())
-                      line = current_prefix + prefix_char + f"[{num_lower_edges} lower edges omitted]"
-                      output_lines.append(line)
 
               # Start the process from the root node
               root = self.inner
@@ -5097,450 +4063,185 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/implementations/leveled_impl.py
-  - user: |-
-      ```python 'python/gss_tester/implementations/reference_impl.py'
-      from __future__ import annotations
-      import json
-      from dataclasses import dataclass
-      from functools import reduce
-      from typing import List, Tuple, Callable, Set, Any, Type, Optional, Dict, TypeVar
-
-      from ..interface import GSS, T, Acc, NewAcc
-
-
-      @dataclass(eq=False)
-      class ReferenceGSS(GSS[T, Acc]):
-          """
-          A simple, 'dumb' reference implementation of the GSS interface using a list of explicit stacks.
-          Each stack is represented as a pair: (list_of_values, accumulator).
-
-          This implementation ensures that for any given stack content, there is at most
-          one entry, with accumulators merged. This canonical form is enforced on
-          creation and after any operation that could produce duplicate stacks (like pop).
-
-          Notes on semantics (aligned with GSS interface):
-          - from_stacks: constructs a new GSS from explicit stacks.
-          - push(value): pushes `value` onto all active stack heads; returns a new GSS.
-          - pop(): for all non-empty stacks, pops the top element. Empty stacks are discarded.
-                   Returns a new GSS with the resulting stacks.
-          - isolate(value): keeps only stacks whose top value equals `value` (does not modify the stacks).
-          - apply(func): transforms each accumulator independently; returns a new GSS.
-          - prune(predicate): removes stacks whose accumulator does not satisfy predicate.
-          - peek(): returns the set of top values across all stacks (ignores empty stacks).
-          - reduce_acc(merge_func): reduces/merges all accumulators into one using `merge_func`, or None
-                                    if there are no active stacks.
-          - merge(gss_list, merge_func): merges multiple GSS instances into one, combining accumulators for
-                                         identical stacks using `merge_func`.
-          - is_empty(): True iff there are no active stacks.
-          """
-
-          _stacks: List[Tuple[List[T], Acc]]
-
-          def __post_init__(self):
-              # On creation, merge any stacks with identical values by merging their accumulators.
-              # This ensures the GSS is always in a canonical form.
-              merged: Dict[Tuple[T, ...], Acc] = {}
-              for vals, acc in self._stacks:
-                  key = tuple(vals)
-                  if key in merged:
-                      merged[key] = merged[key].merge(acc)
-                  else:
-                      merged[key] = acc
-              self._stacks = [(list(key), acc) for key, acc in merged.items()]
-
-          @classmethod
-          def from_stacks(cls: Type['ReferenceGSS'], stacks: List[Tuple[List[T], Acc]]) -> 'ReferenceGSS[T, Acc]':
-              # The dataclass __init__ will be called, and __post_init__ will handle copying.
-              return cls(stacks)
-
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """Returns a canonical, sorted list of stacks."""
-              return self._get_canonical_sorted_stacks()
-
-          def push(self, value: T) -> 'ReferenceGSS[T, Acc]':
-              # Push `value` onto all stacks (copy each list to avoid mutating original)
-              new_stacks: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  new_vals = list(vals)
-                  new_vals.append(value)
-                  new_stacks.append((new_vals, acc))
-              return ReferenceGSS(new_stacks)
-
-          def pop(self) -> 'ReferenceGSS[T, Acc]':
-              # Pop from all non-empty stacks. Empty stacks are discarded.
-              # If multiple stacks become identical, they are merged by the constructor.
-              new_stacks: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  if vals:
-                      new_stacks.append((vals[:-1], acc))
-              return ReferenceGSS(new_stacks)
-
-          def isolate(self, value: Optional[T]) -> 'ReferenceGSS[T, Acc]':
-              # Keep only stacks whose top equals `value`, or empty stacks if `value` is None.
-              filtered: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  if value is None:
-                      if not vals:
-                          filtered.append((list(vals), acc))
-                  else:
-                      if vals and vals[-1] == value:
-                          filtered.append((list(vals), acc))
-              return ReferenceGSS(filtered)
-
-          def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> 'ReferenceGSS[T, NewAcc]':
-              # Apply func to each accumulator independently
-              transformed: List[Tuple[List[T], NewAcc]] = []
-              for vals, acc in self._stacks:
-                  transformed.append((list(vals), func(acc)))
-              return ReferenceGSS(transformed) # type: ignore[arg-type]
-
-          def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> 'ReferenceGSS[T, Acc]':
-              # Keep only stacks where predicate(acc) is True
-              kept: List[Tuple[List[T], Acc]] = []
-              for vals, acc in self._stacks:
-                  if predicate(acc):
-                      kept.append((list(vals), acc))
-              return ReferenceGSS(kept)
-
-          def merge(self, other: ReferenceGSS[T, Acc]) -> ReferenceGSS[T, Acc]:
-              # The __post_init__ of ReferenceGSS handles merging of duplicate stacks.
-              return ReferenceGSS(self._stacks + other._stacks)
-
-          def peek(self) -> Set[T]:
-              # Return all top values across non-empty stacks
-              tops: Set[T] = set()
-              for vals, _ in self._stacks:
-                  if vals:
-                      tops.add(vals[-1])
-              return tops
-
-          def reduce_acc(self) -> Optional[Acc]:
-              # Reduce all accumulators into a single Acc (or None if no stacks)
-              if not self._stacks:
-                  return None
-              accs = [acc for _, acc in self._stacks]
-              return reduce(lambda a, b: a.merge(b), accs)
-
-          def to_reference_impl(self) -> 'ReferenceGSS[T, Acc]':
-              """Returns a canonical ReferenceGSS. Since this implementation is always canonical, this returns a copy."""
-              return ReferenceGSS(self._stacks)
-
-          def _get_canonical_sorted_stacks(self) -> List[Tuple[List[T], Acc]]:
-              """Helper to sort stacks for deterministic representations."""
-              # With __post_init__ merging, self is always canonical. We just need to
-              # sort for deterministic output.
-              items = self._stacks[:] # Create a shallow copy to sort in-place
-
-              def _encode_for_sort(obj: Any) -> str:
-                  try:
-                      return json.dumps(obj, sort_keys=True, default=repr, separators=(",", ":"))
-                  except Exception:
-                      return repr(obj)
-
-              items.sort(key=lambda pair: (_encode_for_sort(pair[0]), _encode_for_sort(pair[1])))
-              return items
-
-          def __str__(self) -> str:
-              """Provides a human-readable, deterministic string representation."""
-              items = self.to_stacks()
-              if not items:
-                  return f"{self.__class__.__name__}(empty)"
-
-              lines = [f"{self.__class__.__name__}:"]
-              for vals, acc in items:
-                  lines.append(f"  - Stack: {vals}, Acc: {acc!r}")
-              return "\n".join(lines)
-
-          def __repr__(self) -> str:
-              """Provides an unambiguous, deterministic string representation."""
-              items = self.to_stacks()
-              return f"{self.__class__.__name__}(_stacks={items!r})"
-
-          def is_empty(self) -> bool:
-              # True iff there are no active stacks.
-              return not self._stacks
-
-          def __eq__(self, other: object) -> bool:
-              if not isinstance(other, ReferenceGSS):
-                  return NotImplemented
-              # Sort stacks to ensure comparison is order-independent.
-              return self._get_canonical_sorted_stacks() == other._get_canonical_sorted_stacks()
-
-      ```
-    metadata:
-      filename: python/gss_tester/implementations/reference_impl.py
-  - user: |-
-      I want to try out a GSS implementation that is the same structure as the leveled GSS but which doesn't store accs in the graph, but just has a unique graph for each acc. Might be faster in cases where there's just a few accs but a large graph with lots of upper nodes.
-      Define one. Its inner will be a map from Acc to leveled GSS[NoneType]. ie inner leveled GSS won't store anything.
-      Pass through to all the leveled GSS methods. Ensure it has the same methods as the leveled GSS - a drop-in replacement.
+  - user: Add an option to `to_graph_string` that shows only the upper part, ie no
+      lower nodes.
     metadata:
   - user: |-
-      Mode instruction: For this turn, output the full, final contents of any created or modified files.
-                  - Use markdown code blocks, with the language and quoted file path on the opening fence. Example:
-                    ```python "path/to/your_file.py"
-                    ... full code ...
-                    ```
-                  - Do not include placeholders; the code must be complete and immediately usable.
-                  - Do NOT output git diffs in this mode.
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
                   Additional general constraints:
       - Do not split your response across multiple messages.
       - Avoid local cache/config advice; focus on actionable fixes or outputs.
       - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
     metadata:
       kind: mode-guidance
-      mode: simple
+      mode: git-llm
       phase: default
   - assistant: |-
-      I will create a new file `python/gss_tester/implementations/acc_map_impl.py` to define the `AccMapGSS` implementation. This new implementation will be a drop-in replacement for `LeveledGSS`, with an internal structure that maps each accumulator to its own `LeveledGSS` instance containing only stack structures.
+      Of course. Here are the step-by-step instructions to add an `upper_only` option to `to_graph_string`, followed by the corresponding git diff.
 
-      ```python "python/gss_tester/implementations/acc_map_impl.py"
-      from __future__ import annotations
+      ### Step-by-step Instructions
 
-      from collections import defaultdict
-      from dataclasses import dataclass
-      from functools import reduce
-      from typing import (
-          Any,
-          Callable,
-          Dict,
-          Generic,
-          Iterable,
-          List,
-          Literal,
-          Optional,
-          Set,
-          Tuple,
-      )
+      1.  **File:** `python/gss_tester/implementations/leveled_impl.py`
+      2.  **Method:** `LeveledGSS.to_graph_string`
 
-      from ..interface import GSS, T, Acc, NewAcc
-      from .leveled_impl import LeveledGSS, LeveledGSSStats
-      from .reference_impl import ReferenceGSS
+      #### 1. Update Method Signature and Docstring
 
+      First, modify the signature of `to_graph_string` to accept a new boolean argument `upper_only` with a default value of `False`. Also, update the docstring to describe this new parameter.
 
-      @dataclass(frozen=True, eq=True)
-      class AccMapGSS(GSS[T, Acc], Generic[T, Acc]):
-          """
-          A GSS implementation that partitions the GSS by accumulator.
+      -   **Change from:**
+          ```python
+          def to_graph_string(self, memo: Optional[Set[int]] = None) -> str:
+              """
+              Generates a pretty, indented string representation of the GSS structure.
+              Nodes are expanded inline on first appearance. Subsequent encounters are
+              represented as references to avoid redundancy and cycles.
 
-          The inner representation is a dictionary mapping each accumulator to a
-          LeveledGSS instance. Each of these inner GSSs uses `NoneType` for its
-          accumulator type, effectively only storing the stack structure.
-
-          This approach may be more efficient when the number of unique accumulators
-          is small, but the structural sharing between stacks with different
-          accumulators is low.
-          """
-
-          inner: Dict[Acc, LeveledGSS[T, NoneType]]
-
-          @classmethod
-          def from_stacks(cls, stacks: List[Tuple[List[T], Acc]]) -> AccMapGSS[T, Acc]:
-              stacks_by_acc: Dict[Acc, List[Tuple[List[T], NoneType]]] = defaultdict(list)
-              for vals, acc in stacks:
-                  stacks_by_acc[acc].append((vals, None))
-
-              inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, acc_stacks in stacks_by_acc.items():
-                  inner[acc] = LeveledGSS.from_stacks(acc_stacks)
-
-              return cls(inner)
-
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              all_stacks: List[Tuple[List[T], Acc]] = []
-              for acc, gss in self.inner.items():
-                  for vals, _ in gss.to_stacks():
-                      all_stacks.append((vals, acc))
-              return ReferenceGSS(all_stacks).to_stacks()
-
-          def push(self, value: T) -> AccMapGSS[T, Acc]:
-              if self.is_empty():
-                  return self
-              new_inner = {acc: gss.push(value) for acc, gss in self.inner.items()}
-              return AccMapGSS(new_inner)
-
-          def pop(self) -> AccMapGSS[T, Acc]:
-              new_inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, gss in self.inner.items():
-                  popped_gss = gss.pop()
-                  if not popped_gss.is_empty():
-                      new_inner[acc] = popped_gss
-              return AccMapGSS(new_inner)
-
-          def popn(self, n: int) -> AccMapGSS[T, Acc]:
-              if n <= 0:
-                  return self
-              new_inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, gss in self.inner.items():
-                  popped_gss = gss.popn(n)
-                  if not popped_gss.is_empty():
-                      new_inner[acc] = popped_gss
-              return AccMapGSS(new_inner)
-
-          def is_empty(self) -> bool:
-              return not self.inner
-
-          def isolate(self, value: Optional[T]) -> AccMapGSS[T, Acc]:
-              new_inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, gss in self.inner.items():
-                  isolated_gss = gss.isolate(value)
-                  if not isolated_gss.is_empty():
-                      new_inner[acc] = isolated_gss
-              return AccMapGSS(new_inner)
-
-          def isolate_many(self, values: Iterable[Optional[T]]) -> AccMapGSS[T, Acc]:
-              new_inner: Dict[Acc, LeveledGSS[T, NoneType]] = {}
-              for acc, gss in self.inner.items():
-                  isolated_gss = gss.isolate_many(values)
-                  if not isolated_gss.is_empty():
-                      new_inner[acc] = isolated_gss
-              return AccMapGSS(new_inner)
-
-          def apply(
-              self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None
-          ) -> AccMapGSS[T, NewAcc]:
-              new_inner: Dict[NewAcc, LeveledGSS[T, NoneType]] = defaultdict(
-                  lambda: LeveledGSS.from_stacks([])
-              )
-              for old_acc, gss in self.inner.items():
-                  new_acc = func(old_acc)
-                  new_inner[new_acc] = new_inner[new_acc].merge(gss)
-              return AccMapGSS(dict(new_inner))
-
-          def prune(
-              self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None
-          ) -> AccMapGSS[T, Acc]:
-              new_inner = {acc: gss for acc, gss in self.inner.items() if predicate(acc)}
-              return AccMapGSS(new_inner)
-
-          def apply_and_prune(
-              self, mutator: Callable[[Acc], Optional[NewAcc]], memo: Optional[Dict[int, Any]] = None
-          ) -> AccMapGSS[T, NewAcc]:
-              new_inner: Dict[NewAcc, LeveledGSS[T, NoneType]] = defaultdict(
-                  lambda: LeveledGSS.from_stacks([])
-              )
-              for old_acc, gss in self.inner.items():
-                  new_acc_opt = mutator(old_acc)
-                  if new_acc_opt is not None:
-                      new_inner[new_acc_opt] = new_inner[new_acc_opt].merge(gss)
-              return AccMapGSS(dict(new_inner))
-
-          def merge(self, other: AccMapGSS[T, Acc]) -> AccMapGSS[T, Acc]:
-              new_inner = self.inner.copy()
-              for acc, other_gss in other.inner.items():
-                  if acc in new_inner:
-                      new_inner[acc] = new_inner[acc].merge(other_gss)
-                  else:
-                      new_inner[acc] = other_gss
-              return AccMapGSS(new_inner)
-
-          def peek(self) -> Set[T]:
-              all_peeks: Set[T] = set()
-              for gss in self.inner.values():
-                  all_peeks.update(gss.peek())
-              return all_peeks
-
-          def reduce_acc(self) -> Optional[Acc]:
-              if not self.inner:
-                  return None
-              accs = list(self.inner.keys())
-              return reduce(lambda a, b: a.merge(b), accs)
-
-          def stats(self) -> LeveledGSSStats[T, Acc]:
-              if self.is_empty():
-                  empty_set: Set[Any] = set()
-                  return LeveledGSSStats(
-                      top_values=empty_set,
-                      num_upperbranch_nodes=0, num_interface_nodes=0, num_lower_nodes=0, total_unique_nodes=0,
-                      upper_edges=0, interface_to_lower_edges=0, lower_edges=0, total_edges=0,
-                      max_upper_depth=0, max_lower_depth=0,
-                      distinct_values_count=0, distinct_values=empty_set,
-                      unique_accumulators_count=0, unique_accumulators=empty_set, total_accumulator_instances=0,
-                      num_upper_with_empty=0, num_interfaces_with_empty=0, num_lower_terminal_nodes=0, num_interface_implicit_terminals=0,
-                      num_multi_depth_slots_upper=0, num_multi_depth_slots_lower=0,
-                      max_multiplicity_per_value_upper=0, max_multiplicity_per_value_lower=0,
-                      average_in_degree=0.0, max_in_degree=0, structural_sharing_factor=0.0,
-                      promotable_upper_nodes=0
-                  )
-
-              all_stats = [gss.stats() for gss in self.inner.values()]
-
-              total_unique_nodes = sum(s.total_unique_nodes for s in all_stats)
-              total_edges = sum(s.total_edges for s in all_stats)
-
-              if total_unique_nodes > 0:
-                  avg_in_degree = sum(s.average_in_degree * s.total_unique_nodes for s in all_stats) / total_unique_nodes
-              else:
-                  avg_in_degree = 0.0
-
-              return LeveledGSSStats(
-                  top_values=set().union(*(s.top_values for s in all_stats)),
-                  num_upperbranch_nodes=sum(s.num_upperbranch_nodes for s in all_stats),
-                  num_interface_nodes=sum(s.num_interface_nodes for s in all_stats),
-                  num_lower_nodes=sum(s.num_lower_nodes for s in all_stats),
-                  total_unique_nodes=total_unique_nodes,
-                  upper_edges=sum(s.upper_edges for s in all_stats),
-                  interface_to_lower_edges=sum(s.interface_to_lower_edges for s in all_stats),
-                  lower_edges=sum(s.lower_edges for s in all_stats),
-                  total_edges=total_edges,
-                  max_upper_depth=max((s.max_upper_depth for s in all_stats), default=0),
-                  max_lower_depth=max((s.max_lower_depth for s in all_stats), default=0),
-                  distinct_values=set().union(*(s.distinct_values for s in all_stats)),
-                  distinct_values_count=len(set().union(*(s.distinct_values for s in all_stats))),
-                  unique_accumulators_count=len(self.inner),
-                  unique_accumulators=set(self.inner.keys()),
-                  total_accumulator_instances=len(self.inner),
-                  num_upper_with_empty=sum(s.num_upper_with_empty for s in all_stats),
-                  num_interfaces_with_empty=sum(s.num_interfaces_with_empty for s in all_stats),
-                  num_lower_terminal_nodes=sum(s.num_lower_terminal_nodes for s in all_stats),
-                  num_interface_implicit_terminals=sum(s.num_interface_implicit_terminals for s in all_stats),
-                  num_multi_depth_slots_upper=sum(s.num_multi_depth_slots_upper for s in all_stats),
-                  num_multi_depth_slots_lower=sum(s.num_multi_depth_slots_lower for s in all_stats),
-                  max_multiplicity_per_value_upper=max((s.max_multiplicity_per_value_upper for s in all_stats), default=0),
-                  max_multiplicity_per_value_lower=max((s.max_multiplicity_per_value_lower for s in all_stats), default=0),
-                  average_in_degree=avg_in_degree,
-                  max_in_degree=max((s.max_in_degree for s in all_stats), default=0),
-                  structural_sharing_factor=total_edges / float(max(1, total_unique_nodes - len(self.inner))) if total_unique_nodes > len(self.inner) else 0.0,
-                  promotable_upper_nodes=sum(s.promotable_upper_nodes for s in all_stats),
-              )
-
+              Args:
+                  memo: An optional set of node IDs (from id()) that have already been
+                        printed. This method will mutate the set by adding IDs of
+                        nodes it prints. This allows for coherent printing of multiple
+                        GSS structures that share nodes.
+              """
+          ```
+      -   **Change to:**
+          ```python
           def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
-              output_lines: List[str] = []
-              if memo is None:
-                  memo = set()
+              """
+              Generates a pretty, indented string representation of the GSS structure.
+              Nodes are expanded inline on first appearance. Subsequent encounters are
+              represented as references to avoid redundancy and cycles.
 
-              # Sort by accumulator representation for deterministic output
-              sorted_items = sorted(self.inner.items(), key=lambda item: repr(item[0]))
+              Args:
+                  memo: An optional set of node IDs (from id()) that have already been
+                        printed. This method will mutate the set by adding IDs of
+                        nodes it prints. This allows for coherent printing of multiple
+                        GSS structures that share nodes.
+                  upper_only: If True, do not expand Lower nodes from Interface nodes.
+              """
+          ```
 
-              for i, (acc, gss) in enumerate(sorted_items):
-                  if i > 0:
-                      output_lines.append("")
-                  output_lines.append(f"--- Graph for Acc: {acc!r} ---")
-                  output_lines.append(gss.to_graph_string(memo=memo, upper_only=upper_only))
-              return "\n".join(output_lines)
+      #### 2. Modify Child Collection Logic in `_format_recursive`
 
-          def fuse(
-              self, levels: Optional[int | Literal["to_interface"]] = None, memo: Optional[Dict] = None
-          ) -> AccMapGSS[T, Acc]:
-              new_inner = {acc: gss.fuse(levels=levels) for acc, gss in self.inner.items()}
-              return AccMapGSS(new_inner)
+      Inside the `to_graph_string` method, locate the nested function `_format_recursive`. Modify the section that collects children to prevent it from traversing into `Lower` nodes when `upper_only` is `True`.
+
+      -   **Change from:**
+          ```python
+                  # Collect children edges to be printed for this node
+                  children_to_print = []
+                  if hasattr(node, 'children') and node.children:
+                      sorted_children = sorted(node.children.items())
+                      for v, kids_at_depths in sorted_children:
+                          sorted_kids = sorted(kids_at_depths.items())
+                          for depth, child in sorted_kids:
+                              label = f"Edge {repr(v)} (d={depth})"
+                              children_to_print.append((label, child))
+          ```
+      -   **Change to:**
+          ```python
+                  # Collect children edges to be printed for this node
+                  children_to_print = []
+                  if hasattr(node, 'children') and node.children:
+                      if not (upper_only and isinstance(node, Interface)):
+                          sorted_children = sorted(node.children.items())
+                          for v, kids_at_depths in sorted_children:
+                              sorted_kids = sorted(kids_at_depths.items())
+                              for depth, child in sorted_kids:
+                                  label = f"Edge {repr(v)} (d={depth})"
+                                  children_to_print.append((label, child))
+          ```
+
+      #### 3. Add Summary for Omitted Lower Nodes
+
+      Finally, at the end of the `_format_recursive` function (after the `for` loop that iterates through `children_to_print`), add a new block of code. This will print a summary line for any `Interface` node whose `Lower` children are being omitted.
+
+      -   **Add the following code block:**
+          ```python
+                  if upper_only and isinstance(node, Interface) and node.children:
+                      prefix_char = "└── "
+                      num_lower_edges = sum(len(kids) for kids in node.children.values())
+                      line = current_prefix + prefix_char + f"[{num_lower_edges} lower edges omitted]"
+                      output_lines.append(line)
+          ```
+
+      ### Git Diff
+
+      Here is the git diff that applies the changes described above.
+
+      ```diff
+      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
+      --- a/python/gss_tester/implementations/leveled_impl.py
+      +++ b/python/gss_tester/implementations/leveled_impl.py
+      @@ -1025,7 +1025,7 @@
+                   promotable_upper_nodes=promotable_upper_nodes,
+               )
+       
+      -    def to_graph_string(self, memo: Optional[Set[int]] = None) -> str:
+      +    def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
+               """
+               Generates a pretty, indented string representation of the GSS structure.
+               Nodes are expanded inline on first appearance. Subsequent encounters are
+      @@ -1035,7 +1035,7 @@
+                   memo: An optional set of node IDs (from id()) that have already been
+                         printed. This method will mutate the set by adding IDs of
+                         nodes it prints. This allows for coherent printing of multiple
+      -                  GSS structures that share nodes.
+      +                  GSS structures that share nodes.
+      +            upper_only: If True, do not expand Lower nodes from Interface nodes.
+               """
+               if memo is None:
+                   memo = set()
+      @@ -1071,12 +1071,13 @@
+                   # Collect children edges to be printed for this node
+                   children_to_print = []
+                   if hasattr(node, 'children') and node.children:
+      -                sorted_children = sorted(node.children.items())
+      -                for v, kids_at_depths in sorted_children:
+      -                    sorted_kids = sorted(kids_at_depths.items())
+      -                    for depth, child in sorted_kids:
+      -                        label = f"Edge {repr(v)} (d={depth})"
+      -                        children_to_print.append((label, child))
+      +                if not (upper_only and isinstance(node, Interface)):
+      +                    sorted_children = sorted(node.children.items())
+      +                    for v, kids_at_depths in sorted_children:
+      +                        sorted_kids = sorted(kids_at_depths.items())
+      +                        for depth, child in sorted_kids:
+      +                            label = f"Edge {repr(v)} (d={depth})"
+      +                            children_to_print.append((label, child))
+       
+                   # Iterate through the collected children and format them
+                   for i, (label, child) in enumerate(children_to_print):
+      @@ -1095,6 +1096,12 @@
+                           # Prepare prefix for the next level of recursion
+                           child_prefix = current_prefix + ("    " if is_last else "│   ")
+                           _format_recursive(child, child_prefix)
+      +
+      +            if upper_only and isinstance(node, Interface) and node.children:
+      +                prefix_char = "└── "
+      +                num_lower_edges = sum(len(kids) for kids in node.children.values())
+      +                line = current_prefix + prefix_char + f"[{num_lower_edges} lower edges omitted]"
+      +                output_lines.append(line)
+       
+               # Start the process from the root node
+               root = self.inner
+
       ```
     metadata:
   - user: |
-      Identified target file 'python/gss_tester/implementations/acc_map_impl.py' on fence open line 1:
-      ```python "python/gss_tester/implementations/acc_map_impl.py"
-      Found 1 code blocks.
-      Matching against available files:
-        1: python/gss_tester/implementations/leveled_impl.py
-        2: python/gss_tester/implementations/reference_impl.py
-        3: python/gss_tester/implementations/leveled_impl_cpp.py
-        4: python/gss_tester/implementations/__init__.py
-      --- Phase 1: Processing explicit file paths in fences ---
-      Assigned block to NEW file python/gss_tester/implementations/acc_map_impl.py based on explicit fence path.
-      Remaining unassigned blocks: 0, Available files: 4
-      --- Phase 6: Applying changes to assigned files ---
-      Successfully created new file: python/gss_tester/implementations/acc_map_impl.py
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/implementations/leveled_impl.py
+      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
     metadata:
-  - user: 'Changes committed with message: "Feat: Implement AccMapGSS by partitioning
-      structure based on accumulator"'
+  - user: 'Changes committed with message: "Feat: Add `upper_only` option to `to_graph_string`
+      to suppress lower node expansion"'
     metadata:
 ...
