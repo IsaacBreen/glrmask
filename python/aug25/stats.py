@@ -89,7 +89,13 @@ class Stats:
     def _record_key_position(self, key: str):
         """If seeing a key for the first time, record its call site (file, line)."""
         if self.enabled and key not in self.key_positions:
-            # Inspection is expensive, so we only do it once per key.
+            # Inspection is expensive. Pause all active timers while it runs.
+            now = time.perf_counter()
+            active_timer_keys = list(self.timers.keys())
+            for k in active_timer_keys:
+                self.times[k] += now - self.timers[k]
+
+            # --- Expensive operation ---
             try:
                 frame = inspect.currentframe()
                 if frame and frame.f_back:
@@ -101,6 +107,12 @@ class Stats:
             finally:
                 # Avoid reference cycles
                 del frame
+            # --- End of expensive operation ---
+
+            # Resume timers
+            new_start_time = time.perf_counter()
+            for k in active_timer_keys:
+                self.timers[k] = new_start_time
 
     # -------- Group management --------
 
