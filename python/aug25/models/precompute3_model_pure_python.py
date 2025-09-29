@@ -604,11 +604,10 @@ class Model(GraphProvider):
                     continue
                 terminals_to_llm = pmc[tsid]
 
-                stats.start(f'{p}.to_indices')
-                indices = disallowed_terminals.to_indices()
-                stats.stop(f'{p}.to_indices')
+                stats.start(f'{p}.iter_indices')
+                indices = disallowed_terminals.iter_indices()
+                stats.stop(f'{p}.iter_indices')
 
-                stats.inc(f'{p}.disallowed_terminals_count.sum', len(indices))
                 for terminal_id in indices:
                     stats.inc(f'{p}.disallowed_terminals_inner_loops')
                     if terminal_id in terminals_to_llm:
@@ -797,11 +796,10 @@ class Model(GraphProvider):
         stats.start('get_mask.final_conversion')
         # Convert internal mask back to original IDs
         original_indices: List[int] = []
-        stats.start('get_mask.final_conversion.to_indices')
-        final_indices = final_mask.to_indices()
-        stats.stop('get_mask.final_conversion.to_indices')
+        stats.start('get_mask.final_conversion.iter_indices')
+        final_indices = final_mask.iter_indices()
+        stats.stop('get_mask.final_conversion.iter_indices')
 
-        stats.inc('get_mask.final_mask.internal_indices', len(final_indices))
         for i in final_indices:
             if i in self.internal_to_original_map:
                 original_indices.extend(self.internal_to_original_map[i].iter_indices())
