@@ -26,10 +26,10 @@ from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
 # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSet
 
 # from ..common_interface import RangeSetOut
-# Use FFI-backed rangeset for output to speed final conversion
-from ..range_set.ffi_range_set import FFIRangeSet as RangeSetOut
+from ..range_set.set_range_set import SetRangeSet as RangeSetOut
 # from ..range_set.py_range_set import PyRangeSet as RangeSetOut
 # from ..range_set.bitset_range_set import BitsetRangeSet as RangeSetOut
+# from ..range_set.ffi_range_set import FFIRangeSet as RangeSetOut
 # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetOut
 
 # from ..common_interface import RangeSetStates
