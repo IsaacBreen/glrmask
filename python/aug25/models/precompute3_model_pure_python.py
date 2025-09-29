@@ -171,7 +171,7 @@ class Model(GraphProvider):
 
     # Token/Terminal mapping fields
     id_to_token: Dict[int, bytes]
-    internal_to_original_map: Dict[int, RangeSet]
+    internal_to_original_map: Dict[int, Set[int]]
     all_internal_llm_tokens_bitset: LLMTokenSet
     all_terminals_bitset: TerminalIdSet
     ignore_terminal_id: Optional[int]
@@ -310,13 +310,13 @@ class Model(GraphProvider):
         if vocab:
             internal_to_original_map_raw = dict(vocab['internal_to_original'])
             internal_to_original_map = {
-                int(k): RangeSet.from_indices(v) for k, v in internal_to_original_map_raw.items()
+                int(k): set(v) for k, v in internal_to_original_map_raw.items()
             }
             internal_max = vocab['internal_max_llm_token']
             all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, internal_max)])
         else:
             internal_to_original_map_raw = constraint.internal_to_original_map()
-            internal_to_original_map = {k: RangeSet.from_indices([v]) for k, v in internal_to_original_map_raw.items()}
+            internal_to_original_map = {k: {v} for k, v in internal_to_original_map_raw.items()}
             all_internal = constraint.all_internal_llm_tokens_bitset()
             all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
 
@@ -802,7 +802,7 @@ class Model(GraphProvider):
 
         for i in final_indices:
             if i in self.internal_to_original_map:
-                original_indices.extend(self.internal_to_original_map[i].iter_indices())
+                original_indices.extend(self.internal_to_original_map[i])
 
         stats.start('get_mask.final_conversion.from_indices')
         result = RangeSet.from_indices(original_indices)
