@@ -1,4 +1,5 @@
 import time
+import inspect
 from collections import defaultdict
 from typing import Dict, Iterable, List, Tuple
 
@@ -35,6 +36,9 @@ class Stats:
         # Timings: hit counts per key (number of successful stop() calls).
         self.time_counts: Dict[str, int] = defaultdict(int)
 
+        # Location of first call for each key: key -> (file, line)
+        self.key_positions: Dict[str, Tuple[str, int]] = {}
+
         # Active timers: key -> start_time
         self.timers: Dict[str, float] = {}
 
@@ -57,17 +61,20 @@ class Stats:
         self.times.clear()
         self.time_counts.clear()
         self.timers.clear()
+        self.key_positions.clear()
 
     def inc(self, key: str, value: int = 1):
         """Increment a counter."""
         if not self.enabled:
             return
+        self._record_key_position(key)
         self.counts[key] += value
 
     def start(self, key: str):
         """Start a timer."""
         if not self.enabled:
             return
+        self._record_key_position(key)
         self.timers[key] = time.perf_counter()
 
     def stop(self, key: str):
@@ -78,6 +85,22 @@ class Stats:
             self.times[key] += time.perf_counter() - self.timers[key]
             self.time_counts[key] += 1
             del self.timers[key]
+
+    def _record_key_position(self, key: str):
+        """If seeing a key for the first time, record its call site (file, line)."""
+        if self.enabled and key not in self.key_positions:
+            # Inspection is expensive, so we only do it once per key.
+            try:
+                frame = inspect.currentframe()
+                if frame and frame.f_back:
+                    # We want the caller of inc() or start(), which is one level up.
+                    info = inspect.getframeinfo(frame.f_back)
+                    self.key_positions[key] = (info.filename, info.lineno)
+                else:
+                    self.key_positions[key] = ("<unknown>", 0)
+            finally:
+                # Avoid reference cycles
+                del frame
 
     # -------- Group management --------
 
@@ -105,7 +128,8 @@ class Stats:
         # General counts (manual inc()).
         if self.counts:
             print("--- Counts ---")
-            rows = [(key, self.counts[key]) for key in sorted(self.counts)]
+            sorted_keys = sorted(self.counts.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
+            rows = [(key, self.counts[key]) for key in sorted_keys]
             self._print_table(
                 headers=("key", "count"),
                 rows=rows,
@@ -117,7 +141,8 @@ class Stats:
         if self.times:
             print("\n--- Timings (ms) ---")
             rows = []
-            for key in sorted(self.times):
+            sorted_keys = sorted(self.times.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
+            for key in sorted_keys:
                 total_ms = self.times[key] * 1000.0
                 hits = self.time_counts.get(key, 0)
                 avg_ms = (total_ms / hits) if hits else 0.0
@@ -133,7 +158,16 @@ class Stats:
         # Grouped reporting (if any groups are defined)
         if self.groups:
             print("\n--- Groups (prefix-based) ---")
-            for g in sorted(self.groups):
+            group_sort_keys = {}
+            for g in self.groups:
+                members = self._group_members(g)
+                if members:
+                    # Sort key for a group is the minimum position of its members.
+                    min_pos = min(self.key_positions.get(m, ("~", float("inf"))) for m in members)
+                    group_sort_keys[g] = min_pos
+
+            sorted_groups = sorted(self.groups, key=lambda g: group_sort_keys.get(g, ("~", float("inf"))))
+            for g in sorted_groups:
                 members = self._group_members(g)
                 if not members:
                     # No timed members under this prefix; skip for brevity
@@ -148,7 +182,8 @@ class Stats:
 
                 # For each member, show both per-hit and per-group-hit metrics.
                 rows = []
-                for k in sorted(members):
+                sorted_members = sorted(members, key=lambda k: self.key_positions.get(k, ("", 0)))
+                for k in sorted_members:
                     total_ms = self.times[k] * 1000.0
                     hits = self.time_counts.get(k, 0)
                     avg_ms = (total_ms / hits) if hits else 0.0
