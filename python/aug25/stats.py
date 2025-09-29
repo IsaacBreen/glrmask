@@ -122,7 +122,7 @@ class Stats:
             self._print_table(
                 headers=("key", "total_ms", "hits", "avg_ms"),
                 rows=rows,
-                formats=(str, self._fmt_ms, int, self._fmt_ms),
+                formats=(str, self._fmt_ms, str, self._fmt_ms),
                 indent="  "
             )
 
@@ -154,7 +154,7 @@ class Stats:
                 self._print_table(
                     headers=("member", "total_ms", "hits", "avg_ms", "per_group_hit_ms"),
                     rows=rows,
-                    formats=(str, self._fmt_ms, int, self._fmt_ms, self._fmt_ms),
+                    formats=(str, self._fmt_ms, str, self._fmt_ms, self._fmt_ms),
                     indent="    "
                 )
 
