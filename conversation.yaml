@@ -6,6 +6,7 @@ local_system:
   initial_file_contents:
     python/aug25/stats.py: |
       import time
+      import inspect
       from collections import defaultdict
       from typing import Dict, Iterable, List, Tuple
 
@@ -42,6 +43,9 @@ local_system:
               # Timings: hit counts per key (number of successful stop() calls).
               self.time_counts: Dict[str, int] = defaultdict(int)
 
+              # Location of first call for each key: key -> (file, line)
+              self.key_positions: Dict[str, Tuple[str, int]] = {}
+
               # Active timers: key -> start_time
               self.timers: Dict[str, float] = {}
 
@@ -64,17 +68,20 @@ local_system:
               self.times.clear()
               self.time_counts.clear()
               self.timers.clear()
+              self.key_positions.clear()
 
           def inc(self, key: str, value: int = 1):
               """Increment a counter."""
               if not self.enabled:
                   return
+              self._record_key_position(key)
               self.counts[key] += value
 
           def start(self, key: str):
               """Start a timer."""
               if not self.enabled:
                   return
+              self._record_key_position(key)
               self.timers[key] = time.perf_counter()
 
           def stop(self, key: str):
@@ -85,6 +92,22 @@ local_system:
                   self.times[key] += time.perf_counter() - self.timers[key]
                   self.time_counts[key] += 1
                   del self.timers[key]
+
+          def _record_key_position(self, key: str):
+              """If seeing a key for the first time, record its call site (file, line)."""
+              if self.enabled and key not in self.key_positions:
+                  # Inspection is expensive, so we only do it once per key.
+                  try:
+                      frame = inspect.currentframe()
+                      if frame and frame.f_back:
+                          # We want the caller of inc() or start(), which is one level up.
+                          info = inspect.getframeinfo(frame.f_back)
+                          self.key_positions[key] = (info.filename, info.lineno)
+                      else:
+                          self.key_positions[key] = ("<unknown>", 0)
+                  finally:
+                      # Avoid reference cycles
+                      del frame
 
           # -------- Group management --------
 
@@ -112,7 +135,8 @@ local_system:
               # General counts (manual inc()).
               if self.counts:
                   print("--- Counts ---")
-                  rows = [(key, self.counts[key]) for key in sorted(self.counts)]
+                  sorted_keys = sorted(self.counts.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
+                  rows = [(key, self.counts[key]) for key in sorted_keys]
                   self._print_table(
                       headers=("key", "count"),
                       rows=rows,
@@ -124,7 +148,8 @@ local_system:
               if self.times:
                   print("\n--- Timings (ms) ---")
                   rows = []
-                  for key in sorted(self.times):
+                  sorted_keys = sorted(self.times.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
+                  for key in sorted_keys:
                       total_ms = self.times[key] * 1000.0
                       hits = self.time_counts.get(key, 0)
                       avg_ms = (total_ms / hits) if hits else 0.0
@@ -140,7 +165,16 @@ local_system:
               # Grouped reporting (if any groups are defined)
               if self.groups:
                   print("\n--- Groups (prefix-based) ---")
-                  for g in sorted(self.groups):
+                  group_sort_keys = {}
+                  for g in self.groups:
+                      members = self._group_members(g)
+                      if members:
+                          # Sort key for a group is the minimum position of its members.
+                          min_pos = min(self.key_positions.get(m, ("~", float("inf"))) for m in members)
+                          group_sort_keys[g] = min_pos
+
+                  sorted_groups = sorted(self.groups, key=lambda g: group_sort_keys.get(g, ("~", float("inf"))))
+                  for g in sorted_groups:
                       members = self._group_members(g)
                       if not members:
                           # No timed members under this prefix; skip for brevity
@@ -155,7 +189,8 @@ local_system:
 
                       # For each member, show both per-hit and per-group-hit metrics.
                       rows = []
-                      for k in sorted(members):
+                      sorted_members = sorted(members, key=lambda k: self.key_positions.get(k, ("", 0)))
+                      for k in sorted_members:
                           total_ms = self.times[k] * 1000.0
                           hits = self.time_counts.get(k, 0)
                           avg_ms = (total_ms / hits) if hits else 0.0
@@ -497,6 +532,11 @@ local_system:
               ncols = len(headers)
               fmts = formats if formats is not None else tuple([str] * ncols)
 
+              # Determine which columns are numeric (should be right-aligned)
+              # Check against the static formatters defined in the class.
+              numeric_formatters = (self._fmt_int, self._fmt_ms)
+              is_numeric_col = [f in numeric_formatters for f in fmts]
+
               # Convert cells to strings using provided formatters
               str_rows: List[List[str]] = []
               for r in rows:
@@ -513,14 +553,22 @@ local_system:
                       widths[i] = max(widths[i], len(cell))
 
               # Print header
-              header_line = indent + " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+              header_line = indent + " | ".join(
+                  h.rjust(widths[i]) if is_numeric_col[i] else h.ljust(widths[i])
+                  for i, h in enumerate(headers)
+              )
               sep_line = indent + "-+-".join("-" * widths[i] for i in range(ncols))
               print(header_line)
               print(sep_line)
 
               # Print rows
               for r in str_rows:
-                  print(indent + " | ".join(r[i].ljust(widths[i]) for i in range(ncols)))
+                  print(
+                      indent + " | ".join(
+                          r[i].rjust(widths[i]) if is_numeric_col[i] else r[i].ljust(widths[i])
+                          for i in range(ncols)
+                      )
+                  )
 
           def _group_members(self, prefix: str) -> List[str]:
               """Return all timing keys that belong to the group 'prefix'.
@@ -564,7 +612,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gf
   code_completion_model:
     - cp
   commit_message_model:
@@ -600,6 +648,7 @@ messages:
   - user: |-
       ```python 'python/aug25/stats.py'
       import time
+      import inspect
       from collections import defaultdict
       from typing import Dict, Iterable, List, Tuple
 
@@ -636,6 +685,9 @@ messages:
               # Timings: hit counts per key (number of successful stop() calls).
               self.time_counts: Dict[str, int] = defaultdict(int)
 
+              # Location of first call for each key: key -> (file, line)
+              self.key_positions: Dict[str, Tuple[str, int]] = {}
+
               # Active timers: key -> start_time
               self.timers: Dict[str, float] = {}
 
@@ -658,17 +710,20 @@ messages:
               self.times.clear()
               self.time_counts.clear()
               self.timers.clear()
+              self.key_positions.clear()
 
           def inc(self, key: str, value: int = 1):
               """Increment a counter."""
               if not self.enabled:
                   return
+              self._record_key_position(key)
               self.counts[key] += value
 
           def start(self, key: str):
               """Start a timer."""
               if not self.enabled:
                   return
+              self._record_key_position(key)
               self.timers[key] = time.perf_counter()
 
           def stop(self, key: str):
@@ -679,6 +734,22 @@ messages:
                   self.times[key] += time.perf_counter() - self.timers[key]
                   self.time_counts[key] += 1
                   del self.timers[key]
+
+          def _record_key_position(self, key: str):
+              """If seeing a key for the first time, record its call site (file, line)."""
+              if self.enabled and key not in self.key_positions:
+                  # Inspection is expensive, so we only do it once per key.
+                  try:
+                      frame = inspect.currentframe()
+                      if frame and frame.f_back:
+                          # We want the caller of inc() or start(), which is one level up.
+                          info = inspect.getframeinfo(frame.f_back)
+                          self.key_positions[key] = (info.filename, info.lineno)
+                      else:
+                          self.key_positions[key] = ("<unknown>", 0)
+                  finally:
+                      # Avoid reference cycles
+                      del frame
 
           # -------- Group management --------
 
@@ -706,7 +777,8 @@ messages:
               # General counts (manual inc()).
               if self.counts:
                   print("--- Counts ---")
-                  rows = [(key, self.counts[key]) for key in sorted(self.counts)]
+                  sorted_keys = sorted(self.counts.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
+                  rows = [(key, self.counts[key]) for key in sorted_keys]
                   self._print_table(
                       headers=("key", "count"),
                       rows=rows,
@@ -718,7 +790,8 @@ messages:
               if self.times:
                   print("\n--- Timings (ms) ---")
                   rows = []
-                  for key in sorted(self.times):
+                  sorted_keys = sorted(self.times.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
+                  for key in sorted_keys:
                       total_ms = self.times[key] * 1000.0
                       hits = self.time_counts.get(key, 0)
                       avg_ms = (total_ms / hits) if hits else 0.0
@@ -734,7 +807,16 @@ messages:
               # Grouped reporting (if any groups are defined)
               if self.groups:
                   print("\n--- Groups (prefix-based) ---")
-                  for g in sorted(self.groups):
+                  group_sort_keys = {}
+                  for g in self.groups:
+                      members = self._group_members(g)
+                      if members:
+                          # Sort key for a group is the minimum position of its members.
+                          min_pos = min(self.key_positions.get(m, ("~", float("inf"))) for m in members)
+                          group_sort_keys[g] = min_pos
+
+                  sorted_groups = sorted(self.groups, key=lambda g: group_sort_keys.get(g, ("~", float("inf"))))
+                  for g in sorted_groups:
                       members = self._group_members(g)
                       if not members:
                           # No timed members under this prefix; skip for brevity
@@ -749,7 +831,8 @@ messages:
 
                       # For each member, show both per-hit and per-group-hit metrics.
                       rows = []
-                      for k in sorted(members):
+                      sorted_members = sorted(members, key=lambda k: self.key_positions.get(k, ("", 0)))
+                      for k in sorted_members:
                           total_ms = self.times[k] * 1000.0
                           hits = self.time_counts.get(k, 0)
                           avg_ms = (total_ms / hits) if hits else 0.0
@@ -859,8 +942,7 @@ messages:
       ```
     metadata:
       filename: python/aug25/stats.py
-  - user: Use inspection to get the code position of the first call to each key (only
-      the first, inspection is expensive). Sort the output data by code position.
+  - user: Numbers should always be displayed right-aligned in a column.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -879,228 +961,101 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. To achieve sorting by code position, we'll use Python's `inspect` module to find where each statistics key is first used. This is an expensive operation, so we'll ensure it only runs once per key.
+      The requirement is to ensure that number columns in the printed tables are right-aligned. This requires modifying the `_print_table` helper method to conditionally use string right-alignment (`rjust`) for columns formatted with `_fmt_int` or `_fmt_ms`, and left-alignment (`ljust`) for others (like keys/members).
 
-      Here are the step-by-step instructions, followed by the git diff.
+      Here are the step-by-step instructions and the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      Here are the edits for `python/aug25/stats.py`:
+      In the file `python/aug25/stats.py`:
 
-      1.  **Import `inspect` module**:
-          At the top of the file, add the following import statement:
+      1.  **Modify `Stats._print_table` to identify numeric columns.**
+          Locate the `_print_table` method (starting around line 235). After line 250, which sets `fmts`, insert logic to determine which columns use the numeric formatters (`_fmt_int` or `_fmt_ms`).
+
+          *   **Insert** the following lines after `fmts = formats if formats is not None else tuple([str] * ncols)` (around line 250):
+
           ```python
-          import inspect
+              # Determine which columns are numeric (should be right-aligned)
+              # Check against the static formatters defined in the class.
+              numeric_formatters = (self._fmt_int, self._fmt_ms)
+              is_numeric_col = [f in numeric_formatters for f in fmts]
           ```
 
-      2.  **Update `Stats.__init__`**:
-          In the `__init__` method, add a new dictionary to store the code position for each key. A good place is after `self.time_counts`:
-          ```python
-          # Location of first call for each key: key -> (file, line)
-          self.key_positions: Dict[str, Tuple[str, int]] = {}
-          ```
+      2.  **Modify header printing to use conditional alignment.**
+          Locate the line that prints the header (around line 264) and replace the use of `h.ljust(widths[i])` with a conditional expression that uses `rjust` for numeric columns.
 
-      3.  **Update `Stats.reset`**:
-          In the `reset` method, add a line to clear the new dictionary:
-          ```python
-          self.key_positions.clear()
-          ```
-
-      4.  **Add `_record_key_position` Helper Method**:
-          Inside the `Stats` class, a good place for this new helper is after the `stop` method. This method will find and store the call site of a key.
-          ```python
-          def _record_key_position(self, key: str):
-              """If seeing a key for the first time, record its call site (file, line)."""
-              if self.enabled and key not in self.key_positions:
-                  # Inspection is expensive, so we only do it once per key.
-                  try:
-                      frame = inspect.currentframe()
-                      if frame and frame.f_back:
-                          # We want the caller of inc() or start(), which is one level up.
-                          info = inspect.getframeinfo(frame.f_back)
-                          self.key_positions[key] = (info.filename, info.lineno)
-                      else:
-                          self.key_positions[key] = ("<unknown>", 0)
-                  finally:
-                      # Avoid reference cycles
-                      del frame
-          ```
-
-      5.  **Update `Stats.inc` and `Stats.start`**:
-          Call the new helper method at the beginning of both `inc()` and `start()` methods, right after the `if not self.enabled:` check.
-          ```python
-          # Add this line in inc()
-          self._record_key_position(key)
-
-          # Add this line in start()
-          self._record_key_position(key)
-          ```
-
-      6.  **Update `Stats.report` for Sorting**:
-          Finally, modify the `report` method to use the stored positions for sorting the output.
-
-          *   In the "Counts" section, change how the rows are generated:
+          *   **Replace** line 264:
               ```python
-              # Replace this line:
-              # rows = [(key, self.counts[key]) for key in sorted(self.counts)]
-              # With this:
-              sorted_keys = sorted(self.counts.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
-              rows = [(key, self.counts[key]) for key in sorted_keys]
+              header_line = indent + " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+              ```
+          *   **With** the following block:
+              ```python
+              header_line = indent + " | ".join(
+                  h.rjust(widths[i]) if is_numeric_col[i] else h.ljust(widths[i])
+                  for i, h in enumerate(headers)
+              )
               ```
 
-          *   In the "Timings" section, modify the loop to iterate over position-sorted keys:
-              ```python
-              # Replace this line:
-              # for key in sorted(self.times):
-              # With this:
-              sorted_keys = sorted(self.times.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
-              for key in sorted_keys:
-              ```
+      3.  **Modify row printing to use conditional alignment.**
+          Locate the line that prints the rows (around line 270) and replace the use of `r[i].ljust(widths[i])` with a conditional expression that uses `rjust` for numeric columns.
 
-          *   In the "Groups" section, replace the sorting logic for both the groups and their members.
-              First, replace the group iteration line:
+          *   **Replace** line 270:
               ```python
-              # Replace this line:
-              # for g in sorted(self.groups):
-              # With this new block to sort groups by the position of their first member:
-              group_sort_keys = {}
-              for g in self.groups:
-                  members = self._group_members(g)
-                  if members:
-                      # Sort key for a group is the minimum position of its members.
-                      min_pos = min(self.key_positions.get(m, ("~", float("inf"))) for m in members)
-                      group_sort_keys[g] = min_pos
-
-              sorted_groups = sorted(self.groups, key=lambda g: group_sort_keys.get(g, ("~", float("inf"))))
-              for g in sorted_groups:
+              print(indent + " | ".join(r[i].ljust(widths[i]) for i in range(ncols)))
               ```
-              Then, inside that loop, sort the members by position:
+          *   **With** the following block:
               ```python
-              # Replace this line:
-              # for k in sorted(members):
-              # With this:
-              sorted_members = sorted(members, key=lambda k: self.key_positions.get(k, ("", 0)))
-              for k in sorted_members:
+              print(
+                  indent + " | ".join(
+                      r[i].rjust(widths[i]) if is_numeric_col[i] else r[i].ljust(widths[i])
+                      for i in range(ncols)
+                  )
+              )
               ```
 
       ### Git Diff
 
-      Here is the git diff with all the changes described above.
-
       ```diff
       diff --git a/python/aug25/stats.py b/python/aug25/stats.py
-      index 92c813a..7564d26 100644
       --- a/python/aug25/stats.py
       +++ b/python/aug25/stats.py
-      @@ -1,4 +1,5 @@
-       import time
-      +import inspect
-       from collections import defaultdict
-       from typing import Dict, Iterable, List, Tuple
+      @@ -248,6 +248,11 @@
+               ncols = len(headers)
+               fmts = formats if formats is not None else tuple([str] * ncols)
        
-      @@ -38,6 +39,9 @@
-               # Timings: hit counts per key (number of successful stop() calls).
-               self.time_counts: Dict[str, int] = defaultdict(int)
-       
-      +        # Location of first call for each key: key -> (file, line)
-      +        self.key_positions: Dict[str, Tuple[str, int]] = {}
+      +        # Determine which columns are numeric (should be right-aligned)
+      +        # Check against the static formatters defined in the class.
+      +        numeric_formatters = (self._fmt_int, self._fmt_ms)
+      +        is_numeric_col = [f in numeric_formatters for f in fmts]
       +
-               # Active timers: key -> start_time
-               self.timers: Dict[str, float] = {}
+               # Convert cells to strings using provided formatters
+               str_rows: List[List[str]] = []
+               for r in rows:
+      @@ -263,14 +268,20 @@
+                       widths[i] = max(widths[i], len(cell))
        
-      @@ -58,12 +62,14 @@
-               self.times.clear()
-               self.time_counts.clear()
-               self.timers.clear()
-      +        self.key_positions.clear()
+               # Print header
+      -        header_line = indent + " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+      +        header_line = indent + " | ".join(
+      +            h.rjust(widths[i]) if is_numeric_col[i] else h.ljust(widths[i])
+      +            for i, h in enumerate(headers)
+      +        )
+               sep_line = indent + "-+-".join("-" * widths[i] for i in range(ncols))
+               print(header_line)
+               print(sep_line)
        
-           def inc(self, key: str, value: int = 1):
-               """Increment a counter."""
-               if not self.enabled:
-                   return
-      +        self._record_key_position(key)
-               self.counts[key] += value
+               # Print rows
+               for r in str_rows:
+      -            print(indent + " | ".join(r[i].ljust(widths[i]) for i in range(ncols)))
+      +            print(
+      +                indent + " | ".join(
+      +                    r[i].rjust(widths[i]) if is_numeric_col[i] else r[i].ljust(widths[i])
+      +                    for i in range(ncols)
+      +                )
+      +            )
        
-           def start(self, key: str):
-      @@ -71,6 +77,7 @@
-               if not self.enabled:
-                   return
-      +        self._record_key_position(key)
-               self.timers[key] = time.perf_counter()
-       
-           def stop(self, key: str):
-      @@ -82,6 +89,21 @@
-                   self.time_counts[key] += 1
-                   del self.timers[key]
-       
-      +    def _record_key_position(self, key: str):
-      +        """If seeing a key for the first time, record its call site (file, line)."""
-      +        if self.enabled and key not in self.key_positions:
-      +            # Inspection is expensive, so we only do it once per key.
-      +            try:
-      +                frame = inspect.currentframe()
-      +                if frame and frame.f_back:
-      +                    # We want the caller of inc() or start(), which is one level up.
-      +                    info = inspect.getframeinfo(frame.f_back)
-      +                    self.key_positions[key] = (info.filename, info.lineno)
-      +                else:
-      +                    self.key_positions[key] = ("<unknown>", 0)
-      +            finally:
-      +                # Avoid reference cycles
-      +                del frame
-      +
-           # -------- Group management --------
-       
-           def add_group(self, prefix: str):
-      @@ -105,7 +127,8 @@
-               # General counts (manual inc()).
-               if self.counts:
-                   print("--- Counts ---")
-      -            rows = [(key, self.counts[key]) for key in sorted(self.counts)]
-      +            sorted_keys = sorted(self.counts.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
-      +            rows = [(key, self.counts[key]) for key in sorted_keys]
-                   self._print_table(
-                       headers=("key", "count"),
-                       rows=rows,
-      @@ -117,8 +140,9 @@
-               if self.times:
-                   print("\n--- Timings (ms) ---")
-                   rows = []
-      -            for key in sorted(self.times):
-      +            sorted_keys = sorted(self.times.keys(), key=lambda k: self.key_positions.get(k, ("", 0)))
-      +            for key in sorted_keys:
-                       total_ms = self.times[key] * 1000.0
-                       hits = self.time_counts.get(key, 0)
-                       avg_ms = (total_ms / hits) if hits else 0.0
-      @@ -134,7 +158,16 @@
-               # Grouped reporting (if any groups are defined)
-               if self.groups:
-                   print("\n--- Groups (prefix-based) ---")
-      -            for g in sorted(self.groups):
-      +            group_sort_keys = {}
-      +            for g in self.groups:
-      +                members = self._group_members(g)
-      +                if members:
-      +                    # Sort key for a group is the minimum position of its members.
-      +                    min_pos = min(self.key_positions.get(m, ("~", float("inf"))) for m in members)
-      +                    group_sort_keys[g] = min_pos
-      +
-      +            sorted_groups = sorted(self.groups, key=lambda g: group_sort_keys.get(g, ("~", float("inf"))))
-      +            for g in sorted_groups:
-                       members = self._group_members(g)
-                       if not members:
-                           # No timed members under this prefix; skip for brevity
-      @@ -149,7 +182,8 @@
-       
-                       # For each member, show both per-hit and per-group-hit metrics.
-                       rows = []
-      -                for k in sorted(members):
-      +                sorted_members = sorted(members, key=lambda k: self.key_positions.get(k, ("", 0)))
-      +                for k in sorted_members:
-                           total_ms = self.times[k] * 1000.0
-                           hits = self.time_counts.get(k, 0)
-                           avg_ms = (total_ms / hits) if hits else 0.0
-
+           def _group_members(self, prefix: str) -> List[str]:
+               """Return all timing keys that belong to the group 'prefix'.
       ```
     metadata:
   - user: |
@@ -1112,7 +1067,7 @@ messages:
       Applying patch to 'python/aug25/stats.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/stats.py.
     metadata:
-  - user: 'Changes committed with message: "Feature: Track and report stats keys sorted
-      by first call code position"'
+  - user: 'Changes committed with message: "Fix: Right-align numeric columns in Stats._print_table
+      output"'
     metadata:
 ...

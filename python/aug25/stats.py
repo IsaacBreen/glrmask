@@ -232,6 +232,11 @@ class Stats:
         ncols = len(headers)
         fmts = formats if formats is not None else tuple([str] * ncols)
 
+        # Determine which columns are numeric (should be right-aligned)
+        # Check against the static formatters defined in the class.
+        numeric_formatters = (self._fmt_int, self._fmt_ms)
+        is_numeric_col = [f in numeric_formatters for f in fmts]
+
         # Convert cells to strings using provided formatters
         str_rows: List[List[str]] = []
         for r in rows:
@@ -248,14 +253,22 @@ class Stats:
                 widths[i] = max(widths[i], len(cell))
 
         # Print header
-        header_line = indent + " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+        header_line = indent + " | ".join(
+            h.rjust(widths[i]) if is_numeric_col[i] else h.ljust(widths[i])
+            for i, h in enumerate(headers)
+        )
         sep_line = indent + "-+-".join("-" * widths[i] for i in range(ncols))
         print(header_line)
         print(sep_line)
 
         # Print rows
         for r in str_rows:
-            print(indent + " | ".join(r[i].ljust(widths[i]) for i in range(ncols)))
+            print(
+                indent + " | ".join(
+                    r[i].rjust(widths[i]) if is_numeric_col[i] else r[i].ljust(widths[i])
+                    for i in range(ncols)
+                )
+            )
 
     def _group_members(self, prefix: str) -> List[str]:
         """Return all timing keys that belong to the group 'prefix'.
