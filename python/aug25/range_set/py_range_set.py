@@ -108,6 +108,11 @@ class PyRangeSet(RangeSet[int]):
             result.extend(range(start, end + 1))
         return result
 
+    def iter_indices(self) -> Iterable[int]:
+        """Iterates over all individual indices in the set."""
+        for start, end in self.intervals:
+            yield from range(start, end + 1)
+
     @staticmethod
     def from_numpy(bv) -> 'PyRangeSet':
         """Creates a PyRangeSet from a numpy array of booleans."""
