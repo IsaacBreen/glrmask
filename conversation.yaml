@@ -239,6 +239,11 @@ local_system:
               ncols = len(headers)
               fmts = formats if formats is not None else tuple([str] * ncols)
 
+              # Determine which columns are numeric (should be right-aligned)
+              # Check against the static formatters defined in the class.
+              numeric_formatters = (self._fmt_int, self._fmt_ms)
+              is_numeric_col = [f in numeric_formatters for f in fmts]
+
               # Convert cells to strings using provided formatters
               str_rows: List[List[str]] = []
               for r in rows:
@@ -255,14 +260,22 @@ local_system:
                       widths[i] = max(widths[i], len(cell))
 
               # Print header
-              header_line = indent + " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+              header_line = indent + " | ".join(
+                  h.rjust(widths[i]) if is_numeric_col[i] else h.ljust(widths[i])
+                  for i, h in enumerate(headers)
+              )
               sep_line = indent + "-+-".join("-" * widths[i] for i in range(ncols))
               print(header_line)
               print(sep_line)
 
               # Print rows
               for r in str_rows:
-                  print(indent + " | ".join(r[i].ljust(widths[i]) for i in range(ncols)))
+                  print(
+                      indent + " | ".join(
+                          r[i].rjust(widths[i]) if is_numeric_col[i] else r[i].ljust(widths[i])
+                          for i in range(ncols)
+                      )
+                  )
 
           def _group_members(self, prefix: str) -> List[str]:
               """Return all timing keys that belong to the group 'prefix'.
@@ -375,14 +388,14 @@ local_system:
               if not self.enabled:
                   return
               self._record_key_position(key)
-              self.timers[key] = time.perf_counter()
+              self.timers[key] = time.process_time()
 
           def stop(self, key: str):
               """Stop a timer and record the duration and hit count."""
               if not self.enabled:
                   return
               if key in self.timers:
-                  self.times[key] += time.perf_counter() - self.timers[key]
+                  self.times[key] += time.process_time() - self.timers[key]
                   self.time_counts[key] += 1
                   del self.timers[key]
 
@@ -881,6 +894,11 @@ messages:
               ncols = len(headers)
               fmts = formats if formats is not None else tuple([str] * ncols)
 
+              # Determine which columns are numeric (should be right-aligned)
+              # Check against the static formatters defined in the class.
+              numeric_formatters = (self._fmt_int, self._fmt_ms)
+              is_numeric_col = [f in numeric_formatters for f in fmts]
+
               # Convert cells to strings using provided formatters
               str_rows: List[List[str]] = []
               for r in rows:
@@ -897,14 +915,22 @@ messages:
                       widths[i] = max(widths[i], len(cell))
 
               # Print header
-              header_line = indent + " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+              header_line = indent + " | ".join(
+                  h.rjust(widths[i]) if is_numeric_col[i] else h.ljust(widths[i])
+                  for i, h in enumerate(headers)
+              )
               sep_line = indent + "-+-".join("-" * widths[i] for i in range(ncols))
               print(header_line)
               print(sep_line)
 
               # Print rows
               for r in str_rows:
-                  print(indent + " | ".join(r[i].ljust(widths[i]) for i in range(ncols)))
+                  print(
+                      indent + " | ".join(
+                          r[i].rjust(widths[i]) if is_numeric_col[i] else r[i].ljust(widths[i])
+                          for i in range(ncols)
+                      )
+                  )
 
           def _group_members(self, prefix: str) -> List[str]:
               """Return all timing keys that belong to the group 'prefix'.
@@ -942,7 +968,7 @@ messages:
       ```
     metadata:
       filename: python/aug25/stats.py
-  - user: Numbers should always be displayed right-aligned in a column.
+  - user: Use `time.process_time()` for timing.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -961,101 +987,67 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      The requirement is to ensure that number columns in the printed tables are right-aligned. This requires modifying the `_print_table` helper method to conditionally use string right-alignment (`rjust`) for columns formatted with `_fmt_int` or `_fmt_ms`, and left-alignment (`ljust`) for others (like keys/members).
+      To use `time.process_time()` for timing instead of `time.perf_counter()`, you need to update the `start` and `stop` methods in `python/aug25/stats.py`.
 
-      Here are the step-by-step instructions and the corresponding git diff.
+      Here are the step-by-step instructions, followed by the git diff.
 
       ### Step-by-step Instructions
 
-      In the file `python/aug25/stats.py`:
-
-      1.  **Modify `Stats._print_table` to identify numeric columns.**
-          Locate the `_print_table` method (starting around line 235). After line 250, which sets `fmts`, insert logic to determine which columns use the numeric formatters (`_fmt_int` or `_fmt_ms`).
-
-          *   **Insert** the following lines after `fmts = formats if formats is not None else tuple([str] * ncols)` (around line 250):
+      1.  **In `python/aug25/stats.py`**, locate the `start` method (around line 68).
+          Change the line that sets the timer start time to use `time.process_time()`:
 
           ```python
-              # Determine which columns are numeric (should be right-aligned)
-              # Check against the static formatters defined in the class.
-              numeric_formatters = (self._fmt_int, self._fmt_ms)
-              is_numeric_col = [f in numeric_formatters for f in fmts]
+          # python/aug25/stats.py:68
+          # ...
+          def start(self, key: str):
+              """Start a timer."""
+              if not self.enabled:
+                  return
+              self._record_key_position(key)
+          -    self.timers[key] = time.perf_counter()
+          +    self.timers[key] = time.process_time()
           ```
 
-      2.  **Modify header printing to use conditional alignment.**
-          Locate the line that prints the header (around line 264) and replace the use of `h.ljust(widths[i])` with a conditional expression that uses `rjust` for numeric columns.
+      2.  **In `python/aug25/stats.py`**, locate the `stop` method (around line 75).
+          Change the line that calculates the duration to use `time.process_time()`:
 
-          *   **Replace** line 264:
-              ```python
-              header_line = indent + " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
-              ```
-          *   **With** the following block:
-              ```python
-              header_line = indent + " | ".join(
-                  h.rjust(widths[i]) if is_numeric_col[i] else h.ljust(widths[i])
-                  for i, h in enumerate(headers)
-              )
-              ```
+          ```python
+          # python/aug25/stats.py:75
+          # ...
+          def stop(self, key: str):
+              """Stop a timer and record the duration and hit count."""
+              if not self.enabled:
+                  return
+              if key in self.timers:
+          -        self.times[key] += time.perf_counter() - self.timers[key]
+          +        self.times[key] += time.process_time() - self.timers[key]
+                  self.time_counts[key] += 1
+                  del self.timers[key]
+          ```
 
-      3.  **Modify row printing to use conditional alignment.**
-          Locate the line that prints the rows (around line 270) and replace the use of `r[i].ljust(widths[i])` with a conditional expression that uses `rjust` for numeric columns.
-
-          *   **Replace** line 270:
-              ```python
-              print(indent + " | ".join(r[i].ljust(widths[i]) for i in range(ncols)))
-              ```
-          *   **With** the following block:
-              ```python
-              print(
-                  indent + " | ".join(
-                      r[i].rjust(widths[i]) if is_numeric_col[i] else r[i].ljust(widths[i])
-                      for i in range(ncols)
-                  )
-              )
-              ```
-
-      ### Git Diff
+      ### Git Diffs
 
       ```diff
       diff --git a/python/aug25/stats.py b/python/aug25/stats.py
       --- a/python/aug25/stats.py
       +++ b/python/aug25/stats.py
-      @@ -248,6 +248,11 @@
-               ncols = len(headers)
-               fmts = formats if formats is not None else tuple([str] * ncols)
+      @@ -68,14 +68,14 @@
+               if not self.enabled:
+                   return
+               self._record_key_position(key)
+      -        self.timers[key] = time.perf_counter()
+      +        self.timers[key] = time.process_time()
        
-      +        # Determine which columns are numeric (should be right-aligned)
-      +        # Check against the static formatters defined in the class.
-      +        numeric_formatters = (self._fmt_int, self._fmt_ms)
-      +        is_numeric_col = [f in numeric_formatters for f in fmts]
-      +
-               # Convert cells to strings using provided formatters
-               str_rows: List[List[str]] = []
-               for r in rows:
-      @@ -263,14 +268,20 @@
-                       widths[i] = max(widths[i], len(cell))
+           def stop(self, key: str):
+               """Stop a timer and record the duration and hit count."""
+               if not self.enabled:
+                   return
+               if key in self.timers:
+      -            self.times[key] += time.perf_counter() - self.timers[key]
+      +            self.times[key] += time.process_time() - self.timers[key]
+                   self.time_counts[key] += 1
+                   del self.timers[key]
        
-               # Print header
-      -        header_line = indent + " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
-      +        header_line = indent + " | ".join(
-      +            h.rjust(widths[i]) if is_numeric_col[i] else h.ljust(widths[i])
-      +            for i, h in enumerate(headers)
-      +        )
-               sep_line = indent + "-+-".join("-" * widths[i] for i in range(ncols))
-               print(header_line)
-               print(sep_line)
-       
-               # Print rows
-               for r in str_rows:
-      -            print(indent + " | ".join(r[i].ljust(widths[i]) for i in range(ncols)))
-      +            print(
-      +                indent + " | ".join(
-      +                    r[i].rjust(widths[i]) if is_numeric_col[i] else r[i].ljust(widths[i])
-      +                    for i in range(ncols)
-      +                )
-      +            )
-       
-           def _group_members(self, prefix: str) -> List[str]:
-               """Return all timing keys that belong to the group 'prefix'.
       ```
     metadata:
   - user: |
@@ -1067,7 +1059,6 @@ messages:
       Applying patch to 'python/aug25/stats.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/stats.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Right-align numeric columns in Stats._print_table
-      output"'
+  - user: 'Changes committed with message: "Use time.process_time() for timer measurements."'
     metadata:
 ...

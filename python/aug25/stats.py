@@ -75,14 +75,14 @@ class Stats:
         if not self.enabled:
             return
         self._record_key_position(key)
-        self.timers[key] = time.perf_counter()
+        self.timers[key] = time.process_time()
 
     def stop(self, key: str):
         """Stop a timer and record the duration and hit count."""
         if not self.enabled:
             return
         if key in self.timers:
-            self.times[key] += time.perf_counter() - self.timers[key]
+            self.times[key] += time.process_time() - self.timers[key]
             self.time_counts[key] += 1
             del self.timers[key]
 
