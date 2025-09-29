@@ -210,7 +210,6 @@ class Model(GraphProvider):
     arena: Dict[NodeID, ArenaNode]
     roots_map: Dict[int, NodeID]
     max_depth: Dict[NodeID, int]
-    min_end_distance: Dict[NodeID, int] = field(default_factory=dict)
 
     # Parser-related fields
     parser_table: ParserTable
@@ -232,6 +231,7 @@ class Model(GraphProvider):
 
     # State
     state: Dict[int, GSS]
+    min_end_distance: Dict[NodeID, int] = field(default_factory=dict)
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
