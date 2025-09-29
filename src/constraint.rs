@@ -1,7 +1,6 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use crate::datastructures::hybrid_l2_bitset;
 use std::collections::btree_map::Entry as BTreeEntry;
 use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
@@ -100,15 +99,11 @@ impl JSONConvertible for TerminalAllowanceCheckMode {
 pub type PrecomputeNode1 = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode3 = Trie<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
-// New: PrecomputeNode0 with (grammar token, optional (tokenizer end state, disallowed terminal))
-pub type PrecomputeNode0 = Trie<(Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>), LLMTokenBV, PrecomputedNodeContents>;
 
-pub type PrecomputeNode0Index = Trie2Index;
 pub type PrecomputeNode1Index = Trie2Index;
 pub type PrecomputeNode2Index = Trie2Index;
 pub type PrecomputeNode3Index = Trie2Index;
 
-pub type Precomputed0 = BTreeMap<TokenizerStateID, PrecomputeNode0Index>;
 pub type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode1Index>;
 pub type Precomputed2 = BTreeMap<TokenizerStateID, PrecomputeNode2Index>;
 pub type Precomputed3 = BTreeMap<TokenizerStateID, PrecomputeNode3Index>;
@@ -213,8 +208,6 @@ pub struct GrammarConstraint {
     pub(crate) precomputed:      Precomputed,
     pub precomputed2:     Precomputed2,
     pub precomputed3:     Precomputed3,
-    // New: store precompute-0 too
-    pub precomputed0:     Precomputed0,
     pub llm_vocab:        Arc<LLMVocab>,
     pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
     pub possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
@@ -223,7 +216,6 @@ pub struct GrammarConstraint {
     pub trie3_god: Trie3GodWrapper,
     pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
     // Stage-local vocabularies for internal<->original mappings
-    pub trie0_god: Trie0GodWrapper,
     pub precompute_vocab: StageVocab,
     pub precompute2_vocab: StageVocab,
     pub precompute3_vocab: StageVocab,
@@ -248,11 +240,6 @@ impl GrammarConstraint {
             assert_eq!(sid1, sid2);
             assert!(PrecomputeNode3::are_graphs_equal(&self.trie3_god, *arc1, &other.trie3_god, *arc2));
         }
-        assert_eq!(self.precomputed0.len(), other.precomputed0.len());
-        for ((sid1, arc1), (sid2, arc2)) in self.precomputed0.iter().zip(other.precomputed0.iter()) {
-            assert_eq!(sid1, sid2);
-            assert!(PrecomputeNode0::are_graphs_equal(&self.trie0_god, *arc1, &other.trie0_god, *arc2));
-        }
         assert_eq!(self.llm_vocab.llm_token_map, other.llm_vocab.llm_token_map);
         assert_eq!(self.token_name_map, other.token_name_map);
         assert_eq!(self.llm_vocab.max_original_llm_token_id, other.llm_vocab.max_original_llm_token_id);
@@ -271,7 +258,6 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("precomputed".to_string(), self.precomputed.to_json());
         obj.insert("precomputed2".to_string(), self.precomputed2.to_json());
         obj.insert("precomputed3".to_string(), self.precomputed3.to_json());
-        obj.insert("precomputed0".to_string(), self.precomputed0.to_json());
         obj.insert("llm_token_map".to_string(), self.llm_vocab.llm_token_map.to_json());
         obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
         obj.insert("max_original_llm_token_id".to_string(), self.llm_vocab.max_original_llm_token_id.to_json());
@@ -281,7 +267,6 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("trie1_god".to_string(), self.trie1_god.to_json());
         obj.insert("trie2_god".to_string(), self.trie2_god.to_json());
         obj.insert("trie3_god".to_string(), self.trie3_god.to_json());
-        obj.insert("trie0_god".to_string(), self.trie0_god.to_json());
         obj.insert("post_commit_allow_check_mode".to_string(), self.post_commit_allow_check_mode.to_json());
         // Stage vocabs
         obj.insert("precompute_vocab".to_string(), self.precompute_vocab.to_json());
@@ -303,7 +288,6 @@ impl JSONConvertible for GrammarConstraint {
                                      .and_then(|n| Precomputed2::from_json(n))?;
                 let precomputed3 = obj.remove("precomputed3").ok_or_else(|| "Missing field precomputed3".to_string())
                                      .and_then(|n| Precomputed3::from_json(n))?;
-                let precomputed0_opt = obj.remove("precomputed0").map(|n| Precomputed0::from_json(n));
 
                 let llm_token_map = obj.remove("llm_token_map").ok_or_else(|| "Missing field llm_token_map".to_string())
                                        .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
@@ -323,8 +307,6 @@ impl JSONConvertible for GrammarConstraint {
                                     .and_then(|n| Trie2GodWrapper::from_json(n))?;
                 let trie3_god = obj.remove("trie3_god").ok_or_else(|| "Missing field trie3_god".to_string())
                                     .and_then(|n| Trie3GodWrapper::from_json(n))?;
-                let trie0_god = obj.remove("trie0_god").map(|n| Trie0GodWrapper::from_json(n))
-                    .transpose()?.unwrap_or_else(|| Trie0GodWrapper::new());
                 let post_commit_allow_check_mode = match obj.remove("post_commit_allow_check_mode") {
                     Some(n) => TerminalAllowanceCheckMode::from_json(n)?,
                     None => TerminalAllowanceCheckMode::default(),
@@ -371,24 +353,6 @@ impl JSONConvertible for GrammarConstraint {
                     trie1_god,
                     trie2_god,
                     trie3_god,
-                    precomputed0: {
-                        // If precomputed0 was present, use it; otherwise, derive from precomputed1
-                        match precomputed0_opt {
-                            Some(Ok(p0)) => p0,
-                            _ => {
-                                let (p0, _t0) = GrammarConstraint::derive_precompute0_from_precompute1(&precomputed, &trie1_god);
-                                p0
-                            }
-                        }
-                    },
-                    trie0_god: {
-                        if trie0_god.is_empty() {
-                            let (_p0, t0) = GrammarConstraint::derive_precompute0_from_precompute1(&precomputed, &trie1_god);
-                            t0
-                        } else {
-                            trie0_god
-                        }
-                    },
                     post_commit_allow_check_mode,
                     precompute_vocab,
                     precompute2_vocab,
@@ -587,8 +551,6 @@ impl GrammarConstraint {
                 precomputed: BTreeMap::new(),
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
-                precomputed0: BTreeMap::new(),
-                trie0_god: Trie0GodWrapper::new(),
                 llm_vocab,
                 token_name_map,
                 possible_matches: computed_possible_matches,
@@ -613,16 +575,6 @@ impl GrammarConstraint {
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
         );
-        // Derive Precompute 0 from Trie 1 (trivial lift), and then reduce back to Trie 1
-        let (precomputed0, trie0_god) = Self::derive_precompute0_from_precompute1(&precomputed, &trie1_god);
-        let (precomputed1_reduced, trie1_god_reduced) = Self::reduce_precompute0_to_precompute1(&precomputed0, &trie0_god);
-        // Sanity: graphs should match
-        for (sid, arc1) in &precomputed {
-            let arc2 = precomputed1_reduced.get(sid).unwrap();
-            assert!(PrecomputeNode1::are_graphs_equal(&trie1_god, *arc1, &trie1_god_reduced, *arc2));
-        }
-        // We will continue using the originally computed Trie1 (precomputed/trie1_god) for downstream
-        // but we keep precomputed0/trie0_god in the constraint for commit.
 
         if config.optimize_trie1_merge_equivalent_llm_tokens {
             constraint_precompute1_utils::merge_equivalent_llm_tokens_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
@@ -696,8 +648,6 @@ impl GrammarConstraint {
             precomputed,
             precomputed2,
             precomputed3,
-            precomputed0,
-            trie0_god,
             llm_vocab,
             token_name_map,
             possible_matches: computed_possible_matches,
@@ -924,124 +874,6 @@ impl GrammarConstraint {
         optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
 
         (precomputed3, trie3_god)
-    }
-
-    // Lift Trie1 -> Trie0 (trivial: attach disallow=None to every edge key)
-    pub fn derive_precompute0_from_precompute1(
-        precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-        trie1_god: &Trie1GodWrapper,
-    ) -> (Precomputed0, Trie0GodWrapper) {
-        let trie0_god = Trie0GodWrapper::new();
-        let mut precomputed0: Precomputed0 = BTreeMap::new();
-
-        // Map from Trie1Index -> Trie0Index
-        let mut map_1_to_0: HashMap<PrecomputeNode1Index, PrecomputeNode0Index> = HashMap::new();
-        let mut queue: VecDeque<PrecomputeNode1Index> = VecDeque::new();
-
-        // Create roots
-        for (sid, root1) in precomputed1.iter() {
-            let root_value = { root1.read(trie1_god).expect("poison").value.clone() };
-            let root0 = PrecomputeNode0Index::new(trie0_god.insert(PrecomputeNode0::new(root_value)));
-            precomputed0.insert(*sid, root0);
-            map_1_to_0.insert(*root1, root0);
-            queue.push_back(*root1);
-        }
-
-        // BFS clone: edges (gtid_opt) -> ((gtid_opt, None))
-        while let Some(n1) = queue.pop_front() {
-            let n0 = map_1_to_0.get(&n1).cloned().expect("must be present");
-            let children_snapshot: Vec<(Option<GrammarTokenID>, Vec<(PrecomputeNode1Index, LLMTokenBV)>)> = {
-                let g = n1.read(trie1_god).expect("poison");
-                g.children()
-                    .iter()
-                    .map(|(ek, dest_map)| {
-                        let entries = dest_map.iter().map(|(idx, ev)| (*idx, ev.clone())).collect::<Vec<_>>();
-                        (ek.clone(), entries)
-                    })
-                    .collect()
-            };
-            for (ek1, entries) in children_snapshot {
-                let ek0 = (ek1, None);
-                for (child1, ev) in entries {
-                    // ensure child0 exists
-                    let child0 = if let Some(&c0) = map_1_to_0.get(&child1) {
-                        c0
-                    } else {
-                        let child_value = { child1.read(trie1_god).expect("poison").value.clone() };
-                        let c0 = PrecomputeNode0Index::new(trie0_god.insert(PrecomputeNode0::new(child_value)));
-                        map_1_to_0.insert(child1, c0);
-                        queue.push_back(child1);
-                        c0
-                    };
-                    // insert edge
-                    let mut edge_val = Some(ev.clone());
-                    let mut n0w = n0.write(&trie0_god).expect("poison");
-                    n0w.try_insert_unchecked(ek0.clone(), &mut edge_val, child0);
-                    // propagate live tokens
-                    n0w.value.live_tokens |= &ev;
-                }
-            }
-        }
-        // Set max depths
-        let roots: Vec<_> = precomputed0.values().cloned().collect();
-        Trie::recompute_all_max_depths(&trie0_god, &roots);
-        (precomputed0, trie0_god)
-    }
-
-    // Reduce Trie0 -> Trie1 (drop disallow info)
-    pub fn reduce_precompute0_to_precompute1(
-        precomputed0: &Precomputed0,
-        trie0_god: &Trie0GodWrapper,
-    ) -> (Precomputed, Trie1GodWrapper) {
-        let trie1_god = Trie1GodWrapper::new();
-        let mut precomputed1: Precomputed = BTreeMap::new();
-
-        // Map 0->1
-        let mut map_0_to_1: HashMap<PrecomputeNode0Index, PrecomputeNode1Index> = HashMap::new();
-        let mut queue: VecDeque<PrecomputeNode0Index> = VecDeque::new();
-
-        for (sid, root0) in precomputed0.iter() {
-            let root_value = { root0.read(trie0_god).expect("poison").value.clone() };
-            let root1 = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(root_value)));
-            precomputed1.insert(*sid, root1);
-            map_0_to_1.insert(*root0, root1);
-            queue.push_back(*root0);
-        }
-
-        while let Some(n0) = queue.pop_front() {
-            let n1 = map_0_to_1.get(&n0).cloned().expect("must exist");
-            let children_snapshot: Vec<(((Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>)), Vec<(PrecomputeNode0Index, LLMTokenBV)>)> = {
-                let g = n0.read(trie0_god).expect("poison");
-                g.children()
-                    .iter()
-                    .map(|(ek, dest_map)| {
-                        let entries = dest_map.iter().map(|(idx, ev)| (*idx, ev.clone())).collect::<Vec<_>>();
-                        (ek.clone(), entries)
-                    })
-                    .collect()
-            };
-            for ((gt_opt, _disallow_opt), entries) in children_snapshot {
-                let ek1 = gt_opt;
-                for (child0, ev) in entries {
-                    let child1 = if let Some(&c1) = map_0_to_1.get(&child0) {
-                        c1
-                    } else {
-                        let child_value = { child0.read(trie0_god).expect("poison").value.clone() };
-                        let c1 = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(child_value)));
-                        map_0_to_1.insert(child0, c1);
-                        queue.push_back(child0);
-                        c1
-                    };
-                    let mut n1w = n1.write(&trie1_god).expect("poison");
-                    let mut edge_val = Some(ev.clone());
-                    n1w.try_insert_unchecked(ek1.clone(), &mut edge_val, child1);
-                    n1w.value.live_tokens |= &ev;
-                }
-            }
-        }
-        let roots: Vec<_> = precomputed1.values().cloned().collect();
-        Trie::recompute_all_max_depths(&trie1_god, &roots);
-        (precomputed1, trie1_god)
     }
 
     pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -2152,12 +1984,1100 @@ pub type Trie2GodWrapper = GodWrapper<(usize, Option<StateID>), HybridBitset, Pr
 pub type Trie2God = God<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
 pub type Trie3GodWrapper = GodWrapper<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
 pub type Trie3God = God<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
-pub type Trie0GodWrapper = GodWrapper<(Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>), HybridBitset, PrecomputedNodeContents>;
-pub type Trie0God = God<(Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>), HybridBitset, PrecomputedNodeContents>;
 
 impl<'a> PartialEq for GrammarConstraintState<'a> {
     fn eq(&self, other: &Self) -> bool {
         // Compare parent by pointer to ensure they originate from the same constraint object.
         std::ptr::eq(self.parent, other.parent) && self.state == other.state
+    }
+}
+
+impl<'a> Eq for GrammarConstraintState<'a> {}
+
+impl<'a> Display for GrammarConstraintState<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(f, "GrammarConstraintState ({} active tokenizer states):", self.state.len())?;
+        if self.state.is_empty() {
+            return Ok(());
+        }
+
+        let mut gss_roots = Vec::new();
+        let mut tokenizer_state_info = Vec::new();
+
+        for (tokenizer_state_id, glr_state) in &self.state {
+            if !glr_state.active_state.stack.is_empty() {
+                gss_roots.push(glr_state.active_state.stack.clone());
+                tokenizer_state_info.push(format!(
+                    "  - Tokenizer State {:>3}: GSS Root ({} predecessors)",
+                    tokenizer_state_id.0,
+                    glr_state.active_state.stack.num_predecessors()
+                ));
+            } else {
+                tokenizer_state_info.push(format!(
+                    "  - Tokenizer State {:>3}: (Empty GSS)",
+                    tokenizer_state_id.0
+                ));
+            }
+        }
+
+        for info in tokenizer_state_info {
+            writeln!(f, "{}", info)?;
+        }
+
+        if !gss_roots.is_empty() {
+            writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
+        let config = GSSPrintConfig {
+            labels: None,
+            max_edges: 50,
+            original_internal_bimap: None,
+            llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
+            verbose: false,
+        };
+            let (gss_str, _) =
+                crate::datastructures::gss::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
+            write!(f, "{}", gss_str)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<'a> GrammarConstraintState<'a> {
+    pub fn compute_commit_maps(&self, llm_token_bytes: &[u8]) -> (BTreeMap<TokenizerStateID, TokenizerStateID>, BTreeMap<TokenizerStateID, TerminalBV>) {
+        let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+        let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
+        for (tokenizer_state_id, _state) in self.state.iter() {
+            let exec_result = self.parent.tokenizer.execute_from_state(
+                &llm_token_bytes,
+                *tokenizer_state_id,
+            );
+            if let Some(new_state) = exec_result.end_state {
+                state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
+            }
+            let mut terminals = TerminalBV::zeros();
+            for token in exec_result.matches {
+                terminals.insert(token.id);
+            }
+            terminals_map.insert(*tokenizer_state_id, terminals);
+        }
+        (state_map, terminals_map)
+    }
+
+    pub fn get_mask(&self) -> LLMTokenBV {
+        // return HybridBitset::ones(self.parent.llm_vocab.max_original_llm_token_id + 1); // TEMP
+        // self.get_mask1()
+        // self.get_mask2()
+        self.get_mask3()
+    }
+
+    #[time_it]
+    pub fn get_mask1(&self) -> LLMTokenBV {
+        let t0 = std::time::Instant::now();
+        crate::debug!(2, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
+        let stats = gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
+        crate::debug!(3, "GSS stats: {:#?}", stats);
+        let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
+        if GSS_LOGGING_ENABLED {
+            let (s, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
+            println!("{}", s);
+            println!("\n\n--- GSS State Explanations ---\n");
+            for state_id in state_ids {
+                let mut explanation = String::new();
+                println!("\n--- State {} ---", state_id.0);
+                self.parent.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
+                println!("{}", explanation);
+            }
+
+            println!("\n\n--- Begin GSS Graphviz ---");
+            let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
+            let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+                .map(|s| s.as_str())
+                .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
+                .collect();
+            println!("{}", self.parent.parser.gss_forest_to_dot(
+                &roots_with_labels,
+                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                Some(&self.parent.llm_vocab.llm_token_map),
+            ));
+            println!("\n\n--- End GSS Graphviz ---");
+        }
+
+        for (state_id, state) in self.state.iter() {
+            crate::debug!(3, "State {}:", state_id.0);
+        }
+
+        let final_mask_internal = RefCell::new(HybridBitset::zeros());
+
+        if self.state.is_empty() {
+            return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+        }
+
+        #[derive(Default, Clone, Copy, Debug)]
+        struct StepCount {
+            total: usize,
+            successful: usize,
+        }
+
+        let step_counts = Arc::new(RwLock::new(BTreeMap::<TerminalID, StepCount>::new()));
+
+        let mut initial_values_for_map: Vec<(PrecomputeNode1Index, GLRParserState<'a>)> = Vec::new();
+        for (tokenizer_state_id, glr_state) in &self.state {
+            // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
+            // Ensure the GLR state's GSS stack is not empty before proceeding
+            if glr_state.active_state.stack.is_empty() {
+                continue;
+            }
+            if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
+                let mut glr_state = glr_state.clone();
+                prune_llm_tokens_by_disallowed_terminals(
+                    &mut glr_state.active_state.stack,
+                    &self.parent.possible_matches,
+                    &mut HashMap::new(),
+                );
+                initial_values_for_map.push((precomputed_trie_root_arc.clone(), glr_state));
+            } else {
+                panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
+            }
+        }
+
+        if initial_values_for_map.is_empty() {
+             // This can happen if all GLR states had empty GSS stacks or no corresponding precomputed tries.
+             crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
+             return self.parent.internal_bv_to_original_precompute(&final_mask_internal.into_inner());
+        }
+
+        let t1 = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("after initial_values_for_map: {:>15?}", t1.duration_since(t0));
+        }
+
+        let step_counts_clone1 = Arc::clone(&step_counts);
+        let step_counts_clone2 = Arc::clone(&step_counts);
+
+        crate::profiler::reset();
+
+        Trie::special_map_grouped(
+            &self.parent.trie1_god,
+            initial_values_for_map,
+            // step_fn: (current_glr_state, edge_grammar_token_opt, destinations_map)
+            |glr_s, grammar_token_opt, dest_map| {
+                if true {
+                    timeit!("get_mask try to avoid step for no additional llm tokens", {
+                    let mut all_edge_llm_tokens = HybridBitset::zeros();
+                    for edge_llm_tokens_bv in dest_map.values() {
+                        all_edge_llm_tokens |= edge_llm_tokens_bv;
+                    }
+                    let glr_s_llm_tokens = glr_s.active_state.stack.allowed_llm_tokens();
+                    let potential_additional_llm_tokens = &glr_s_llm_tokens & &all_edge_llm_tokens;
+                    if potential_additional_llm_tokens.is_subset(&final_mask_internal.borrow()) {
+                        // If the potential additional tokens are already in the final mask, skip stepping.
+                        crate::debug!(4, "Skipping step for grammar token {:?} as all edge LLM tokens are already in final mask.", grammar_token_opt);
+                        return Vec::new();
+                    }
+                    });
+                }
+
+                // let mut glr_s = glr_s.clone();
+                // disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+
+                // Count num end nodes vs non end nodes
+                let mut num_end = 0;
+                let mut num_non_end = 0;
+                for child_node_trie_data in dest_map.keys() {
+                    if child_node_trie_data.as_arc().read(&self.parent.trie1_god).unwrap().value.end {
+                        num_end += 1;
+                    } else {
+                        num_non_end += 1;
+                    }
+                }
+                timeit!(format!("get_mask step_fn - end only? {}", num_end > 0 && num_non_end == 0), {
+                    if num_non_end == 0 {
+                        if let Some(gtid) = grammar_token_opt {
+                            // let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
+                            // crate::debug!(3, "Step for grammar token {:?} with only end nodes, GSS stats: {:#?}", gtid, stats);
+                            // Perhaps we can avoid stepping by calling `has_action_for`
+                            match glr_s.has_action_for(*gtid) {
+                                Some(glr_s_llm_tokens) => {
+                                    timeit!(format!("get_mask step_fn - has_action_for"), {
+                                        // This token will succeed
+                                        crate::debug!(4, "Step with grammar token {:?} ({}) has action, but all children are end nodes, so we can skip stepping and update final mask directly.", gtid, self.parent.parser.terminal_map.get_by_right(gtid).map_or("UNKNOWN_TERMINAL".to_string(), |s| s.to_string()));
+                                        let mut edge_llm_tokens = HybridBitset::zeros();
+                                        for edge_llm_tokens_bv in dest_map.values() {
+                                            edge_llm_tokens |= edge_llm_tokens_bv;
+                                        }
+                                        let llm_tokens = &glr_s_llm_tokens & &edge_llm_tokens;
+                                        crate::debug!(4, "Adding active tokens {:?} to final mask", llm_tokens);
+                                        *final_mask_internal.borrow_mut() |= llm_tokens;
+                                        crate::debug!(4, "Final mask after adding tokens: {:?}", final_mask_internal.borrow());
+                                        return Vec::new();
+                                    });
+                                },
+                                None => {
+                                    timeit!(format!("get_mask step_fn - has_action_for - inconclusive"), {
+                                        // Inconclusive
+                                        crate::debug!(4, "Inconclusive step for grammar token {:?}, no action found.", gtid);
+                                    });
+                                },
+                            }
+                        }
+                    }
+
+                    let mut glr_s = glr_s.clone();
+
+                    if let Some(gtid) = grammar_token_opt {
+                        let mut counts_guard = step_counts_clone1.write().unwrap();
+                        let entry = counts_guard.entry(*gtid).or_default();
+                        entry.total += 1;
+
+                        let terminal_name = self.parent.parser.terminal_map.get_by_right(gtid)
+                            .map(|s| s.to_string())
+                            .unwrap_or("UNKNOWN_TERMINAL".to_string());
+                        // timeit!(format!("get_mask step for terminal '{}'", terminal_name), {
+                        glr_s.process_token(*gtid);
+                        // });
+
+                        crate::debug!(4, "glr_s.is_ok()_after_process_token: {}", glr_s.is_ok());
+
+                        if glr_s.is_ok() {
+                            entry.successful += 1;
+                        } else {
+                            return Vec::new();
+
+                        }
+                    }
+
+                    // glr_s.log_gss("After stepping", grammar_token_opt.unwrap_or(TerminalID(0)));
+                    // disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+
+                    let mut results = Vec::new();
+
+                    crate::debug!(4, "Processing edge: {:?}", grammar_token_opt);
+                    for (child_node_trie_data, edge_llm_tokens_bv) in dest_map.iter() {
+                        let mut glr_s = glr_s.clone();
+                        allow_only_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
+                        crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
+                        glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)), false, false);
+                        crate::debug!(4, "Active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
+                        crate::debug!(4, "Edge LLM tokens: {:?}", edge_llm_tokens_bv);
+                        // crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
+                        // subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                        // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
+
+                        if !glr_s.is_ok() {
+                            crate::debug!(4, "GLR state is not alive after step, skipping.");
+                            continue;
+                        }
+
+                        if child_node_trie_data.as_arc().read(&self.parent.trie1_god).unwrap().value.end {
+                            let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
+                            crate::debug!(4, "Adding active tokens {:?} to final mask", glr_active_tokens);
+                            // timeit!("get_mask final_mask update", {
+                            *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                            // });
+                            crate::debug!(4, "Final mask after adding end node tokens: {:?}", final_mask_internal.borrow());
+                        }
+
+                        results.push((child_node_trie_data.clone(), glr_s));
+                    }
+                    crate::debug!(4, "Step function results len: {}", results.len());
+                    results
+                })
+            },
+            // merge_fn
+            |glr_s1, glr_s2| {
+                timeit!("get_mask merge_fn", {
+                    crate::debug!(4, "Active LLM tokens in glr_s1 before merge: {:?}", glr_s1.active_state.stack.allowed_llm_tokens());
+                    crate::debug!(4, "Active LLM tokens in glr_s2 before merge: {:?}", glr_s2.active_state.stack.allowed_llm_tokens());
+                    glr_s1.merge_with(glr_s2);
+                    crate::debug!(4, "Active LLM tokens in glr_s1 after merge: {:?}", glr_s1.active_state.stack.allowed_llm_tokens());
+                })
+            },
+            // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
+            |precomputed_node_data, glr_s| {
+                timeit!("get_mask process_fn", {
+                    crate::debug!(4, "Processing precomputed node data: {:?}", precomputed_node_data);
+                    if precomputed_node_data.value.end {
+                        let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
+                        crate::debug!(4, "Precomputed node data is an end node, adding active tokens {:?} to final mask", glr_active_tokens);
+                        *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                        crate::debug!(4, "Final mask after adding end node tokens: {:?}", final_mask_internal.borrow());
+                        false
+                    } else {
+                        let mut num_outgoing_edges_that_lead_to_non_end_nodes = 0;
+                        for (edge_terminal_opt, dest_map) in precomputed_node_data.children().iter() {
+                            if edge_terminal_opt.is_none() {
+                                num_outgoing_edges_that_lead_to_non_end_nodes += 1
+                            } else {
+                                for (child_node_trie_data, _edge_llm_tokens_bv) in dest_map.iter() {
+                                    if !child_node_trie_data.as_arc().read(&self.parent.trie1_god).unwrap().value.end {
+                                        num_outgoing_edges_that_lead_to_non_end_nodes += 1;
+                                        break;
+                                    }
+                                }
+                            }
+                            if num_outgoing_edges_that_lead_to_non_end_nodes >= 2 {
+                                break; // No need to check further, we have at least two non-end nodes.
+                            }
+                        }
+                        // Print GSS stats
+                        disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                        Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                        let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
+                        // crate::debug!(3, "GSS stats for precomputed node data: {:#?}", stats);
+                        let mut do_phase3 = false;
+                        do_phase3 |= num_outgoing_edges_that_lead_to_non_end_nodes >= 2;
+                        do_phase3 |= match LR_MODE {
+                            LRMode::LR1 | LRMode::LALR_EX_SHIFT_STATES => false,
+                            LRMode::LALR => true,
+                        };
+                        // do_phase3 |= true;
+                        if do_phase3 {
+                            // There will be a split.
+                            // Let's do some work ahead of time to avoid redundant computations due to the upcoming split.
+                            crate::debug!(4, "Processing non-end precomputed node data");
+                            crate::debug!(4, "Active LLM tokens before phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
+
+                            let mut allowed_terminals = TerminalBV::zeros();
+                            for gtid_opt in precomputed_node_data.children().keys() {
+                                if let Some(gtid) = gtid_opt {
+                                    allowed_terminals.insert(gtid.0);
+                                }
+                            }
+                            let disallowed_terminals_bv = allowed_terminals.inverted();
+                            if !disallowed_terminals_bv.is_empty() {
+                                let disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::from_iter(
+                                    std::iter::once((0..=usize::MAX, disallowed_terminals_bv))
+                                );
+                                disallow_terminals_and_prune_arc(&mut glr_s.active_state.stack, &disallowed_l2, &mut HashMap::new());
+                            }
+
+                            glr_s.process_default_reductions();
+                            crate::debug!(4, "After phase 3, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
+                            Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                            crate::debug!(4, "Active LLM tokens after phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
+                            crate::debug!(4, "Disallowing LLM tokens and pruning arc for precomputed node data: {:?}", final_mask_internal.borrow());
+                            Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                        }
+                        crate::debug!(4, "After processing precomputed node data, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
+                        crate::debug!(4, "Final active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
+                        !glr_s.active_state.stack.is_empty()
+                    }
+                })
+            },
+        );
+
+        let t_after_special_map = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("after special_map: {:>15?}", t_after_special_map.duration_since(t0));
+        }
+
+        crate::profiler::print_summary_flat();
+
+        let counts = step_counts.read().unwrap();
+        if !counts.is_empty() {
+            let mut sorted_counts: Vec<_> = counts.iter().collect();
+            sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count.total));
+
+            let mut log_msg = String::from("get_mask step() counts:");
+            for (terminal_id, count) in sorted_counts {
+                let terminal_name = self.parent.parser.terminal_map.get_by_right(terminal_id)
+                    .map(|s| s.to_string())
+                    .unwrap_or("UNKNOWN_TERMINAL".to_string());
+                log_msg.push_str(&format!("\n  - '{}': {}/{} successful", terminal_name, count.successful, count.total));
+            }
+            crate::debug!(3, "{}", log_msg);
+        }
+
+        crate::profiler::print_summary();
+        crate::profiler::reset();
+
+        // Log the GSSs
+        if GSS_LOGGING_ENABLED {
+            crate::debug!(3, "Final GSS states after get_mask:");
+            let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
+            let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
+            let config = GSSPrintConfig {
+                labels: Some(&labels),
+                max_edges: 300,
+                original_internal_bimap: None,
+                llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
+                verbose: false,
+            };
+            print!("{}", print_gss_forest(&roots, &self.parent.parser.terminal_map, &config).0);
+        }
+
+        let final_mask_mapped = self.parent.internal_bv_to_original_precompute(&final_mask_internal.into_inner());
+
+        let t_end = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("get_mask took: {:>15?}", t_end.duration_since(t0));
+        }
+
+        final_mask_mapped
+    }
+
+    pub fn get_mask2(&self) -> LLMTokenBV {
+        let t0 = std::time::Instant::now();
+        crate::debug!(2, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
+        let stats = gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
+        crate::debug!(3, "GSS stats: {:#?}", stats);
+        let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
+        if GSS_LOGGING_ENABLED {
+            let (s, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
+            println!("{}", s);
+            println!("\n\n--- GSS State Explanations ---\n");
+            for state_id in state_ids {
+                let mut explanation = String::new();
+                println!("\n--- State {} ---", state_id.0);
+                self.parent.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
+                println!("{}", explanation);
+            }
+
+            println!("\n\n--- Begin GSS Graphviz ---");
+            let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
+            let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+                .map(|s| s.as_str())
+                .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
+                .collect();
+            println!("{}", self.parent.parser.gss_forest_to_dot(
+                &roots_with_labels,
+                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                Some(&self.parent.llm_vocab.llm_token_map),
+            ));
+            println!("\n\n--- End GSS Graphviz ---");
+        }
+
+        for (state_id, state) in self.state.iter() {
+            crate::debug!(3, "State {}:", state_id.0);
+        }
+
+        let final_mask_internal = RefCell::new(HybridBitset::zeros());
+
+        if self.state.is_empty() {
+            return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+        }
+
+        #[derive(Default, Clone, Copy, Debug)]
+        struct StepCount {
+            total: usize,
+            successful: usize,
+        }
+
+        let step_counts = Arc::new(RwLock::new(BTreeMap::<TerminalID, StepCount>::new()));
+
+        let mut initial_values_for_map: Vec<(Trie2Index, GLRParserState<'a>)> = Vec::new();
+        for (tokenizer_state_id, glr_state) in &self.state {
+            // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
+            // Ensure the GLR state's GSS stack is not empty before proceeding
+            if glr_state.active_state.stack.is_empty() {
+                continue;
+            }
+            if let Some(precomputed_trie_root_arc) = self.parent.precomputed2.get(tokenizer_state_id) {
+                let mut glr_state = glr_state.clone();
+                prune_llm_tokens_by_disallowed_terminals(
+                    &mut glr_state.active_state.stack,
+                    &self.parent.possible_matches,
+                    &mut HashMap::new(),
+                );
+                initial_values_for_map.push((precomputed_trie_root_arc.clone(), glr_state));
+            } else {
+                panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
+            }
+        }
+
+        if initial_values_for_map.is_empty() {
+             // This can happen if all GLR states had empty GSS stacks or no corresponding precomputed tries.
+             crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
+             return self.parent.internal_bv_to_original_precompute2(&final_mask_internal.into_inner());
+        }
+
+        let t1 = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("after initial_values_for_map: {:>15?}", t1.duration_since(t0));
+        }
+
+        let step_counts_clone1 = Arc::clone(&step_counts);
+        let step_counts_clone2 = Arc::clone(&step_counts);
+
+        crate::profiler::reset();
+
+        Trie::special_map_grouped(
+            &self.parent.trie2_god,
+            initial_values_for_map,
+            // step_fn: (current_glr_state, (k, option state ID), destinations_map)
+            |glr_s, (k, expected_state_id_opt ), dest_map| {
+                // if !glr_s.is_ok() {
+                //     crate::debug!(4, "GLR state is not alive before popping, skipping.");
+                //     return Vec::new();
+                // }
+                crate::debug!(4, "Processing step for k: {:?}, expected_state_id_opt: {:?}", k, expected_state_id_opt);
+                // glr_s.log_gss("Before popping", TerminalID(0), false, false);
+                let mut out_gsss = Vec::new();
+                let popped = glr_s.active_state.stack.popn(*k);
+                for popper_item in popped.iter() {
+                    for peek in popper_item.peek_iter() {
+                        let ok = if let Some(expected_state_id) = expected_state_id_opt {
+                            expected_state_id == &peek.edge_value().state_id
+                        } else {
+                            true
+                        };
+                        if ok {
+                            out_gsss.push(peek.isolated_parent());
+                        }
+                    }
+                }
+                if out_gsss.is_empty() {
+                    crate::debug!(4, "No valid GSS nodes after popping, skipping.");
+                    return Vec::new();
+                }
+                let out_gss = GSSNode::merge_many_with_depth(1, out_gsss);
+                crate::debug!(4, "After popping {} from GSS: {}", k, print_gss_forest(&[out_gss.clone()], &self.parent.parser.terminal_map, &GSSPrintConfig::default()).0);
+                // if !out_gss.is_alive() {
+                //     crate::debug!(4, "GLR state is not alive after popping, skipping.");
+                //     return Vec::new();
+                // }
+                let mut out = Vec::new();
+                for (dst_node_wrapper, edge_bv) in dest_map.iter() {
+                    let mut out_gss_filtered = out_gss.clone();
+                    crate::debug!(5, "Filtering GSS for edge LLM tokens: {:?}", edge_bv);
+                    allow_only_llm_tokens_and_prune_arc(&mut out_gss_filtered, edge_bv, &mut HashMap::new());
+                    let mut out_glr_s = glr_s.clone();
+                    out_glr_s.active_state.stack = out_gss_filtered;
+                    crate::debug!(4, "Allowed LLM tokens in out_gss_filtered: {:?}", out_glr_s.active_state.stack.allowed_llm_tokens());
+                    // out_glr_s.log_gss("After filtering for edge LLM tokens", TerminalID(0), false, false);
+                    // if out_glr_s.is_ok() {
+                        out.push((dst_node_wrapper.clone(), out_glr_s));
+                    }
+                // }
+                out
+            },
+            // merge_fn
+            |glr_s1, glr_s2| {
+                crate::debug!(4, "Merging two GLR states");
+                glr_s1.merge_with(glr_s2);
+            },
+            // process_fn: (precomputed_node_data, final_glr_s_for_this_path)
+            |precomputed_node_data, glr_s| {
+                crate::debug!(4, "Processing node {:p}", precomputed_node_data);
+                // glr_s.log_gss("At process_fn", TerminalID(0), false, false);
+                let glr_active_tokens = glr_s.active_state.stack.allowed_llm_tokens();
+                // let keep_going = !glr_active_tokens.is_empty();
+                let keep_going = glr_s.is_ok();
+                if precomputed_node_data.value.end {
+                    crate::debug!(4, "Precomputed node data is an end node, adding active tokens {:?} to final mask", glr_active_tokens);
+                    *final_mask_internal.borrow_mut() |= glr_active_tokens;
+                } else {
+                    crate::debug!(4, "Precomputed node data is not an end node, active tokens: {:?}", glr_active_tokens);
+                }
+                keep_going
+            },
+        );
+
+        let t_after_special_map = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("after special_map: {:>15?}", t_after_special_map.duration_since(t0));
+        }
+
+        crate::profiler::print_summary_flat();
+
+        let counts = step_counts.read().unwrap();
+        if !counts.is_empty() {
+            let mut sorted_counts: Vec<_> = counts.iter().collect();
+            sorted_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count.total));
+
+            let mut log_msg = String::from("get_mask step() counts:");
+            for (terminal_id, count) in sorted_counts {
+                let terminal_name = self.parent.parser.terminal_map.get_by_right(terminal_id)
+                    .map(|s| s.to_string())
+                    .unwrap_or("UNKNOWN_TERMINAL".to_string());
+                log_msg.push_str(&format!("\n  - '{}': {}/{} successful", terminal_name, count.successful, count.total));
+            }
+            crate::debug!(3, "{}", log_msg);
+        }
+
+        crate::profiler::print_summary();
+        crate::profiler::reset();
+
+        // Log the GSSs
+        if GSS_LOGGING_ENABLED {
+            crate::debug!(3, "Final GSS states after get_mask:");
+            let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
+            let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
+            let config = GSSPrintConfig {
+                labels: Some(&labels),
+                max_edges: 300,
+                original_internal_bimap: None,
+                llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
+                verbose: false,
+            };
+            print!("{}", print_gss_forest(&roots, &self.parent.parser.terminal_map, &config).0);
+        }
+
+        crate::debug!(4, "Final mask internal: {:?}", final_mask_internal.borrow());
+        let final_mask_mapped = self.parent.internal_bv_to_original_precompute2(&final_mask_internal.into_inner());
+        crate::debug!(4, "Final mask mapped: {:?}", final_mask_mapped);
+
+        let t_end = std::time::Instant::now();
+        println!("get_mask took: {:>15?}", t_end.duration_since(t0));
+
+        final_mask_mapped
+    }
+
+    pub fn print_gss_stats(&self) {
+        println!("GrammarConstraintState Stats:");
+        println!("  - Active tokenizer states: {}", self.state.len());
+        if self.state.is_empty() {
+            println!("  - GSS is empty.");
+            return;
+        }
+        let stats = gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
+        println!("  - GSS Stats: {:#?}", stats);
+    }
+
+    pub fn print_gss(&self) {
+        let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
+        if roots.is_empty() {
+            println!("GSS is empty.");
+            return;
+        }
+        let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
+        self.parent.print_gss_nodes(&roots, Some(&labels));
+    }
+
+    pub fn explain_stack(&self) {
+        for (state_id, state) in &self.state {
+            println!("\n--- State {} ---", state_id.0);
+            // Sample and print a bunch of stacks
+            let mut seen = BTreeSet::new();
+            let num_to_sample = 10;
+            for i in 0..1000 {
+                if let Some(sampled_path_edges) = sample_path(&[&state.active_state.stack], i) {
+                    let mut sampled_stack: Vec<usize> = sampled_path_edges.iter()
+                        .map(|edge| edge.state_id.0)
+                        .collect();
+                    sampled_stack.reverse();
+                    if seen.contains(&sampled_stack) {
+                        continue;
+                    }
+                    seen.insert(sampled_stack);
+                    if seen.len() >= num_to_sample {
+                        break;
+                    }
+                };
+            }
+            for sampled_stack in seen {
+                println!("  Sampled stack: {:?}", sampled_stack);
+            }
+            // Sample a stack
+            if let Some(sampled_path_edges) = sample_path(&[&state.active_state.stack], 1) {
+                let mut sampled_stack: Vec<StateID> = sampled_path_edges.iter()
+                    .map(|edge| edge.state_id)
+                    .collect();
+                sampled_stack.reverse();
+                let explanation = self.parent.parser.explain_stack(&sampled_stack);
+                // Indent the explanation for readability
+                for line in explanation.lines() {
+                    println!("      {}", line);
+                }
+            };
+        }
+    }
+
+    pub fn get_mask3(&self) -> LLMTokenBV {
+        let t0 = std::time::Instant::now();
+        crate::debug!(10, "\n--- get_mask3 START ---");
+        crate::debug!(10, "GSS at start of get_mask3:");
+        crate::debug!(2, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
+        let stats = gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
+        crate::debug!(10, "Initial GSS stats: {:#?}", stats);
+        crate::debug!(3, "GSS stats: {:#?}", stats);
+        let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
+        if GSS_LOGGING_ENABLED {
+            let (s, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
+            println!("{}", s);
+            println!("\n\n--- GSS State Explanations ---\n");
+            for state_id in state_ids {
+                let mut explanation = String::new();
+                println!("\n--- State {} ---", state_id.0);
+                self.parent.parser.format_state_details(&mut explanation, state_id, "  ").unwrap();
+                println!("{}", explanation);
+            }
+
+            println!("\n\n--- Begin GSS Graphviz ---");
+            let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
+            let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+                .map(|s| s.as_str())
+                .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
+                .collect();
+            println!("{}", self.parent.parser.gss_forest_to_dot(
+                &roots_with_labels,
+                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                Some(&self.parent.llm_vocab.llm_token_map),
+            ));
+            println!("\n\n--- End GSS Graphviz ---");
+        }
+
+        for (state_id, state) in self.state.iter() {
+            crate::debug!(3, "State {}:", state_id.0);
+        }
+
+        let final_mask_internal = RefCell::new(HybridBitset::zeros());
+        if self.state.is_empty() {
+            return self.parent.internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
+        }
+        let mut initial_values_by_trie_node: BTreeMap<PrecomputeNode3Index, GLRParserState<'a>> = BTreeMap::new();
+        crate::debug!(10, "\n--- Seeding work queue ---");
+        for (&tokenizer_state_id, glr_state) in &self.state {
+            if glr_state.active_state.stack.is_empty() {
+                continue;
+            }
+            let mut glr_state = glr_state.clone();
+            prune_llm_tokens_by_disallowed_terminals(
+                &mut glr_state.active_state.stack,
+                &self.parent.possible_matches,
+                &mut HashMap::new(),
+            );
+
+            if let Some(precomputed_trie_root_arc) = self.parent.precomputed3.get(&tokenizer_state_id) {
+                crate::debug!(10, "  SEED: sid={}, root_idx={}, gss_ptr={:p}", tokenizer_state_id.0, precomputed_trie_root_arc, glr_state.active_state.stack);
+                
+                initial_values_by_trie_node.entry(precomputed_trie_root_arc.clone())
+                    .and_modify(|existing_glr| {
+                        existing_glr.merge_with(glr_state.clone());
+                    })
+                    .or_insert(glr_state.clone());
+            } else {
+                panic!("No precomputed trie found for tokenizer state {:?}.", tokenizer_state_id);
+            }
+        }
+
+        let initial_values_for_map: Vec<_> = initial_values_by_trie_node.into_iter().collect();
+
+        if initial_values_for_map.is_empty() {
+             crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
+             return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
+        }
+
+        let t1 = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("after initial_values_for_map: {:>15?}", t1.duration_since(t0));
+        }
+
+        crate::profiler::reset();
+
+        Trie::special_map_grouped(
+            &self.parent.trie3_god,
+            initial_values_for_map,
+            // step_fn: (current_state, (pop, llm_token_bv), destinations_map)
+            |glr_s, (pop, llm_token_bv_from_edge), dest_map| {
+                crate::debug!(10, "  - STEP: gss_ptr={:p}, edge=(pop={}, llm_bv={})", glr_s.active_state.stack, pop, format_bv(llm_token_bv_from_edge));
+                let popped = glr_s.active_state.stack.popn(*pop);
+                let num_peeks: usize = popped.iter().map(|p| p.peek_iter().count()).sum();
+                if num_peeks > 0 {
+                    crate::debug!(10, "      - Popped GSS has {} peeks", num_peeks);
+                }
+                let mut results = Vec::new();
+
+                for (dest_idx, state_id_bv) in dest_map.iter() {
+                    let mut valid_gss_nodes = Vec::new();
+                    for popper_item in popped.iter() {
+                        for peek in popper_item.peek_iter() {
+                            if state_id_bv.contains(peek.edge_value().state_id.0) {
+                                valid_gss_nodes.push(peek.isolated_parent());
+                            }
+                        }
+                    }
+
+                    if valid_gss_nodes.is_empty() {
+                        continue;
+                    }
+
+                    let merged_gss = GSSNode::merge_many_with_depth(1, valid_gss_nodes.clone());
+                    let mut new_glr_s = glr_s.clone();
+                    new_glr_s.active_state.stack = merged_gss;
+
+                    allow_only_llm_tokens_and_prune_arc(&mut new_glr_s.active_state.stack, llm_token_bv_from_edge, &mut HashMap::new());
+
+                    if new_glr_s.is_ok() {
+                        crate::debug!(10, "      - Dest: idx={}, state_bv={}, matched={}, new_gss_ptr={:p}", dest_idx, format_bv(state_id_bv), valid_gss_nodes.len(), new_glr_s.active_state.stack);
+                        results.push((dest_idx.clone(), new_glr_s));
+                    }
+                }
+                results
+            },
+            // merge_fn
+            |glr_s1, glr_s2| {
+                crate::debug!(10, "    - MERGE: gss1(ptr={:p}) WITH gss2(ptr={:p})", glr_s1.active_state.stack, glr_s2.active_state.stack);
+                glr_s1.merge_with(glr_s2);
+            },
+            // process_fn: (precomputed_node_data, final_state_for_this_path)
+            |precomputed_node_data, glr_s| {
+                crate::debug!(10, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}", precomputed_node_data as *const _, glr_s.active_state.stack);
+                let mut glr_s_copy = glr_s.clone();
+                let glr_active_tokens = glr_s_copy.active_state.stack.allowed_llm_tokens();
+                let keep_going = glr_s_copy.is_ok();
+                if precomputed_node_data.value.end {
+                    if !glr_active_tokens.is_empty() {
+                        let before = final_mask_internal.borrow().len();
+                        *final_mask_internal.borrow_mut() |= &glr_active_tokens;
+                        let after = final_mask_internal.borrow().len();
+                        if after > before {
+                            crate::debug!(10, "    - END NODE. final_mask len: {} -> {} (+{}) with tokens {}", before, after, after - before, format_bv(&glr_active_tokens));
+                        }
+                    }
+                }
+                keep_going
+            },
+        );
+
+        let t_after_special_map = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("after special_map: {:>15?}", t_after_special_map.duration_since(t0));
+        }
+
+        crate::profiler::print_summary_flat();
+        crate::profiler::print_summary();
+        crate::profiler::reset();
+
+        crate::debug!(10, "\n--- get_mask3 END ---");
+        crate::debug!(10, "Final mask internal: {}", format_bv(&final_mask_internal.borrow()));
+        crate::debug!(4, "Final mask internal: {}", format_bv(&final_mask_internal.borrow()));
+        let final_mask_mapped = self.parent.internal_bv_to_original_precompute3(&final_mask_internal.into_inner());
+        crate::debug!(10, "Final mask mapped: {}", format_bv(&final_mask_mapped));
+        crate::debug!(4, "Final mask mapped: {}", format_bv(&final_mask_mapped));
+
+        let t_end = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("get_mask took: {:>15?}", t_end.duration_since(t0));
+        }
+
+        final_mask_mapped
+    }
+
+    pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
+        let llm_token_bytes = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id).unwrap();
+        self.commit_bytes(llm_token_bytes);
+    }
+
+    #[time_it]
+    pub fn commit_bytes(&mut self, llm_token_bytes: &[u8]) { // llm_token_id is original
+        if llm_token_bytes.is_empty() {
+            return;
+        }
+
+        crate::debug!(3, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
+
+        // for (state_id, state) in &self.state {
+        //     crate::debug!(3, "State {} before commit:", state_id.0);
+        //     state.log_gss("Before commit", TerminalID(0), false, false);
+        // }
+
+        let mut gss_transformation_memo = HashMap::new();
+
+        for state in self.state.values_mut() {
+            reset_llm_tokens(&mut state.active_state.stack, &mut gss_transformation_memo);
+        }
+        gss_transformation_memo.clear();
+
+        // Handle allowed terminals
+        let (state_map, terminals_map) = self.compute_commit_maps(llm_token_bytes);
+
+        let gss_stats_before_pruning = gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
+        crate::debug!(5, "Terminals map: {:?}", terminals_map);
+        for state in self.state.values_mut() {
+            prune_disallowed_terminals(&mut state.active_state.stack, &terminals_map, &mut gss_transformation_memo);
+        }
+        gss_transformation_memo.clear();
+        let gss_stats_after_pruning = gather_gss_stats(
+            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        );
+        crate::debug!(4, "GSS stats before pruning disallowed terminals: {:#?}", gss_stats_before_pruning);
+        if gss_stats_after_pruning != gss_stats_before_pruning {
+            crate::debug!(4, "GSS stats after pruning disallowed terminals: {:#?}", gss_stats_after_pruning);
+            crate::debug!(4, "GSS stats changed after pruning disallowed terminals.");
+            // if GSS_LOGGING_ENABLED {
+            //     self.print_gss();
+            // }
+        } else {
+            crate::debug!(4, "GSS stats did not change after pruning disallowed terminals.");
+        }
+
+        for state in self.state.values_mut() {
+            map_allowed_terminals_tokenizer_states(&mut state.active_state.stack, &state_map, &mut gss_transformation_memo);
+        }
+        gss_transformation_memo.clear();
+        // println!("State after preparation: {}", self);
+
+        let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
+
+        let mut processing_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, GLRParserState<'a>>> = BTreeMap::new();
+        processing_queue.insert(0, std::mem::take(&mut self.state));
+
+        while let Some((offset, states_to_process)) = processing_queue.pop_first() {
+            crate::debug!(3, "Processing offset {} with states {:?}.", offset, states_to_process.keys().map(|k| k.0).collect::<Vec<_>>());
+            for (tokenizer_s_id_at_offset, glr_s_at_offset) in states_to_process {
+                assert!(offset < llm_token_bytes.len());
+
+                let exec_result = self.parent.tokenizer.execute_from_state(
+                    &llm_token_bytes[offset..],
+                    tokenizer_s_id_at_offset,
+                );
+
+                for match_info in &exec_result.matches {
+                    let mut cloned_glr_s = glr_s_at_offset.clone();
+
+                    cloned_glr_s.step(TerminalID(match_info.id));
+                    // cloned_glr_s.do_phase3();
+
+                    if cloned_glr_s.is_ok() {
+                        let new_offset = offset + match_info.width;
+                        // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
+                        let next_tokenizer_id_for_segment = self.parent.tokenizer.initial_state_id();
+
+                        if let Some(end_state_id) = exec_result.end_state {
+                            let terminals_accessible_from_end_state = self.parent.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id));
+                            if terminals_accessible_from_end_state.contains(&TerminalID(match_info.id)) {
+                                let mut disallowed_terminals = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
+                                let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
+                                // Disallow this token from being matched again immediately.
+                                disallowed_terminals_for_end_state.insert(match_info.id);
+                                disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
+                                    disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
+                            }
+                        }
+                        // cloned_glr_s.log_gss(format!("Before disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
+                        // cloned_glr_s.log_gss(format!("After disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
+
+                        if new_offset == llm_token_bytes.len() {
+                            // reset_allowed_terminals(&mut cloned_glr_s.active_state.stack);
+                            new_overall_state.entry(next_tokenizer_id_for_segment).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);
+                        } else {
+                            processing_queue.entry(new_offset).or_default().entry(next_tokenizer_id_for_segment).and_modify(|existing| existing.merge_with(cloned_glr_s.clone())).or_insert(cloned_glr_s);
+                        }
+                    }
+                }
+
+                if let Some(final_tokenizer_s_id_for_llm_token_segment) = exec_result.end_state {
+                    // The rest of llm_token_bytes (from offset) was consumed, tokenizer ended in this state.
+                    // The glr_s_at_offset is carried over. This is a state *after* the current LLM token.
+                    let final_tokenizer_state = TokenizerStateID(final_tokenizer_s_id_for_llm_token_segment);
+                    new_overall_state.entry(final_tokenizer_state).and_modify(|existing| existing.merge_with(glr_s_at_offset.clone())).or_insert(glr_s_at_offset.clone());
+                }
+            }
+        }
+
+        self.state = new_overall_state.clone();
+        for glr_parser_state in self.state.values_mut() {
+            // glr_parser_state.process_default_reductions();
+        }
+
+        // TODO: this shouldn't be necessary, but due to some order-dependent LLM token BV weirdness in GSS, it is necessary to ensure commit order invariance.
+        for state in self.state.values_mut() {
+            reset_llm_tokens(&mut state.active_state.stack, &mut gss_transformation_memo);
+        }
+        gss_transformation_memo.clear();
+
+        self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
+
+        let mut fuse_memo = HashMap::new();
+        for state in self.state.values_mut() {
+            state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 1, &mut fuse_memo);
+        }
+        fuse_memo.clear();
+
+        // Post-commit allowance check: ensure each surviving state allows at least one
+        // token the tokenizer can produce from its current tokenizer state.
+        // Mode is controlled by self.parent.post_commit_allow_check_mode.
+        match self.parent.post_commit_allow_check_mode {
+            TerminalAllowanceCheckMode::None => {
+                // no-op
+            }
+            TerminalAllowanceCheckMode::ImmediateSets => {
+                self.state.retain(|tokenizer_state_id, glr_state| {
+                    // Fast auto-pass if tokenizer can produce all grammar terminals.
+                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
+                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                        return true;
+                    }
+
+                    let mut union = glr_state.immediate_shift_terminals();
+                    union.extend(glr_state.immediate_reduce_terminals());
+                    !union.is_disjoint(&accessible)
+                });
+            }
+            TerminalAllowanceCheckMode::ImmediateProbe => {
+                self.state.retain(|tokenizer_state_id, glr_state| {
+                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
+                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                        return true;
+                    }
+                    for tid in &accessible {
+                        if glr_state.has_immediate_action_for_terminal(*tid).unwrap_or(false) {
+                            return true;
+                        }
+                    }
+                    false
+                });
+            }
+            TerminalAllowanceCheckMode::StepProbe => {
+                self.state.retain(|tokenizer_state_id, glr_state| {
+                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
+                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                        return true;
+                    }
+                    for tid in &accessible {
+                        if glr_state.allows_terminal(*tid) {
+                            return true;
+                        }
+                    }
+                    false
+                });
+            }
+        }
+
+        // let mut roots: BTreeMap<TokenizerStateID, Arc<GSSNode>> = BTreeMap::new();
+        // for (tokenizer_state_id, glr_state) in &self.state {
+        //     roots.insert(*tokenizer_state_id, glr_state.active_state.stack.clone());
+        // }
+        // simplify(&mut roots);
+        // for (tokenizer_state_id, glr_state) in &mut self.state {
+        //     glr_state.active_state.stack = roots.get(tokenizer_state_id).unwrap().clone();
+        // }
+
+        // let mut roots_to_simplify_arcs = Vec::new();
+        // for glr_parser_state in self.state.values_mut() {
+        //     if !glr_parser_state.active_state.stack.is_empty() {
+        //         roots_to_simplify_arcs.push(&mut glr_parser_state.active_state.stack);
+        //     }
+        // }
+        //
+        // if !roots_to_simplify_arcs.is_empty() {
+        //     GSSNode::simplify_together(&mut roots_to_simplify_arcs);
+        // }
+
+        crate::debug!(4, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k|k.0).collect::<Vec<_>>());
+        for (tokenizer_id, glr_state) in &self.state {
+            if !glr_state.active_state.stack.is_empty() { // Log only for non-empty GSS
+                // glr_state.log_gss("After commit", TerminalID(0), false, false);
+            }
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        !self.state.is_empty()
+    }
+
+    pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {
+        &self.state
     }
 }
