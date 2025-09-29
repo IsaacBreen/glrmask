@@ -386,6 +386,9 @@ class Model(GraphProvider):
             state=state,
         )
 
+        # Reorder edges/dests to prioritize reaching end nodes quickly
+        model.optimize_traversal()
+
         return model
     @profile
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
@@ -620,6 +623,30 @@ class Model(GraphProvider):
 
         stats.stop(p)
         return False
+
+    def optimize_traversal(self) -> None:
+        """
+        Reorder edges and their destination lists to favor reaching end nodes ASAP.
+        Heuristic:
+          - Inner dests: sort by max_depth[dest] descending
+          - Outer edges: sort by best dest depth (after inner sort) descending,
+            then by pop asc as a tie-breaker.
+        """
+        stats = Stats.get()
+        stats.start('optimize_traversal')
+        md = self.max_depth
+        for node in self.arena.values():
+            if not node.children:
+                continue
+            # Sort inner dests first (so the first dest has the highest depth)
+            for _edge_key, dests in node.children:
+                dests.sort(key=lambda item: md.get(int(item[0]), 0), reverse=True)
+            # Sort edges by best dest depth desc, then pop asc
+            def _edge_key(edge):
+                (pop, _llm_bv), dests = edge
+                best = md.get(int(dests[0][0]), 0) if dests else -1
+                return (-best, pop)
+            node.children.sort(key=_edge_key)
     def get_mask(self) -> LLMTokenSet:
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
@@ -639,10 +666,11 @@ class Model(GraphProvider):
         all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
         final_mask: LLMTokenSet = RangeSet.empty()
 
-        # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
+        # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask.
         values: Dict[NodeID, GSS] = {}
         depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
         enqueued_nodes: Set[NodeID] = set()
+        edge_cursor: Dict[NodeID, int] = {}  # Next edge index to process per node
 
         hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
@@ -779,7 +807,12 @@ class Model(GraphProvider):
             edges = a_node.children if a_node else []
             stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
             stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
-            for (pop, llm_bv), dests in edges:
+            # Process only one edge per pop; resume where we left off
+            start_edge_idx = edge_cursor.get(node, 0)
+            spawned_any = False
+            for edge_i in range(start_edge_idx, len(edges)):
+                (pop, llm_bv), dests = edges[edge_i]
+
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
                 stats.start('get_mask.main_loop.edge.popn')
@@ -789,7 +822,6 @@ class Model(GraphProvider):
                     stats.inc('get_mask.traversal.edge.popped_empty')
                     continue
 
-                # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                 @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)
                 def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                     p = 'get_mask.main_loop.edge.intersect_and_prune'
@@ -797,15 +829,10 @@ class Model(GraphProvider):
                     stats.start(f'{p}.intersection')
                     new_mask = acc.llm_mask.intersection(llm_bv)
                     stats.stop(f'{p}.intersection')
-
                     if new_mask.is_empty():
                         stats.inc(f'{p}.pruned_accs')
                         return None
-                    else:
-                        return PyAcc(
-                            terminals_union=acc.terminals_union,
-                            llm_mask=new_mask
-                        )
+                    return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
 
                 stats.start('get_mask.main_loop.edge.apply_and_prune')
                 popped = popped.apply_and_prune(intersect_and_prune)
@@ -820,15 +847,13 @@ class Model(GraphProvider):
                     continue
 
                 peeked = popped.peek()
-                # peeked = RangeSetStates.from_indices(popped.peek())
+                child_spawned = False
                 for dest_idx, state_bv in dests:
                     stats.inc('get_mask.traversal.dests_traversed')
 
                     stats.start('get_mask.main_loop.edge.peek_and_filter')
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-                    # values_to_keep = peeked & state_bv
                     stats.stop('get_mask.main_loop.edge.peek_and_filter')
-
                     if not values_to_keep:
                         continue
 
@@ -853,6 +878,19 @@ class Model(GraphProvider):
                     else:
                         values[d] = child_gss
                     enqueue(max_depth[d], d)
+                    child_spawned = True
+
+                if child_spawned:
+                    spawned_any = True
+                    # Save progress and re-enqueue this node to process the next edge later
+                    edge_cursor[node] = edge_i + 1
+                    values[node] = gss_node
+                    enqueue(max_depth[node], node)
+                    break
+
+            # If we didn't spawn any child across remaining edges, this node is done
+            if not spawned_any:
+                edge_cursor.pop(node, None)
         stats.stop('get_mask.main_loop')
         stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
         stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
