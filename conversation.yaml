@@ -577,6 +577,31 @@ local_system:
               stats.inc(f'{p}.final_heads', len(result.peek()))
               stats.stop(f'{p}.total')
               return result
+
+          def _is_zombie_path(self, gss: GSS, path_token_union: LLMTokenSet, final_mask: LLMTokenSet, stat_context: str) -> bool:
+              """
+              Checks if a given traversal path is a "zombie" path, meaning it cannot
+              contribute any new tokens to the final_mask.
+              """
+              stats = Stats.get()
+              p = f'get_mask.zombie_check.{stat_context}'
+              stats.start(p)
+
+              # We only care about tokens that are not yet in the final mask.
+              potential_new_tokens = path_token_union.difference(final_mask)
+              if potential_new_tokens.is_empty():
+                  stats.inc(f'{p}.skipped_no_potential')
+                  stats.stop(p)
+                  return True
+
+              gss_mask_acc = gss.reduce_acc()
+              if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
+                  stats.inc(f'{p}.skipped_no_overlap_disjoint')
+                  stats.stop(p)
+                  return True
+
+              stats.stop(p)
+              return False
           def get_mask(self) -> LLMTokenSet:
               """
               Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
@@ -724,22 +749,10 @@ local_system:
 
                   # Zombie traversal avoidance: if this node's edges can't possibly add
                   # to the final mask given the current GSS mask, skip it.
-                  stats.start('get_mask.zombie_check')
                   a_node = arena.get(node)
                   node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-                  # We only care about tokens that are not yet in the final mask.
-                  potential_new_tokens = node_llm_bv_union.difference(final_mask)
-                  if potential_new_tokens.is_empty():
-                      stats.inc('get_mask.zombie_check.skipped_nodes_no_potential')
-                      stats.stop('get_mask.zombie_check')
+                  if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask, 'node'):
                       continue
-
-                  gss_mask_acc = gss_node.reduce_acc()
-                  if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
-                      stats.inc('get_mask.zombie_check.skipped_nodes_no_overlap_disjoint')
-                      stats.stop('get_mask.zombie_check')
-                      continue
-                  stats.stop('get_mask.zombie_check')
 
                   # Traverse edges and propagate masks
                   a_node = arena.get(node)
@@ -747,11 +760,6 @@ local_system:
                   stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
                   stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
                   for (pop, llm_bv), dests in edges:
-                      llm_bv = llm_bv.difference(final_mask)
-                      if llm_bv.is_empty():
-                          stats.inc('get_mask.traversal.edge.llm_bv_empty')
-                          continue
-
                       stats.inc('get_mask.traversal.edges_traversed')
                       stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
                       stats.start('get_mask.main_loop.edge.popn')
@@ -760,6 +768,11 @@ local_system:
                       if popped.is_empty():
                           stats.inc('get_mask.traversal.edge.popped_empty')
                           continue
+
+                      if self._is_zombie_path(popped, llm_bv, final_mask, 'edge'):
+                          continue
+
+                      llm_bv = llm_bv.difference(final_mask)
 
                       # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                       acc_memo: Dict[int, Optional[PyAcc]] = {}
@@ -823,6 +836,11 @@ local_system:
                               continue
 
                           d: NodeID = int(dest_idx)
+                          dest_node = arena.get(d)
+                          dest_llm_bv_union = dest_node.llm_bv_union if dest_node else RangeSet.empty()
+                          if self._is_zombie_path(child_gss, dest_llm_bv_union, final_mask, 'dest'):
+                              continue
+
                           if d in values:
                               stats.inc('get_mask.traversal.edge.gss_merges')
                               stats.start('get_mask.main_loop.edge.gss_merge')
@@ -1496,10 +1514,16 @@ local_system:
 
               stats.start('get_mask.seeding')
               # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-              acc_memo = {}
+              acc_id_memo = {}
+              acc_val_memo = {}
               def initialize_acc(acc: PyAcc) -> PyAcc:
-                  if id(acc) in acc_memo:
-                      return acc_memo[id(acc)]
+                  if id(acc) in acc_id_memo:
+                      return acc_id_memo[id(acc)]
+                  cached_acc = acc_val_memo.get(acc)
+                  if cached_acc is not None:
+                      acc_id_memo[id(acc)] = cached_acc
+                      return cached_acc
+
                   p = 'get_mask.seeding.initialize_acc'
                   stats.inc(f'{p}.calls')
                   stats.start(f'{p}.total')
@@ -1534,7 +1558,8 @@ local_system:
                       terminals_union={},  # consume
                       llm_mask=allowed_mask,
                   )
-                  acc_memo[id(acc)] = result
+                  acc_id_memo[id(acc)] = result
+                  acc_val_memo[acc] = result
                   return result
 
               cache = {}
@@ -2332,6 +2357,31 @@ messages:
               stats.inc(f'{p}.final_heads', len(result.peek()))
               stats.stop(f'{p}.total')
               return result
+
+          def _is_zombie_path(self, gss: GSS, path_token_union: LLMTokenSet, final_mask: LLMTokenSet, stat_context: str) -> bool:
+              """
+              Checks if a given traversal path is a "zombie" path, meaning it cannot
+              contribute any new tokens to the final_mask.
+              """
+              stats = Stats.get()
+              p = f'get_mask.zombie_check.{stat_context}'
+              stats.start(p)
+
+              # We only care about tokens that are not yet in the final mask.
+              potential_new_tokens = path_token_union.difference(final_mask)
+              if potential_new_tokens.is_empty():
+                  stats.inc(f'{p}.skipped_no_potential')
+                  stats.stop(p)
+                  return True
+
+              gss_mask_acc = gss.reduce_acc()
+              if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
+                  stats.inc(f'{p}.skipped_no_overlap_disjoint')
+                  stats.stop(p)
+                  return True
+
+              stats.stop(p)
+              return False
           def get_mask(self) -> LLMTokenSet:
               """
               Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
@@ -2479,22 +2529,10 @@ messages:
 
                   # Zombie traversal avoidance: if this node's edges can't possibly add
                   # to the final mask given the current GSS mask, skip it.
-                  stats.start('get_mask.zombie_check')
                   a_node = arena.get(node)
                   node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-                  # We only care about tokens that are not yet in the final mask.
-                  potential_new_tokens = node_llm_bv_union.difference(final_mask)
-                  if potential_new_tokens.is_empty():
-                      stats.inc('get_mask.zombie_check.skipped_nodes_no_potential')
-                      stats.stop('get_mask.zombie_check')
+                  if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask, 'node'):
                       continue
-
-                  gss_mask_acc = gss_node.reduce_acc()
-                  if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
-                      stats.inc('get_mask.zombie_check.skipped_nodes_no_overlap_disjoint')
-                      stats.stop('get_mask.zombie_check')
-                      continue
-                  stats.stop('get_mask.zombie_check')
 
                   # Traverse edges and propagate masks
                   a_node = arena.get(node)
@@ -2502,11 +2540,6 @@ messages:
                   stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
                   stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
                   for (pop, llm_bv), dests in edges:
-                      llm_bv = llm_bv.difference(final_mask)
-                      if llm_bv.is_empty():
-                          stats.inc('get_mask.traversal.edge.llm_bv_empty')
-                          continue
-
                       stats.inc('get_mask.traversal.edges_traversed')
                       stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
                       stats.start('get_mask.main_loop.edge.popn')
@@ -2515,6 +2548,11 @@ messages:
                       if popped.is_empty():
                           stats.inc('get_mask.traversal.edge.popped_empty')
                           continue
+
+                      if self._is_zombie_path(popped, llm_bv, final_mask, 'edge'):
+                          continue
+
+                      llm_bv = llm_bv.difference(final_mask)
 
                       # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                       acc_memo: Dict[int, Optional[PyAcc]] = {}
@@ -2578,6 +2616,11 @@ messages:
                               continue
 
                           d: NodeID = int(dest_idx)
+                          dest_node = arena.get(d)
+                          dest_llm_bv_union = dest_node.llm_bv_union if dest_node else RangeSet.empty()
+                          if self._is_zombie_path(child_gss, dest_llm_bv_union, final_mask, 'dest'):
+                              continue
+
                           if d in values:
                               stats.inc('get_mask.traversal.edge.gss_merges')
                               stats.start('get_mask.main_loop.edge.gss_merge')
@@ -2609,10 +2652,22 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: Encapsulate zombie traversal avoidance in a helper. Call it not only in
-      the `while depth_heap:` loop, but also in the `for (pop, llm_bv), dests in edges:`
-      and `for dest_idx, state_bv in dests:` loops to avoid/break traversal as much
-      as possible.
+  - user: |-
+      ```python
+      acc_id_memo = {}
+      acc_val_memo = {}
+      def initialize_acc(acc: PyAcc) -> PyAcc:
+          if id(acc) in acc_id_memo:
+              return acc_id_memo[id(acc)]
+          cached_acc = acc_val_memo.get(acc, None)
+          if cached_acc is not None:
+              acc_id_memo[id(acc)] = cached_acc
+              return cached_acc
+          ...
+      ```
+    metadata:
+  - user: For caching the acc, do something more like this, with two memos, one for
+      val, one for id
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -2631,198 +2686,91 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to apply the changes, followed by the git diff.
+      Of course. Here are the step-by-step instructions to implement the improved caching logic, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file** `python/aug25/models/precompute3_model_pure_python.py`.
+      In the file `python/aug25/models/precompute3_model_pure_python.py`:
 
-      2.  **Add the `_is_zombie_path` helper method** inside the `Model` class, right before the `get_mask` method definition (around line 700).
-
-          ```python
-          def _is_zombie_path(self, gss: GSS, path_token_union: LLMTokenSet, final_mask: LLMTokenSet, stat_context: str) -> bool:
-              """
-              Checks if a given traversal path is a "zombie" path, meaning it cannot
-              contribute any new tokens to the final_mask.
-              """
-              stats = Stats.get()
-              p = f'get_mask.zombie_check.{stat_context}'
-              stats.start(p)
-
-              # We only care about tokens that are not yet in the final mask.
-              potential_new_tokens = path_token_union.difference(final_mask)
-              if potential_new_tokens.is_empty():
-                  stats.inc(f'{p}.skipped_no_potential')
-                  stats.stop(p)
-                  return True
-
-              gss_mask_acc = gss.reduce_acc()
-              if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
-                  stats.inc(f'{p}.skipped_no_overlap_disjoint')
-                  stats.stop(p)
-                  return True
-
-              stats.stop(p)
-              return False
-          ```
-
-      3.  **In the `get_mask` method**, locate the main `while depth_heap:` loop. Find and **replace** the existing "Zombie traversal avoidance" code block:
-
-          *   **Delete** these lines:
+      1.  **Navigate to the `get_mask` method** inside the `Model` class.
+      2.  **Find the `initialize_acc` function definition** within `get_mask`.
+      3.  Replace the single memoization dictionary `acc_memo` with two separate dictionaries for caching by object ID and by value:
+          -   Delete the line:
               ```python
-                  # Zombie traversal avoidance: if this node's edges can't possibly add
-                  # to the final mask given the current GSS mask, skip it.
-                  stats.start('get_mask.zombie_check')
-                  a_node = arena.get(node)
-                  node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-                  # We only care about tokens that are not yet in the final mask.
-                  potential_new_tokens = node_llm_bv_union.difference(final_mask)
-                  if potential_new_tokens.is_empty():
-                      stats.inc('get_mask.zombie_check.skipped_nodes_no_potential')
-                      stats.stop('get_mask.zombie_check')
-                      continue
-
-                  gss_mask_acc = gss_node.reduce_acc()
-                  if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
-                      stats.inc('get_mask.zombie_check.skipped_nodes_no_overlap_disjoint')
-                      stats.stop('get_mask.zombie_check')
-                      continue
-                  stats.stop('get_mask.zombie_check')
+              acc_memo = {}
               ```
-          *   **Add** these lines in its place:
+          -   Add these two lines in its place:
               ```python
-                  # Zombie traversal avoidance: if this node's edges can't possibly add
-                  # to the final mask given the current GSS mask, skip it.
-                  a_node = arena.get(node)
-                  node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-                  if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask, 'node'):
-                      continue
+              acc_id_memo = {}
+              acc_val_memo = {}
               ```
-
-      4.  Still in `get_mask`, find the `for (pop, llm_bv), dests in edges:` loop.
-
-          *   **Delete** the first three lines inside this loop:
+      4.  Update the caching logic at the beginning of `initialize_acc`:
+          -   Change the existing `id`-based check to use `acc_id_memo`:
               ```python
-                      llm_bv = llm_bv.difference(final_mask)
-                      if llm_bv.is_empty():
-                          stats.inc('get_mask.traversal.edge.llm_bv_empty')
-                          continue
+              # Change this:
+              if id(acc) in acc_memo:
+                  return acc_memo[id(acc)]
+              
+              # To this:
+              if id(acc) in acc_id_memo:
+                  return acc_id_memo[id(acc)]
               ```
-          *   **Add** the call to `_is_zombie_path` and the `llm_bv` recalculation after the `if popped.is_empty():` block:
+          -   Immediately after that block, insert the new value-based cache check:
               ```python
-                      if self._is_zombie_path(popped, llm_bv, final_mask, 'edge'):
-                          continue
-
-                      llm_bv = llm_bv.difference(final_mask)
+              cached_acc = acc_val_memo.get(acc)
+              if cached_acc is not None:
+                  acc_id_memo[id(acc)] = cached_acc
+                  return cached_acc
               ```
-
-      5.  Finally, in the innermost `for dest_idx, state_bv in dests:` loop, **add** a new zombie check after `child_gss` has been validated but before it is used.
-
-          *   After the line `d: NodeID = int(dest_idx)`, **insert** the following code:
+      5.  Finally, update the cache population logic at the end of `initialize_acc` to store the result in both caches:
+          -   Replace this line:
               ```python
-                          dest_node = arena.get(d)
-                          dest_llm_bv_union = dest_node.llm_bv_union if dest_node else RangeSet.empty()
-                          if self._is_zombie_path(child_gss, dest_llm_bv_union, final_mask, 'dest'):
-                              continue
+              acc_memo[id(acc)] = result
+              ```
+          -   With these two lines:
+              ```python
+              acc_id_memo[id(acc)] = result
+              acc_val_memo[acc] = result
               ```
 
       ### Git Diff
 
+      Here is the git diff to apply these changes directly.
+
       ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -699,6 +699,31 @@
-               stats.inc(f'{p}.final_heads', len(result.peek()))
-               stats.stop(f'{p}.total')
-               return result
-      +
-      +    def _is_zombie_path(self, gss: GSS, path_token_union: LLMTokenSet, final_mask: LLMTokenSet, stat_context: str) -> bool:
-      +        """
-      +        Checks if a given traversal path is a "zombie" path, meaning it cannot
-      +        contribute any new tokens to the final_mask.
-      +        """
-      +        stats = Stats.get()
-      +        p = f'get_mask.zombie_check.{stat_context}'
-      +        stats.start(p)
-      +
-      +        # We only care about tokens that are not yet in the final mask.
-      +        potential_new_tokens = path_token_union.difference(final_mask)
-      +        if potential_new_tokens.is_empty():
-      +            stats.inc(f'{p}.skipped_no_potential')
-      +            stats.stop(p)
-      +            return True
-      +
-      +        gss_mask_acc = gss.reduce_acc()
-      +        if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
-      +            stats.inc(f'{p}.skipped_no_overlap_disjoint')
-      +            stats.stop(p)
-      +            return True
-      +
-      +        stats.stop(p)
-      +        return False
-           def get_mask(self) -> LLMTokenSet:
-               """
-               Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-      @@ -845,26 +870,11 @@
+      @@ -732,11 +732,18 @@
        
-                   # Zombie traversal avoidance: if this node's edges can't possibly add
-                   # to the final mask given the current GSS mask, skip it.
-      -            stats.start('get_mask.zombie_check')
-                   a_node = arena.get(node)
-                   node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-      -            # We only care about tokens that are not yet in the final mask.
-      -            potential_new_tokens = node_llm_bv_union.difference(final_mask)
-      -            if potential_new_tokens.is_empty():
-      -                stats.inc('get_mask.zombie_check.skipped_nodes_no_potential')
-      -                stats.stop('get_mask.zombie_check')
-      +            if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask, 'node'):
-                       continue
-       
-      -            gss_mask_acc = gss_node.reduce_acc()
-      -            if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
-      -                stats.inc('get_mask.zombie_check.skipped_nodes_no_overlap_disjoint')
-      -                stats.stop('get_mask.zombie_check')
-      -                continue
-      -            stats.stop('get_mask.zombie_check')
-      -
-                   # Traverse edges and propagate masks
-                   a_node = arena.get(node)
-                   edges = a_node.children if a_node else []
-      @@ -872,12 +882,6 @@
-                   stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
-                   for (pop, llm_bv), dests in edges:
-      -                llm_bv = llm_bv.difference(final_mask)
-      -                if llm_bv.is_empty():
-      -                    stats.inc('get_mask.traversal.edge.llm_bv_empty')
-      -                    continue
-      -
-                       stats.inc('get_mask.traversal.edges_traversed')
-                       stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
-                       stats.start('get_mask.main_loop.edge.popn')
-      @@ -887,6 +891,11 @@
-                           stats.inc('get_mask.traversal.edge.popped_empty')
-                           continue
-       
-      +                if self._is_zombie_path(popped, llm_bv, final_mask, 'edge'):
-      +                    continue
+               stats.start('get_mask.seeding')
+               # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+      -        acc_memo = {}
+      +        acc_id_memo = {}
+      +        acc_val_memo = {}
+               def initialize_acc(acc: PyAcc) -> PyAcc:
+      -            if id(acc) in acc_memo:
+      -                return acc_memo[id(acc)]
+      +            if id(acc) in acc_id_memo:
+      +                return acc_id_memo[id(acc)]
+      +            cached_acc = acc_val_memo.get(acc)
+      +            if cached_acc is not None:
+      +                acc_id_memo[id(acc)] = cached_acc
+      +                return cached_acc
       +
-      +                llm_bv = llm_bv.difference(final_mask)
-      +
-                       # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                       acc_memo: Dict[int, Optional[PyAcc]] = {}
+                   p = 'get_mask.seeding.initialize_acc'
+                   stats.inc(f'{p}.calls')
+                   stats.start(f'{p}.total')
+      @@ -771,8 +778,9 @@
+                       terminals_union={},  # consume
+                       llm_mask=allowed_mask,
+                   )
+      -            acc_memo[id(acc)] = result
+      +            acc_id_memo[id(acc)] = result
+      +            acc_val_memo[acc] = result
+                   return result
        
-      @@ -945,6 +954,12 @@
-                               continue
-       
-                           d: NodeID = int(dest_idx)
-      +                    dest_node = arena.get(d)
-      +                    dest_llm_bv_union = dest_node.llm_bv_union if dest_node else RangeSet.empty()
-      +                    if self._is_zombie_path(child_gss, dest_llm_bv_union, final_mask, 'dest'):
-      +                        continue
-      +
-                           if d in values:
-                               stats.inc('get_mask.traversal.edge.gss_merges')
-                               stats.start('get_mask.main_loop.edge.gss_merge')
+               cache = {}
 
       ```
     metadata:
@@ -2835,7 +2783,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Encapsulate zombie path avoidance
-      logic in _is_zombie_path helper within get_mask"'
+  - user: 'Changes committed with message: "Improve PyAcc memoization in get_mask.initialize_acc
+      with ID and value caches"'
     metadata:
 ...

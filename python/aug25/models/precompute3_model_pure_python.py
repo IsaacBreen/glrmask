@@ -642,10 +642,16 @@ class Model(GraphProvider):
 
         stats.start('get_mask.seeding')
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-        acc_memo = {}
+        acc_id_memo = {}
+        acc_val_memo = {}
         def initialize_acc(acc: PyAcc) -> PyAcc:
-            if id(acc) in acc_memo:
-                return acc_memo[id(acc)]
+            if id(acc) in acc_id_memo:
+                return acc_id_memo[id(acc)]
+            cached_acc = acc_val_memo.get(acc)
+            if cached_acc is not None:
+                acc_id_memo[id(acc)] = cached_acc
+                return cached_acc
+
             p = 'get_mask.seeding.initialize_acc'
             stats.inc(f'{p}.calls')
             stats.start(f'{p}.total')
@@ -680,7 +686,8 @@ class Model(GraphProvider):
                 terminals_union={},  # consume
                 llm_mask=allowed_mask,
             )
-            acc_memo[id(acc)] = result
+            acc_id_memo[id(acc)] = result
+            acc_val_memo[acc] = result
             return result
 
         cache = {}
