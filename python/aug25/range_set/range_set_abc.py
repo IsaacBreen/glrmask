@@ -152,6 +152,11 @@ class RangeSet(ABC, Generic[T]):
         """Iterates over all individual indices in the set."""
         raise NotImplementedError
 
+    @abstractmethod
+    def iter_ranges(self) -> Iterable[Tuple[T, T]]:
+        """Iterates over all [start, end] intervals in the set."""
+        raise NotImplementedError
+
     @classmethod
     @abstractmethod
     def from_json(cls, data: List[List[T]]) -> "RangeSet[T]":

@@ -57,6 +57,10 @@ class RoaringRangeSet(RangeSet[int]):
         """Iterates over all individual indices in the set."""
         yield from self._rb
 
+    def iter_ranges(self) -> Iterable[Tuple[int, int]]:
+        """Iterates over all [start, end] intervals in the set."""
+        yield from self.intervals
+
     def contains(self, x: int) -> bool:
         if x < 0:
             return False

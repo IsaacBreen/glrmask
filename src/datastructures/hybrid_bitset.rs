@@ -217,13 +217,18 @@ impl HybridBitset {
     }
 
     /// Returns an iterator over the indices of the set bits.
-    pub fn iter(&self) -> Iter<'_> {
+    pub fn iter_indices(&self) -> Iter<'_> {
         Iter {
             iter_inner: self.inner.iter(),
             remaining: self.len(),
             is_all: self.is_all(),
             count: 0,
         }
+    }
+
+    /// Returns an iterator over the inclusive [start, end] ranges of the set.
+    pub fn iter_ranges(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.inner.ranges().map(|r| (*r.start(), *r.end()))
     }
 
     /// Returns an iterator over booleans, indicating for each index from 0
@@ -265,7 +270,7 @@ impl HybridBitset {
         let mut all_nodes: HashSet<usize> = HashSet::new();
 
         for set in sets.iter() {
-            let mut iter = set.iter().peekable();
+            let mut iter = set.iter_indices().peekable();
             while let Some(u) = iter.next() {
                 all_nodes.insert(u);
                 if let Some(&v) = iter.peek() {
@@ -410,7 +415,7 @@ impl<'a> IntoIterator for &'a HybridBitset {
     type IntoIter = Iter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.iter()
+        self.iter_indices()
     }
 }
 
@@ -797,7 +802,7 @@ mod tests {
     fn test_iteration() {
         let indices = vec![5, 1, 100, 42];
         let set = HybridBitset::from_iter(indices.clone());
-        let mut collected: Vec<usize> = set.iter().collect();
+        let mut collected: Vec<usize> = set.iter_indices().collect();
         collected.sort_unstable();
         let mut expected = indices;
         expected.sort_unstable();
@@ -828,19 +833,19 @@ mod tests {
         let sym_diff = &set1 ^ &set2;
 
         assert_eq!(
-            intersection.iter().collect::<BTreeSet<usize>>(),
+            intersection.iter_indices().collect::<BTreeSet<usize>>(),
             BTreeSet::from_iter(vec![3, 10])
         );
         assert_eq!(
-            union.iter().collect::<BTreeSet<usize>>(),
+            union.iter_indices().collect::<BTreeSet<usize>>(),
             BTreeSet::from_iter(vec![1, 2, 3, 4, 5, 10])
         );
         assert_eq!(
-            difference.iter().collect::<BTreeSet<usize>>(),
+            difference.iter_indices().collect::<BTreeSet<usize>>(),
             BTreeSet::from_iter(vec![1, 2])
         );
         assert_eq!(
-            sym_diff.iter().collect::<BTreeSet<usize>>(),
+            sym_diff.iter_indices().collect::<BTreeSet<usize>>(),
             BTreeSet::from_iter(vec![1, 2, 4, 5])
         );
     }
@@ -864,19 +869,19 @@ mod tests {
             .collect();
 
         assert_eq!(
-            intersection.iter().collect::<BTreeSet<usize>>(),
+            intersection.iter_indices().collect::<BTreeSet<usize>>(),
             intersection_expected
         );
         assert_eq!(
-            union.iter().collect::<BTreeSet<usize>>(),
+            union.iter_indices().collect::<BTreeSet<usize>>(),
             union_expected
         );
         assert_eq!(
-            difference.iter().collect::<BTreeSet<usize>>(),
+            difference.iter_indices().collect::<BTreeSet<usize>>(),
             difference_expected
         );
         assert_eq!(
-            sym_diff.iter().collect::<BTreeSet<usize>>(),
+            sym_diff.iter_indices().collect::<BTreeSet<usize>>(),
             sym_diff_expected
         );
     }
@@ -891,7 +896,7 @@ mod tests {
         let intersection1 = &set1_conceptually_sparse & &set2_conceptually_dense;
         let intersection1_expected: BTreeSet<usize> = vec![1, 2, 3].into_iter().collect();
         assert_eq!(
-            intersection1.iter().collect::<BTreeSet<usize>>(),
+            intersection1.iter_indices().collect::<BTreeSet<usize>>(),
             intersection1_expected
         );
 
@@ -899,7 +904,7 @@ mod tests {
         let mut union1_expected: BTreeSet<usize> = (0..SPARSE_TO_DENSE_THRESHOLD + 5).collect();
         union1_expected.insert(SPARSE_TO_DENSE_THRESHOLD + 100);
         assert_eq!(
-            union1.iter().collect::<BTreeSet<usize>>(),
+            union1.iter_indices().collect::<BTreeSet<usize>>(),
             union1_expected
         );
 
@@ -907,7 +912,7 @@ mod tests {
         let diff1_expected: BTreeSet<usize> =
             vec![SPARSE_TO_DENSE_THRESHOLD + 100].into_iter().collect();
         assert_eq!(
-            diff1.iter().collect::<BTreeSet<usize>>(),
+            diff1.iter_indices().collect::<BTreeSet<usize>>(),
             diff1_expected
         );
 
@@ -917,7 +922,7 @@ mod tests {
         diff2_expected.remove(&2);
         diff2_expected.remove(&3);
         assert_eq!(
-            diff2.iter().collect::<BTreeSet<usize>>(),
+            diff2.iter_indices().collect::<BTreeSet<usize>>(),
             diff2_expected
         );
 
@@ -925,7 +930,7 @@ mod tests {
         let mut xor1_expected = diff2_expected.clone();
         xor1_expected.insert(SPARSE_TO_DENSE_THRESHOLD + 100);
         assert_eq!(
-            xor1.iter().collect::<BTreeSet<usize>>(),
+            xor1.iter_indices().collect::<BTreeSet<usize>>(),
             xor1_expected
         );
     }
@@ -1010,7 +1015,7 @@ mod tests {
         let mut set1 = set1_orig.clone();
         set1 |= set2.clone();
         assert_eq!(
-            set1.iter().collect::<BTreeSet<_>>(),
+            set1.iter_indices().collect::<BTreeSet<_>>(),
             BTreeSet::from_iter(vec![1, 2, 3, 10, 20])
         );
 
@@ -1021,13 +1026,13 @@ mod tests {
             (DENSE_TO_SPARSE_THRESHOLD / 2..DENSE_TO_SPARSE_THRESHOLD).collect::<BTreeSet<_>>();
         let mut set3 = set3_orig.clone();
         set3 &= set4.clone();
-        assert_eq!(set3.iter().collect::<BTreeSet<_>>(), expected_and);
+        assert_eq!(set3.iter_indices().collect::<BTreeSet<_>>(), expected_and);
 
         let mut set5 = HybridBitset::from_iter(vec![1, 2, 3]);
         let set6 = HybridBitset::from_iter(vec![3, 4, 5]);
         set5 ^= set6.clone();
         assert_eq!(
-            set5.iter().collect::<BTreeSet<_>>(),
+            set5.iter_indices().collect::<BTreeSet<_>>(),
             BTreeSet::from_iter(vec![1, 2, 4, 5])
         );
 
@@ -1035,7 +1040,7 @@ mod tests {
         let set8 = HybridBitset::from_iter(vec![2, 4, 6]);
         set7 -= set8.clone();
         assert_eq!(
-            set7.iter().collect::<BTreeSet<_>>(),
+            set7.iter_indices().collect::<BTreeSet<_>>(),
             BTreeSet::from_iter(vec![1, 3, 5])
         );
     }
@@ -1048,7 +1053,7 @@ mod tests {
         let mut set1 = set1_orig.clone();
         set1 |= &set2;
         assert_eq!(
-            set1.iter().collect::<BTreeSet<_>>(),
+            set1.iter_indices().collect::<BTreeSet<_>>(),
             BTreeSet::from_iter(vec![1, 2, 3, 10, 20])
         );
 
@@ -1059,13 +1064,13 @@ mod tests {
             (DENSE_TO_SPARSE_THRESHOLD / 2..DENSE_TO_SPARSE_THRESHOLD).collect::<BTreeSet<_>>();
         let mut set3 = set3_orig.clone();
         set3 &= &set4;
-        assert_eq!(set3.iter().collect::<BTreeSet<_>>(), expected_and);
+        assert_eq!(set3.iter_indices().collect::<BTreeSet<_>>(), expected_and);
 
         let mut set5 = HybridBitset::from_iter(vec![1, 2, 3]);
         let set6 = HybridBitset::from_iter(vec![3, 4, 5]);
         set5 ^= &set6;
         assert_eq!(
-            set5.iter().collect::<BTreeSet<_>>(),
+            set5.iter_indices().collect::<BTreeSet<_>>(),
             BTreeSet::from_iter(vec![1, 2, 4, 5])
         );
 
@@ -1073,7 +1078,7 @@ mod tests {
         let set8 = HybridBitset::from_iter(vec![2, 4, 6]);
         set7 -= &set8;
         assert_eq!(
-            set7.iter().collect::<BTreeSet<_>>(),
+            set7.iter_indices().collect::<BTreeSet<_>>(),
             BTreeSet::from_iter(vec![1, 3, 5])
         );
     }
@@ -1104,25 +1109,25 @@ mod tests {
 
         let inter = &d4 & &d5;
         assert_eq!(
-            inter.iter().collect::<BTreeSet<_>>(),
+            inter.iter_indices().collect::<BTreeSet<_>>(),
             BTreeSet::from_iter(vec![3, 4])
         );
 
         let union = &d4 | &d5;
         assert_eq!(
-            union.iter().collect::<BTreeSet<_>>(),
+            union.iter_indices().collect::<BTreeSet<_>>(),
             (0..10).collect::<BTreeSet<_>>()
         );
 
         let diff = &d4 - &d5;
         assert_eq!(
-            diff.iter().collect::<BTreeSet<_>>(),
+            diff.iter_indices().collect::<BTreeSet<_>>(),
             BTreeSet::from_iter(vec![0, 1, 2])
         );
 
         let sym_diff = &d4 ^ &d5;
         assert_eq!(
-            sym_diff.iter().collect::<BTreeSet<_>>(),
+            sym_diff.iter_indices().collect::<BTreeSet<_>>(),
             BTreeSet::from_iter(vec![0, 1, 2, 5, 6, 7, 8, 9])
         );
     }
@@ -1134,7 +1139,7 @@ mod tests {
         let set: HybridBitset = data.into_iter().collect();
 
         let expected: BTreeSet<usize> = vec![10, 20, 30].into_iter().collect();
-        assert_eq!(set.iter().collect::<BTreeSet<_>>(), expected);
+        assert_eq!(set.iter_indices().collect::<BTreeSet<_>>(), expected);
     }
 
     #[test]
@@ -1230,7 +1235,7 @@ mod tests {
         // Apply the permutation
         let apply_permutation =
             |set: &HybridBitset, map: &std::collections::HashMap<usize, usize>| -> HybridBitset {
-                set.iter().map(|val| *map.get(&val).unwrap()).collect()
+                set.iter_indices().map(|val| *map.get(&val).unwrap()).collect()
             };
 
         let pi_s1 = apply_permutation(&s1, &perm_map);

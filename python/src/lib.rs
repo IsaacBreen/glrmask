@@ -587,27 +587,20 @@ impl PyHybridBitset {
     }
 
     fn to_indices(&self) -> Vec<usize> {
-        self.inner.iter().collect()
+        self.inner.iter_indices().collect()
     }
 
     fn to_ranges(&self) -> Vec<(usize, usize)> {
-        // reuse JSON conversion for simplicity
-        let json = self.inner.to_json();
-        let arr = match json {
-            sep1::json_serialization::JSONNode::Array(arr) => arr,
-            _ => vec![],
-        };
-        let mut out = Vec::new();
-        for pair in arr {
-            if let sep1::json_serialization::JSONNode::Array(v) = pair {
-                if v.len() == 2 {
-                    let s = usize::from_json(v[0].clone()).unwrap();
-                    let e = usize::from_json(v[1].clone()).unwrap();
-                    out.push((s,e));
-                }
-            }
-        }
-        out
+        self.inner.iter_ranges().collect()
+    }
+
+    fn __iter__(&self) -> impl IntoIterator<Item = usize> {
+        self.inner.clone()
+    }
+
+    fn iter_ranges<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyIterator>> {
+        let ranges: Vec<(usize, usize)> = self.inner.iter_ranges().collect();
+        pyo3::types::PyIterator::from_iter(ranges.into_iter(), py)
     }
 
     fn contains(&self, idx: usize) -> bool {

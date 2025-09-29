@@ -18,11 +18,11 @@ class FFIRangeSet(RangeSet[int]):
     @property
     def intervals(self) -> Tuple[Tuple[int, int], ...]:
         """Returns the intervals as a tuple of tuples."""
-        return tuple(cast(List[Tuple[int, int]], self._bitset.to_ranges()))
+        return tuple(self.iter_ranges())
 
     def to_ranges(self) -> List[Tuple[int]]:
         """Returns the intervals as a list of lists for JSON serialization."""
-        return [tuple(r) for r in self._bitset.to_ranges()]
+        return list(self.iter_ranges())
 
     @time_method
     def to_indices(self) -> List[int]:
@@ -36,8 +36,11 @@ class FFIRangeSet(RangeSet[int]):
 
     def iter_indices(self) -> Iterable[int]:
         """Iterates over all individual indices in the set."""
-        for start, end in self.intervals:
-            yield from range(start, end + 1)
+        yield from self._bitset
+
+    def iter_ranges(self) -> Iterable[Tuple[int, int]]:
+        """Iterates over all [start, end] intervals in the set."""
+        yield from self._bitset.iter_ranges()
 
     @time_method
     def contains(self, x: int) -> bool:

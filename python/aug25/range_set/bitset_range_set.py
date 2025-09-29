@@ -60,9 +60,25 @@ class BitsetRangeSet(RangeSet[int]):
 
     @property
     def intervals(self) -> Tuple[Tuple[int, int], ...]:
-        # This is not efficient, but it is correct.
-        # A more performant implementation would scan bits directly.
-        return PyRangeSet.from_indices(self.to_indices()).intervals
+        return tuple(self.iter_ranges())
+
+    def iter_ranges(self) -> Iterable[Tuple[int, int]]:
+        """Iterates over all [start, end] intervals in the set."""
+        if self.is_empty():
+            return
+
+        in_range = False
+        start_range = 0
+        
+        # We need to check one past the last possible element to close the last range
+        for i in range(len(self._bitset) * 8 + 1):
+            is_set = self.contains(i) # contains handles out of bounds
+            if is_set and not in_range:
+                start_range = i
+                in_range = True
+            elif not is_set and in_range:
+                yield (start_range, i - 1)
+                in_range = False
 
     def to_ranges(self) -> List[Tuple[int]]:
         return list(self.intervals)
