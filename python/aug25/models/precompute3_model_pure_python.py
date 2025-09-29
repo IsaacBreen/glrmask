@@ -641,8 +641,8 @@ class Model(GraphProvider):
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
         values: Dict[NodeID, GSS] = {}
-        depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
-        enqueued_nodes: Set[NodeID] = set()
+        work_heap: List[Tuple[int, str, Tuple[Any, ...]]] = [] # (-prio, type, args)
+        expanding_gss: Dict[NodeID, GSS] = {}
 
         hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
@@ -726,45 +726,129 @@ class Model(GraphProvider):
             else:
                 values[r] = gss_initialized
 
+        for r in values.keys():
             d: int = max_depth[r]
-            if r not in enqueued_nodes:
-                enqueued_nodes.add(r)
-                hp(depth_heap, (-d, r))
+            hp(work_heap, (-d, 'EXPAND', (r,)))
 
-        def enqueue(d: int, n: NodeID) -> None:
-            stats.inc('get_mask.traversal.enqueues')
-            if n not in enqueued_nodes:
-                enqueued_nodes.add(n)
-                hp(depth_heap, (-d, n))
-
-        def dequeue() -> Tuple[int, int]:
-            neg_d, n = hpop(depth_heap)
-            return -neg_d, n
         stats.stop('get_mask.seeding')
 
         # Main loop
         stats.start('get_mask.main_loop')
         max_depth_reached = 0
         visited_nodes = set()
-        # Per-node edge scheduling: process one best edge at a time
-        # - edge_plan[node]: [(child_depth, pop, llm_bv, dest_node_id, state_bv), ...] sorted by child_depth desc
-        # - edge_cursor[node]: index of next edge to process from edge_plan[node]
-        # - last_gss_id[node]: id of the GSS object last used to drive edge processing; reset cursor if it changes
-        edge_plan: Dict[NodeID, List[Tuple[int, int, LLMTokenSet, int, StateIDSet]]] = {}
-        edge_cursor: Dict[NodeID, int] = {}
-        last_gss_id: Dict[NodeID, int] = {}
+        while work_heap:
+            neg_prio, task_type, args = hpop(work_heap)
+            priority = -neg_prio
+
+            if task_type == 'EXPAND':
+                node, = args
+                if node not in values:  # Already expanded
+                    continue
+
+                gss_node = values.pop(node)
+                expanding_gss[node] = gss_node
+                max_depth_reached = max(max_depth_reached, priority)
+                stats.inc('get_mask.traversal.nodes_processed')
+                visited_nodes.add(node)
+                stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
+
+                # End-node handling
+                if is_end(node):
+                    stats.inc('get_mask.traversal.end_nodes')
+                    stats.start('get_mask.main_loop.end_node.reduce_acc')
+                    reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+                    stats.stop('get_mask.main_loop.end_node.reduce_acc')
+                    if reduced_acc:
+                        stats.start('get_mask.main_loop.end_node.final_mask_union')
+                        final_mask |= reduced_acc.llm_mask
+                        stats.stop('get_mask.main_loop.end_node.final_mask_union')
+
+                # Zombie traversal avoidance
+                a_node = arena.get(node)
+                node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
+                if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask, 'node'):
+                    del expanding_gss[node]
+                    continue
+
+                # Schedule continuation for the first edge
+                hp(work_heap, (neg_prio, 'CONTINUE', (node, 0)))
+
+            elif task_type == 'CONTINUE':
+                node, edge_idx = args
+                if node not in expanding_gss:
+                    continue
+
+                gss_node = expanding_gss[node]
+                a_node = arena.get(node)
+                edges = a_node.children if a_node else []
+
+                if edge_idx >= len(edges):
+                    del expanding_gss[node]
+                    continue
+
+                # Process one edge
+                (pop, llm_bv), dests = edges[edge_idx]
+                stats.inc('get_mask.traversal.edges_traversed')
+                stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
+
+                # --- GSS computation for this edge ---
+                stats.start('get_mask.main_loop.edge.popn')
+                popped: GSS = gss_node.popn(pop)
+                stats.stop('get_mask.main_loop.edge.popn')
+
+                if not popped.is_empty():
+                    # Apply edge LLM mask
+                    @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)
+                    def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                        new_mask = acc.llm_mask.intersection(llm_bv)
+                        return None if new_mask.is_empty() else PyAcc(terminals_union={}, llm_mask=new_mask)
+
+                    stats.start('get_mask.main_loop.edge.apply_and_prune')
+                    popped = popped.apply_and_prune(intersect_and_prune)
+                    stats.stop('get_mask.main_loop.edge.apply_and_prune')
+
+                    if not popped.is_empty() and not popped.reduce_acc().is_empty():
+                        peeked = popped.peek()
+                        for dest_idx, state_bv in dests:
+                            values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                            if not values_to_keep: continue
+
+                            child_gss = popped.isolate_many(values_to_keep)
+                            if child_gss.is_empty() or child_gss.reduce_acc().is_empty(): continue
+
+                            d: NodeID = int(dest_idx)
+                            is_new = d not in values
+                            values[d] = values.get(d, GSS.empty()).merge(child_gss)
+                            if is_new:
+                                hp(work_heap, (-max_depth[d], 'EXPAND', (d,)))
+
+                # Schedule continuation for the next edge
+                hp(work_heap, (neg_prio, 'CONTINUE', (node, edge_idx + 1)))
+
+        stats.stop('get_mask.main_loop')
+        stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
+        stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
+
+        stats.start('get_mask.final_conversion')
+        # Convert internal mask back to original IDs
+        original_indices = RangeSetOut.empty()
+        for i in final_mask.iter_indices():
+            if i in self.internal_to_original_map:
+                original_indices |= self.internal_to_original_map[i]
+        stats.stop('get_mask.final_conversion')
+
+        stats.stop('get_mask')
+        return original_indices
+
+        # --- OLD LOOP LOGIC REMOVED ---
+        """
         while depth_heap:
             depth, node = dequeue()
             max_depth_reached = max(max_depth_reached, depth)
             stats.inc('get_mask.traversal.depth_heap.pops')
             stats.inc('get_mask.traversal.nodes_processed')
             visited_nodes.add(node)
-            gss_node: Optional[GSS] = values.get(node)
-            # It is possible that values[node] was removed or empty; guard and continue.
-            if gss_node is None or gss_node.is_empty():
-                if node in enqueued_nodes:
-                    enqueued_nodes.remove(node)
-                continue
+            gss_node: GSS = values.pop(node)
             enqueued_nodes.remove(node)
             stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
 
@@ -786,46 +870,21 @@ class Model(GraphProvider):
             if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask, 'node'):
                 continue
 
-            # Build per-node edge plan once, sorted by child depth (closest to end first)
-            if node not in edge_plan:
-                a_node = arena.get(node)
-                edges_local = a_node.children if a_node else []
-                stats.inc('get_mask.traversal.edge_blocks.sum', len(edges_local))
-                stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges_local))
-                plan: List[Tuple[int, int, LLMTokenSet, int, StateIDSet]] = []
-                for (pop, llm_bv), dests in edges_local:
-                    for dest_idx, state_bv in dests:
-                        d: NodeID = int(dest_idx)
-                        plan.append((max_depth[d], int(pop), llm_bv, d, state_bv))
-                # Sort by child depth descending to prioritize closest-to-end
-                plan.sort(key=lambda x: x[0], reverse=True)
-                edge_plan[node] = plan
-                edge_cursor[node] = 0
-                last_gss_id[node] = id(gss_node)
-            # If GSS at this node has changed identity since last processing, reset cursor to reprocess edges
-            elif last_gss_id.get(node) != id(gss_node):
-                edge_cursor[node] = 0
-                last_gss_id[node] = id(gss_node)
+            # Traverse edges and propagate masks
+            a_node = arena.get(node)
+            edges = a_node.children if a_node else []
+            stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
+            stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
+            for (pop, llm_bv), dests in edges:
+                stats.inc('get_mask.traversal.edges_traversed')
+                stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
+                stats.start('get_mask.main_loop.edge.popn')
+                popped: GSS = gss_node.popn(pop)
+                stats.stop('get_mask.main_loop.edge.popn')
+                if popped.is_empty():
+                    stats.inc('get_mask.traversal.edge.popped_empty')
+                    continue
 
-            plan = edge_plan.get(node, [])
-            cursor = edge_cursor.get(node, 0)
-
-            # If no edges to process, continue
-            if not plan or cursor >= len(plan):
-                continue
-
-            # Process exactly one best edge from this node per pop
-            child_depth, pop, llm_bv, dest_node_id, state_bv = plan[cursor]
-            edge_cursor[node] = cursor + 1
-
-            stats.inc('get_mask.traversal.edges_traversed')
-            stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
-            stats.start('get_mask.main_loop.edge.popn')
-            popped: GSS = gss_node.popn(pop)
-            stats.stop('get_mask.main_loop.edge.popn')
-            if popped.is_empty():
-                stats.inc('get_mask.traversal.edge.popped_empty')
-            else:
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                 @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)
                 def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
@@ -850,49 +909,47 @@ class Model(GraphProvider):
 
                 if popped.is_empty():
                     stats.inc('get_mask.traversal.edge.popped_pruned_empty')
-                elif popped.reduce_acc().is_empty():
+                    continue
+
+                if popped.reduce_acc().is_empty():
                     stats.inc('get_mask.traversal.edge.popped_reduced_empty')
-                else:
-                    peeked = popped.peek()
+                    continue
+
+                peeked = popped.peek()
+                # peeked = RangeSetStates.from_indices(popped.peek())
+                for dest_idx, state_bv in dests:
                     stats.inc('get_mask.traversal.dests_traversed')
+
                     stats.start('get_mask.main_loop.edge.peek_and_filter')
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                    # values_to_keep = peeked & state_bv
                     stats.stop('get_mask.main_loop.edge.peek_and_filter')
 
-                    if values_to_keep:
-                        stats.start('get_mask.main_loop.edge.isolate_many')
-                        child_gss = popped.isolate_many(values_to_keep)
-                        stats.stop('get_mask.main_loop.edge.isolate_many')
+                    if not values_to_keep:
+                        continue
 
-                        stats.inc('get_mask.main_loop.edge.intersect_and_prune.memo_size.sum', intersect_and_prune._acc_memo_size())
-                        if not child_gss.is_empty() and not child_gss.reduce_acc().is_empty():
-                            d: NodeID = int(dest_node_id)
-                            if d in values:
-                                stats.inc('get_mask.traversal.edge.gss_merges')
-                                stats.start('get_mask.main_loop.edge.gss_merge')
-                                values[d] = values[d].merge(child_gss)
-                                stats.stop('get_mask.main_loop.edge.gss_merge')
-                            else:
-                                values[d] = child_gss
-                            enqueue(max_depth[d], d)
+                    stats.start('get_mask.main_loop.edge.isolate_many')
+                    child_gss = popped.isolate_many(values_to_keep)
+                    stats.stop('get_mask.main_loop.edge.isolate_many')
 
-            # If there are more edges to try from this node, re-enqueue the node itself
-            if edge_cursor[node] < len(edge_plan[node]):
-                enqueue(depth, node)
-        stats.stop('get_mask.main_loop')
-        stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
-        stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
+                    stats.inc('get_mask.main_loop.edge.intersect_and_prune.memo_size.sum', intersect_and_prune._acc_memo_size())
+                    if child_gss.is_empty():
+                        stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
+                        continue
 
-        stats.start('get_mask.final_conversion')
-        # Convert internal mask back to original IDs
-        original_indices = RangeSetOut.empty()
-        for i in final_mask.iter_indices():
-            if i in self.internal_to_original_map:
-                original_indices |= self.internal_to_original_map[i]
-        stats.stop('get_mask.final_conversion')
+                    if child_gss.reduce_acc().is_empty():
+                        continue
 
-        stats.stop('get_mask')
-        return original_indices
+                    d: NodeID = int(dest_idx)
+                    if d in values:
+                        stats.inc('get_mask.traversal.edge.gss_merges')
+                        stats.start('get_mask.main_loop.edge.gss_merge')
+                        values[d] = values[d].merge(child_gss)
+                        stats.stop('get_mask.main_loop.edge.gss_merge')
+                    else:
+                        values[d] = child_gss
+                    enqueue(max_depth[d], d)
+        """
 
     def finalize(self):
         """Called at the end of a benchmark run to perform any final actions, like printing stats."""
