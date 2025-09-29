@@ -801,7 +801,7 @@ class Model(GraphProvider):
         # allowed internal token.
         result = RangeSet.empty()
         stats.start('get_mask.final_conversion.union_loop')
-        for i in final_mask.to_indices():
+        for i in final_mask.iter_indices():
             # Mapped RangeSet for the internal token i
             mapped_rs = self.internal_to_original_map.get(i)
             if mapped_rs:
