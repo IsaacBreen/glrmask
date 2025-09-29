@@ -344,6 +344,7 @@ class Model(GraphProvider):
         # model._merge_equivalent_llm_tokens()
         # model._reorder_llm_tokens_for_range_minimization()
         # model._recompute_max_depth_from_arena()
+        model._reorder_edges_for_traversal_heuristic()
         return model
     @profile
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
@@ -2195,8 +2196,59 @@ class Model(GraphProvider):
         print(f"- Nodes merged (equiv signatures): {compaction_stats.get('nodes_merged', 0)}")
         print(f"- Normalization: groups before/after not tracked across stages here")
 
+    def _reorder_edges_for_traversal_heuristic(self) -> None:
+        """
+        Reorder edges within each node to prioritize traversal of more promising paths
+        in get_mask. The goal is to grow the final_mask as quickly as possible to
+        enable more effective zombie node pruning.
+
+        Heuristic:
+        - Primary sort key: Maximum max_depth among an edge's destination nodes (descending).
+          This prioritizes paths that are more likely to lead to an end node.
+        - Secondary sort key: The number of LLM tokens in the edge's mask (descending).
+          This prioritizes edges that have the potential to add more tokens to the final_mask.
+        - Tertiary keys are added for deterministic sorting.
+        """
+        print("Reordering arena edges for optimized traversal...", end="", flush=True)
+        if not self.arena or not self.max_depth:
+            print(" done (arena or max_depth not available).")
+            return
+
+        t0 = time.perf_counter()
+
+        def _rs_key(rs: LLMTokenSet) -> Tuple[Tuple[int, int], ...]:
+            try:
+                return tuple((int(a), int(b)) for (a, b) in rs.to_ranges())
+            except Exception:
+                return ()
+
+        for node in self.arena.values():
+            if not node.children or len(node.children) <= 1:
+                continue
+
+            def sort_key(item: Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]):
+                (pop, llm_bv), dests = item
+
+                # Primary key: max depth of destination nodes (desc)
+                max_dest_depth = 0
+                if dests:
+                    max_dest_depth = max(self.max_depth.get(int(dest_id), 0) for dest_id, _ in dests)
+
+                # Secondary key: size of llm mask (desc)
+                llm_bv_size = len(llm_bv)
+
+                # Tertiary keys for stability
+                pop_val = int(pop)
+                llm_key = _rs_key(llm_bv)
+
+                return (-max_dest_depth, -llm_bv_size, pop_val, llm_key)
+
+            node.children.sort(key=sort_key)
+
+        t1 = time.perf_counter()
+        print(f" done in {t1 - t0:.3f}s.")
+
     def finalize(self):
         """Called at the end of a benchmark run to perform any final actions, like printing stats."""
         print("\n--- Final Stats Report from Model ---")
         Stats.get().report()
-
