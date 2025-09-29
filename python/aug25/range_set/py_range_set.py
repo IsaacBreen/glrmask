@@ -165,43 +165,7 @@ class PyRangeSet(RangeSet[int]):
             return PyRangeSet(other.intervals)
         if other.is_empty():
             return self
-
-        # Efficiently merge two sorted, disjoint interval lists
-        intervals1 = self.intervals
-        intervals2 = other.intervals
-
-        # Combine intervals by merging two sorted lists
-        combined = []
-        i, j = 0, 0
-        while i < len(intervals1) and j < len(intervals2):
-            if intervals1[i][0] < intervals2[j][0]:
-                combined.append(intervals1[i])
-                i += 1
-            else:
-                combined.append(intervals2[j])
-                j += 1
-        combined.extend(intervals1[i:])
-        combined.extend(intervals2[j:])
-
-        if not combined:
-            return PyRangeSet.empty()
-
-        # Merge overlapping/adjacent intervals
-        merged: List[Tuple[int, int]] = []
-        cs, ce = combined[0]
-        for ns, ne in combined[1:]:
-            if ns <= ce + 1:
-                ce = max(ce, ne)
-            else:
-                merged.append((cs, ce))
-                cs, ce = ns, ne
-        merged.append((cs, ce))
-
-        # Create a new PyRangeSet directly with the merged intervals
-        # to avoid re-sorting in __init__/_normalize.
-        new_set = PyRangeSet()
-        new_set._intervals = tuple(merged)
-        return new_set
+        return PyRangeSet(self.intervals + other.intervals)
 
     def intersection(self, other: 'RangeSet[int]') -> 'PyRangeSet':
         """Return the intersection of two RangeSets."""
