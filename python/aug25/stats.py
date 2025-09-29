@@ -105,13 +105,17 @@ class Stats:
         # General counts (manual inc()).
         if self.counts:
             print("--- Counts ---")
-            for key in sorted(self.counts):
-                print(f"  {key}: {self.counts[key]}")
+            rows = [(key, self.counts[key]) for key in sorted(self.counts)]
+            self._print_table(
+                headers=("key", "count"),
+                rows=rows,
+                formats=(str, self._fmt_int),
+                indent="  "
+            )
 
         # Timings with counts and per-hit averages.
         if self.times:
             print("\n--- Timings (ms) ---")
-            # Compute formatting widths
             rows = []
             for key in sorted(self.times):
                 total_ms = self.times[key] * 1000.0
@@ -122,7 +126,7 @@ class Stats:
             self._print_table(
                 headers=("key", "total_ms", "hits", "avg_ms"),
                 rows=rows,
-                formats=(str, self._fmt_ms, str, self._fmt_ms),
+                formats=(str, self._fmt_ms, self._fmt_int, self._fmt_ms),
                 indent="  "
             )
 
@@ -140,7 +144,7 @@ class Stats:
                 group_avg_ms = (group_total_ms / group_hits) if group_hits else 0.0
 
                 print(f"\nGroup: {g}")
-                print(f"  members: {len(members)} | group_hits: {group_hits} | group_total_ms: {self._fmt_ms(group_total_ms)} | per_group_hit: {self._fmt_ms(group_avg_ms)}")
+                print(f"  members: {len(members)} | group_hits: {self._fmt_int(group_hits)} | group_total_ms: {self._fmt_ms(group_total_ms)} | per_group_hit: {self._fmt_ms(group_avg_ms)}")
 
                 # For each member, show both per-hit and per-group-hit metrics.
                 rows = []
@@ -154,13 +158,18 @@ class Stats:
                 self._print_table(
                     headers=("member", "total_ms", "hits", "avg_ms", "per_group_hit_ms"),
                     rows=rows,
-                    formats=(str, self._fmt_ms, str, self._fmt_ms, self._fmt_ms),
+                    formats=(str, self._fmt_ms, self._fmt_int, self._fmt_ms, self._fmt_ms),
                     indent="    "
                 )
 
         print("-------------------------\n")
 
     # -------- Helpers --------
+
+    @staticmethod
+    def _fmt_int(value: int) -> str:
+        """Format integer with thousands separator."""
+        return f"{value:,}"
 
     @staticmethod
     def _fmt_ms(value: float) -> str:

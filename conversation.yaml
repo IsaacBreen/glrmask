@@ -177,13 +177,17 @@ local_system:
               # General counts (manual inc()).
               if self.counts:
                   print("--- Counts ---")
-                  for key in sorted(self.counts):
-                      print(f"  {key}: {self.counts[key]}")
+                  rows = [(key, self.counts[key]) for key in sorted(self.counts)]
+                  self._print_table(
+                      headers=("key", "count"),
+                      rows=rows,
+                      formats=(str, self._fmt_int),
+                      indent="  "
+                  )
 
               # Timings with counts and per-hit averages.
               if self.times:
                   print("\n--- Timings (ms) ---")
-                  # Compute formatting widths
                   rows = []
                   for key in sorted(self.times):
                       total_ms = self.times[key] * 1000.0
@@ -194,7 +198,7 @@ local_system:
                   self._print_table(
                       headers=("key", "total_ms", "hits", "avg_ms"),
                       rows=rows,
-                      formats=(str, self._fmt_ms, str, self._fmt_ms),
+                      formats=(str, self._fmt_ms, self._fmt_int, self._fmt_ms),
                       indent="  "
                   )
 
@@ -212,7 +216,7 @@ local_system:
                       group_avg_ms = (group_total_ms / group_hits) if group_hits else 0.0
 
                       print(f"\nGroup: {g}")
-                      print(f"  members: {len(members)} | group_hits: {group_hits} | group_total_ms: {self._fmt_ms(group_total_ms)} | per_group_hit: {self._fmt_ms(group_avg_ms)}")
+                      print(f"  members: {len(members)} | group_hits: {self._fmt_int(group_hits)} | group_total_ms: {self._fmt_ms(group_total_ms)} | per_group_hit: {self._fmt_ms(group_avg_ms)}")
 
                       # For each member, show both per-hit and per-group-hit metrics.
                       rows = []
@@ -226,13 +230,18 @@ local_system:
                       self._print_table(
                           headers=("member", "total_ms", "hits", "avg_ms", "per_group_hit_ms"),
                           rows=rows,
-                          formats=(str, self._fmt_ms, str, self._fmt_ms, self._fmt_ms),
+                          formats=(str, self._fmt_ms, self._fmt_int, self._fmt_ms, self._fmt_ms),
                           indent="    "
                       )
 
               print("-------------------------\n")
 
           # -------- Helpers --------
+
+          @staticmethod
+          def _fmt_int(value: int) -> str:
+              """Format integer with thousands separator."""
+              return f"{value:,}"
 
           @staticmethod
           def _fmt_ms(value: float) -> str:
@@ -327,7 +336,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -1010,5 +1019,482 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Implement timer hit counts and prefix-based
       time grouping/reporting"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/stats.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      RUST_LOG=debug SKIP_CPP_BUILD=1 CONSTRAINT_FILE="./.cache/test_vocabs/js_grammar_constraint js full.json.gz" CODE_FILE=./src/example_code2.js bash python/run_benchmarks.sh python/aug25/models/precompute3_model_pure_python.py
+      Benchmark results will be saved in: benchmark_results/2025-09-29_10-35-18
+      ---
+      Baseline Model: python/aug25/models/precompute3_model_pure_python.py
+      Other Models: (none)
+      Constraint File: ./.cache/test_vocabs/js_grammar_constraint js full.json.gz
+      Code: ./src/example_code2.js
+      ---
+      Skipping C++ extension build (SKIP_CPP_BUILD=1).
+      ---
+      Starting benchmark runs...
+
+      >>> Running benchmark for: precompute3_model_pure_python.py
+      python -m python.aug25.benchmark_runner --code ./src/example_code2.js --constraint-file ./.cache/test_vocabs/js_grammar_constraint js full.json.gz --model python/aug25/models/precompute3_model_pure_python.py --output benchmark_results/2025-09-29_10-35-18
+      --- Setting up benchmark environment ---
+      Loading pre-compiled grammar constraint from: .cache/test_vocabs/js_grammar_constraint js full.json.gz
+      Loading model from: python/aug25/models/precompute3_model_pure_python.py
+      Model loaded in 23.3987 seconds.
+      Loading and tokenizing code from: src/example_code2.js
+      Tokenized into 3620 tokens.
+
+      --- Running benchmark (3620 steps) ---
+      Benchmarking steps: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3620/3620 [00:40<00:00, 88.39it/s, commit]
+      --- Benchmark finished ---
+      --- Finalizing model ---
+
+      --- Final Stats Report from Model ---
+
+      --- Performance Stats ---
+      --- Counts ---
+        _process_token.calls: 11260
+        _process_token.final_heads: 2772
+        _process_token.initial_heads: 214256
+        _process_token.loop_iterations: 242244
+        _process_token.reduce.new_heads: 31796
+        _process_token.reduces: 27517
+        _process_token.shifts: 3703
+        _process_token.splits: 366
+        bitset.intersection.calls: 642214
+        bitset.union.calls: 134591
+        commit.tokenizer_states_in: 10567
+        commit.tokenizer_states_out: 10569
+        get_mask.final_mask.internal_indices: 5364692
+        get_mask.gss.at_node.accs.sum: 0
+        get_mask.initial.gss_heads.sum: 212553
+        get_mask.initial.unique_accs: 0
+        get_mask.initial_tokenizer_states: 10567
+        get_mask.initialize_acc.calls: 403538
+        get_mask.initialize_acc.disallowed_map_size.sum: 396433
+        get_mask.initialize_acc.disallowed_terminals_count.sum: 1263652
+        get_mask.initialize_acc.disallowed_terminals_inner_loops: 1263652
+        get_mask.initialize_acc.disallowed_terminals_loops: 396433
+        get_mask.intersect_and_prune.calls: 289586
+        get_mask.intersect_and_prune.memo_hits: 3687
+        get_mask.intersect_and_prune.memo_size.sum: 231870
+        get_mask.intersect_and_prune.pruned_accs: 5
+        get_mask.seeding.gss_loops: 10567
+        get_mask.traversal.depth_heap.pops: 240973
+        get_mask.traversal.dests_blocks.sum: 7953796
+        get_mask.traversal.dests_traversed: 7750268
+        get_mask.traversal.edge.gss_merges: 856
+        get_mask.traversal.edge.llm_bv_empty: 15946
+        get_mask.traversal.edge_blocks.sum: 301480
+        get_mask.traversal.edge_pop_val.0: 284524
+        get_mask.traversal.edge_pop_val.1: 899
+        get_mask.traversal.edge_pop_val.2: 65
+        get_mask.traversal.edge_pop_val.3: 46
+        get_mask.traversal.edges_traversed: 285534
+        get_mask.traversal.end_nodes: 3756
+        get_mask.traversal.enqueues: 231775
+        get_mask.traversal.max_depth_reached: 83260
+        get_mask.traversal.nodes_processed: 240973
+        get_mask.traversal.nodes_visited.unique: 240777
+        get_mask.zombie_check.skipped_nodes_no_overlap: 1993
+        get_mask.zombie_check.skipped_nodes_no_potential: 226288
+
+      --- Timings (ms) ---
+        key                                          | total_ms   | hits    | avg_ms
+        ---------------------------------------------+------------+---------+-------
+        _process_token.merge_many.final              | 70.259     | 11260   | 0.006 
+        _process_token.merge_many.heads              | 3,099.693  | 242244  | 0.013 
+        _process_token.reduce.pop                    | 111.848    | 27517   | 0.004 
+        _process_token.total                         | 5,053.283  | 11260   | 0.449 
+        bitset.intersection.time                     | 3,516.355  | 642214  | 0.005 
+        bitset.union.time                            | 612.554    | 134591  | 0.005 
+        commit                                       | 8,715.470  | 3620    | 2.408 
+        commit.build_tokenizer_maps                  | 78.831     | 3620    | 0.022 
+        commit.fuse                                  | 202.667    | 3620    | 0.056 
+        commit.main_loop                             | 5,203.993  | 3620    | 1.438 
+        commit.merge_states                          | 620.543    | 3620    | 0.171 
+        commit.prune_and_map_gss                     | 2,507.910  | 3620    | 0.693 
+        get_mask                                     | 28,992.946 | 3620    | 8.009 
+        get_mask.final_conversion                    | 10,955.176 | 3620    | 3.026 
+        get_mask.final_conversion.from_indices       | 8,555.966  | 3620    | 2.364 
+        get_mask.final_conversion.to_indices         | 62.646     | 3620    | 0.017 
+        get_mask.initial_stats                       | 21.375     | 3620    | 0.006 
+        get_mask.initialize_acc.difference           | 118.528    | 403538  | 0.000 
+        get_mask.initialize_acc.to_indices           | 226.333    | 396433  | 0.001 
+        get_mask.initialize_acc.total                | 968.155    | 403538  | 0.002 
+        get_mask.initialize_acc.union                | 12.581     | 3029    | 0.004 
+        get_mask.intersect_and_prune.intersection    | 3,142.698  | 285899  | 0.011 
+        get_mask.main_loop                           | 14,809.952 | 3620    | 4.091 
+        get_mask.main_loop.edge.apply_and_prune      | 4,570.678  | 285534  | 0.016 
+        get_mask.main_loop.edge.gss_merge            | 32.800     | 856     | 0.038 
+        get_mask.main_loop.edge.isolate_many         | 727.739    | 231775  | 0.003 
+        get_mask.main_loop.edge.peek_and_filter      | 4,371.237  | 7750268 | 0.001 
+        get_mask.main_loop.edge.popn                 | 98.370     | 285534  | 0.000 
+        get_mask.main_loop.end_node.final_mask_union | 9.749      | 3756    | 0.003 
+        get_mask.main_loop.end_node.reduce_acc       | 3.001      | 3756    | 0.001 
+        get_mask.seeding                             | 3,190.224  | 3620    | 0.881 
+        get_mask.seeding.gss.apply                   | 3,127.955  | 10567   | 0.296 
+        get_mask.seeding.gss.merge                   | 38.550     | 513     | 0.075 
+        get_mask.zombie_check                        | 1,101.178  | 240973  | 0.005 
+
+      --- Groups (prefix-based) ---
+
+      Group: commit
+        members: 6 | group_hits: 3620 | group_total_ms: 17,329.414 | per_group_hit: 4.787
+          member                      | total_ms  | hits | avg_ms | per_group_hit_ms
+          ----------------------------+-----------+------+--------+-----------------
+          commit                      | 8,715.470 | 3620 | 2.408  | 2.408           
+          commit.build_tokenizer_maps | 78.831    | 3620 | 0.022  | 0.022           
+          commit.fuse                 | 202.667   | 3620 | 0.056  | 0.056           
+          commit.main_loop            | 5,203.993 | 3620 | 1.438  | 1.438           
+          commit.merge_states         | 620.543   | 3620 | 0.171  | 0.171           
+          commit.prune_and_map_gss    | 2,507.910 | 3620 | 0.693  | 0.693           
+
+      Group: get_mask
+        members: 22 | group_hits: 3620 | group_total_ms: 85,137.836 | per_group_hit: 23.519
+          member                                       | total_ms   | hits    | avg_ms | per_group_hit_ms
+          ---------------------------------------------+------------+---------+--------+-----------------
+          get_mask                                     | 28,992.946 | 3620    | 8.009  | 8.009           
+          get_mask.final_conversion                    | 10,955.176 | 3620    | 3.026  | 3.026           
+          get_mask.final_conversion.from_indices       | 8,555.966  | 3620    | 2.364  | 2.364           
+          get_mask.final_conversion.to_indices         | 62.646     | 3620    | 0.017  | 0.017           
+          get_mask.initial_stats                       | 21.375     | 3620    | 0.006  | 0.006           
+          get_mask.initialize_acc.difference           | 118.528    | 403538  | 0.000  | 0.033           
+          get_mask.initialize_acc.to_indices           | 226.333    | 396433  | 0.001  | 0.063           
+          get_mask.initialize_acc.total                | 968.155    | 403538  | 0.002  | 0.267           
+          get_mask.initialize_acc.union                | 12.581     | 3029    | 0.004  | 0.003           
+          get_mask.intersect_and_prune.intersection    | 3,142.698  | 285899  | 0.011  | 0.868           
+          get_mask.main_loop                           | 14,809.952 | 3620    | 4.091  | 4.091           
+          get_mask.main_loop.edge.apply_and_prune      | 4,570.678  | 285534  | 0.016  | 1.263           
+          get_mask.main_loop.edge.gss_merge            | 32.800     | 856     | 0.038  | 0.009           
+          get_mask.main_loop.edge.isolate_many         | 727.739    | 231775  | 0.003  | 0.201           
+          get_mask.main_loop.edge.peek_and_filter      | 4,371.237  | 7750268 | 0.001  | 1.208           
+          get_mask.main_loop.edge.popn                 | 98.370     | 285534  | 0.000  | 0.027           
+          get_mask.main_loop.end_node.final_mask_union | 9.749      | 3756    | 0.003  | 0.003           
+          get_mask.main_loop.end_node.reduce_acc       | 3.001      | 3756    | 0.001  | 0.001           
+          get_mask.seeding                             | 3,190.224  | 3620    | 0.881  | 0.881           
+          get_mask.seeding.gss.apply                   | 3,127.955  | 10567   | 0.296  | 0.864           
+          get_mask.seeding.gss.merge                   | 38.550     | 513     | 0.075  | 0.011           
+          get_mask.zombie_check                        | 1,101.178  | 240973  | 0.005  | 0.304           
+      -------------------------
+
+
+      Benchmark results saved to: benchmark_results/2025-09-29_10-35-18/precompute3_model_pure_python_results.json
+      >>> Finished benchmark for: precompute3_model_pure_python.py
+
+      All benchmark runs completed.
+      ---
+      Analyzing results and generating plots...
+      python -m python.aug25.benchmark_analyzer benchmark_results/2025-09-29_10-35-18/precompute3_model_pure_python_results.json --baseline precompute3_model_pure_python --output-dir benchmark_results/2025-09-29_10-35-18/analysis
+      Selected baseline: precompute3_model_pure_python
+      --- Benchmark Summary ---
+                                    equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
+      model                                                                                                                                      
+      precompute3_model_pure_python          ✅                    0   3620     8.1765    4.7400    2.9390    5.0813   14.4946   16.7486   29.0637
+
+      Baseline: precompute3_model_pure_python
+      ✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch
+
+      Saving plots to benchmark_results/2025-09-29_10-35-18/analysis...
+      Saved linear scale plot to benchmark_results/2025-09-29_10-35-18/analysis/timings_per_token_linear.png
+      Saved log scale plot to benchmark_results/2025-09-29_10-35-18/analysis/timings_per_token_log.png
+      Saved box plot to benchmark_results/2025-09-29_10-35-18/analysis/timings_distribution_boxplot.png
+      Saved commit linear scale plot to benchmark_results/2025-09-29_10-35-18/analysis/commit_timings_per_token_linear.png
+      Saved commit log scale plot to benchmark_results/2025-09-29_10-35-18/analysis/commit_timings_per_token_log.png
+      Saved combined linear scale plot to benchmark_results/2025-09-29_10-35-18/analysis/combined_timings_per_token_linear.png
+      Saved combined log scale plot to benchmark_results/2025-09-29_10-35-18/analysis/combined_timings_per_token_log.png
+      Saved stacked area plot to benchmark_results/2025-09-29_10-35-18/analysis/timings_stacked_area.png
+      Saved total time linear scale plot to benchmark_results/2025-09-29_10-35-18/analysis/total_timings_per_token_linear.png
+      Saved total time log scale plot to benchmark_results/2025-09-29_10-35-18/analysis/total_timings_per_token_log.png
+
+      ---
+      Benchmark analysis complete.
+      Baseline: precompute3_model_pure_python
+      Summary printed above. Plots are saved in: benchmark_results/2025-09-29_10-35-18/analysis
+      Full JSON results are in: benchmark_results/2025-09-29_10-35-18
+    metadata:
+  - user: Make the counts table format consistent
+    metadata:
+  - assistant: |-
+      Of course. I'll make the "Counts" table formatting consistent with the others and apply thousand-separator formatting to all integer counts for better readability.
+
+      Here is the updated file:
+
+      ```python "python/aug25/stats.py"
+      import time
+      from collections import defaultdict
+      from typing import Dict, Iterable, List, Tuple
+
+
+      class Stats:
+          """A simple singleton class for collecting performance stats with grouping.
+
+          Features:
+          - Counters via inc(key).
+          - Timers via start(key)/stop(key) with duration totals AND hit counts.
+          - Optional groups defined by key prefixes, e.g. "get_mask" or "get_mask.seeding".
+            Each group reports:
+              * All timed members whose keys are equal to the group prefix or start with "prefix.".
+              * The group's "hit count": if there is a timer count for the exact group key, use it;
+                otherwise, use the maximum timer count among descendant members.
+              * For each member: total ms, hits, avg ms per hit, and ms per group hit.
+            Notes:
+              - Defining nested groups (e.g. "get_mask" and "get_mask.seeding") is supported.
+                A key may appear in multiple groups independently. Each group computes its own
+                per-group-hit normalization using its own group hit count.
+              - Group totals are simple sums of member totals and may double-count if some timers
+                are nested within others. These totals are provided to aid quick inspection rather
+                than to guarantee exclusivity.
+          """
+          _instance = None
+
+          def __init__(self):
+              # General counters (manual via inc()).
+              self.counts: Dict[str, int] = defaultdict(int)
+
+              # Timings: total duration (seconds) per key.
+              self.times: Dict[str, float] = defaultdict(float)
+
+              # Timings: hit counts per key (number of successful stop() calls).
+              self.time_counts: Dict[str, int] = defaultdict(int)
+
+              # Active timers: key -> start_time
+              self.timers: Dict[str, float] = {}
+
+              # Enabled flag lets callers noop the collection if needed.
+              self.enabled = True
+
+              # Optional group prefixes (strings).
+              self.groups = set()
+
+          @staticmethod
+          def get():
+              """Get the singleton instance."""
+              if Stats._instance is None:
+                  Stats._instance = Stats()
+              return Stats._instance
+
+          def reset(self):
+              """Clear all collected stats."""
+              self.counts.clear()
+              self.times.clear()
+              self.time_counts.clear()
+              self.timers.clear()
+
+          def inc(self, key: str, value: int = 1):
+              """Increment a counter."""
+              if not self.enabled:
+                  return
+              self.counts[key] += value
+
+          def start(self, key: str):
+              """Start a timer."""
+              if not self.enabled:
+                  return
+              self.timers[key] = time.perf_counter()
+
+          def stop(self, key: str):
+              """Stop a timer and record the duration and hit count."""
+              if not self.enabled:
+                  return
+              if key in self.timers:
+                  self.times[key] += time.perf_counter() - self.timers[key]
+                  self.time_counts[key] += 1
+                  del self.timers[key]
+
+          # -------- Group management --------
+
+          def add_group(self, prefix: str):
+              """Register a single group prefix."""
+              self.groups.add(prefix)
+
+          def set_groups(self, prefixes: Iterable[str]):
+              """Replace current group prefixes with the provided list/iterable."""
+              self.groups = set(prefixes)
+
+          def clear_groups(self):
+              """Clear configured groups."""
+              self.groups.clear()
+
+          # -------- Reporting --------
+
+          def report(self):
+              """Print a formatted report of all collected stats."""
+              if not self.enabled:
+                  return
+
+              print("\n--- Performance Stats ---")
+
+              # General counts (manual inc()).
+              if self.counts:
+                  print("--- Counts ---")
+                  rows = [(key, self.counts[key]) for key in sorted(self.counts)]
+                  self._print_table(
+                      headers=("key", "count"),
+                      rows=rows,
+                      formats=(str, self._fmt_int),
+                      indent="  "
+                  )
+
+              # Timings with counts and per-hit averages.
+              if self.times:
+                  print("\n--- Timings (ms) ---")
+                  rows = []
+                  for key in sorted(self.times):
+                      total_ms = self.times[key] * 1000.0
+                      hits = self.time_counts.get(key, 0)
+                      avg_ms = (total_ms / hits) if hits else 0.0
+                      rows.append((key, total_ms, hits, avg_ms))
+
+                  self._print_table(
+                      headers=("key", "total_ms", "hits", "avg_ms"),
+                      rows=rows,
+                      formats=(str, self._fmt_ms, self._fmt_int, self._fmt_ms),
+                      indent="  "
+                  )
+
+              # Grouped reporting (if any groups are defined)
+              if self.groups:
+                  print("\n--- Groups (prefix-based) ---")
+                  for g in sorted(self.groups):
+                      members = self._group_members(g)
+                      if not members:
+                          # No timed members under this prefix; skip for brevity
+                          continue
+
+                      group_hits = self._group_hits(g, members)
+                      group_total_ms = sum(self.times[k] for k in members) * 1000.0
+                      group_avg_ms = (group_total_ms / group_hits) if group_hits else 0.0
+
+                      print(f"\nGroup: {g}")
+                      print(f"  members: {len(members)} | group_hits: {self._fmt_int(group_hits)} | group_total_ms: {self._fmt_ms(group_total_ms)} | per_group_hit: {self._fmt_ms(group_avg_ms)}")
+
+                      # For each member, show both per-hit and per-group-hit metrics.
+                      rows = []
+                      for k in sorted(members):
+                          total_ms = self.times[k] * 1000.0
+                          hits = self.time_counts.get(k, 0)
+                          avg_ms = (total_ms / hits) if hits else 0.0
+                          per_group_ms = (total_ms / group_hits) if group_hits else 0.0
+                          rows.append((k, total_ms, hits, avg_ms, per_group_ms))
+
+                      self._print_table(
+                          headers=("member", "total_ms", "hits", "avg_ms", "per_group_hit_ms"),
+                          rows=rows,
+                          formats=(str, self._fmt_ms, self._fmt_int, self._fmt_ms, self._fmt_ms),
+                          indent="    "
+                      )
+
+              print("-------------------------\n")
+
+          # -------- Helpers --------
+
+          @staticmethod
+          def _fmt_int(value: int) -> str:
+              """Format integer with thousands separator."""
+              return f"{value:,}"
+
+          @staticmethod
+          def _fmt_ms(value: float) -> str:
+              """Format milliseconds with 3 decimals and thousands separator."""
+              return f"{value:,.3f}"
+
+          def _print_table(
+              self,
+              headers: Tuple[str, ...],
+              rows: List[Tuple],
+              formats: Tuple = None,
+              indent: str = "",
+          ):
+              """Print a simple aligned table.
+
+              headers: tuple of column names.
+              rows: list of tuples aligned with headers.
+              formats: tuple of formatter callables (len == len(headers)), applied to each cell.
+                       If None, str() is used.
+              indent: left indentation for each printed row.
+              """
+              if not rows:
+                  return
+
+              ncols = len(headers)
+              fmts = formats if formats is not None else tuple([str] * ncols)
+
+              # Convert cells to strings using provided formatters
+              str_rows: List[List[str]] = []
+              for r in rows:
+                  str_row = []
+                  for i in range(ncols):
+                      val = r[i]
+                      str_row.append(fmts[i](val) if callable(fmts[i]) else str(val))
+                  str_rows.append(str_row)
+
+              # Compute column widths
+              widths = [len(h) for h in headers]
+              for r in str_rows:
+                  for i, cell in enumerate(r):
+                      widths[i] = max(widths[i], len(cell))
+
+              # Print header
+              header_line = indent + " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+              sep_line = indent + "-+-".join("-" * widths[i] for i in range(ncols))
+              print(header_line)
+              print(sep_line)
+
+              # Print rows
+              for r in str_rows:
+                  print(indent + " | ".join(r[i].ljust(widths[i]) for i in range(ncols)))
+
+          def _group_members(self, prefix: str) -> List[str]:
+              """Return all timing keys that belong to the group 'prefix'.
+
+              A key belongs if key == prefix or key.startswith(prefix + ".").
+              """
+              pfx_dot = prefix + "."
+              members = [k for k in self.times.keys() if k == prefix or k.startswith(pfx_dot)]
+              return members
+
+          def _group_hits(self, prefix: str, members: List[str]) -> int:
+              """Determine the 'group hit count' for a group.
+
+              Rule:
+              - If the exact group key has a timing hit count, use that.
+              - Else use the maximum timing hit count among its members (descendants).
+              This approximates "how many times the group ran" even if the root itself
+              wasn't timed explicitly.
+              """
+              direct = self.time_counts.get(prefix, 0)
+              if direct > 0:
+                  return direct
+              max_desc = 0
+              for k in members:
+                  max_desc = max(max_desc, self.time_counts.get(k, 0))
+              return max_desc
+
+          def __enter__(self):
+              self.reset()
+              return self
+
+          def __exit__(self, exc_type, exc_val, exc_tb):
+              self.report()
+      ```
+    metadata:
+  - user: |
+      Identified target file 'python/aug25/stats.py' on fence open line 1:
+      ```python "python/aug25/stats.py"
+      Found 1 code blocks.
+      Matching against available files:
+        1: python/aug25/stats.py
+      --- Phase 1: Processing explicit file paths in fences ---
+      Assigned block to python/aug25/stats.py based on explicit fence path.
+      Remaining unassigned blocks: 0, Available files: 0
+      --- Phase 6: Applying changes to assigned files ---
+    metadata:
+  - user: 'Changes committed with message: "Refine report formatting: use tables for
+      counts and apply integer formatting with thousands separators"'
     metadata:
 ...
