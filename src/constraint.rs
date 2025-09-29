@@ -96,15 +96,15 @@ impl JSONConvertible for TerminalAllowanceCheckMode {
     }
 }
 
-pub type PrecomputeNode = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
+pub type PrecomputeNode1 = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode3 = Trie<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
 
-pub type PrecomputeNodeIndex = Trie2Index;
+pub type PrecomputeNode1Index = Trie2Index;
 pub type PrecomputeNode2Index = Trie2Index;
 pub type PrecomputeNode3Index = Trie2Index;
 
-pub type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNodeIndex>;
+pub type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode1Index>;
 pub type Precomputed2 = BTreeMap<TokenizerStateID, PrecomputeNode2Index>;
 pub type Precomputed3 = BTreeMap<TokenizerStateID, PrecomputeNode3Index>;
 
@@ -228,7 +228,7 @@ impl GrammarConstraint {
         assert_eq!(self.precomputed.len(), other.precomputed.len());
         for ((sid1, arc1), (sid2, arc2)) in self.precomputed.iter().zip(other.precomputed.iter()) {
             assert_eq!(sid1, sid2);
-            assert!(PrecomputeNode::are_graphs_equal(&self.trie1_god, *arc1, &other.trie1_god, *arc2));
+            assert!(PrecomputeNode1::are_graphs_equal(&self.trie1_god, *arc1, &other.trie1_god, *arc2));
         }
         assert_eq!(self.precomputed2.len(), other.precomputed2.len());
         for ((sid1, arc1), (sid2, arc2)) in self.precomputed2.iter().zip(other.precomputed2.iter()) {
@@ -564,7 +564,7 @@ impl GrammarConstraint {
             };
         }
 
-        let (precomputed, trie1_god) = Self::precompute(
+        let (precomputed, trie1_god) = Self::precompute1(
             &tokenizer,
             Some(&parser),
             Some(llm_vocab.clone()),
@@ -663,7 +663,7 @@ impl GrammarConstraint {
         gc
     }
 
-    pub fn precompute(
+    pub fn precompute1(
         tokenizer:        &Regex,
         parser:           Option<&GLRParser>,
         llm_vocab:        Option<Arc<LLMVocab>>,
@@ -673,7 +673,7 @@ impl GrammarConstraint {
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-    ) -> (BTreeMap<TokenizerStateID, PrecomputeNodeIndex>, Trie1GodWrapper) {
+    ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
         // return (BTreeMap::new(), Trie1GodWrapper::new()); // TEMP
 
         let mut helper = Precomputer::new(
@@ -711,7 +711,7 @@ impl GrammarConstraint {
 
     /// Build the "Trie 2" precomputation.
     pub fn precompute2(
-        precomputed: &BTreeMap<TokenizerStateID, PrecomputeNodeIndex>,
+        precomputed: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
         _trie1_god: &Trie1GodWrapper,
         _tokenizer: &Regex,
         _parser: Option<&GLRParser>,
@@ -728,7 +728,7 @@ impl GrammarConstraint {
     }
 
     pub fn precompute3(
-        precomputed: &BTreeMap<TokenizerStateID, PrecomputeNodeIndex>,
+        precomputed: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
         trie1_god: &Trie1GodWrapper,
         tokenizer: &Regex,
         parser: Option<&GLRParser>,
@@ -754,7 +754,7 @@ impl GrammarConstraint {
         let trie3_god = Trie3GodWrapper::new();
 
         let parser = parser.unwrap();
-        let mut initial_values_for_map: Vec<(PrecomputeNodeIndex, GLRParserState)> = Vec::new();
+        let mut initial_values_for_map: Vec<(PrecomputeNode1Index, GLRParserState)> = Vec::new();
 
         #[cfg(not(rustrover))]
         let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=false);
@@ -1037,7 +1037,7 @@ struct Precomputer<'r> {
     parser:           Option<&'r GLRParser>,
     llm_vocab:        Option<Arc<LLMVocab>>,
     vocab:            VocabPrefixTree,
-    roots:            BTreeMap<TokenizerStateID, PrecomputeNodeIndex>,
+    roots:            BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
     possible_matches: RefCell<BTreeMap<*const VocabPrefixTreeNode, BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>>,
     all_llm_tokens:   HybridBitset,
     merge_threshold:  usize,
@@ -1047,7 +1047,7 @@ struct Precomputer<'r> {
     ignore_terminal_id: Option<TerminalID>,
     // Map each precompute node to the set of LLM tokens that can pass through it.
     // tags:             RefCell<HashMap<PrecomputeNodeIndex, LLMTokenBV>>, // Removed
-    end_node:         PrecomputeNodeIndex,
+    end_node: PrecomputeNode1Index,
     trie1_god:        Trie1GodWrapper,
 }
 
@@ -1076,7 +1076,7 @@ impl<'r> Precomputer<'r> {
         for sid in tokenizer.iter_states() {
             roots.insert(
                 sid,
-                PrecomputeNodeIndex::new(trie1_god.insert(PrecomputeNode::new(PrecomputedNodeContents::root(internal_max_llm_token)))),
+                PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::root(internal_max_llm_token)))),
             );
         }
 
@@ -1092,7 +1092,7 @@ impl<'r> Precomputer<'r> {
             pb.set_draw_target(ProgressDrawTarget::hidden());
         }
 
-        let end_node = PrecomputeNode2Index::new(trie1_god.insert(PrecomputeNode::new(PrecomputedNodeContents::leaf())));
+        let end_node = PrecomputeNode2Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::leaf())));
 
         Self {
             tokenizer,
@@ -1152,7 +1152,7 @@ impl<'r> Precomputer<'r> {
     fn run_dfs(&mut self) {
         let mut assoc: BTreeMap<
             TokenizerStateID,
-            OrderedHashSet<PrecomputeNodeIndex>,
+            OrderedHashSet<PrecomputeNode1Index>,
         > = BTreeMap::new();
 
         for (sid, arc) in &self.roots {
@@ -1223,13 +1223,13 @@ impl<'r> Precomputer<'r> {
     fn simplify_none_edges(&mut self) {
         crate::debug!(2, "Simplifying None edges (shortcut predecessors to successors)...");
 
-        let root_node_ptrs: HashSet<PrecomputeNodeIndex> = self.roots.values().cloned().collect();
+        let root_node_ptrs: HashSet<PrecomputeNode1Index> = self.roots.values().cloned().collect();
 
         // 1) Collect all unique nodes reachable from any root
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
         let all_nodes = Trie::all_nodes(&self.trie1_god, &roots_vec);
         // Map pointer -> Arc for quick retrieval
-        let mut arc_by_ptr: HashMap<PrecomputeNodeIndex, PrecomputeNodeIndex> = HashMap::new();
+        let mut arc_by_ptr: HashMap<PrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
         for n in &all_nodes {
             arc_by_ptr.insert(*n, n.clone());
         }
@@ -1239,14 +1239,14 @@ impl<'r> Precomputer<'r> {
         //    - none_edges_from[B] = vec of (C, bv2) for edges B -(None; bv2)-> C
         //    - none_union[B] = union of all bv2 for None edges from B
         let mut incoming: HashMap<
-            PrecomputeNodeIndex,
-            Vec<(PrecomputeNodeIndex, Option<GrammarTokenID>, LLMTokenBV)>
+            PrecomputeNode1Index,
+            Vec<(PrecomputeNode1Index, Option<GrammarTokenID>, LLMTokenBV)>
         > = HashMap::new();
         let mut none_edges_from: HashMap<
-            PrecomputeNodeIndex,
-            Vec<(PrecomputeNodeIndex, LLMTokenBV)>
+            PrecomputeNode1Index,
+            Vec<(PrecomputeNode1Index, LLMTokenBV)>
         > = HashMap::new();
-        let mut none_union: HashMap<PrecomputeNodeIndex, LLMTokenBV> = HashMap::new();
+        let mut none_union: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
 
         for src_arc in &all_nodes {
             let src_ptr = src_arc;
@@ -1364,7 +1364,7 @@ impl<'r> Precomputer<'r> {
             .map(|root_arc| (root_arc.clone(), None))
             .collect();
 
-        type NodePtr = *const PrecomputeNode;
+        type NodePtr = *const PrecomputeNode1;
         let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>> = HashMap::new();
 
         Trie::special_map(
@@ -1438,7 +1438,7 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Pruning dead paths from precomputed trie.");
 
         // A cache of nodes to the set of "live" LLM tokens reachable from them.
-        let mut live_tokens_cache: HashMap<PrecomputeNodeIndex, LLMTokenBV> = HashMap::new();
+        let mut live_tokens_cache: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
 
         // For each root, run the pruning process. This will modify the trie in-place.
         // We do not remove the root from the map even if it becomes "dead" (has no live paths).
@@ -1462,8 +1462,8 @@ impl<'r> Precomputer<'r> {
     /// Returns a `LLMTokenBV` of all live tokens reachable from `node_wrapper`.
     fn get_live_tokens_and_prune(
         &self,
-        node_wrapper: PrecomputeNodeIndex,
-        live_tokens_cache: &mut HashMap<PrecomputeNodeIndex, LLMTokenBV>,
+        node_wrapper: PrecomputeNode1Index,
+        live_tokens_cache: &mut HashMap<PrecomputeNode1Index, LLMTokenBV>,
     ) -> LLMTokenBV {
         // If we've already computed the live tokens for this node, return the cached result.
         if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
@@ -1477,7 +1477,7 @@ impl<'r> Precomputer<'r> {
         let node_arc = node_wrapper.as_arc().clone();
 
         // We must collect children before recursing to avoid holding the lock.
-        let children_to_check: Vec<PrecomputeNodeIndex> = {
+        let children_to_check: Vec<PrecomputeNode1Index> = {
             let node_guard = node_arc.read(&self.trie1_god).unwrap();
             node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
         };
@@ -1554,10 +1554,10 @@ impl<'r> Precomputer<'r> {
         // 2. Build an incoming edge map for every node.
         // incoming_map: D_ptr -> (gtid -> Vec<(S_ptr, bv)>)
         let mut incoming_map: HashMap<
-            PrecomputeNodeIndex, // Dst node ptr
+            PrecomputeNode1Index, // Dst node ptr
             HashMap<
                 GrammarTokenID, // Edge key 'gtid'
-                Vec<(PrecomputeNodeIndex, LLMTokenBV)>, // List of (Src node ptr, edge bv)
+                Vec<(PrecomputeNode1Index, LLMTokenBV)>, // List of (Src node ptr, edge bv)
             >,
         > = HashMap::new();
 
@@ -1583,7 +1583,7 @@ impl<'r> Precomputer<'r> {
                     let dest_arc = arc_map.get(&dest_ptr).unwrap().clone();
 
                     // a. Create a new intermediate node `I`.
-                    let intermediate_node = PrecomputeNodeIndex::new(self.trie1_god.insert(PrecomputeNode::new(PrecomputedNodeContents::internal())));
+                    let intermediate_node = PrecomputeNode1Index::new(self.trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
 
                     // b. Add edge I --(gtid)--> D
                     let mut union_bv = LLMTokenBV::zeros();
@@ -1627,9 +1627,9 @@ impl<'r> Precomputer<'r> {
     fn merge_nodes(&mut self) {
         crate::debug!(2, "Merging identical subtrees in precomputed trie.");
         // A map from a node's content to its canonical Arc.
-        let mut canonical_nodes: HashMap<PrecomputeNode, PrecomputeNodeIndex> = HashMap::new();
+        let mut canonical_nodes: HashMap<PrecomputeNode1, PrecomputeNode1Index> = HashMap::new();
         // A map from a node's pointer to its canonicalized Arc, to avoid re-processing.
-        let mut visited: HashMap<PrecomputeNodeIndex, PrecomputeNodeIndex> = HashMap::new();
+        let mut visited: HashMap<PrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
 
         // We need to process all roots.
         let mut new_roots = BTreeMap::new();
@@ -1643,10 +1643,10 @@ impl<'r> Precomputer<'r> {
 
     fn deduplicate_recursive(
         &self,
-        node_arc: PrecomputeNodeIndex,
-        canonical_nodes: &mut HashMap<PrecomputeNode, PrecomputeNodeIndex>,
-        visited: &mut HashMap<PrecomputeNodeIndex, PrecomputeNodeIndex>,
-    ) -> PrecomputeNodeIndex {
+        node_arc: PrecomputeNode1Index,
+        canonical_nodes: &mut HashMap<PrecomputeNode1, PrecomputeNode1Index>,
+        visited: &mut HashMap<PrecomputeNode1Index, PrecomputeNode1Index>,
+    ) -> PrecomputeNode1Index {
         let node_ptr = node_arc;
         if let Some(canonical_arc) = visited.get(&node_ptr) {
             return canonical_arc.clone();
@@ -1707,7 +1707,7 @@ impl<'r> Precomputer<'r> {
         token_name_map: &BiBTreeMap<Terminal, usize>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
         internal_max_llm_token: usize,
-    ) -> (BTreeMap<TokenizerStateID, PrecomputeNodeIndex>, Trie1GodWrapper) {
+    ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
 
         calculate_final_stats(&self.roots, &mut self.stats, &self.trie1_god);
         print_precompute_stats(&self.stats, token_name_map, &self.trie1_god);
@@ -1718,14 +1718,14 @@ impl<'r> Precomputer<'r> {
     fn dfs(
         &self,
         vocab_node: &VocabPrefixTreeNode,
-        assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNodeIndex>>,
+        assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode1Index>>,
     ) {
         self.pb.inc(1);
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let mut work_queue: BTreeMap<
                 usize,
-                BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNodeIndex>>,
+                BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode1Index>>,
             > = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
 
@@ -2122,7 +2122,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         let step_counts = Arc::new(RwLock::new(BTreeMap::<TerminalID, StepCount>::new()));
 
-        let mut initial_values_for_map: Vec<(PrecomputeNodeIndex, GLRParserState<'a>)> = Vec::new();
+        let mut initial_values_for_map: Vec<(PrecomputeNode1Index, GLRParserState<'a>)> = Vec::new();
         for (tokenizer_state_id, glr_state) in &self.state {
             // crate::debug!(4, "Initializing GSS for state {}", tokenizer_state_id.0);
             // Ensure the GLR state's GSS stack is not empty before proceeding

@@ -4,13 +4,13 @@ use range_set_blaze::RangeSetBlaze;
 use ordered_hash_map::OrderedHashMap;
 use kdam::tqdm;
 use crate::profiler::PROGRESS_BAR_ENABLED;
-use crate::constraint::{StageVocab, PrecomputeNodeIndex, Trie1GodWrapper};
+use crate::constraint::{StageVocab, PrecomputeNode1Index, Trie1GodWrapper};
 use crate::datastructures::EntryApi;
 use crate::datastructures::gss::LLMTokenBV;
 use crate::datastructures::trie::Trie;
 
 fn count_total_ranges_trie1(
-    all_nodes: &[PrecomputeNodeIndex],
+    all_nodes: &[PrecomputeNode1Index],
     trie1_god: &Trie1GodWrapper,
 ) -> usize {
     let mut count = 0;
@@ -101,7 +101,7 @@ fn remap_llm_bv_permutation(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, us
 ///
 /// Applies a many-to-one id mapping and merges masks accordingly.
 pub fn merge_equivalent_llm_tokens_trie1(
-    roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNodeIndex>,
+    roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode1Index>,
     trie1_god: &Trie1GodWrapper,
     stage_vocab: &mut StageVocab,
 ) {
@@ -244,9 +244,9 @@ pub fn merge_equivalent_llm_tokens_trie1(
 
         // Remap children edge masks
         let old_children = std::mem::take(w.children_mut());
-        let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
+        let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
         for (ek, dm) in old_children {
-            let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
+            let mut new_dm: OrderedHashMap<PrecomputeNode1Index, LLMTokenBV> = OrderedHashMap::new();
             for (dst, bv) in dm {
                 let bv_ptr = Arc::as_ptr(&bv.inner);
                 let mapped = if bv.is_empty() {
@@ -290,7 +290,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
 /// Reorder internal LLM tokens (permutation) to reduce ranges in masks by clustering co-occurring tokens.
 /// Conservative heuristic: sort by (descending frequency, then by id).
 pub fn reorder_llm_tokens_for_range_minimization_trie1(
-    roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNodeIndex>,
+    roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode1Index>,
     trie1_god: &Trie1GodWrapper,
     stage_vocab: &mut StageVocab,
 ) {
@@ -343,9 +343,9 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
                 .or_insert_with_key(|bv| remap_llm_bv_permutation(bv, &old_to_new, max_tok))
                 .clone()
         };
-        let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
+        let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
         for (ek, dm) in r.children() {
-            let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
+            let mut new_dm: OrderedHashMap<PrecomputeNode1Index, LLMTokenBV> = OrderedHashMap::new();
             for (dst, bv) in dm {
                 let mapped = memo.entry(bv.clone())
                     .or_insert_with_key(|bv| remap_llm_bv_permutation(bv, &old_to_new, max_tok))
@@ -391,22 +391,22 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
 /// - Coalesce duplicate destination entries (union LLMBV) for same child under a terminal key.
 /// - Remove empty masks.
 pub fn optimize_state_masks_and_edges_trie1(
-    roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNodeIndex>,
+    roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode1Index>,
     trie1_god: &Trie1GodWrapper,
 ) {
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
     for n in &all_nodes {
         let mut w = n.write(trie1_god).expect("write");
-        let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV>> = BTreeMap::new();
+        let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
         for (ek, dm) in w.children().clone() {
             // Union masks for same dst
-            let mut coalesced: HashMap<PrecomputeNodeIndex, LLMTokenBV> = HashMap::new();
+            let mut coalesced: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
             for (dst, bv) in dm {
                 let entry = coalesced.entry(dst).or_insert_with(LLMTokenBV::zeros);
                 *entry |= &bv;
             }
-            let mut new_dm: OrderedHashMap<PrecomputeNodeIndex, LLMTokenBV> = OrderedHashMap::new();
+            let mut new_dm: OrderedHashMap<PrecomputeNode1Index, LLMTokenBV> = OrderedHashMap::new();
             for (dst, bv) in coalesced {
                 if !bv.is_empty() {
                     new_dm.insert(dst, bv);

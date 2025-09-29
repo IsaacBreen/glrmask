@@ -446,7 +446,7 @@ fn test_precompute_for_python_name_token() {
     }
 
 
-    let _precomputed = GrammarConstraint::precompute(
+    let _precomputed = GrammarConstraint::precompute1(
         &tokenizer,
         None,
         None,
@@ -480,7 +480,7 @@ fn test_precompute_explosion() {
          internal_llm_token_map_for_precompute.insert(token.clone(), LLMTokenID(i));
     }
 
-    let _precomputed = GrammarConstraint::precompute(
+    let _precomputed = GrammarConstraint::precompute1(
         &tokenizer,
         None,
         None,
