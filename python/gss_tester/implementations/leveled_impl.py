@@ -746,22 +746,28 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
         return LeveledGSS(merge_upper(self.inner, other.inner))
 
-    def fuse(self, levels: Optional[int] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
-        if levels is not None and levels <= 0:
+    def fuse(self, levels: Optional[int | str] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
+        if isinstance(levels, int) and levels <= 0:
             return self
         if memo is None:
             memo = {}
 
-        def fuse_lower_node(node: Lower[T], remain: Optional[int]) -> Lower[T]:
+        def fuse_lower_node(node: Lower[T], remain: Optional[int | str]) -> Lower[T]:
+            if remain == "to_interface":
+                return node
             key = ('L', id(node), remain)
             cached = memo.get(key)
             if cached is not None:
                 return cached
-            if remain == 0:
+            if isinstance(remain, int) and remain == 0:
                 memo[key] = node
                 return node
 
-            next_remain: Optional[int] = None if remain is None else remain - 1
+            next_remain: Optional[int | str]
+            if isinstance(remain, int):
+                next_remain = None if remain is None else remain - 1
+            else:
+                next_remain = remain
 
             has_multi_depth_slots = any(len(kids) > 1 for kids in node.children.values())
 
@@ -789,16 +795,20 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             memo[key] = res
             return res
 
-        def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int]) -> Upper[T, Acc]:
+        def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int | str]) -> Upper[T, Acc]:
             key = ('U', id(node), remain)
             cached = memo.get(key)
             if cached is not None:
                 return cached
-            if remain == 0:
+            if isinstance(remain, int) and remain == 0:
                 memo[key] = node
                 return node
 
-            next_remain: Optional[int] = None if remain is None else remain - 1
+            next_remain: Optional[int | str]
+            if isinstance(remain, int):
+                next_remain = None if remain is None else remain - 1
+            else:
+                next_remain = remain
 
             if isinstance(node, Interface):
                 has_multi_depth_slots = any(len(kids) > 1 for kids in node.children.values())
