@@ -185,6 +185,29 @@ class BitsetRangeSet(RangeSet[int]):
             # Generic path
             return other.issubset(self)
 
+    def issubset(self, other: RangeSet[int]) -> bool:
+        """Return True if self is a subset of other."""
+        if not isinstance(other, RangeSet):
+            return NotImplemented
+        
+        if isinstance(other, BitsetRangeSet):
+            len_a = len(self._bitset)
+            len_b = len(other._bitset)
+            if len_a > len_b:
+                # Check if the extra part of self's bitset is all zeros
+                for i in range(len_b, len_a):
+                    if self._bitset[i] != 0:
+                        return False
+            
+            limit = min(len_a, len_b)
+            for i in range(limit):
+                # Check if all bits set in self are also set in other
+                if (self._bitset[i] & other._bitset[i]) != self._bitset[i]:
+                    return False
+            return True
+        else:
+            return other.issuperset(self)
+
     def isdisjoint(self, other: RangeSet[int]) -> bool:
         """Return True if self has no elements in common with other."""
         if not isinstance(other, RangeSet):

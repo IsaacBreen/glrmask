@@ -215,6 +215,57 @@ class PyRangeSet(RangeSet[int]):
                 j += 1
         return True
 
+    def issubset(self, other: 'RangeSet[int]') -> bool:
+        """Return True if self is a subset of other."""
+        if not isinstance(other, RangeSet):
+            return NotImplemented
+        
+        other_intervals = other.intervals
+        
+        i = 0  # pointer for self.intervals
+        j = 0  # pointer for other.intervals
+        
+        while i < len(self.intervals):
+            s1, e1 = self.intervals[i]
+            
+            # Find the first interval in other that could cover s1
+            while j < len(other_intervals) and other_intervals[j][1] < s1:
+                j += 1
+            
+            if j == len(other_intervals):
+                # No more intervals in other, but we still have intervals in self
+                return False
+            
+            s2, e2 = other_intervals[j]
+            
+            # Check if s1 is covered
+            if s1 < s2:
+                return False # Gap, s1 is not in any interval of other
+            
+            # s1 is covered. Now check up to e1.
+            current_s = s1
+            while current_s <= e1:
+                if current_s > e2:
+                    j += 1
+                    if j == len(other_intervals): return False
+                    s2, e2 = other_intervals[j]
+                    if current_s < s2: return False # Gap
+                    continue
+
+                covered_until = e2
+                
+                if e1 <= covered_until:
+                    current_s = e1 + 1 # break inner loop
+                else:
+                    current_s = covered_until + 1
+                    j += 1
+                    if j == len(other_intervals): return False
+                    s2_next, e2_next = other_intervals[j]
+                    if s2_next != current_s: return False # Gap
+                    s2, e2 = s2_next, e2_next
+            i += 1
+        return True
+
     def difference(self, other: 'RangeSet[int]') -> 'PyRangeSet':
         """Return the set difference self \\ other as a PyRangeSet."""
         if self.is_empty():

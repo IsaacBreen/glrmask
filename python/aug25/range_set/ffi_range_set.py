@@ -113,6 +113,16 @@ class FFIRangeSet(RangeSet[int]):
         return res
 
     @time_method
+    def issubset(self, other: RangeSet[int]) -> bool:
+        """Return True if self is a subset of other."""
+        if not isinstance(other, FFIRangeSet):
+            raise TypeError("other must be a FFIRangeSet")
+        # Assumes the FFI object has a .is_subset() method
+        res = self._bitset.is_subset(other._bitset)
+        record_metric('FFIRangeSet.issubset.true' if res else 'FFIRangeSet.issubset.false', 1)
+        return res
+
+    @time_method
     def isdisjoint(self, other: RangeSet[int]) -> bool:
         """Return True if self has no elements in common with other."""
         if not isinstance(other, FFIRangeSet):

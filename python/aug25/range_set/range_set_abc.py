@@ -81,9 +81,10 @@ class RangeSet(ABC, Generic[T]):
             return self
         return other.difference(self)
 
+    @abstractmethod
     def issubset(self, other: "RangeSet[T]") -> bool:
         """Return True if self is a subset of other."""
-        return self.difference(other).is_empty()
+        raise NotImplementedError
 
     def issuperset(self, other: "RangeSet[T]") -> bool:
         """Return True if self is a superset of other."""

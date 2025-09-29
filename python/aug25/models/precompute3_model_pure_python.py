@@ -689,11 +689,11 @@ class Model(GraphProvider):
             a_node = arena.get(node)
             node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
             # We only care about tokens that are not yet in the final mask.
-            potential_new_tokens = node_llm_bv_union.difference(final_mask)
-            if potential_new_tokens.is_empty():
+            if node_llm_bv_union.issubset(final_mask):
                 stats.inc('get_mask.zombie_check.skipped_nodes_no_potential')
                 stats.stop('get_mask.zombie_check')
                 continue
+            potential_new_tokens = node_llm_bv_union.difference(final_mask)
 
             gss_mask_acc = gss_node.reduce_acc()
             if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
@@ -708,10 +708,10 @@ class Model(GraphProvider):
             stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
             stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
             for (pop, llm_bv), dests in edges:
-                llm_bv = llm_bv.difference(final_mask)
-                if llm_bv.is_empty():
+                if llm_bv.issubset(final_mask):
                     stats.inc('get_mask.traversal.edge.llm_bv_empty')
                     continue
+                llm_bv = llm_bv.difference(final_mask)
 
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')

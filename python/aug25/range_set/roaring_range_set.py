@@ -127,6 +127,21 @@ class RoaringRangeSet(RangeSet[int]):
                 other_rb.add_range(start, end + 1)
             return self._rb.issuperset(other_rb)
 
+    def issubset(self, other: RangeSet[int]) -> bool:
+        """Return True if self is a subset of other."""
+        if not isinstance(other, RangeSet):
+            return NotImplemented
+        
+        if isinstance(other, RoaringRangeSet):
+            return self._rb.issubset(other._rb)
+        else:
+            other_rb = RoaringBitmap()
+            for start, end in other.intervals:
+                if start < 0:
+                    raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                other_rb.add_range(start, end + 1)
+            return self._rb.issubset(other_rb)
+
     def isdisjoint(self, other: RangeSet[int]) -> bool:
         """Return True if self has no elements in common with other."""
         if not isinstance(other, RangeSet):
