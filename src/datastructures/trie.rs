@@ -151,7 +151,7 @@ pub struct Trie2WriteGuard<'a, EK: Ord, EV, T> {
     index: usize,
 }
 
-impl<'a, EK: Ord, EV, T> Deref for Trie2WriteGuard<'a, EK, EV, T> {
+impl<'a, EK: Ord, EV, T> Deref for Trie2WriteGuard<'a> {
     type Target = Trie<EK, EV, T>;
     fn deref(&self) -> &Self::Target {
         self.guard.values[self.index]
