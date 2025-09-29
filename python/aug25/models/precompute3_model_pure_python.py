@@ -846,8 +846,8 @@ class Model(GraphProvider):
                         continue
 
                     d: NodeID = int(dest_idx)
-                    if self._is_zombie_path(child_gss, arena.get(d).llm_bv_union if arena.get(d) else RangeSet.empty(), final_mask, 'dest'):
-                        continue
+                    # if self._is_zombie_path(child_gss, arena.get(d).llm_bv_union if arena.get(d) else RangeSet.empty(), final_mask, 'dest'):
+                    #     continue
 
                     if d in values:
                         stats.inc('get_mask.traversal.edge.gss_merges')
