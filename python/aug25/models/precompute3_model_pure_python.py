@@ -171,7 +171,7 @@ class Model(GraphProvider):
 
     # Token/Terminal mapping fields
     id_to_token: Dict[int, bytes]
-    internal_to_original_map: Dict[int, Set[int]]
+    internal_to_original_map: Dict[int, RangeSet]
     all_internal_llm_tokens_bitset: LLMTokenSet
     all_terminals_bitset: TerminalIdSet
     ignore_terminal_id: Optional[int]
@@ -310,13 +310,13 @@ class Model(GraphProvider):
         if vocab:
             internal_to_original_map_raw = dict(vocab['internal_to_original'])
             internal_to_original_map = {
-                int(k): set(v) for k, v in internal_to_original_map_raw.items()
+                int(k): RangeSet.from_indices(v) for k, v in internal_to_original_map_raw.items()
             }
             internal_max = vocab['internal_max_llm_token']
             all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, internal_max)])
         else:
             internal_to_original_map_raw = constraint.internal_to_original_map()
-            internal_to_original_map = {k: {v} for k, v in internal_to_original_map_raw.items()}
+            internal_to_original_map = {k: RangeSet.from_indices([v]) for k, v in internal_to_original_map_raw.items()}
             all_internal = constraint.all_internal_llm_tokens_bitset()
             all_internal_llm_tokens_bitset = RangeSet.from_ranges(all_internal.to_ranges())
 
@@ -794,20 +794,25 @@ class Model(GraphProvider):
         stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
 
         stats.start('get_mask.final_conversion')
-        # Convert internal mask back to original IDs
-        original_indices: List[int] = []
-        stats.start('get_mask.final_conversion.to_indices')
-        final_indices = final_mask.to_indices()
-        stats.stop('get_mask.final_conversion.to_indices')
+        # Convert internal mask back to original IDs by collecting all original token intervals
+        # and creating a new RangeSet, which will normalize (sort and merge) them.
+        # This is much more efficient than collecting individual indices and sorting a huge list.
+        original_intervals: List[Tuple[int, int]] = []
+        stats.start('get_mask.final_conversion.collect_intervals')
+        for start, end in final_mask.intervals:
+            for i in range(start, end + 1):
+                # Mapped RangeSet for the internal token i
+                mapped_rs = self.internal_to_original_map.get(i)
+                if mapped_rs:
+                    original_intervals.extend(mapped_rs.intervals)
+        stats.stop('get_mask.final_conversion.collect_intervals')
 
-        stats.inc('get_mask.final_mask.internal_indices', len(final_indices))
-        for i in final_indices:
-            if i in self.internal_to_original_map:
-                original_indices.extend(list(self.internal_to_original_map[i]))
+        stats.inc('get_mask.final_mask.internal_indices', len(final_mask))
+        stats.inc('get_mask.final_mask.original_intervals_collected', len(original_intervals))
 
-        stats.start('get_mask.final_conversion.from_indices')
-        result = RangeSet.from_indices(original_indices)
-        stats.stop('get_mask.final_conversion.from_indices')
+        stats.start('get_mask.final_conversion.from_intervals')
+        result = RangeSet(original_intervals)
+        stats.stop('get_mask.final_conversion.from_intervals')
 
         stats.stop('get_mask.final_conversion')
 
