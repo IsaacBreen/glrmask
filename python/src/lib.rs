@@ -549,6 +549,22 @@ impl PyGrammarConstraint {
     }
 }
 
+#[pyclass(name = "HybridBitsetIterator")]
+struct PyHybridBitsetIterator {
+    inner: Box<dyn Iterator<Item = usize> + Send>,
+}
+
+#[pymethods]
+impl PyHybridBitsetIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<usize> {
+        slf.inner.next()
+    }
+}
+
 #[pyclass(name = "Bitset")]
 #[derive(Clone)]
 pub struct PyHybridBitset {
@@ -594,13 +610,15 @@ impl PyHybridBitset {
         self.inner.iter_ranges().collect()
     }
 
-    fn __iter__(&self) -> impl IntoIterator<Item = usize> {
-        self.inner.clone()
+    fn __iter__(&self) -> PyHybridBitsetIterator {
+        PyHybridBitsetIterator {
+            inner: Box::new(self.inner.clone().into_iter()),
+        }
     }
 
     fn iter_ranges<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyIterator>> {
         let ranges: Vec<(usize, usize)> = self.inner.iter_ranges().collect();
-        pyo3::types::PyIterator::from_iter(ranges.into_iter(), py)
+        pyo3::types::PyList::new_bound(py, &ranges).iter()
     }
 
     fn contains(&self, idx: usize) -> bool {
@@ -1114,6 +1132,7 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGLRParser>()?;
     m.add_class::<PyGrammarConstraint>()?;
     m.add_class::<PyGrammarConstraintState>()?;
+    m.add_class::<PyHybridBitsetIterator>()?;
     m.add_class::<PyHybridBitset>()?;
     m.add_class::<PyHybridL2Bitset>()?;
     m.add_class::<PyGSSNode>()?;
