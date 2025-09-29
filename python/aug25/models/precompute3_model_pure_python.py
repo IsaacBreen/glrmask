@@ -605,7 +605,10 @@ class Model(GraphProvider):
 
         stats.start('get_mask.seeding')
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+        acc_memo = {}
         def initialize_acc(acc: PyAcc) -> PyAcc:
+            if id(acc) in acc_memo:
+                return acc_memo[id(acc)]
             p = 'get_mask.seeding.initialize_acc'
             stats.inc(f'{p}.calls')
             stats.start(f'{p}.total')
@@ -636,10 +639,12 @@ class Model(GraphProvider):
             stats.stop(f'{p}.difference')
 
             stats.stop(f'{p}.total')
-            return PyAcc(
+            result = PyAcc(
                 terminals_union={},  # consume
                 llm_mask=allowed_mask,
             )
+            acc_memo[id(acc)] = result
+            return result
 
         cache = {}
         for sid, gss in state_map.items():
