@@ -794,25 +794,19 @@ class Model(GraphProvider):
         stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
 
         stats.start('get_mask.final_conversion')
-        # Convert internal mask back to original IDs by collecting all original token intervals
-        # and creating a new RangeSet, which will normalize (sort and merge) them.
-        # This is much more efficient than collecting individual indices and sorting a huge list.
-        original_intervals: List[Tuple[int, int]] = []
-        stats.start('get_mask.final_conversion.collect_intervals')
+        # Convert internal mask back to original IDs by uniting the RangeSet for each
+        # allowed internal token.
+        result = RangeSet.empty()
+        stats.start('get_mask.final_conversion.union_loop')
         for start, end in final_mask.intervals:
             for i in range(start, end + 1):
                 # Mapped RangeSet for the internal token i
                 mapped_rs = self.internal_to_original_map.get(i)
                 if mapped_rs:
-                    original_intervals.extend(mapped_rs.intervals)
-        stats.stop('get_mask.final_conversion.collect_intervals')
+                    result = result.union(mapped_rs)
+        stats.stop('get_mask.final_conversion.union_loop')
 
         stats.inc('get_mask.final_mask.internal_indices', len(final_mask))
-        stats.inc('get_mask.final_mask.original_intervals_collected', len(original_intervals))
-
-        stats.start('get_mask.final_conversion.from_intervals')
-        result = RangeSet(original_intervals)
-        stats.stop('get_mask.final_conversion.from_intervals')
 
         stats.stop('get_mask.final_conversion')
 
