@@ -147,28 +147,30 @@ class Stats:
         # This phase gathers all data and rows for all tables before printing.
 
         # 1. Prepare combined stats data  
-        stats_headers = ("key", "counter", "timer_hits", "total_ms", "avg_ms")
-        stats_formats = (str, self._fmt_int_or_blank, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
+        stats_headers = ("key", "hits", "total_ms", "avg_ms")
+        stats_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
         stats_rows = []
         all_keys = self.counts.keys() | self.times.keys()
         if all_keys:
             sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
             for key in sorted_keys:
-                counter = self.counts.get(key)
+                # 'hits' is timer hits if available, otherwise counter value.
+                hits = self.time_counts.get(key)
+                if hits is None:
+                    hits = self.counts.get(key)
 
                 total_ms = None
-                timer_hits = None
                 avg_ms = None
                 if key in self.times:
                     total_ms = self.times[key] * 1000.0
-                    timer_hits = self.time_counts.get(key, 0)
-                    avg_ms = (total_ms / timer_hits) if timer_hits else 0.0
+                    timer_hits_for_avg = self.time_counts.get(key, 0)
+                    avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
 
-                stats_rows.append((key, counter, timer_hits, total_ms, avg_ms))
+                stats_rows.append((key, hits, total_ms, avg_ms))
 
         # 2. Prepare Groups data
         groups_data = []
-        group_members_headers = ("member", "timer_hits", "total_ms", "avg_ms", "ms/group_hit")
+        group_members_headers = ("member", "hits", "total_ms", "avg_ms", "ms/group_hit")
         group_members_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
         if self.groups:
             group_sort_keys = {}
@@ -203,17 +205,21 @@ class Stats:
                 if all_members:
                     sorted_members = sorted(all_members, key=lambda k: self.key_positions.get(k, ("", 0)))
                     for k in sorted_members:
-                        timer_hits = None
+                        # 'hits' is timer hits if available, otherwise counter value.
+                        hits = self.time_counts.get(k)
+                        if hits is None:
+                            hits = self.counts.get(k)
+
                         total_ms = None
                         avg_ms = None
                         per_group_ms = None
                         if k in self.times:
                             total_ms = self.times[k] * 1000.0
-                            timer_hits = self.time_counts.get(k, 0)
-                            avg_ms = (total_ms / timer_hits) if timer_hits else 0.0
+                            timer_hits_for_avg = self.time_counts.get(k, 0)
+                            avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
                             per_group_ms = (total_ms / group_hits) if group_hits else 0.0
 
-                        member_rows.append((k, timer_hits, total_ms, avg_ms, per_group_ms))
+                        member_rows.append((k, hits, total_ms, avg_ms, per_group_ms))
 
                 groups_data.append({"info": group_info, "member_rows": member_rows})
 

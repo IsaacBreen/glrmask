@@ -104,17 +104,25 @@ local_system:
                       self.times[k] += now - self.timers[k]
 
                   # --- Expensive operation ---
+                  caller_frame = None
                   try:
                       frame = inspect.currentframe()
-                      if frame and frame.f_back:
-                          # We want the caller of inc() or start(), which is one level up.
-                          info = inspect.getframeinfo(frame.f_back)
+                      # The call stack is:
+                      #   - model code (the one we want)
+                      #   - inc() or start() in this class
+                      #   - _record_key_position() (current frame)
+                      # So we need to go up two levels.
+                      if frame and frame.f_back and frame.f_back.f_back:
+                          caller_frame = frame.f_back.f_back
+                          info = inspect.getframeinfo(caller_frame)
                           self.key_positions[key] = (info.filename, info.lineno)
                       else:
                           self.key_positions[key] = ("<unknown>", 0)
                   finally:
                       # Avoid reference cycles
                       del frame
+                      if caller_frame:
+                          del caller_frame
                   # --- End of expensive operation ---
 
                   # Resume timers
@@ -1359,28 +1367,30 @@ local_system:
               # This phase gathers all data and rows for all tables before printing.
 
               # 1. Prepare combined stats data  
-              stats_headers = ("key", "counter", "timer_hits", "total_ms", "avg_ms")
-              stats_formats = (str, self._fmt_int_or_blank, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
+              stats_headers = ("key", "hits", "total_ms", "avg_ms")
+              stats_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
               stats_rows = []
               all_keys = self.counts.keys() | self.times.keys()
               if all_keys:
                   sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
                   for key in sorted_keys:
-                      counter = self.counts.get(key)
+                      # 'hits' is timer hits if available, otherwise counter value.
+                      hits = self.time_counts.get(key)
+                      if hits is None:
+                          hits = self.counts.get(key)
 
                       total_ms = None
-                      timer_hits = None
                       avg_ms = None
                       if key in self.times:
                           total_ms = self.times[key] * 1000.0
-                          timer_hits = self.time_counts.get(key, 0)
-                          avg_ms = (total_ms / timer_hits) if timer_hits else 0.0
+                          timer_hits_for_avg = self.time_counts.get(key, 0)
+                          avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
 
-                      stats_rows.append((key, counter, timer_hits, total_ms, avg_ms))
+                      stats_rows.append((key, hits, total_ms, avg_ms))
 
               # 2. Prepare Groups data
               groups_data = []
-              group_members_headers = ("member", "timer_hits", "total_ms", "avg_ms", "ms/group_hit")
+              group_members_headers = ("member", "hits", "total_ms", "avg_ms", "ms/group_hit")
               group_members_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
               if self.groups:
                   group_sort_keys = {}
@@ -1415,17 +1425,21 @@ local_system:
                       if all_members:
                           sorted_members = sorted(all_members, key=lambda k: self.key_positions.get(k, ("", 0)))
                           for k in sorted_members:
-                              timer_hits = None
+                              # 'hits' is timer hits if available, otherwise counter value.
+                              hits = self.time_counts.get(k)
+                              if hits is None:
+                                  hits = self.counts.get(k)
+
                               total_ms = None
                               avg_ms = None
                               per_group_ms = None
                               if k in self.times:
                                   total_ms = self.times[k] * 1000.0
-                                  timer_hits = self.time_counts.get(k, 0)
-                                  avg_ms = (total_ms / timer_hits) if timer_hits else 0.0
+                                  timer_hits_for_avg = self.time_counts.get(k, 0)
+                                  avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
                                   per_group_ms = (total_ms / group_hits) if group_hits else 0.0
 
-                              member_rows.append((k, timer_hits, total_ms, avg_ms, per_group_ms))
+                              member_rows.append((k, hits, total_ms, avg_ms, per_group_ms))
 
                       groups_data.append({"info": group_info, "member_rows": member_rows})
 
@@ -2563,17 +2577,25 @@ messages:
                       self.times[k] += now - self.timers[k]
 
                   # --- Expensive operation ---
+                  caller_frame = None
                   try:
                       frame = inspect.currentframe()
-                      if frame and frame.f_back:
-                          # We want the caller of inc() or start(), which is one level up.
-                          info = inspect.getframeinfo(frame.f_back)
+                      # The call stack is:
+                      #   - model code (the one we want)
+                      #   - inc() or start() in this class
+                      #   - _record_key_position() (current frame)
+                      # So we need to go up two levels.
+                      if frame and frame.f_back and frame.f_back.f_back:
+                          caller_frame = frame.f_back.f_back
+                          info = inspect.getframeinfo(caller_frame)
                           self.key_positions[key] = (info.filename, info.lineno)
                       else:
                           self.key_positions[key] = ("<unknown>", 0)
                   finally:
                       # Avoid reference cycles
                       del frame
+                      if caller_frame:
+                          del caller_frame
                   # --- End of expensive operation ---
 
                   # Resume timers
@@ -3906,8 +3928,8 @@ messages:
       Summary printed above. Plots are saved in: benchmark_results/2025-09-29_12-47-44/analysis
       Full JSON results are in: benchmark_results/2025-09-29_12-47-44
     metadata:
-  - user: Why is it such a mess the order the rows are printed in? Should be nice
-      and neat, the order they appear in the code.
+  - user: Why aren't there hits entries for some rows? Fix it. Col shouldn't be `timer_hits`,
+      but just `hits`. It's for any hit, not just timer hits.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3926,102 +3948,103 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The messy order in the stats report is happening because the code that records the location of each statistic is looking at the wrong place in the call stack. It's recording the line number from within the `Stats` class itself, not from your model code where you're calling `stats.inc()` or `stats.start()`.
-
-      The fix is to adjust the frame inspection logic to look two levels up the call stack instead of just one. Here are the step-by-step instructions to correct this.
+      Of course. Here are the step-by-step instructions to fix the stats reporting, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      The only file that needs to be changed is `python/aug25/stats.py`.
+      I'll update the reporting logic in `python/aug25/stats.py` to consolidate counter values and timer hits into a single `hits` column, ensuring it's always populated.
 
-      1.  **Open `python/aug25/stats.py`**.
-      2.  Navigate to the `_record_key_position` method, around line 85.
-      3.  You will find a section marked `--- Expensive operation ---`. We need to modify the `try...finally` block within it.
-      4.  The current logic incorrectly inspects `frame.f_back`, which points to the `inc()` or `start()` method inside the `Stats` class. We need to inspect `frame.f_back.f_back` to get to the code that *called* `inc()` or `start()`.
-      5.  Replace the entire `try...finally` block with the corrected version below. This new version correctly navigates the call stack and ensures any created frame references are properly deleted to prevent memory leaks.
+      **File: `python/aug25/stats.py`**
 
-          **Replace this block:**
-          ```python
-                      # --- Expensive operation ---
-                      try:
-                          frame = inspect.currentframe()
-                          if frame and frame.f_back:
-                              # We want the caller of inc() or start(), which is one level up.
-                              info = inspect.getframeinfo(frame.f_back)
-                              self.key_positions[key] = (info.filename, info.lineno)
-                          else:
-                              self.key_positions[key] = ("<unknown>", 0)
-                      finally:
-                          # Avoid reference cycles
-                          del frame
-                      # --- End of expensive operation ---
-          ```
+      1.  **Navigate to the `report` method.**
 
-          **With this new block:**
-          ```python
-                      # --- Expensive operation ---
-                      caller_frame = None
-                      try:
-                          frame = inspect.currentframe()
-                          # The call stack is:
-                          #   - model code (the one we want)
-                          #   - inc() or start() in this class
-                          #   - _record_key_position() (current frame)
-                          # So we need to go up two levels.
-                          if frame and frame.f_back and frame.f_back.f_back:
-                              caller_frame = frame.f_back.f_back
-                              info = inspect.getframeinfo(caller_frame)
-                              self.key_positions[key] = (info.filename, info.lineno)
-                          else:
-                              self.key_positions[key] = ("<unknown>", 0)
-                      finally:
-                          # Avoid reference cycles
-                          del frame
-                          if caller_frame:
-                              del caller_frame
-                      # --- End of expensive operation ---
-          ```
+      2.  **Modify the "All Stats" table generation:**
+          *   Find the line defining `stats_headers`.
+          *   Replace `("key", "counter", "timer_hits", "total_ms", "avg_ms")` with `("key", "hits", "total_ms", "avg_ms")`.
+          *   Update the corresponding `stats_formats` tuple to remove one `self._fmt_int_or_blank`.
+          *   Replace the logic for preparing each row in the `for key in sorted_keys:` loop. The new logic will calculate a single `hits` value, prioritizing timer hits over counter values.
 
-      After applying this change, the stats report will be sorted neatly based on the file and line number where each stat key first appears in your code.
+      3.  **Modify the "Groups" table generation:**
+          *   A little further down in the `report` method, find the line defining `group_members_headers`.
+          *   Rename the `"timer_hits"` column to `"hits"`.
+          *   In the inner loop (`for k in sorted_members:`), replace the logic for preparing each member row. This change mirrors the one made for the "All Stats" table, creating a single `hits` value for each group member.
+
+      These changes will produce a cleaner report where every key has a value in the `hits` column, resolving the empty cells and clarifying the column's purpose.
 
       ### Git Diffs
 
-      Here is the git patch for the change described above.
+      Here is the git patch to apply the changes:
 
       ```diff
       diff --git a/python/aug25/stats.py b/python/aug25/stats.py
-      index 211131c..118111e 100644
       --- a/python/aug25/stats.py
       +++ b/python/aug25/stats.py
-      @@ -91,17 +91,21 @@
-                       self.times[k] += now - self.timers[k]
+      @@ -148,29 +148,29 @@
+               # This phase gathers all data and rows for all tables before printing.
        
-                   # --- Expensive operation ---
-      +            caller_frame = None
-                   try:
-                       frame = inspect.currentframe()
-      -                if frame and frame.f_back:
-      -                    # We want the caller of inc() or start(), which is one level up.
-      -                    info = inspect.getframeinfo(frame.f_back)
-      +                # The call stack is:
-      +                #   - model code (the one we want)
-      +                #   - inc() or start() in this class
-      +                #   - _record_key_position() (current frame)
-      +                # So we need to go up two levels.
-      +                if frame and frame.f_back and frame.f_back.f_back:
-      +                    caller_frame = frame.f_back.f_back
-      +                    info = inspect.getframeinfo(caller_frame)
-                           self.key_positions[key] = (info.filename, info.lineno)
-                       else:
-                           self.key_positions[key] = ("<unknown>", 0)
-                   finally:
-                       # Avoid reference cycles
-                       del frame
-      +                if caller_frame:
-      +                    del caller_frame
-                   # --- End of expensive operation ---
+               # 1. Prepare combined stats data  
+      -        stats_headers = ("key", "counter", "timer_hits", "total_ms", "avg_ms")
+      -        stats_formats = (str, self._fmt_int_or_blank, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
+      +        stats_headers = ("key", "hits", "total_ms", "avg_ms")
+      +        stats_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
+               stats_rows = []
+               all_keys = self.counts.keys() | self.times.keys()
+               if all_keys:
+                   sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
+                   for key in sorted_keys:
+      -                counter = self.counts.get(key)
+      +                # 'hits' is timer hits if available, otherwise counter value.
+      +                hits = self.time_counts.get(key)
+      +                if hits is None:
+      +                    hits = self.counts.get(key)
        
-                   # Resume timers
+                       total_ms = None
+      -                timer_hits = None
+                       avg_ms = None
+                       if key in self.times:
+                           total_ms = self.times[key] * 1000.0
+      -                    timer_hits = self.time_counts.get(key, 0)
+      -                    avg_ms = (total_ms / timer_hits) if timer_hits else 0.0
+      -
+      -                stats_rows.append((key, counter, timer_hits, total_ms, avg_ms))
+      +                    timer_hits_for_avg = self.time_counts.get(key, 0)
+      +                    avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
+      +
+      +                stats_rows.append((key, hits, total_ms, avg_ms))
+       
+               # 2. Prepare Groups data
+               groups_data = []
+      -        group_members_headers = ("member", "timer_hits", "total_ms", "avg_ms", "ms/group_hit")
+      +        group_members_headers = ("member", "hits", "total_ms", "avg_ms", "ms/group_hit")
+               group_members_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
+               if self.groups:
+                   group_sort_keys = {}
+      @@ -201,17 +201,21 @@
+                       if all_members:
+                           sorted_members = sorted(all_members, key=lambda k: self.key_positions.get(k, ("", 0)))
+                           for k in sorted_members:
+      -                        timer_hits = None
+      +                        # 'hits' is timer hits if available, otherwise counter value.
+      +                        hits = self.time_counts.get(k)
+      +                        if hits is None:
+      +                            hits = self.counts.get(k)
+      +
+                               total_ms = None
+                               avg_ms = None
+                               per_group_ms = None
+                               if k in self.times:
+                                   total_ms = self.times[k] * 1000.0
+      -                            timer_hits = self.time_counts.get(k, 0)
+      -                            avg_ms = (total_ms / timer_hits) if timer_hits else 0.0
+      +                            timer_hits_for_avg = self.time_counts.get(k, 0)
+      +                            avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
+                                   per_group_ms = (total_ms / group_hits) if group_hits else 0.0
+       
+      -                        member_rows.append((k, timer_hits, total_ms, avg_ms, per_group_ms))
+      +                        member_rows.append((k, hits, total_ms, avg_ms, per_group_ms))
+       
+                       groups_data.append({"info": group_info, "member_rows": member_rows})
+       
 
       ```
     metadata:
@@ -4034,7 +4057,7 @@ messages:
       Applying patch to 'python/aug25/stats.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/stats.py.
     metadata:
-  - user: 'Changes committed with message: "Fix Stats._record_key_position to correctly
-      capture caller frame for sorting by inspecting f_back.f_back"'
+  - user: "Changes committed with message: \"Refactor Stats report to unify counter
+      and timer hits into a single 'hits' column\""
     metadata:
 ...
