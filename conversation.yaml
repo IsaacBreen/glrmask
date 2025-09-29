@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - python/aug25/models/precompute3_model_pure_python.py
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     python/aug25/models/precompute3_model_pure_python.py: |
@@ -876,9 +876,9 @@ local_system:
       # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetStates
 
       import _sep1 as ffi
-      # from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      # from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
       # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
-      from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
 
 
       # --- Monkey-patch RangeSet to collect stats on union/intersection ---
@@ -1191,15 +1191,21 @@ local_system:
           @profile
           def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
               terminal_to_add_rs = RangeSet.from_indices([terminal_id])
+              acc_memo = {}
 
               def apply_disallow(acc: PyAcc) -> PyAcc:
+                  if id(acc) in acc_memo:
+                      return acc_memo[id(acc)]
                   current_set = acc.terminals_union.get(state_id, RangeSet.empty())
                   if current_set.contains(terminal_id):
+                      acc_memo[id(acc)] = acc
                       return acc
 
                   new_map = acc.terminals_union.copy()
                   new_map[state_id] = current_set.union(terminal_to_add_rs)
-                  return PyAcc(terminals_union=new_map, llm_mask=acc.llm_mask)
+                  result = PyAcc(terminals_union=new_map, llm_mask=acc.llm_mask)
+                  acc_memo[id(acc)] = result
+                  return result
 
               return gss.apply(apply_disallow)
 
@@ -1247,12 +1253,16 @@ local_system:
               # Prune and map per-state GSS in a single pass
               temp_states: Dict[int, GSS] = {}
               stats.start('commit.prune_and_map_gss')
+              acc_memo = {}
               def mutator(acc: PyAcc) -> Optional[PyAcc]:
+                  if id(acc) in acc_memo:
+                      return acc_memo[id(acc)]
                   # Prune condition
                   disallowed_terminals_map = acc.terminals_union
                   for tsid, matched_bv in terminals_map.items():
                       disallowed_for_state = disallowed_terminals_map.get(tsid)
                       if disallowed_for_state and not matched_bv.isdisjoint(disallowed_for_state):
+                          acc_memo[id(acc)] = None
                           return None
 
                   # Map
@@ -1265,7 +1275,9 @@ local_system:
                               new_bvs[new_sid] |= bv_source
                           else:
                               new_bvs[new_sid] = bv_source
-                  return PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
+                  result = PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
+                  acc_memo[id(acc)] = result
+                  return result
               cache = {}
               current_state_for_processing = {tsid: gss.apply_and_prune(mutator, cache) for tsid, gss in self.state.items()}
               current_state_for_processing = {tsid: gss for tsid, gss in current_state_for_processing.items() if not gss.is_empty()}
@@ -1580,14 +1592,14 @@ local_system:
                           continue
 
                       # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                      acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
+                      acc_memo: Dict[int, Optional[PyAcc]] = {}
 
                       def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                           p = 'get_mask.main_loop.edge.intersect_and_prune'
                           stats.inc(f'{p}.calls')
-                          if acc in acc_memo:
+                          if id(acc) in acc_memo:
                               stats.inc(f'{p}.memo_hits')
-                              return acc_memo[acc]
+                              return acc_memo[id(acc)]
                           stats.start(f'{p}.intersection')
                           new_mask = acc.llm_mask.intersection(llm_bv)
                           stats.stop(f'{p}.intersection')
@@ -1600,7 +1612,7 @@ local_system:
                                   terminals_union=acc.terminals_union,
                                   llm_mask=new_mask
                               )
-                          acc_memo[acc] = result
+                          acc_memo[id(acc)] = result
                           return result
 
                       stats.start('get_mask.main_loop.edge.apply_and_prune')
@@ -2662,5 +2674,180 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Memoize initialize_acc result in
       get_mask using accumulator ID"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python.py since previous turn:
+      ```diff
+      --- original version of python/aug25/models/precompute3_model_pure_python.py+++ current version of python/aug25/models/precompute3_model_pure_python.py@@ -39,9 +39,9 @@ # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetStates
+       
+       import _sep1 as ffi
+      -# from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      +from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      +# from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
+       # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
+      -from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
+       
+       
+       # --- Monkey-patch RangeSet to collect stats on union/intersection ---
+
+      ```
+    metadata:
+  - user: |-
+      A lot of the time there's one acc shared among a lot of nodes.
+      Introduce a memo (in *addition* to the existing memos eg for apply_and_prune) that ensures this is the case. e.g.
+      ```python
+      acc_memo = {}
+      def initialize_acc(acc: PyAcc) -> PyAcc:
+          if id(acc) in acc_memo:
+              return acc_memo[id(acc)]
+          ...
+      ```
+      Do it with the other apply/apply_and_prune calls as well.
+    metadata:
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to apply the memoization pattern to the other `apply` and `apply_and_prune` calls, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file `python/aug25/models/precompute3_model_pure_python.py`.**
+
+      2.  **Modify the `_disallow_terminal_in_state` method (around line 428):**
+          *   After the line `terminal_to_add_rs = RangeSet.from_indices([terminal_id])`, add `acc_memo = {}`.
+          *   Inside the nested function `apply_disallow`, add the memoization logic at the beginning:
+              ```python
+              if id(acc) in acc_memo:
+                  return acc_memo[id(acc)]
+              ```
+          *   Before returning `acc` when no changes are needed, cache it: `acc_memo[id(acc)] = acc`.
+          *   Before returning the newly created `PyAcc`, store it in a `result` variable, cache it, and then return it:
+              ```python
+              result = PyAcc(terminals_union=new_map, llm_mask=acc.llm_mask)
+              acc_memo[id(acc)] = result
+              return result
+              ```
+
+      3.  **Modify the `commit` method (around line 472):**
+          *   Before the definition of the `mutator` function, add `acc_memo = {}`.
+          *   Inside the `mutator` function, add the memoization check at the beginning:
+              ```python
+              if id(acc) in acc_memo:
+                  return acc_memo[id(acc)]
+              ```
+          *   When the prune condition is met, cache `None` before returning: `acc_memo[id(acc)] = None`.
+          *   At the end of the function, store the new `PyAcc` in a `result` variable, cache it, and then return it:
+              ```python
+              result = PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
+              acc_memo[id(acc)] = result
+              return result
+              ```
+
+      4.  **Modify the `get_mask` method (around line 852):**
+          *   Find the `intersect_and_prune` function defined inside the edge traversal loop.
+          *   Change the definition of its memoization dictionary from `acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}` to `acc_memo: Dict[int, Optional[PyAcc]] = {}`.
+          *   Update the memoization check to use the object's ID: change `if acc in acc_memo:` to `if id(acc) in acc_memo:`.
+          *   Update the memoization retrieval: change `return acc_memo[acc]` to `return acc_memo[id(acc)]`.
+          *   Update the memoization storage: change `acc_memo[acc] = result` to `acc_memo[id(acc)] = result`.
+
+      ### Git Diff
+
+      Here is the git patch that applies the changes described above.
+
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      --- a/python/aug25/models/precompute3_model_pure_python.py
+      +++ b/python/aug25/models/precompute3_model_pure_python.py
+      @@ -428,17 +428,24 @@
+           @profile
+           def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+               terminal_to_add_rs = RangeSet.from_indices([terminal_id])
+      +        acc_memo = {}
+       
+               def apply_disallow(acc: PyAcc) -> PyAcc:
+      +            if id(acc) in acc_memo:
+      +                return acc_memo[id(acc)]
+                   current_set = acc.terminals_union.get(state_id, RangeSet.empty())
+                   if current_set.contains(terminal_id):
+      +                acc_memo[id(acc)] = acc
+                       return acc
+       
+                   new_map = acc.terminals_union.copy()
+                   new_map[state_id] = current_set.union(terminal_to_add_rs)
+      -            return PyAcc(terminals_union=new_map, llm_mask=acc.llm_mask)
+      +            result = PyAcc(terminals_union=new_map, llm_mask=acc.llm_mask)
+      +            acc_memo[id(acc)] = result
+      +            return result
+       
+               return gss.apply(apply_disallow)
+       
+           def get_root(self, state_id: int) -> NodeID:
+      @@ -470,14 +477,19 @@
+               # Prune and map per-state GSS in a single pass
+               temp_states: Dict[int, GSS] = {}
+               stats.start('commit.prune_and_map_gss')
+      +        acc_memo = {}
+               def mutator(acc: PyAcc) -> Optional[PyAcc]:
+      +            if id(acc) in acc_memo:
+      +                return acc_memo[id(acc)]
+                   # Prune condition
+                   disallowed_terminals_map = acc.terminals_union
+                   for tsid, matched_bv in terminals_map.items():
+                       disallowed_for_state = disallowed_terminals_map.get(tsid)
+                       if disallowed_for_state and not matched_bv.isdisjoint(disallowed_for_state):
+      +                    acc_memo[id(acc)] = None
+                           return None
+       
+                   # Map
+      @@ -491,7 +503,9 @@
+                               new_bvs[new_sid] |= bv_source
+                           else:
+                               new_bvs[new_sid] = bv_source
+      -            return PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
+      +            result = PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
+      +            acc_memo[id(acc)] = result
+      +            return result
+               cache = {}
+               current_state_for_processing = {tsid: gss.apply_and_prune(mutator, cache) for tsid, gss in self.state.items()}
+               current_state_for_processing = {tsid: gss for tsid, gss in current_state_for_processing.items() if not gss.is_empty()}
+      @@ -851,14 +865,14 @@
+                           continue
+       
+                       # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+      -                acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
+      +                acc_memo: Dict[int, Optional[PyAcc]] = {}
+       
+                       def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                           p = 'get_mask.main_loop.edge.intersect_and_prune'
+                           stats.inc(f'{p}.calls')
+      -                    if acc in acc_memo:
+      +                    if id(acc) in acc_memo:
+                               stats.inc(f'{p}.memo_hits')
+      -                        return acc_memo[acc]
+      +                        return acc_memo[id(acc)]
+                           stats.start(f'{p}.intersection')
+                           new_mask = acc.llm_mask.intersection(llm_bv)
+                           stats.stop(f'{p}.intersection')
+      @@ -871,7 +885,7 @@
+                                   terminals_union=acc.terminals_union,
+                                   llm_mask=new_mask
+                               )
+      -                    acc_memo[acc] = result
+      +                    acc_memo[id(acc)] = result
+                           return result
+       
+                       stats.start('get_mask.main_loop.edge.apply_and_prune')
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
+    metadata:
+  - user: 'Changes committed with message: "Extend PyAcc memoization to _disallow_terminal_in_state,
+      commit mutator, and get_mask intersect_and_prune"'
     metadata:
 ...

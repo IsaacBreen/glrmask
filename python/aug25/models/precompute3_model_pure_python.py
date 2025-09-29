@@ -354,15 +354,21 @@ class Model(GraphProvider):
     @profile
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         terminal_to_add_rs = RangeSet.from_indices([terminal_id])
+        acc_memo = {}
 
         def apply_disallow(acc: PyAcc) -> PyAcc:
+            if id(acc) in acc_memo:
+                return acc_memo[id(acc)]
             current_set = acc.terminals_union.get(state_id, RangeSet.empty())
             if current_set.contains(terminal_id):
+                acc_memo[id(acc)] = acc
                 return acc
 
             new_map = acc.terminals_union.copy()
             new_map[state_id] = current_set.union(terminal_to_add_rs)
-            return PyAcc(terminals_union=new_map, llm_mask=acc.llm_mask)
+            result = PyAcc(terminals_union=new_map, llm_mask=acc.llm_mask)
+            acc_memo[id(acc)] = result
+            return result
 
         return gss.apply(apply_disallow)
 
@@ -410,12 +416,16 @@ class Model(GraphProvider):
         # Prune and map per-state GSS in a single pass
         temp_states: Dict[int, GSS] = {}
         stats.start('commit.prune_and_map_gss')
+        acc_memo = {}
         def mutator(acc: PyAcc) -> Optional[PyAcc]:
+            if id(acc) in acc_memo:
+                return acc_memo[id(acc)]
             # Prune condition
             disallowed_terminals_map = acc.terminals_union
             for tsid, matched_bv in terminals_map.items():
                 disallowed_for_state = disallowed_terminals_map.get(tsid)
                 if disallowed_for_state and not matched_bv.isdisjoint(disallowed_for_state):
+                    acc_memo[id(acc)] = None
                     return None
 
             # Map
@@ -428,7 +438,9 @@ class Model(GraphProvider):
                         new_bvs[new_sid] |= bv_source
                     else:
                         new_bvs[new_sid] = bv_source
-            return PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
+            result = PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
+            acc_memo[id(acc)] = result
+            return result
         cache = {}
         current_state_for_processing = {tsid: gss.apply_and_prune(mutator, cache) for tsid, gss in self.state.items()}
         current_state_for_processing = {tsid: gss for tsid, gss in current_state_for_processing.items() if not gss.is_empty()}
@@ -743,14 +755,14 @@ class Model(GraphProvider):
                     continue
 
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
+                acc_memo: Dict[int, Optional[PyAcc]] = {}
 
                 def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                     p = 'get_mask.main_loop.edge.intersect_and_prune'
                     stats.inc(f'{p}.calls')
-                    if acc in acc_memo:
+                    if id(acc) in acc_memo:
                         stats.inc(f'{p}.memo_hits')
-                        return acc_memo[acc]
+                        return acc_memo[id(acc)]
                     stats.start(f'{p}.intersection')
                     new_mask = acc.llm_mask.intersection(llm_bv)
                     stats.stop(f'{p}.intersection')
@@ -763,7 +775,7 @@ class Model(GraphProvider):
                             terminals_union=acc.terminals_union,
                             llm_mask=new_mask
                         )
-                    acc_memo[acc] = result
+                    acc_memo[id(acc)] = result
                     return result
 
                 stats.start('get_mask.main_loop.edge.apply_and_prune')
