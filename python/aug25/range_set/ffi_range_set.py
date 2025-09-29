@@ -104,6 +104,27 @@ class FFIRangeSet(RangeSet[int]):
         return res
 
     @time_method
+    def union_update(self, other: RangeSet[int]) -> None:
+        """Update self with the union of self and other."""
+        if not isinstance(other, FFIRangeSet):
+            raise TypeError("other must be a FFIRangeSet")
+        self._bitset |= other._bitset
+
+    @time_method
+    def intersection_update(self, other: RangeSet[int]) -> None:
+        """Update self with the intersection of self and other."""
+        if not isinstance(other, FFIRangeSet):
+            raise TypeError("other must be a FFIRangeSet")
+        self._bitset &= other._bitset
+
+    @time_method
+    def difference_update(self, other: RangeSet[int]) -> None:
+        """Update self with the set difference self \\ other."""
+        if not isinstance(other, FFIRangeSet):
+            raise TypeError("other must be a FFIRangeSet")
+        self._bitset -= other._bitset
+
+    @time_method
     def is_empty(self) -> bool:
         res = self._bitset.is_empty()
         record_metric('FFIRangeSet.is_empty.true' if res else 'FFIRangeSet.is_empty.false', 1)

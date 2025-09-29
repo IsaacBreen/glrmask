@@ -112,6 +112,48 @@ class RoaringRangeSet(RangeSet[int]):
                 other_rb.add_range(start, end + 1)
             return self._new_from_rb(self._rb - other_rb)
 
+    def union_update(self, other: RangeSet[int]) -> None:
+        """Update self with the union of self and other."""
+        if not isinstance(other, RangeSet):
+            raise TypeError("other must be a RangeSet")
+
+        if isinstance(other, RoaringRangeSet):
+            self._rb |= other._rb
+        else:
+            # Generic path
+            other_rb = RoaringBitmap()
+            for start, end in other.intervals:
+                if start < 0:
+                    raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                other_rb.add_range(start, end + 1)
+            self._rb |= other_rb
+
+    def intersection_update(self, other: RangeSet[int]) -> None:
+        """Update self with the intersection of self and other."""
+        if not isinstance(other, RangeSet):
+            raise TypeError("other must be a RangeSet")
+
+        if isinstance(other, RoaringRangeSet):
+            self._rb &= other._rb
+        else:
+            other_rb = RoaringBitmap()
+            for start, end in other.intervals:
+                if start < 0:
+                    raise ValueError("RoaringRangeSet only supports non-negative integers.")
+                other_rb.add_range(start, end + 1)
+            self._rb &= other_rb
+
+    def difference_update(self, other: RangeSet[int]) -> None:
+        """Update self with the set difference self \\ other."""
+        if not isinstance(other, RangeSet):
+            raise TypeError("other must be a RangeSet")
+
+        if isinstance(other, RoaringRangeSet):
+            self._rb -= other._rb
+        else:
+            other_rb = RoaringBitmap(other.iter_indices())
+            self._rb -= other_rb
+
     def is_empty(self) -> bool:
         return len(self._rb) == 0
 

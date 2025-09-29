@@ -642,6 +642,22 @@ impl PyHybridBitset {
         PyHybridBitset { inner: &self.inner & &other.inner }
     }
 
+    fn __ior__(&mut self, other: &PyHybridBitset) {
+        self.inner |= &other.inner;
+    }
+
+    fn __iand__(&mut self, other: &PyHybridBitset) {
+        self.inner &= &other.inner;
+    }
+
+    fn __isub__(&mut self, other: &PyHybridBitset) {
+        self.inner -= &other.inner;
+    }
+
+    fn __ixor__(&mut self, other: &PyHybridBitset) {
+        self.inner ^= &other.inner;
+    }
+
     fn difference(&self, other: &PyHybridBitset) -> PyHybridBitset {
         PyHybridBitset { inner: &self.inner - &other.inner }
     }

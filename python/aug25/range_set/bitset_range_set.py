@@ -162,6 +162,64 @@ class BitsetRangeSet(RangeSet[int]):
             differenced = py_self.difference(other)
             return BitsetRangeSet(differenced.intervals)
 
+    def union_update(self, other: RangeSet[int]) -> None:
+        """Update self with the union of self and other."""
+        if not isinstance(other, RangeSet):
+            raise TypeError("other must be a RangeSet")
+
+        if isinstance(other, BitsetRangeSet):
+            len_a = len(self._bitset)
+            len_b = len(other._bitset)
+            if len_b > len_a:
+                self._bitset.extend(bytearray(len_b - len_a))
+
+            for i in range(len_b):
+                self._bitset[i] |= other._bitset[i]
+
+            self._len = sum(BIT_COUNTS[byte] for byte in self._bitset)
+        else:
+            # Generic path
+            new_set = self.union(other)
+            self._bitset = new_set._bitset
+            self._len = new_set._len
+
+    def intersection_update(self, other: RangeSet[int]) -> None:
+        """Update self with the intersection of self and other."""
+        if not isinstance(other, RangeSet):
+            raise TypeError("other must be a RangeSet")
+
+        if isinstance(other, BitsetRangeSet):
+            len_a = len(self._bitset)
+            len_b = len(other._bitset)
+            new_len = min(len_a, len_b)
+
+            if len_a > new_len:
+                self._bitset = self._bitset[:new_len]
+
+            for i in range(new_len):
+                self._bitset[i] &= other._bitset[i]
+
+            self._len = sum(BIT_COUNTS[byte] for byte in self._bitset)
+        else:
+            new_set = self.intersection(other)
+            self._bitset = new_set._bitset
+            self._len = new_set._len
+
+    def difference_update(self, other: RangeSet[int]) -> None:
+        """Update self with the set difference self \\ other."""
+        if not isinstance(other, RangeSet):
+            raise TypeError("other must be a RangeSet")
+
+        if isinstance(other, BitsetRangeSet):
+            limit = min(len(self._bitset), len(other._bitset))
+            for i in range(limit):
+                self._bitset[i] &= ~other._bitset[i]
+            self._len = sum(BIT_COUNTS[byte] for byte in self._bitset)
+        else:
+            new_set = self.difference(other)
+            self._bitset = new_set._bitset
+            self._len = new_set._len
+
     def is_empty(self) -> bool:
         return self._len == 0
 

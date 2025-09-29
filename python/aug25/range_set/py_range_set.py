@@ -222,3 +222,65 @@ class PyRangeSet(RangeSet[int]):
             if curr <= e1:
                 res.append((curr, e1))
         return PyRangeSet(res)
+
+    def union_update(self, other: 'RangeSet[int]') -> None:
+        """Update self with the union of self and other."""
+        if not isinstance(other, RangeSet):
+            raise TypeError("other must be a RangeSet")
+        if other.is_empty():
+            return
+        self._intervals = self._normalize(self.intervals + other.intervals)
+
+    def intersection_update(self, other: 'RangeSet[int]') -> None:
+        """Update self with the intersection of self and other."""
+        if not isinstance(other, RangeSet):
+            raise TypeError("other must be a RangeSet")
+        if self.is_empty():
+            return
+        if other.is_empty():
+            self._intervals = tuple()
+            return
+        a = list(self.intervals)
+        b = list(other.intervals)
+        i = j = 0
+        res: List[Tuple[int, int]] = []
+        while i < len(a) and j < len(b):
+            s1, e1 = a[i]
+            s2, e2 = b[j]
+            s = max(s1, s2)
+            e = min(e1, e2)
+            if s <= e:
+                res.append((s, e))
+            if e1 < e2:
+                i += 1
+            else:
+                j += 1
+        self._intervals = tuple(res)
+
+    def difference_update(self, other: 'RangeSet[int]') -> None:
+        """Update self with the set difference self \\ other."""
+        if not isinstance(other, RangeSet):
+            raise TypeError("other must be a RangeSet")
+        if self.is_empty() or other.is_empty():
+            return
+        a = list(self.intervals)
+        b = list(other.intervals)
+        res: List[Tuple[int, int]] = []
+        j = 0
+        for s1, e1 in a:
+            curr = s1
+            while j < len(b) and b[j][1] < curr:
+                j += 1
+            k = j
+            while k < len(b) and b[k][0] <= e1:
+                s2, e2 = b[k]
+                if s2 > curr:
+                    res.append((curr, s2 - 1))
+                if e2 + 1 > curr:
+                    curr = e2 + 1
+                if curr > e1:
+                    break
+                k += 1
+            if curr <= e1:
+                res.append((curr, e1))
+        self._intervals = tuple(res)

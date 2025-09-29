@@ -211,7 +211,7 @@ class Model(GraphProvider):
                 llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
                 # Convert to RangeSet for ffi-free operations in commit/get_mask
                 llm_bv: LLMTokenSet = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
-                llm_bv_union = llm_bv_union.union(llm_bv)
+                llm_bv_union |= llm_bv
                 new_dest_map = []
                 for dest_idx, state_bv_json in dest_map:
                     state_bv_bitset = bs_from_json(dumps(state_bv_json))
@@ -414,7 +414,7 @@ class Model(GraphProvider):
                 bv_source = old_map.get(old_sid)
                 if bv_source and not bv_source.is_empty():
                     if new_sid in new_bvs:
-                        new_bvs[new_sid] = new_bvs[new_sid].union(bv_source)
+                        new_bvs[new_sid] |= bv_source
                     else:
                         new_bvs[new_sid] = bv_source
             return PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
@@ -613,9 +613,7 @@ class Model(GraphProvider):
                     stats.inc(f'{p}.disallowed_terminals_inner_loops')
                     if terminal_id in terminals_to_llm:
                         stats.start(f'{p}.union')
-                        disallowed_llm_mask = disallowed_llm_mask.union(
-                            terminals_to_llm[terminal_id]
-                        )
+                        disallowed_llm_mask |= terminals_to_llm[terminal_id]
                         stats.stop(f'{p}.union')
 
             stats.start(f'{p}.difference')
@@ -682,7 +680,7 @@ class Model(GraphProvider):
                 stats.stop('get_mask.main_loop.end_node.reduce_acc')
                 if reduced_acc:
                     stats.start('get_mask.main_loop.end_node.final_mask_union')
-                    final_mask = final_mask.union(reduced_acc.llm_mask)
+                    final_mask |= reduced_acc.llm_mask
                     stats.stop('get_mask.main_loop.end_node.final_mask_union')
 
             # Zombie traversal avoidance: if this node's edges can't possibly add
@@ -808,7 +806,7 @@ class Model(GraphProvider):
             # Mapped RangeSet for the internal token i
             mapped_rs = self.internal_to_original_map.get(i)
             if mapped_rs:
-                    result = result.union(mapped_rs)
+                    result |= mapped_rs
         stats.stop('get_mask.final_conversion.union_loop')
 
         stats.inc('get_mask.final_conversion.internal_indices', len(final_mask))

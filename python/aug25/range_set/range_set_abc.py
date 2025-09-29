@@ -43,6 +43,24 @@ class RangeSet(ABC, Generic[T]):
             return self
         return self.union(other)
 
+    def __ior__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+        if other is None:
+            return self
+        self.union_update(other)
+        return self
+
+    def __iand__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+        if other is None:
+            return self
+        self.intersection_update(other)
+        return self
+
+    def __isub__(self, other: "RangeSet[T]") -> "RangeSet[T]":
+        if other is None:
+            return self
+        self.difference_update(other)
+        return self
+
     def __and__(self, other: "RangeSet[T]") -> "RangeSet[T]":
         if other is None:
             return self
@@ -80,6 +98,21 @@ class RangeSet(ABC, Generic[T]):
     @abstractmethod
     def intersection(self, other: "RangeSet[T]") -> "RangeSet[T]":
         """Return the intersection of two RangeSets."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def union_update(self, other: "RangeSet[T]") -> None:
+        """Update self with the union of self and other."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def intersection_update(self, other: "RangeSet[T]") -> None:
+        """Update self with the intersection of self and other."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def difference_update(self, other: "RangeSet[T]") -> None:
+        """Update self with the set difference self \\ other."""
         raise NotImplementedError
 
     @abstractmethod
