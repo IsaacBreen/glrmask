@@ -786,10 +786,6 @@ class Model(GraphProvider):
                     stats.inc('get_mask.traversal.edge.popped_empty')
                     continue
 
-                if self._is_zombie_path(popped, llm_bv, final_mask, 'edge'):
-                    continue
-                llm_bv = llm_bv.difference(final_mask)
-
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
                 @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune')
                 def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
@@ -846,9 +842,6 @@ class Model(GraphProvider):
                         continue
 
                     d: NodeID = int(dest_idx)
-                    # if self._is_zombie_path(child_gss, arena.get(d).llm_bv_union if arena.get(d) else RangeSet.empty(), final_mask, 'dest'):
-                    #     continue
-
                     if d in values:
                         stats.inc('get_mask.traversal.edge.gss_merges')
                         stats.start('get_mask.main_loop.edge.gss_merge')
