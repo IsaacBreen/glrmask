@@ -31,6 +31,13 @@ from ..range_set.set_range_set import SetRangeSet as RangeSetOut
 # from ..range_set.ffi_range_set import FFIRangeSet as RangeSetOut
 # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetOut
 
+# from ..common_interface import RangeSetStates
+from ..range_set.set_range_set import SetRangeSet as RangeSetStates
+# from ..range_set.py_range_set import PyRangeSet as RangeSetStates
+# from ..range_set.bitset_range_set import BitsetRangeSet as RangeSetStates
+# from ..range_set.ffi_range_set import FFIRangeSet as RangeSetStates
+# from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetStates
+
 import _sep1 as ffi
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
@@ -70,7 +77,7 @@ NodeID = int
 
 # Type aliases for different uses of RangeSet to improve clarity.
 LLMTokenSet = RangeSet
-StateIDSet = RangeSet
+StateIDSet = RangeSetStates
 TerminalIdSet = RangeSet
 
 
@@ -224,7 +231,7 @@ class Model(GraphProvider):
                 new_dest_map = []
                 for dest_idx, state_bv_json in dest_map:
                     state_bv_bitset = bs_from_json(dumps(state_bv_json))
-                    state_bv: StateIDSet = RangeSet.from_ranges(state_bv_bitset.to_ranges())
+                    state_bv: StateIDSet = RangeSetStates.from_ranges(state_bv_bitset.to_ranges())
                     new_dest_map.append((int(dest_idx), state_bv))
                 new_children.append(((int(pop), llm_bv), new_dest_map))
             node["children"] = new_children
@@ -760,12 +767,13 @@ class Model(GraphProvider):
                     stats.inc('get_mask.traversal.edge.popped_reduced_empty')
                     continue
 
+                peeked = RangeSetStates.from_indices(popped.peek())
                 for dest_idx, state_bv in dests:
                     stats.inc('get_mask.traversal.dests_traversed')
 
                     stats.start('get_mask.main_loop.edge.peek_and_filter')
-                    peeked = popped.peek()
-                    values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                    # values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                    values_to_keep = peeked & state_bv
                     stats.stop('get_mask.main_loop.edge.peek_and_filter')
 
                     if not values_to_keep:
