@@ -98,11 +98,11 @@ local_system:
           def profile(func): return func
 
       # --- Accumulator memoization decorator ---
-      def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
+      def _acc_memoize(stats_prefix: Optional[str] = None):
           """
           Per-invocation memoization for PyAcc transformers.
           - Caches by id(acc) (including None results).
-          - Caches by value (acc) for non-None results, if use_value_cache is True.
+          - Caches by value (acc) for non-None results.
           If stats_prefix is provided, increments '{prefix}.memo_hits' on cache hits.
           Exposes _acc_memo_size() to inspect id-cache size for stats.
           """
@@ -115,19 +115,16 @@ local_system:
                       if stats_prefix:
                           Stats.get().inc(f'{stats_prefix}.memo_hits')
                       return id_memo[id(acc)]
-
-                  if use_value_cache:
-                      # Structural equality-based cache (only non-None results are useful here)
-                      cached = val_memo.get(acc)
-                      if cached is not None:
-                          id_memo[id(acc)] = cached
-                          if stats_prefix:
-                              Stats.get().inc(f'{stats_prefix}.memo_hits')
-                          return cached
+                  # Structural equality-based cache (only non-None results are useful here)
+                  cached = val_memo.get(acc)
+                  if cached is not None:
+                      id_memo[id(acc)] = cached
+                      if stats_prefix:
+                          Stats.get().inc(f'{stats_prefix}.memo_hits')
+                      return cached
                   result = fn(acc)
                   id_memo[id(acc)] = result
-                  if use_value_cache:
-                      val_memo[acc] = result
+                  val_memo[acc] = result
                   return result
               wrapper._acc_memo_size = lambda: len(id_memo)
               return wrapper
@@ -398,7 +395,7 @@ local_system:
           def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
               terminal_to_add_rs = RangeSet.from_indices([terminal_id])
 
-              @_acc_memoize(use_value_cache=False)
+              @_acc_memoize()
               def apply_disallow(acc: PyAcc) -> PyAcc:
                   current_set = acc.terminals_union.get(state_id, RangeSet.empty())
                   if current_set.contains(terminal_id):
@@ -675,7 +672,7 @@ local_system:
 
               stats.start('get_mask.seeding')
               # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-              @_acc_memoize(use_value_cache=False)
+              @_acc_memoize()
               def initialize_acc(acc: PyAcc) -> PyAcc:
                   if False:  # placeholder to keep minimal diff context; decorator handles memoization
                       if cached_acc is not None:
@@ -797,7 +794,7 @@ local_system:
                           continue
 
                       # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                      @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)
+                      @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune')
                       def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                           p = 'get_mask.main_loop.edge.intersect_and_prune'
                           stats.inc(f'{p}.calls')
@@ -1117,1041 +1114,6 @@ local_system:
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
-              # Prepare stats and parse JSON inputs
-              Stats.get().reset()
-              data = json.loads(s)
-              roots_map_raw = data["precomputed3"]
-              arena_json = data["trie3_god"]
-              arena_values = arena_json.get("values", [])
-              arena_dict = {int(k): v for k, v in arena_values}
-
-              roots_map = {int(s): int(r) for s, r in roots_map_raw}
-              max_depth: Dict[NodeID, int] = {}
-              dumps = json.dumps
-              bs_from_json = ffi.Bitset.from_json_string
-
-              # Normalize arena children bitsets and cache max_depth
-              for uid, node in arena_dict.items():
-                  uid_int = int(uid)
-                  max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
-
-                  children = node.get("children") or []
-                  if not children:
-                      node["children"] = []
-                      node["llm_bv_union"] = RangeSet.empty()
-                      continue
-
-                  new_children = []
-                  llm_bv_union: LLMTokenSet = RangeSet.empty()
-                  for edge_key, dest_map in children:
-                      pop, llm_bv_json = edge_key
-                      llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
-                      # Convert to RangeSet for ffi-free operations in commit/get_mask
-                      llm_bv: LLMTokenSet = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
-                      llm_bv_union |= llm_bv
-                      new_dest_map = []
-                      for dest_idx, state_bv_json in dest_map:
-                          state_bv_bitset = bs_from_json(dumps(state_bv_json))
-                          state_bv: StateIDSet = RangeSetStates.from_ranges(state_bv_bitset.to_ranges())
-                          new_dest_map.append((int(dest_idx), state_bv))
-                      new_children.append(((int(pop), llm_bv), new_dest_map))
-                  node["children"] = new_children
-                  node["llm_bv_union"] = llm_bv_union
-
-              # Build arena with normalized RangeSet payloads
-              arena: Dict[NodeID, ArenaNode] = {
-                  uid: ArenaNode(
-                      children=node_data.get("children", []),
-                      llm_bv_union=node_data.get("llm_bv_union", RangeSet.empty()),
-                      clean_end=node_data.get("value", {}).get("clean_end", False),
-                  )
-                  for uid, node_data in arena_dict.items()
-              }
-              # Load tokenizer and parser table from the full constraint JSON
-
-              # Optimization: reorder edges and dests to prioritize reaching end nodes quickly.
-              # We sort:
-              # - inner dests by max_depth descending (dest nodes with larger max_depth first)
-              # - edges by the best (max) dest max_depth descending
-              def _edge_score(dests_list):
-                  if not dests_list:
-                      return -1
-                  try:
-                      return max(max_depth.get(int(d_idx), 0) for d_idx, _ in dests_list)
-                  except Exception:
-                      return -1
-
-              for _uid, _a_node in arena.items():
-                  if not _a_node.children:
-                      continue
-                  new_children = []
-                  for (pop, llm_bv), dests in _a_node.children:
-                      sorted_dests = sorted(dests, key=lambda t: max_depth.get(int(t[0]), 0), reverse=True)
-                      new_children.append(((pop, llm_bv), sorted_dests))
-                  new_children.sort(key=lambda item: _edge_score(item[1]), reverse=True)
-                  _a_node.children = new_children
-
-              constraint = ffi.GrammarConstraint.from_json_string(s)
-              tokenizer = constraint.tokenizer()
-              tokenizer_max_state = tokenizer.max_state()
-              glr_parser = constraint.glr_parser()
-              ignore_terminal_id = glr_parser.ignore_terminal_id
-              tokenizer_initial_state = tokenizer.initial_state_id()
-
-              parser_data = data['parser']
-              table_data = parser_data['stage_7_table']
-              start_state_id = parser_data['start_state_id']
-              py_table: Dict[int, Row] = {}
-              for state_id_str, row_data in table_data:
-                  state_id = int(state_id_str)
-                  py_row = Row()
-                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
-                      term_id = int(term_id_str)
-                      variant = action_data['variant']
-                      if variant == 'Shift':
-                          py_row.actions[term_id] = action_data['state_id']
-                      elif variant == 'Reduce':
-                          pids = tuple(sorted(action_data['production_ids']))
-                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
-                      elif variant == 'Split':
-                          shift = action_data['shift']
-                          reduces: Dict[int, Dict[int, Tuple[int, ...]]] = {}
-                          for len_str, nts_data in action_data['reduces']:
-                              len_int = int(len_str)
-                              nts: Dict[int, Tuple[int, ...]] = {}
-                              for nt_id_str, pids in nts_data:
-                                  nt_id_int = int(nt_id_str)
-                                  nts[nt_id_int] = tuple(sorted(pids))
-                              reduces[len_int] = nts
-                          py_row.actions[term_id] = Split(shift, reduces)
-                  for nt_id_str, goto_data in row_data['gotos']:
-                      nt_id = int(nt_id_str)
-                      if goto_data['state_id'] is not None:
-                          py_row.gotos[nt_id] = goto_data['state_id']
-                  py_table[state_id] = py_row
-              parser_table = ParserTable(start_state_id, py_table)
-
-              reverse_map: Dict[int, Set[int]] = collections.defaultdict(set)
-              for from_state, row in parser_table.table.items():
-                  # Handle shifts
-                  for action in row.actions.values():
-                      if isinstance(action, int): # Shift
-                          reverse_map[action].add(from_state)
-                      elif isinstance(action, Split):
-                          if action.shift is not None:
-                              reverse_map[action.shift].add(from_state)
-                  # Handle gotos
-                  for to_state in row.gotos.values():
-                      reverse_map[to_state].add(from_state)
-              reverse_state_map = dict(reverse_map)
-
-              all_terminals = set()
-              for row in parser_table.table.values():
-                  all_terminals.update(row.actions.keys())
-              if ignore_terminal_id is not None:
-                  all_terminals.add(ignore_terminal_id)
-              all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
-
-              initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
-              initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
-              state = {tokenizer_initial_state: initial_gss}
-
-              id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
-              # Convert possible_matches_cache to RangeSet
-              pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
-              pmc_rs: Dict[int, Dict[int, LLMTokenSet]] = {}
-              for tsid, inner in pmc_ffi.items():
-                  mapped: Dict[int, LLMTokenSet] = {}
-                  for term_id, bit in inner.items():
-                      mapped[int(term_id)] = RangeSet.from_ranges(bit.to_ranges())
-                  pmc_rs[int(tsid)] = mapped
-              possible_matches_cache = pmc_rs
-
-              vocab = data['precompute3_vocab']
-              internal_to_original_map_raw = dict(vocab['internal_to_original'])
-              internal_to_original_map = {
-                  int(k): RangeSetOut.from_indices(v) for k, v in internal_to_original_map_raw.items()
-              }
-              internal_max = vocab['internal_max_llm_token']
-              all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, internal_max)])
-
-              model = Model(
-                  arena=arena,
-                  roots_map=roots_map,
-                  max_depth=max_depth,
-                  parser_table=parser_table,
-                  glr_parser=glr_parser,
-                  reverse_state_map=reverse_state_map,
-                  tokenizer=tokenizer,
-                  tokenizer_initial_state=tokenizer_initial_state,
-                  tokenizer_max_state=tokenizer_max_state,
-                  possible_matches_cache=possible_matches_cache,
-                  id_to_token=id_to_token,
-                  internal_to_original_map=internal_to_original_map,
-                  all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
-                  all_terminals_bitset=all_terminals_bitset,
-                  ignore_terminal_id=ignore_terminal_id,
-                  state=state,
-              )
-
-              return model
-          @profile
-          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
-              terminal_to_add_rs = RangeSet.from_indices([terminal_id])
-
-              @_acc_memoize(use_value_cache=False)
-              def apply_disallow(acc: PyAcc) -> PyAcc:
-                  current_set = acc.terminals_union.get(state_id, RangeSet.empty())
-                  if current_set.contains(terminal_id):
-                      return acc
-
-                  new_map = acc.terminals_union.copy()
-                  new_map[state_id] = current_set.union(terminal_to_add_rs)
-                  return PyAcc(terminals_union=new_map, llm_mask=acc.llm_mask)
-
-              return gss.apply(apply_disallow)
-
-          def get_root(self, state_id: int) -> NodeID:
-              return self.roots_map[int(state_id)]
-
-          def is_end(self, node: NodeID) -> bool:
-              a_node = self.arena.get(node)
-              if not a_node:
-                  return False
-              return a_node.clean_end
-
-          def iter_edges(self, node: NodeID, token: int):
-              """
-              Explode packed transitions into (pop, state_id or None, dest_idx).
-              """
-              a_node = self.arena.get(node)
-              children = a_node.children if a_node else []
-              for (pop, llm_bv), dests in children:
-                  if llm_bv.contains(token):
-                      for dest_idx, state_bv in dests:
-                          for start, end in state_bv.to_ranges():
-                              for sid in range(start, end + 1):
-                                  yield (int(pop), sid, int(dest_idx))
-
-          @profile
-          def commit(self, token_id: int):
-              stats = Stats.get()
-              stats.start('commit')
-              token_bytes = self.id_to_token[token_id]
-
-              # Build tokenizer maps
-              stats.start('commit.build_tokenizer_maps')
-              stats.inc('commit.tokenizer_states_in', len(self.state))
-              terminals_map: Dict[int, TerminalIdSet] = {}
-              state_map: Dict[int, int] = {}
-              for tokenizer_sid in self.state.keys():
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  if end_state is not None:
-                      state_map[tokenizer_sid] = end_state
-                  matched_terminals = [terminal_id for terminal_id, _ in matches]
-                  terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
-
-              stats.stop('commit.build_tokenizer_maps')
-              # Prune and map per-state GSS in a single pass
-              temp_states: Dict[int, GSS] = {}
-              stats.start('commit.prune_and_map_gss')
-              @_acc_memoize()
-              def mutator(acc: PyAcc) -> Optional[PyAcc]:
-                  # Prune condition
-                  disallowed_terminals_map = acc.terminals_union
-                  for tsid, matched_bv in terminals_map.items():
-                      disallowed_for_state = disallowed_terminals_map.get(tsid)
-                      if disallowed_for_state and not matched_bv.isdisjoint(disallowed_for_state):
-                          return None
-                  # Map
-                  old_map = acc.terminals_union
-                  new_bvs: Dict[int, TerminalIdSet] = {}
-                  for old_sid, new_sid in state_map.items():
-                      bv_source = old_map.get(old_sid)
-                      if bv_source and not bv_source.is_empty():
-                          if new_sid in new_bvs:
-                              new_bvs[new_sid] |= bv_source
-                          else:
-                              new_bvs[new_sid] = bv_source
-                  return PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
-              cache = {}
-              current_state_for_processing = {tsid: gss.apply_and_prune(mutator, cache) for tsid, gss in self.state.items()}
-              current_state_for_processing = {tsid: gss for tsid, gss in current_state_for_processing.items() if not gss.is_empty()}
-              stats.stop('commit.prune_and_map_gss')
-
-              new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
-              stats.start('commit.main_loop')
-              q = collections.deque()
-              for tokenizer_sid, gss in current_state_for_processing.items():
-                  q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
-
-              visited_q_items: set = set()
-
-              while q:
-                  offset, tokenizer_sid, gss = q.popleft()
-                  q_item_key = (offset, tokenizer_sid, id(gss))
-                  if q_item_key in visited_q_items:
-                      continue
-                  visited_q_items.add(q_item_key)
-
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-
-                  for terminal_id, width in matches:
-                      processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
-
-                      # Immediate re-match disallow
-                      if end_state is not None:
-                          accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
-                          if terminal_id in accessible_terms:
-                              processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
-
-                      if not processed_gss.is_empty():
-                          new_offset = offset + width
-                          next_tokenizer_sid = self.tokenizer_initial_state
-                          if new_offset == len(token_bytes):
-                              new_states[next_tokenizer_sid].append(processed_gss)
-                          else:
-                              q.append((new_offset, next_tokenizer_sid, processed_gss))
-
-                  if end_state is not None:
-                      new_states[end_state].append(gss)
-              stats.stop('commit.main_loop')
-
-              stats.start('commit.merge_states')
-              merged_states = {
-                  sid: GSS.merge_many(gss_list)
-                  for sid, gss_list in new_states.items()
-                  if gss_list
-              }
-              merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
-              stats.stop('commit.merge_states')
-
-              stats.start('commit.fuse')
-              # memo = {}
-              # merged_states = {tsid: gss.fuse("to_interface", memo) for tsid, gss in merged_states.items()}
-              # memo = {}
-              # merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
-              stats.stop('commit.fuse')
-              # print(GSS.merge_many(merged_states.values()).stats())
-              # print(GSS.merge_many(merged_states.values()).to_graph_string(upper_only=True))
-
-
-              stats.inc('commit.tokenizer_states_out', len(merged_states))
-              self.state = merged_states
-              stats.stop('commit')
-
-          @profile
-          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-              stats = Stats.get()
-              p = 'commit.main_loop._process_token'
-              stats.start(f'{p}.total')
-              stats.inc(f'{p}.calls')
-              stats.inc(f'{p}.initial_heads', len(gss.peek()))
-
-              heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
-              for state_id in gss.peek():
-                  heads_by_state[state_id].append(gss.isolate(state_id))
-
-              shifted_gsses: List[GSS] = []
-              reduces_handled = 0
-
-              while heads_by_state:
-                  stats.inc(f'{p}.loop_iterations')
-                  state_id, state_gsss = heads_by_state.popitem()
-                  stats.start(f'{p}.merge_many.heads')
-                  state_gss = GSS.merge_many(state_gsss)
-                  stats.stop(f'{p}.merge_many.heads')
-                  row = self.parser_table.table.get(state_id)
-                  if not row:
-                      continue
-                  action = row.actions.get(terminal_id)
-                  if not action:
-                      continue
-
-                  def handle_shift(shift_to_state_id, gss_to_shift):
-                      stats.inc(f'{p}.shifts')
-                      shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
-
-                  def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
-                      stats.inc(f'{p}.reduces')
-                      stats.start(f'{p}.reduce.pop')
-                      popped_gss = gss_to_reduce
-                      for _ in range(reduce_action.len):
-                          popped_gss = popped_gss.pop()
-                      stats.stop(f'{p}.reduce.pop')
-                      for from_state_id in popped_gss.peek():
-                          goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
-                          goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
-                          heads_by_state[goto_state_id].append(goto_gss)
-                          stats.inc(f'{p}.reduce.new_heads')
-
-                  if isinstance(action, int):
-                      handle_shift(action, state_gss)
-                  elif isinstance(action, Reduce):
-                      handle_reduce(action, state_gss)
-                  elif isinstance(action, Split):
-                      stats.inc(f'{p}.splits')
-                      if action.shift is not None:
-                          handle_shift(action.shift, state_gss)
-                      for length, nts in action.reduces.items():
-                          for nt_id, pids in nts.items():
-                              handle_reduce(Reduce(nt_id, length, pids), state_gss)
-
-              stats.start(f'{p}.merge_many.final')
-              result = GSS.merge_many(shifted_gsses)
-              stats.stop(f'{p}.merge_many.final')
-              stats.inc(f'{p}.final_heads', len(result.peek()))
-              stats.stop(f'{p}.total')
-              return result
-
-          def _is_zombie_path(self, gss: GSS, path_token_union: LLMTokenSet, final_mask: LLMTokenSet, stat_context: str) -> bool:
-              """
-              Checks if a given traversal path is a "zombie" path, meaning it cannot
-              contribute any new tokens to the final_mask.
-              """
-              stats = Stats.get()
-              p = f'get_mask.zombie_check.{stat_context}'
-              stats.start(p)
-
-              # We only care about tokens that are not yet in the final mask.
-              potential_new_tokens = path_token_union.difference(final_mask)
-              if potential_new_tokens.is_empty():
-                  stats.inc(f'{p}.skipped_no_potential')
-                  stats.stop(p)
-                  return True
-
-              gss_mask_acc = gss.reduce_acc()
-              if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
-                  stats.inc(f'{p}.skipped_no_overlap_disjoint')
-                  stats.stop(p)
-                  return True
-
-              stats.stop(p)
-              return False
-          def get_mask(self) -> LLMTokenSet:
-              """
-              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-
-              Changes for get_mask_only:
-              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-                the forbidden terminals -> forbidden LLM tokens and taking the complement.
-              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
-              """
-              stats = Stats.get()
-              stats.start('get_mask')
-              state_map: Dict[int, GSS] = self.state
-              stats.inc('get_mask.initial_tokenizer_states', len(state_map))
-
-              all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
-              final_mask: LLMTokenSet = RangeSet.empty()
-
-              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
-              # values: maps node -> accumulated GSS at that node
-              values: Dict[NodeID, GSS] = {}
-              # edge_progress: maps node -> (edge_idx, dest_idx) cursor into a_node.children[edge_idx][1][dest_idx]
-              edge_progress: Dict[NodeID, Tuple[int, int]] = {}
-              end_node_processed: Set[NodeID] = set()
-              depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
-              enqueued_nodes: Set[NodeID] = set()
-
-              hp, hpop = heapq.heappush, heapq.heappop
-              roots_map: Dict[int, NodeID] = self.roots_map
-              max_depth: Dict[NodeID, int] = self.max_depth
-              arena: Dict[NodeID, ArenaNode] = self.arena
-              is_end = self.is_end
-              pmc: Dict[int, Dict[int, LLMTokenSet]] = self.possible_matches_cache or {}
-              max_state: int = self.tokenizer_max_state
-
-              # --- Initial GSS Stats ---
-              stats.start('get_mask.initial_stats')
-              all_initial_accs = set()
-              for gss in state_map.values():
-                  # We assume gss.get_all_accs() exists for stats gathering.
-                  accs = getattr(gss, 'get_all_accs', lambda: [])()
-                  all_initial_accs.update(accs)
-                  stats.inc('get_mask.initial.gss_heads.sum', len(gss.peek()))
-              stats.inc('get_mask.initial.unique_accs', len(all_initial_accs))
-              for acc in all_initial_accs:
-                  stats.inc('get_mask.initial.terminals_union_size.sum', len(acc.terminals_union))
-              stats.stop('get_mask.initial_stats')
-
-
-              stats.start('get_mask.seeding')
-              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-              @_acc_memoize(use_value_cache=False)
-              def initialize_acc(acc: PyAcc) -> PyAcc:
-                  if False:  # placeholder to keep minimal diff context; decorator handles memoization
-                      if cached_acc is not None:
-                          return cached_acc
-
-                  p = 'get_mask.seeding.initialize_acc'
-                  stats.inc(f'{p}.calls')
-                  stats.start(f'{p}.total')
-                  # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                  disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
-                  disallowed_map = acc.terminals_union
-                  stats.inc(f'{p}.disallowed_map_size.sum', len(disallowed_map))
-
-                  for tsid, disallowed_terminals in disallowed_map.items():
-                      stats.inc(f'{p}.disallowed_terminals_loops')
-                      if tsid > max_state or tsid not in pmc:
-                          continue
-                      terminals_to_llm = pmc[tsid]
-
-                      stats.start(f'{p}.iter_indices')
-                      indices = disallowed_terminals.iter_indices()
-                      stats.stop(f'{p}.iter_indices')
-
-                      for terminal_id in indices:
-                          stats.inc(f'{p}.disallowed_terminals_inner_loops')
-                          if terminal_id in terminals_to_llm:
-                              stats.start(f'{p}.union')
-                              disallowed_llm_mask |= terminals_to_llm[terminal_id]
-                              stats.stop(f'{p}.union')
-
-                  stats.start(f'{p}.difference')
-                  allowed_mask = all_ones.difference(disallowed_llm_mask)
-                  stats.stop(f'{p}.difference')
-
-                  stats.stop(f'{p}.total')
-                  result = PyAcc(
-                      terminals_union={},  # consume
-                      llm_mask=allowed_mask,
-                  )
-                  return result
-
-              cache = {}
-              for sid, gss in state_map.items():
-                  stats.inc('get_mask.seeding.gss_loops')
-                  r: NodeID = roots_map[int(sid)]
-
-                  stats.start('get_mask.seeding.gss.apply')
-                  gss_initialized: GSS = gss.apply(initialize_acc, cache)
-                  stats.stop('get_mask.seeding.gss.apply')
-
-                  if r in values:
-                      stats.start('get_mask.seeding.gss.merge')
-                      values[r] = values[r].merge(gss_initialized)
-                      stats.stop('get_mask.seeding.gss.merge')
-                  else:
-                      edge_progress[r] = (0, 0)
-                      values[r] = gss_initialized
-
-                  d: int = max_depth[r]
-                  if r not in enqueued_nodes:
-                      enqueued_nodes.add(r)
-                      hp(depth_heap, (-d, r))
-
-              def enqueue(d: int, n: NodeID) -> None:
-                  stats.inc('get_mask.traversal.enqueues')
-                  if n not in enqueued_nodes:
-                      enqueued_nodes.add(n)
-                      hp(depth_heap, (-d, n))
-
-              def dequeue() -> Tuple[int, int]:
-                  neg_d, n = hpop(depth_heap)
-                  return -neg_d, n
-              stats.stop('get_mask.seeding')
-
-              # Main loop
-              stats.start('get_mask.main_loop')
-              max_depth_reached = 0
-              visited_nodes = set()
-              while depth_heap:
-                  depth, node = dequeue()
-                  max_depth_reached = max(max_depth_reached, depth)
-                  stats.inc('get_mask.traversal.depth_heap.pops')
-                  stats.inc('get_mask.traversal.nodes_processed')
-                  if node not in visited_nodes:
-                      visited_nodes.add(node)
-                  gss_node: Optional[GSS] = values.get(node)
-                  enqueued_nodes.remove(node)
-                  if gss_node is None:
-                      # This node may have been fully processed and cleared.
-                      continue
-                  stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
-
-                  # End-node handling: just union the allowed LLM tokens
-                  if is_end(node) and node not in end_node_processed:
-                      stats.inc('get_mask.traversal.end_nodes')
-                      stats.start('get_mask.main_loop.end_node.reduce_acc')
-                      reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                      stats.stop('get_mask.main_loop.end_node.reduce_acc')
-                      if reduced_acc:
-                          stats.start('get_mask.main_loop.end_node.final_mask_union')
-                          final_mask |= reduced_acc.llm_mask
-                          stats.stop('get_mask.main_loop.end_node.final_mask_union')
-                      end_node_processed.add(node)
-
-                  # Zombie traversal avoidance: if this node's edges can't possibly add
-                  # to the final mask given the current GSS mask, skip it.
-                  a_node = arena.get(node)
-                  node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-                  if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask, 'node'):
-                      # Fully drop this node; no need to keep processing its edges.
-                      values.pop(node, None)
-                      edge_progress.pop(node, None)
-                      continue
-
-                  # Traverse edges and propagate masks
-                  a_node = arena.get(node)
-                  edges = a_node.children if a_node else []
-                  stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
-                  stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
-
-                  # Determine current cursor for this node (edge_idx, dest_idx); default to (0,0).
-                  edge_idx, dest_idx = edge_progress.get(node, (0, 0))
-
-                  # If no edges or we've exhausted all edges, finalize this node.
-                  if not edges or edge_idx >= len(edges):
-                      values.pop(node, None)
-                      edge_progress.pop(node, None)
-                      continue
-
-                  # Process exactly one edge (the current best edge) and exactly one dest within it.
-                  (pop, llm_bv), dests = edges[edge_idx]
-                  stats.inc('get_mask.traversal.edges_traversed')
-                  stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
-
-                  # If current dest_idx is out of range, advance to the next edge.
-                  if dest_idx >= len(dests):
-                      edge_idx += 1
-                      dest_idx = 0
-                      edge_progress[node] = (edge_idx, dest_idx)
-                      if edge_idx < len(edges):
-                          enqueue(max_depth[node], node)
-                      else:
-                          values.pop(node, None)
-                          edge_progress.pop(node, None)
-                      continue
-
-                  stats.start('get_mask.main_loop.edge.popn')
-                  popped: GSS = gss_node.popn(pop)
-                  stats.stop('get_mask.main_loop.edge.popn')
-                  if popped.is_empty():
-                      stats.inc('get_mask.traversal.edge.popped_empty')
-                      # Skip entire edge
-                      edge_idx += 1
-                      dest_idx = 0
-                      edge_progress[node] = (edge_idx, dest_idx)
-                      if edge_idx < len(edges):
-                          enqueue(max_depth[node], node)
-                      else:
-                          values.pop(node, None)
-                          edge_progress.pop(node, None)
-                      continue
-
-                  # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                  @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)
-                  def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                          p = 'get_mask.main_loop.edge.intersect_and_prune'
-                          stats.inc(f'{p}.calls')
-                          stats.start(f'{p}.intersection')
-                          new_mask = acc.llm_mask.intersection(llm_bv)
-                          stats.stop(f'{p}.intersection')
-
-                          if new_mask.is_empty():
-                              stats.inc(f'{p}.pruned_accs')
-                              return None
-                          else:
-                              return PyAcc(
-                                  terminals_union=acc.terminals_union,
-                                  llm_mask=new_mask
-                              )
-                  stats.start('get_mask.main_loop.edge.apply_and_prune')
-                  popped = popped.apply_and_prune(intersect_and_prune)
-                  stats.stop('get_mask.main_loop.edge.apply_and_prune')
-
-                  if popped.is_empty():
-                      stats.inc('get_mask.traversal.edge.popped_pruned_empty')
-                      # Skip entire edge
-                      edge_idx += 1
-                      dest_idx = 0
-                      edge_progress[node] = (edge_idx, dest_idx)
-                      if edge_idx < len(edges):
-                          enqueue(max_depth[node], node)
-                      else:
-                          values.pop(node, None)
-                          edge_progress.pop(node, None)
-                      continue
-
-                  if popped.reduce_acc().is_empty():
-                      stats.inc('get_mask.traversal.edge.popped_reduced_empty')
-                      # Skip entire edge
-                      edge_idx += 1
-                      dest_idx = 0
-                      edge_progress[node] = (edge_idx, dest_idx)
-                      if edge_idx < len(edges):
-                          enqueue(max_depth[node], node)
-                      else:
-                          values.pop(node, None)
-                          edge_progress.pop(node, None)
-                      continue
-
-                  # Process exactly one destination for this iteration
-                  stats.inc('get_mask.traversal.dests_traversed')
-                  dest_node_id, state_bv = dests[dest_idx]
-
-                  stats.start('get_mask.main_loop.edge.peek_and_filter')
-                  peeked = popped.peek()
-                  values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-                  stats.stop('get_mask.main_loop.edge.peek_and_filter')
-
-                  if not values_to_keep:
-                      # Advance to next dest within this edge
-                      dest_idx += 1
-                      edge_progress[node] = (edge_idx, dest_idx)
-                      # Re-enqueue this node if there is more to do
-                      enqueue(max_depth[node], node)
-                      continue
-
-                  stats.start('get_mask.main_loop.edge.isolate_many')
-                  child_gss = popped.isolate_many(values_to_keep)
-                  stats.stop('get_mask.main_loop.edge.isolate_many')
-
-                  stats.inc('get_mask.main_loop.edge.intersect_and_prune.memo_size.sum', intersect_and_prune._acc_memo_size())
-                  if child_gss.is_empty():
-                      stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
-                      # Advance cursor and re-enqueue node for remaining work
-                      dest_idx += 1
-                      edge_progress[node] = (edge_idx, dest_idx)
-                      enqueue(max_depth[node], node)
-                      continue
-
-                  if child_gss.reduce_acc().is_empty():
-                      # Advance cursor and re-enqueue node for remaining work
-                      dest_idx += 1
-                      edge_progress[node] = (edge_idx, dest_idx)
-                      enqueue(max_depth[node], node)
-                      continue
-
-                  d: NodeID = int(dest_node_id)
-                  if d in values:
-                      stats.inc('get_mask.traversal.edge.gss_merges')
-                      stats.start('get_mask.main_loop.edge.gss_merge')
-                      values[d] = values[d].merge(child_gss)
-                      stats.stop('get_mask.main_loop.edge.gss_merge')
-                  else:
-                      values[d] = child_gss
-                      # Initialize traversal progress for newly discovered node
-                      edge_progress[d] = (0, 0)
-                  enqueue(max_depth[d], d)
-
-                  # Advance this node's cursor (one dest at a time)
-                  dest_idx += 1
-                  if dest_idx >= len(dests):
-                      edge_idx += 1
-                      dest_idx = 0
-                  edge_progress[node] = (edge_idx, dest_idx)
-
-                  # Re-enqueue this node if it still has remaining edges/dests to process; else finalize it.
-                  if edge_idx < len(edges):
-                      enqueue(max_depth[node], node)
-                  else:
-                      values.pop(node, None)
-                      edge_progress.pop(node, None)
-              stats.stop('get_mask.main_loop')
-              stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
-              stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
-
-              stats.start('get_mask.final_conversion')
-              # Convert internal mask back to original IDs
-              original_indices = RangeSetOut.empty()
-              for i in final_mask.iter_indices():
-                  if i in self.internal_to_original_map:
-                      original_indices |= self.internal_to_original_map[i]
-              stats.stop('get_mask.final_conversion')
-
-              stats.stop('get_mask')
-              return original_indices
-
-          def finalize(self):
-              """Called at the end of a benchmark run to perform any final actions, like printing stats."""
-              print("\n--- Final Stats Report from Model ---")
-              Stats.get().report()
-  diffs_applied_this_send: true
-  core_guidance_inserted: true
-  prev_apply_mode: git-llm
-system:
-  message: |-
-    You are a helpful assistant.
-    Respond in markdown format.
-    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
-    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
-  model:
-    - gpt-5
-  code_completion_model:
-    - cp
-  commit_message_model:
-    - gemini/gemini-flash-lite-latest
-  diff_correction_model:
-    - gpt-oss-120b
-    - gf
-    - cp
-  max_completion_tokens:
-  temperature: 0.0
-  apply_mode: git-llm
-  llm_context_mode: full
-messages:
-  - user: |-
-      Developer note (core guidance):
-      - Respond in markdown format.
-      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
-      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
-      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
-      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
-        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
-      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
-      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
-      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
-      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
-
-
-      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
-    metadata:
-      kind: core-guidance
-      role: developer
-      ephemeral: false
-  - user: |-
-      ```python 'python/aug25/models/precompute3_model_pure_python.py'
-      from __future__ import annotations
-
-      import json
-      import heapq
-      import collections
-      import textwrap
-      import time
-      from typing import Dict, List, Tuple, Optional, Union, Any, Set
-      from dataclasses import dataclass, field
-
-      # Progress bars (safe fallback if tqdm is unavailable)
-      try:
-          from tqdm import tqdm
-      except Exception:  # pragma: no cover
-          def tqdm(x, **kwargs):
-              return x
-
-      from ..common_interface import GraphProvider
-      from ..stats import Stats
-      # from ..common_interface import RangeSet
-      # from ..range_set.set_range_set import SetRangeSet as RangeSet
-      # from ..range_set.py_range_set import PyRangeSet as RangeSet
-      # from ..range_set.bitset_range_set import BitsetRangeSet as RangeSet
-      from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
-      # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSet
-
-      # from ..common_interface import RangeSetOut
-      from ..range_set.set_range_set import SetRangeSet as RangeSetOut
-      # from ..range_set.py_range_set import PyRangeSet as RangeSetOut
-      # from ..range_set.bitset_range_set import BitsetRangeSet as RangeSetOut
-      # from ..range_set.ffi_range_set import FFIRangeSet as RangeSetOut
-      # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetOut
-
-      # from ..common_interface import RangeSetStates
-      from ..range_set.set_range_set import SetRangeSet as RangeSetStates
-      # from ..range_set.py_range_set import PyRangeSet as RangeSetStates
-      # from ..range_set.bitset_range_set import BitsetRangeSet as RangeSetStates
-      # from ..range_set.ffi_range_set import FFIRangeSet as RangeSetStates
-      # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetStates
-
-      import _sep1 as ffi
-      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
-      # from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
-      # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
-
-
-      # --- Monkey-patch RangeSet to collect stats on union/intersection ---
-      # This is to fulfill the request of tracking ffi.Bitset.union and intersection calls.
-      # Since the code was refactored to use a pure Python RangeSet, we track its methods instead.
-      _original_rangeset_union = RangeSet.union
-      _original_rangeset_intersection = RangeSet.intersection
-
-      def _patched_union(self, other: "RangeSet") -> "RangeSet":
-          """Patched version of RangeSet.union that increments a stats counter."""
-          stats = Stats.get()
-          stats.inc('bitset.union.calls')
-          stats.start('bitset.union.time')
-          result = _original_rangeset_union(self, other)
-          stats.stop('bitset.union.time')
-          return result
-
-      def _patched_intersection(self, other: "RangeSet") -> "RangeSet":
-          """Patched version of RangeSet.intersection that increments a stats counter."""
-          stats = Stats.get()
-          stats.inc('bitset.intersection.calls')
-          stats.start('bitset.intersection.time')
-          result = _original_rangeset_intersection(self, other)
-          stats.stop('bitset.intersection.time')
-          return result
-
-      # Apply the patches
-      RangeSet.union = _patched_union
-      RangeSet.intersection = _patched_intersection
-      # --- End of monkey-patch ---
-
-
-      NodeID = int
-
-      # Type aliases for different uses of RangeSet to improve clarity.
-      LLMTokenSet = RangeSet
-      StateIDSet = RangeSetStates
-      TerminalIdSet = RangeSet
-
-
-      # Add a dummy profiler for when not running under kernprof
-      try:
-          # This will be injected by the kernprof script.
-          profile
-      except NameError:
-          # If not running under kernprof, create a dummy decorator.
-          def profile(func): return func
-
-      # --- Accumulator memoization decorator ---
-      def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
-          """
-          Per-invocation memoization for PyAcc transformers.
-          - Caches by id(acc) (including None results).
-          - Caches by value (acc) for non-None results, if use_value_cache is True.
-          If stats_prefix is provided, increments '{prefix}.memo_hits' on cache hits.
-          Exposes _acc_memo_size() to inspect id-cache size for stats.
-          """
-          def decorator(fn):
-              id_memo = {}
-              val_memo = {}
-              def wrapper(acc):
-                  # Identity-based fast path
-                  if id(acc) in id_memo:
-                      if stats_prefix:
-                          Stats.get().inc(f'{stats_prefix}.memo_hits')
-                      return id_memo[id(acc)]
-
-                  if use_value_cache:
-                      # Structural equality-based cache (only non-None results are useful here)
-                      cached = val_memo.get(acc)
-                      if cached is not None:
-                          id_memo[id(acc)] = cached
-                          if stats_prefix:
-                              Stats.get().inc(f'{stats_prefix}.memo_hits')
-                          return cached
-                  result = fn(acc)
-                  id_memo[id(acc)] = result
-                  if use_value_cache:
-                      val_memo[acc] = result
-                  return result
-              wrapper._acc_memo_size = lambda: len(id_memo)
-              return wrapper
-          return decorator
-
-
-      @dataclass(frozen=True)
-      class Reduce:
-          nonterminal_id: int
-          len: int
-          production_ids: Tuple[int, ...]
-
-
-      @dataclass(frozen=True)
-      class Split:
-          shift: Optional[int]
-          reduces: Dict[int, Dict[int, Tuple[int, ...]]]  # len -> nt_id -> pids
-
-
-      # Action can be a Shift (int), Reduce, or Split
-      Action = Union[int, Reduce, Split]
-
-
-      @dataclass
-      class Row:
-          actions: Dict[int, Action] = field(default_factory=dict)  # terminal_id -> Action
-          gotos: Dict[int, int] = field(default_factory=dict)  # nonterminal_id -> state_id
-
-
-      @dataclass
-      class ParserTable:
-          start_state_id: int
-          table: Dict[int, Row]
-
-
-      @dataclass
-      class ArenaNode:
-          children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = field(default_factory=list)
-          llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
-          clean_end: bool = False
-
-      @dataclass(frozen=True, eq=False)
-      class PyAcc:
-          terminals_union: Dict[int, TerminalIdSet]
-          llm_mask: LLMTokenSet
-
-          def __eq__(self, other):
-              if not isinstance(other, PyAcc):
-                  return NotImplemented
-              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
-
-          def __hash__(self):
-              # frozenset of items for hashable dict
-              return hash((len(self.terminals_union), self.llm_mask))
-
-          def merge(self, other: "PyAcc") -> "PyAcc":
-              # The dataclass is frozen, so we can't modify in-place.
-              # But terminals_union is a dict, which is mutable.
-              # We must be careful to create copies.
-              d1 = self.terminals_union
-              d2 = other.terminals_union
-              new_terminals_union = d1.copy()
-              for k, v in d2.items():
-                  if k in new_terminals_union:
-                      new_terminals_union[k] = new_terminals_union[k].union(v)
-                  else:
-                      new_terminals_union[k] = v
-
-              return PyAcc(
-                  terminals_union=new_terminals_union,
-                  llm_mask=self.llm_mask.union(other.llm_mask),
-              )
-
-          def is_empty(self):
-              return self.llm_mask.is_empty()
-
-      @dataclass
-      class Model(GraphProvider):
-          """
-          Precomputed trie model (third-generation), simplified and concise.
-          """
-          stats = Stats.get()
-          stats.add_group('get_mask')
-          stats.add_group('commit')
-
-          # Core data structures
-          arena: Dict[NodeID, ArenaNode]
-          roots_map: Dict[int, NodeID]
-          max_depth: Dict[NodeID, int]
-
-          # Parser-related fields
-          parser_table: ParserTable
-          glr_parser: ffi.GLRParser
-          reverse_state_map: Dict[int, Set[int]]
-
-          # Tokenizer-related fields
-          tokenizer: ffi.Regex
-          tokenizer_initial_state: int
-          tokenizer_max_state: int
-          possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
-
-          # Token/Terminal mapping fields
-          id_to_token: Dict[int, bytes]
-          internal_to_original_map: Dict[int, RangeSetOut]
-          all_internal_llm_tokens_bitset: LLMTokenSet
-          all_terminals_bitset: TerminalIdSet
-          ignore_terminal_id: Optional[int]
-
-          # State
-          state: Dict[int, GSS]
-
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
               Stats.get().reset()
               data = json.loads(s)
               roots_map_raw = data["precomputed3"]
@@ -2790,13 +1752,928 @@ messages:
               """Called at the end of a benchmark run to perform any final actions, like printing stats."""
               print("\n--- Final Stats Report from Model ---")
               Stats.get().report()
+  diffs_applied_this_send: true
+  core_guidance_inserted: true
+  prev_apply_mode: git-llm
+system:
+  message: |-
+    You are a helpful assistant.
+    Respond in markdown format.
+    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
+    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
+  model:
+    - gp
+  code_completion_model:
+    - cp
+  commit_message_model:
+    - gemini/gemini-flash-lite-latest
+  diff_correction_model:
+    - gpt-oss-120b
+    - gf
+    - cp
+  max_completion_tokens:
+  temperature: 0.0
+  apply_mode: git-llm
+  llm_context_mode: full
+messages:
+  - user: |-
+      Developer note (core guidance):
+      - Respond in markdown format.
+      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
+      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
+      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
+      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
+        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
+      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
+      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
+      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
+      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
+
+
+      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
+    metadata:
+      kind: core-guidance
+      role: developer
+      ephemeral: false
+  - user: |-
+      ```python 'python/aug25/models/precompute3_model_pure_python.py'
+      from __future__ import annotations
+
+      import json
+      import heapq
+      import collections
+      import textwrap
+      import time
+      from typing import Dict, List, Tuple, Optional, Union, Any, Set
+      from dataclasses import dataclass, field
+
+      # Progress bars (safe fallback if tqdm is unavailable)
+      try:
+          from tqdm import tqdm
+      except Exception:  # pragma: no cover
+          def tqdm(x, **kwargs):
+              return x
+
+      from ..common_interface import GraphProvider
+      from ..stats import Stats
+      # from ..common_interface import RangeSet
+      # from ..range_set.set_range_set import SetRangeSet as RangeSet
+      # from ..range_set.py_range_set import PyRangeSet as RangeSet
+      # from ..range_set.bitset_range_set import BitsetRangeSet as RangeSet
+      from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
+      # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSet
+
+      # from ..common_interface import RangeSetOut
+      from ..range_set.set_range_set import SetRangeSet as RangeSetOut
+      # from ..range_set.py_range_set import PyRangeSet as RangeSetOut
+      # from ..range_set.bitset_range_set import BitsetRangeSet as RangeSetOut
+      # from ..range_set.ffi_range_set import FFIRangeSet as RangeSetOut
+      # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetOut
+
+      # from ..common_interface import RangeSetStates
+      from ..range_set.set_range_set import SetRangeSet as RangeSetStates
+      # from ..range_set.py_range_set import PyRangeSet as RangeSetStates
+      # from ..range_set.bitset_range_set import BitsetRangeSet as RangeSetStates
+      # from ..range_set.ffi_range_set import FFIRangeSet as RangeSetStates
+      # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetStates
+
+      import _sep1 as ffi
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+      # from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
+      # from python.gss_tester.implementations.leveled_impl_cpp import Leveled_impl_cppGSS as GSS
+
+
+      # --- Monkey-patch RangeSet to collect stats on union/intersection ---
+      # This is to fulfill the request of tracking ffi.Bitset.union and intersection calls.
+      # Since the code was refactored to use a pure Python RangeSet, we track its methods instead.
+      _original_rangeset_union = RangeSet.union
+      _original_rangeset_intersection = RangeSet.intersection
+
+      def _patched_union(self, other: "RangeSet") -> "RangeSet":
+          """Patched version of RangeSet.union that increments a stats counter."""
+          stats = Stats.get()
+          stats.inc('bitset.union.calls')
+          stats.start('bitset.union.time')
+          result = _original_rangeset_union(self, other)
+          stats.stop('bitset.union.time')
+          return result
+
+      def _patched_intersection(self, other: "RangeSet") -> "RangeSet":
+          """Patched version of RangeSet.intersection that increments a stats counter."""
+          stats = Stats.get()
+          stats.inc('bitset.intersection.calls')
+          stats.start('bitset.intersection.time')
+          result = _original_rangeset_intersection(self, other)
+          stats.stop('bitset.intersection.time')
+          return result
+
+      # Apply the patches
+      RangeSet.union = _patched_union
+      RangeSet.intersection = _patched_intersection
+      # --- End of monkey-patch ---
+
+
+      NodeID = int
+
+      # Type aliases for different uses of RangeSet to improve clarity.
+      LLMTokenSet = RangeSet
+      StateIDSet = RangeSetStates
+      TerminalIdSet = RangeSet
+
+
+      # Add a dummy profiler for when not running under kernprof
+      try:
+          # This will be injected by the kernprof script.
+          profile
+      except NameError:
+          # If not running under kernprof, create a dummy decorator.
+          def profile(func): return func
+
+      # --- Accumulator memoization decorator ---
+      def _acc_memoize(stats_prefix: Optional[str] = None):
+          """
+          Per-invocation memoization for PyAcc transformers.
+          - Caches by id(acc) (including None results).
+          - Caches by value (acc) for non-None results.
+          If stats_prefix is provided, increments '{prefix}.memo_hits' on cache hits.
+          Exposes _acc_memo_size() to inspect id-cache size for stats.
+          """
+          def decorator(fn):
+              id_memo = {}
+              val_memo = {}
+              def wrapper(acc):
+                  # Identity-based fast path
+                  if id(acc) in id_memo:
+                      if stats_prefix:
+                          Stats.get().inc(f'{stats_prefix}.memo_hits')
+                      return id_memo[id(acc)]
+                  # Structural equality-based cache (only non-None results are useful here)
+                  cached = val_memo.get(acc)
+                  if cached is not None:
+                      id_memo[id(acc)] = cached
+                      if stats_prefix:
+                          Stats.get().inc(f'{stats_prefix}.memo_hits')
+                      return cached
+                  result = fn(acc)
+                  id_memo[id(acc)] = result
+                  val_memo[acc] = result
+                  return result
+              wrapper._acc_memo_size = lambda: len(id_memo)
+              return wrapper
+          return decorator
+
+
+      @dataclass(frozen=True)
+      class Reduce:
+          nonterminal_id: int
+          len: int
+          production_ids: Tuple[int, ...]
+
+
+      @dataclass(frozen=True)
+      class Split:
+          shift: Optional[int]
+          reduces: Dict[int, Dict[int, Tuple[int, ...]]]  # len -> nt_id -> pids
+
+
+      # Action can be a Shift (int), Reduce, or Split
+      Action = Union[int, Reduce, Split]
+
+
+      @dataclass
+      class Row:
+          actions: Dict[int, Action] = field(default_factory=dict)  # terminal_id -> Action
+          gotos: Dict[int, int] = field(default_factory=dict)  # nonterminal_id -> state_id
+
+
+      @dataclass
+      class ParserTable:
+          start_state_id: int
+          table: Dict[int, Row]
+
+
+      @dataclass
+      class ArenaNode:
+          children: List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]] = field(default_factory=list)
+          llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
+          clean_end: bool = False
+
+      @dataclass(frozen=True, eq=False)
+      class PyAcc:
+          terminals_union: Dict[int, TerminalIdSet]
+          llm_mask: LLMTokenSet
+
+          def __eq__(self, other):
+              if not isinstance(other, PyAcc):
+                  return NotImplemented
+              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
+
+          def __hash__(self):
+              # frozenset of items for hashable dict
+              return hash((len(self.terminals_union), self.llm_mask))
+
+          def merge(self, other: "PyAcc") -> "PyAcc":
+              # The dataclass is frozen, so we can't modify in-place.
+              # But terminals_union is a dict, which is mutable.
+              # We must be careful to create copies.
+              d1 = self.terminals_union
+              d2 = other.terminals_union
+              new_terminals_union = d1.copy()
+              for k, v in d2.items():
+                  if k in new_terminals_union:
+                      new_terminals_union[k] = new_terminals_union[k].union(v)
+                  else:
+                      new_terminals_union[k] = v
+
+              return PyAcc(
+                  terminals_union=new_terminals_union,
+                  llm_mask=self.llm_mask.union(other.llm_mask),
+              )
+
+          def is_empty(self):
+              return self.llm_mask.is_empty()
+
+      @dataclass
+      class Model(GraphProvider):
+          """
+          Precomputed trie model (third-generation), simplified and concise.
+          """
+          stats = Stats.get()
+          stats.add_group('get_mask')
+          stats.add_group('commit')
+
+          # Core data structures
+          arena: Dict[NodeID, ArenaNode]
+          roots_map: Dict[int, NodeID]
+          max_depth: Dict[NodeID, int]
+
+          # Parser-related fields
+          parser_table: ParserTable
+          glr_parser: ffi.GLRParser
+          reverse_state_map: Dict[int, Set[int]]
+
+          # Tokenizer-related fields
+          tokenizer: ffi.Regex
+          tokenizer_initial_state: int
+          tokenizer_max_state: int
+          possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
+
+          # Token/Terminal mapping fields
+          id_to_token: Dict[int, bytes]
+          internal_to_original_map: Dict[int, RangeSetOut]
+          all_internal_llm_tokens_bitset: LLMTokenSet
+          all_terminals_bitset: TerminalIdSet
+          ignore_terminal_id: Optional[int]
+
+          # State
+          state: Dict[int, GSS]
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              Stats.get().reset()
+              data = json.loads(s)
+              roots_map_raw = data["precomputed3"]
+              arena_json = data["trie3_god"]
+              arena_values = arena_json.get("values", [])
+              arena_dict = {int(k): v for k, v in arena_values}
+
+              roots_map = {int(s): int(r) for s, r in roots_map_raw}
+              max_depth: Dict[NodeID, int] = {}
+              dumps = json.dumps
+              bs_from_json = ffi.Bitset.from_json_string
+
+              # Normalize arena children bitsets and cache max_depth
+              for uid, node in arena_dict.items():
+                  uid_int = int(uid)
+                  max_depth[uid_int] = int(node.get("max_depth", 0) or 0)
+
+                  children = node.get("children") or []
+                  if not children:
+                      node["children"] = []
+                      node["llm_bv_union"] = RangeSet.empty()
+                      continue
+
+                  new_children = []
+                  llm_bv_union: LLMTokenSet = RangeSet.empty()
+                  for edge_key, dest_map in children:
+                      pop, llm_bv_json = edge_key
+                      llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
+                      # Convert to RangeSet for ffi-free operations in commit/get_mask
+                      llm_bv: LLMTokenSet = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
+                      llm_bv_union |= llm_bv
+                      new_dest_map = []
+                      for dest_idx, state_bv_json in dest_map:
+                          state_bv_bitset = bs_from_json(dumps(state_bv_json))
+                          state_bv: StateIDSet = RangeSetStates.from_ranges(state_bv_bitset.to_ranges())
+                          new_dest_map.append((int(dest_idx), state_bv))
+                      new_children.append(((int(pop), llm_bv), new_dest_map))
+                  node["children"] = new_children
+                  node["llm_bv_union"] = llm_bv_union
+
+              arena: Dict[NodeID, ArenaNode] = {
+                  uid: ArenaNode(
+                      children=node_data.get("children", []),
+                      llm_bv_union=node_data.get("llm_bv_union", RangeSet.empty()),
+                      clean_end=node_data.get("value", {}).get("clean_end", False),
+                  )
+                  for uid, node_data in arena_dict.items()
+              }
+              # Load tokenizer and parser table from the full constraint JSON
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              tokenizer = constraint.tokenizer()
+              tokenizer_max_state = tokenizer.max_state()
+              glr_parser = constraint.glr_parser()
+              ignore_terminal_id = glr_parser.ignore_terminal_id
+              tokenizer_initial_state = tokenizer.initial_state_id()
+
+              parser_data = data['parser']
+              table_data = parser_data['stage_7_table']
+              start_state_id = parser_data['start_state_id']
+              py_table: Dict[int, Row] = {}
+              for state_id_str, row_data in table_data:
+                  state_id = int(state_id_str)
+                  py_row = Row()
+                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
+                      term_id = int(term_id_str)
+                      variant = action_data['variant']
+                      if variant == 'Shift':
+                          py_row.actions[term_id] = action_data['state_id']
+                      elif variant == 'Reduce':
+                          pids = tuple(sorted(action_data['production_ids']))
+                          py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], pids)
+                      elif variant == 'Split':
+                          shift = action_data['shift']
+                          reduces: Dict[int, Dict[int, Tuple[int, ...]]] = {}
+                          for len_str, nts_data in action_data['reduces']:
+                              len_int = int(len_str)
+                              nts: Dict[int, Tuple[int, ...]] = {}
+                              for nt_id_str, pids in nts_data:
+                                  nt_id_int = int(nt_id_str)
+                                  nts[nt_id_int] = tuple(sorted(pids))
+                              reduces[len_int] = nts
+                          py_row.actions[term_id] = Split(shift, reduces)
+                  for nt_id_str, goto_data in row_data['gotos']:
+                      nt_id = int(nt_id_str)
+                      if goto_data['state_id'] is not None:
+                          py_row.gotos[nt_id] = goto_data['state_id']
+                  py_table[state_id] = py_row
+              parser_table = ParserTable(start_state_id, py_table)
+
+              reverse_map: Dict[int, Set[int]] = collections.defaultdict(set)
+              for from_state, row in parser_table.table.items():
+                  # Handle shifts
+                  for action in row.actions.values():
+                      if isinstance(action, int): # Shift
+                          reverse_map[action].add(from_state)
+                      elif isinstance(action, Split):
+                          if action.shift is not None:
+                              reverse_map[action.shift].add(from_state)
+                  # Handle gotos
+                  for to_state in row.gotos.values():
+                      reverse_map[to_state].add(from_state)
+              reverse_state_map = dict(reverse_map)
+
+              all_terminals = set()
+              for row in parser_table.table.values():
+                  all_terminals.update(row.actions.keys())
+              if ignore_terminal_id is not None:
+                  all_terminals.add(ignore_terminal_id)
+              all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
+
+              initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
+              initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
+              state = {tokenizer_initial_state: initial_gss}
+
+              id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+              # Convert possible_matches_cache to RangeSet
+              pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
+              pmc_rs: Dict[int, Dict[int, LLMTokenSet]] = {}
+              for tsid, inner in pmc_ffi.items():
+                  mapped: Dict[int, LLMTokenSet] = {}
+                  for term_id, bit in inner.items():
+                      mapped[int(term_id)] = RangeSet.from_ranges(bit.to_ranges())
+                  pmc_rs[int(tsid)] = mapped
+              possible_matches_cache = pmc_rs
+
+              vocab = data['precompute3_vocab']
+              internal_to_original_map_raw = dict(vocab['internal_to_original'])
+              internal_to_original_map = {
+                  int(k): RangeSetOut.from_indices(v) for k, v in internal_to_original_map_raw.items()
+              }
+              internal_max = vocab['internal_max_llm_token']
+              all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, internal_max)])
+
+              model = Model(
+                  arena=arena,
+                  roots_map=roots_map,
+                  max_depth=max_depth,
+                  parser_table=parser_table,
+                  glr_parser=glr_parser,
+                  reverse_state_map=reverse_state_map,
+                  tokenizer=tokenizer,
+                  tokenizer_initial_state=tokenizer_initial_state,
+                  tokenizer_max_state=tokenizer_max_state,
+                  possible_matches_cache=possible_matches_cache,
+                  id_to_token=id_to_token,
+                  internal_to_original_map=internal_to_original_map,
+                  all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
+                  all_terminals_bitset=all_terminals_bitset,
+                  ignore_terminal_id=ignore_terminal_id,
+                  state=state,
+              )
+
+              return model
+          @profile
+          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+              terminal_to_add_rs = RangeSet.from_indices([terminal_id])
+
+              @_acc_memoize()
+              def apply_disallow(acc: PyAcc) -> PyAcc:
+                  current_set = acc.terminals_union.get(state_id, RangeSet.empty())
+                  if current_set.contains(terminal_id):
+                      return acc
+
+                  new_map = acc.terminals_union.copy()
+                  new_map[state_id] = current_set.union(terminal_to_add_rs)
+                  return PyAcc(terminals_union=new_map, llm_mask=acc.llm_mask)
+
+              return gss.apply(apply_disallow)
+
+          def get_root(self, state_id: int) -> NodeID:
+              return self.roots_map[int(state_id)]
+
+          def is_end(self, node: NodeID) -> bool:
+              a_node = self.arena.get(node)
+              if not a_node:
+                  return False
+              return a_node.clean_end
+
+          def iter_edges(self, node: NodeID, token: int):
+              """
+              Explode packed transitions into (pop, state_id or None, dest_idx).
+              """
+              a_node = self.arena.get(node)
+              children = a_node.children if a_node else []
+              for (pop, llm_bv), dests in children:
+                  if llm_bv.contains(token):
+                      for dest_idx, state_bv in dests:
+                          for start, end in state_bv.to_ranges():
+                              for sid in range(start, end + 1):
+                                  yield (int(pop), sid, int(dest_idx))
+
+          @profile
+          def commit(self, token_id: int):
+              stats = Stats.get()
+              stats.start('commit')
+              token_bytes = self.id_to_token[token_id]
+
+              # Build tokenizer maps
+              stats.start('commit.build_tokenizer_maps')
+              stats.inc('commit.tokenizer_states_in', len(self.state))
+              terminals_map: Dict[int, TerminalIdSet] = {}
+              state_map: Dict[int, int] = {}
+              for tokenizer_sid in self.state.keys():
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
+                  if end_state is not None:
+                      state_map[tokenizer_sid] = end_state
+                  matched_terminals = [terminal_id for terminal_id, _ in matches]
+                  terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
+
+              stats.stop('commit.build_tokenizer_maps')
+              # Prune and map per-state GSS in a single pass
+              temp_states: Dict[int, GSS] = {}
+              stats.start('commit.prune_and_map_gss')
+              @_acc_memoize()
+              def mutator(acc: PyAcc) -> Optional[PyAcc]:
+                  # Prune condition
+                  disallowed_terminals_map = acc.terminals_union
+                  for tsid, matched_bv in terminals_map.items():
+                      disallowed_for_state = disallowed_terminals_map.get(tsid)
+                      if disallowed_for_state and not matched_bv.isdisjoint(disallowed_for_state):
+                          return None
+                  # Map
+                  old_map = acc.terminals_union
+                  new_bvs: Dict[int, TerminalIdSet] = {}
+                  for old_sid, new_sid in state_map.items():
+                      bv_source = old_map.get(old_sid)
+                      if bv_source and not bv_source.is_empty():
+                          if new_sid in new_bvs:
+                              new_bvs[new_sid] |= bv_source
+                          else:
+                              new_bvs[new_sid] = bv_source
+                  return PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
+              cache = {}
+              current_state_for_processing = {tsid: gss.apply_and_prune(mutator, cache) for tsid, gss in self.state.items()}
+              current_state_for_processing = {tsid: gss for tsid, gss in current_state_for_processing.items() if not gss.is_empty()}
+              stats.stop('commit.prune_and_map_gss')
+
+              new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
+              stats.start('commit.main_loop')
+              q = collections.deque()
+              for tokenizer_sid, gss in current_state_for_processing.items():
+                  q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
+
+              visited_q_items: set = set()
+
+              while q:
+                  offset, tokenizer_sid, gss = q.popleft()
+                  q_item_key = (offset, tokenizer_sid, id(gss))
+                  if q_item_key in visited_q_items:
+                      continue
+                  visited_q_items.add(q_item_key)
+
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+
+                  for terminal_id, width in matches:
+                      processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
+
+                      # Immediate re-match disallow
+                      if end_state is not None:
+                          accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
+                          if terminal_id in accessible_terms:
+                              processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
+
+                      if not processed_gss.is_empty():
+                          new_offset = offset + width
+                          next_tokenizer_sid = self.tokenizer_initial_state
+                          if new_offset == len(token_bytes):
+                              new_states[next_tokenizer_sid].append(processed_gss)
+                          else:
+                              q.append((new_offset, next_tokenizer_sid, processed_gss))
+
+                  if end_state is not None:
+                      new_states[end_state].append(gss)
+              stats.stop('commit.main_loop')
+
+              stats.start('commit.merge_states')
+              merged_states = {
+                  sid: GSS.merge_many(gss_list)
+                  for sid, gss_list in new_states.items()
+                  if gss_list
+              }
+              merged_states = {sid: state for sid, state in merged_states.items() if not state.is_empty()}
+              stats.stop('commit.merge_states')
+
+              stats.start('commit.fuse')
+              # memo = {}
+              # merged_states = {tsid: gss.fuse("to_interface", memo) for tsid, gss in merged_states.items()}
+              # memo = {}
+              # merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
+              stats.stop('commit.fuse')
+              # print(GSS.merge_many(merged_states.values()).stats())
+              # print(GSS.merge_many(merged_states.values()).to_graph_string(upper_only=True))
+
+
+              stats.inc('commit.tokenizer_states_out', len(merged_states))
+              self.state = merged_states
+              stats.stop('commit')
+
+          @profile
+          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+              stats = Stats.get()
+              p = 'commit.main_loop._process_token'
+              stats.start(f'{p}.total')
+              stats.inc(f'{p}.calls')
+              stats.inc(f'{p}.initial_heads', len(gss.peek()))
+
+              heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
+              for state_id in gss.peek():
+                  heads_by_state[state_id].append(gss.isolate(state_id))
+
+              shifted_gsses: List[GSS] = []
+              reduces_handled = 0
+
+              while heads_by_state:
+                  stats.inc(f'{p}.loop_iterations')
+                  state_id, state_gsss = heads_by_state.popitem()
+                  stats.start(f'{p}.merge_many.heads')
+                  state_gss = GSS.merge_many(state_gsss)
+                  stats.stop(f'{p}.merge_many.heads')
+                  row = self.parser_table.table.get(state_id)
+                  if not row:
+                      continue
+                  action = row.actions.get(terminal_id)
+                  if not action:
+                      continue
+
+                  def handle_shift(shift_to_state_id, gss_to_shift):
+                      stats.inc(f'{p}.shifts')
+                      shifted_gsses.append(gss_to_shift.push(shift_to_state_id))
+
+                  def handle_reduce(reduce_action: Reduce, gss_to_reduce: GSS):
+                      stats.inc(f'{p}.reduces')
+                      stats.start(f'{p}.reduce.pop')
+                      popped_gss = gss_to_reduce
+                      for _ in range(reduce_action.len):
+                          popped_gss = popped_gss.pop()
+                      stats.stop(f'{p}.reduce.pop')
+                      for from_state_id in popped_gss.peek():
+                          goto_state_id = self.parser_table.table[from_state_id].gotos[reduce_action.nonterminal_id]
+                          goto_gss = popped_gss.isolate(from_state_id).push(goto_state_id)
+                          heads_by_state[goto_state_id].append(goto_gss)
+                          stats.inc(f'{p}.reduce.new_heads')
+
+                  if isinstance(action, int):
+                      handle_shift(action, state_gss)
+                  elif isinstance(action, Reduce):
+                      handle_reduce(action, state_gss)
+                  elif isinstance(action, Split):
+                      stats.inc(f'{p}.splits')
+                      if action.shift is not None:
+                          handle_shift(action.shift, state_gss)
+                      for length, nts in action.reduces.items():
+                          for nt_id, pids in nts.items():
+                              handle_reduce(Reduce(nt_id, length, pids), state_gss)
+
+              stats.start(f'{p}.merge_many.final')
+              result = GSS.merge_many(shifted_gsses)
+              stats.stop(f'{p}.merge_many.final')
+              stats.inc(f'{p}.final_heads', len(result.peek()))
+              stats.stop(f'{p}.total')
+              return result
+
+          def _is_zombie_path(self, gss: GSS, path_token_union: LLMTokenSet, final_mask: LLMTokenSet, stat_context: str) -> bool:
+              """
+              Checks if a given traversal path is a "zombie" path, meaning it cannot
+              contribute any new tokens to the final_mask.
+              """
+              stats = Stats.get()
+              p = f'get_mask.zombie_check.{stat_context}'
+              stats.start(p)
+
+              # We only care about tokens that are not yet in the final mask.
+              potential_new_tokens = path_token_union.difference(final_mask)
+              if potential_new_tokens.is_empty():
+                  stats.inc(f'{p}.skipped_no_potential')
+                  stats.stop(p)
+                  return True
+
+              gss_mask_acc = gss.reduce_acc()
+              if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
+                  stats.inc(f'{p}.skipped_no_overlap_disjoint')
+                  stats.stop(p)
+                  return True
+
+              stats.stop(p)
+              return False
+          def get_mask(self) -> LLMTokenSet:
+              """
+              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+
+              Changes for get_mask_only:
+              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
+                the forbidden terminals -> forbidden LLM tokens and taking the complement.
+              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
+              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
+              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+              """
+              stats = Stats.get()
+              stats.start('get_mask')
+              state_map: Dict[int, GSS] = self.state
+              stats.inc('get_mask.initial_tokenizer_states', len(state_map))
+
+              all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
+              final_mask: LLMTokenSet = RangeSet.empty()
+
+              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
+              values: Dict[NodeID, GSS] = {}
+              depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
+              enqueued_nodes: Set[NodeID] = set()
+
+              hp, hpop = heapq.heappush, heapq.heappop
+              roots_map: Dict[int, NodeID] = self.roots_map
+              max_depth: Dict[NodeID, int] = self.max_depth
+              arena: Dict[NodeID, ArenaNode] = self.arena
+              is_end = self.is_end
+              pmc: Dict[int, Dict[int, LLMTokenSet]] = self.possible_matches_cache or {}
+              max_state: int = self.tokenizer_max_state
+
+              # --- Initial GSS Stats ---
+              stats.start('get_mask.initial_stats')
+              all_initial_accs = set()
+              for gss in state_map.values():
+                  # We assume gss.get_all_accs() exists for stats gathering.
+                  accs = getattr(gss, 'get_all_accs', lambda: [])()
+                  all_initial_accs.update(accs)
+                  stats.inc('get_mask.initial.gss_heads.sum', len(gss.peek()))
+              stats.inc('get_mask.initial.unique_accs', len(all_initial_accs))
+              for acc in all_initial_accs:
+                  stats.inc('get_mask.initial.terminals_union_size.sum', len(acc.terminals_union))
+              stats.stop('get_mask.initial_stats')
+
+
+              stats.start('get_mask.seeding')
+              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+              @_acc_memoize()
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  if False:  # placeholder to keep minimal diff context; decorator handles memoization
+                      if cached_acc is not None:
+                          return cached_acc
+
+                  p = 'get_mask.seeding.initialize_acc'
+                  stats.inc(f'{p}.calls')
+                  stats.start(f'{p}.total')
+                  # Compute allowed LLM tokens from disallowed terminals for this accumulator
+                  disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
+                  disallowed_map = acc.terminals_union
+                  stats.inc(f'{p}.disallowed_map_size.sum', len(disallowed_map))
+
+                  for tsid, disallowed_terminals in disallowed_map.items():
+                      stats.inc(f'{p}.disallowed_terminals_loops')
+                      if tsid > max_state or tsid not in pmc:
+                          continue
+                      terminals_to_llm = pmc[tsid]
+
+                      stats.start(f'{p}.iter_indices')
+                      indices = disallowed_terminals.iter_indices()
+                      stats.stop(f'{p}.iter_indices')
+
+                      for terminal_id in indices:
+                          stats.inc(f'{p}.disallowed_terminals_inner_loops')
+                          if terminal_id in terminals_to_llm:
+                              stats.start(f'{p}.union')
+                              disallowed_llm_mask |= terminals_to_llm[terminal_id]
+                              stats.stop(f'{p}.union')
+
+                  stats.start(f'{p}.difference')
+                  allowed_mask = all_ones.difference(disallowed_llm_mask)
+                  stats.stop(f'{p}.difference')
+
+                  stats.stop(f'{p}.total')
+                  result = PyAcc(
+                      terminals_union={},  # consume
+                      llm_mask=allowed_mask,
+                  )
+                  return result
+
+              cache = {}
+              for sid, gss in state_map.items():
+                  stats.inc('get_mask.seeding.gss_loops')
+                  r: NodeID = roots_map[int(sid)]
+
+                  stats.start('get_mask.seeding.gss.apply')
+                  gss_initialized: GSS = gss.apply(initialize_acc, cache)
+                  stats.stop('get_mask.seeding.gss.apply')
+
+                  if r in values:
+                      stats.start('get_mask.seeding.gss.merge')
+                      values[r] = values[r].merge(gss_initialized)
+                      stats.stop('get_mask.seeding.gss.merge')
+                  else:
+                      values[r] = gss_initialized
+
+                  d: int = max_depth[r]
+                  if r not in enqueued_nodes:
+                      enqueued_nodes.add(r)
+                      hp(depth_heap, (-d, r))
+
+              def enqueue(d: int, n: NodeID) -> None:
+                  stats.inc('get_mask.traversal.enqueues')
+                  if n not in enqueued_nodes:
+                      enqueued_nodes.add(n)
+                      hp(depth_heap, (-d, n))
+
+              def dequeue() -> Tuple[int, int]:
+                  neg_d, n = hpop(depth_heap)
+                  return -neg_d, n
+              stats.stop('get_mask.seeding')
+
+              # Main loop
+              stats.start('get_mask.main_loop')
+              max_depth_reached = 0
+              visited_nodes = set()
+              while depth_heap:
+                  depth, node = dequeue()
+                  max_depth_reached = max(max_depth_reached, depth)
+                  stats.inc('get_mask.traversal.depth_heap.pops')
+                  stats.inc('get_mask.traversal.nodes_processed')
+                  visited_nodes.add(node)
+                  gss_node: GSS = values.pop(node)
+                  enqueued_nodes.remove(node)
+                  stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
+
+                  # End-node handling: just union the allowed LLM tokens
+                  if is_end(node):
+                      stats.inc('get_mask.traversal.end_nodes')
+                      stats.start('get_mask.main_loop.end_node.reduce_acc')
+                      reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+                      stats.stop('get_mask.main_loop.end_node.reduce_acc')
+                      if reduced_acc:
+                          stats.start('get_mask.main_loop.end_node.final_mask_union')
+                          final_mask |= reduced_acc.llm_mask
+                          stats.stop('get_mask.main_loop.end_node.final_mask_union')
+
+                  # Zombie traversal avoidance: if this node's edges can't possibly add
+                  # to the final mask given the current GSS mask, skip it.
+                  a_node = arena.get(node)
+                  node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
+                  if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask, 'node'):
+                      continue
+
+                  # Traverse edges and propagate masks
+                  a_node = arena.get(node)
+                  edges = a_node.children if a_node else []
+                  stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
+                  stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
+                  for (pop, llm_bv), dests in edges:
+                      stats.inc('get_mask.traversal.edges_traversed')
+                      stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
+                      stats.start('get_mask.main_loop.edge.popn')
+                      popped: GSS = gss_node.popn(pop)
+                      stats.stop('get_mask.main_loop.edge.popn')
+                      if popped.is_empty():
+                          stats.inc('get_mask.traversal.edge.popped_empty')
+                          continue
+
+                      # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+                      @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune')
+                      def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                          p = 'get_mask.main_loop.edge.intersect_and_prune'
+                          stats.inc(f'{p}.calls')
+                          stats.start(f'{p}.intersection')
+                          new_mask = acc.llm_mask.intersection(llm_bv)
+                          stats.stop(f'{p}.intersection')
+
+                          if new_mask.is_empty():
+                              stats.inc(f'{p}.pruned_accs')
+                              return None
+                          else:
+                              return PyAcc(
+                                  terminals_union=acc.terminals_union,
+                                  llm_mask=new_mask
+                              )
+
+                      stats.start('get_mask.main_loop.edge.apply_and_prune')
+                      popped = popped.apply_and_prune(intersect_and_prune)
+                      stats.stop('get_mask.main_loop.edge.apply_and_prune')
+
+                      if popped.is_empty():
+                          stats.inc('get_mask.traversal.edge.popped_pruned_empty')
+                          continue
+
+                      if popped.reduce_acc().is_empty():
+                          stats.inc('get_mask.traversal.edge.popped_reduced_empty')
+                          continue
+
+                      peeked = popped.peek()
+                      # peeked = RangeSetStates.from_indices(popped.peek())
+                      for dest_idx, state_bv in dests:
+                          stats.inc('get_mask.traversal.dests_traversed')
+
+                          stats.start('get_mask.main_loop.edge.peek_and_filter')
+                          values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                          # values_to_keep = peeked & state_bv
+                          stats.stop('get_mask.main_loop.edge.peek_and_filter')
+
+                          if not values_to_keep:
+                              continue
+
+                          stats.start('get_mask.main_loop.edge.isolate_many')
+                          child_gss = popped.isolate_many(values_to_keep)
+                          stats.stop('get_mask.main_loop.edge.isolate_many')
+
+                          stats.inc('get_mask.main_loop.edge.intersect_and_prune.memo_size.sum', intersect_and_prune._acc_memo_size())
+                          if child_gss.is_empty():
+                              stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
+                              continue
+
+                          if child_gss.reduce_acc().is_empty():
+                              continue
+
+                          d: NodeID = int(dest_idx)
+                          if d in values:
+                              stats.inc('get_mask.traversal.edge.gss_merges')
+                              stats.start('get_mask.main_loop.edge.gss_merge')
+                              values[d] = values[d].merge(child_gss)
+                              stats.stop('get_mask.main_loop.edge.gss_merge')
+                          else:
+                              values[d] = child_gss
+                          enqueue(max_depth[d], d)
+              stats.stop('get_mask.main_loop')
+              stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
+              stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
+
+              stats.start('get_mask.final_conversion')
+              # Convert internal mask back to original IDs
+              original_indices = RangeSetOut.empty()
+              for i in final_mask.iter_indices():
+                  if i in self.internal_to_original_map:
+                      original_indices |= self.internal_to_original_map[i]
+              stats.stop('get_mask.final_conversion')
+
+              stats.stop('get_mask')
+              return original_indices
+
+          def finalize(self):
+              """Called at the end of a benchmark run to perform any final actions, like printing stats."""
+              print("\n--- Final Stats Report from Model ---")
+              Stats.get().report()
 
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: |-
-      I want to modify this code so that `get_mask` tries to get to an end node as quickly as possible. Doing so gives us the best chances of using zombie avoidance to cut redundant paths early. Right now although we are doing well by the order we process nodes on the heap, I'm concerned we do too much work by getting through the whole `for (pop, llm_bv), dests in edges:` and `for dest_idx, state_bv in dests:` before moving to the next item in the heap, which could be a lower node down. I'm envisaging we walk the graph, at each node looking only at the edge that gets us to a node that's as close as possible to the end node, not what we do now which is more like looking at all edges on a node and dequeueing the *node* that's closest to the end node. The difference is that I want us to not process every edge on a node before going to the next node.
-      Also also add an optimization step in `from_json_string` before `return model` that reorders the edges (both the order of the outer `List[Tuple[Tuple[int, LLMTokenSet], List[Tuple[NodeID, StateIDSet]]]]` and the inner `List[Tuple[NodeID, StateIDSet]]`) so that we process them in an order that gets us to an end node as fast as possible.
+  - user: Make it possible to disable to value cache in `_acc_memoize`, and so in
+      all usages except that in `commit`. This means it just uses the id cache.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -2815,370 +2692,106 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are concrete, step-by-step edits and then the exact git diff patches to apply.
+      Of course. Here are the step-by-step instructions to apply the changes, followed by the git diff.
 
-      Step-by-step instructions
+      ### Step-by-step Instructions
 
-      File: python/aug25/models/precompute3_model_pure_python.py
+      I will make modifications to the file `python/aug25/models/precompute3_model_pure_python.py`.
 
-      1) Reorder edges in from_json_string to prioritize reaching end nodes faster
-      - Locate the construction of the ArenaNode map:
-        - The block that assigns to the variable arena via a dict comprehension:
-          arena: Dict[NodeID, ArenaNode] = {...}
-      - Immediately after this block (and before the constraint = ffi.GrammarConstraint.from_json_string(s) line), insert an optimization pass that:
-        - Sorts inner dest lists for each edge so that dests with larger max_depth come first.
-        - Sorts the edge list for each node based on the highest max_depth among its dests (also descending).
-      - This ensures both outer and inner edge order favors moving towards end nodes rapidly.
+      1.  **Update the `_acc_memoize` decorator:**
+          *   I'll change its signature to accept a new boolean parameter `use_value_cache`, which will default to `True`.
+          *   The decorator's internal logic will be updated to only use the value-based cache (`val_memo`) when `use_value_cache` is `True`.
+          *   The docstring will be updated to describe the new parameter.
 
-      2) Modify get_mask to process only one edge and one dest per node visit
-      - After the locals near the start of get_mask (values, depth_heap, enqueued_nodes), add:
-        - edge_progress: Dict[NodeID, Tuple[int, int]] = {} to track the next edge index and destination index per node.
-        - end_node_processed: Set[NodeID] = set() to ensure we only union end-node accumulators once per node.
-      - In the seeding loop (for sid, gss in state_map.items()), when you set values[r] = gss_initialized (or merge), set edge_progress[r] = (0, 0).
-      - In the main while depth_heap loop:
-        - Do not pop the GSS from values per node. Instead, fetch it via values.get(node) to keep it available across multiple iterations.
-        - If node is an end node and node not in end_node_processed, reduce and union once, then add to end_node_processed.
-        - Before traversing edges, compute the current progress for the node via edge_progress.get(node, (0, 0)).
-        - Process exactly one edge and one dest per loop iteration:
-          - If edge_idx is out of range, the node is fully processed: delete values[node] and edge_progress entry and continue.
-          - For the current edge (pop, llm_bv) and current dest at dest_idx:
-            - Run popn and the intersect_and_prune application only once for this edge.
-            - If popped is empty after the intersection, skip the entire edge by advancing to the next edge (edge_idx + 1, dest_idx = 0), update edge_progress, and re-enqueue this node if there are more edges to process.
-            - Compute values_to_keep for the current dest only. If empty, advance dest_idx by 1 (and re-enqueue the node).
-            - If there are values, isolate, merge into child node, enqueue the child node, then advance the current node’s cursor (dest_idx + 1; if end of dests, move to next edge and reset dest cursor).
-            - If there remain more edges/dests, re-enqueue the current node; otherwise, delete values[node] and clear edge_progress for it.
-        - Preserve existing zombie avoidance: if the node is a zombie path, fully drop it by deleting values[node] and clearing edge_progress for it (since we no longer pop values at the start of processing).
+      2.  **Modify decorator usage in `_disallow_terminal_in_state`:**
+          *   I will locate the `@_acc_memoize()` decorator above the `apply_disallow` function.
+          *   I will change it to `@_acc_memoize(use_value_cache=False)` to disable the value cache for this specific use.
 
-      3) Maintain stats wiring
-      - Keep existing stats counters where possible. Some aggregate counts (like edge blocks/traversal counts) will now increment more gradually, but the essential timing/inc counters around intersection/pruning, isolations, and merges should remain in place.
+      3.  **Modify decorator usages in `get_mask`:**
+          *   For the `initialize_acc` function, I will change `@_acc_memoize()` to `@_acc_memoize(use_value_cache=False)`.
+          *   For the `intersect_and_prune` function, I will change `@_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune')` to `@_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)`.
 
-      Git diff patch
+      The decorator usage inside the `commit` method will remain unchanged, thereby continuing to use the value cache as requested.
+
+      ### Git Diff
+
+      Here is the git diff to apply the changes:
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      index 5410972..8c4309a 100644
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -202,6 +202,7 @@ class Model(GraphProvider):
+      @@ -93,12 +93,12 @@
+           def profile(func): return func
        
-           @staticmethod
-           def from_json_string(s: str) -> 'Model':
-      +        # Prepare stats and parse JSON inputs
-               Stats.get().reset()
-               data = json.loads(s)
-               roots_map_raw = data["precomputed3"]
-      @@ -254,6 +255,7 @@ class Model(GraphProvider):
-                   node["children"] = new_children
-                   node["llm_bv_union"] = llm_bv_union
+       # --- Accumulator memoization decorator ---
+      -def _acc_memoize(stats_prefix: Optional[str] = None):
+      +def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
+           """
+           Per-invocation memoization for PyAcc transformers.
+           - Caches by id(acc) (including None results).
+      -    - Caches by value (acc) for non-None results.
+      +    - Caches by value (acc) for non-None results, if use_value_cache is True.
+           If stats_prefix is provided, increments '{prefix}.memo_hits' on cache hits.
+           Exposes _acc_memo_size() to inspect id-cache size for stats.
+           """
+      @@ -111,16 +111,19 @@
+                       if stats_prefix:
+                           Stats.get().inc(f'{stats_prefix}.memo_hits')
+                       return id_memo[id(acc)]
+      -            # Structural equality-based cache (only non-None results are useful here)
+      -            cached = val_memo.get(acc)
+      -            if cached is not None:
+      -                id_memo[id(acc)] = cached
+      -                if stats_prefix:
+      -                    Stats.get().inc(f'{stats_prefix}.memo_hits')
+      -                return cached
+      +
+      +            if use_value_cache:
+      +                # Structural equality-based cache (only non-None results are useful here)
+      +                cached = val_memo.get(acc)
+      +                if cached is not None:
+      +                    id_memo[id(acc)] = cached
+      +                    if stats_prefix:
+      +                        Stats.get().inc(f'{stats_prefix}.memo_hits')
+      +                    return cached
+                   result = fn(acc)
+                   id_memo[id(acc)] = result
+      -            val_memo[acc] = result
+      +            if use_value_cache:
+      +                val_memo[acc] = result
+                   return result
+               wrapper._acc_memo_size = lambda: len(id_memo)
+               return wrapper
+      @@ -406,7 +409,7 @@
+           def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+               terminal_to_add_rs = RangeSet.from_indices([terminal_id])
        
-      +        # Build arena with normalized RangeSet payloads
-               arena: Dict[NodeID, ArenaNode] = {
-                   uid: ArenaNode(
-                       children=node_data.get("children", []),
-      @@ -263,6 +265,24 @@ class Model(GraphProvider):
-                   for uid, node_data in arena_dict.items()
-               }
-               # Load tokenizer and parser table from the full constraint JSON
-      +
-      +        # Optimization: reorder edges and dests to prioritize reaching end nodes quickly.
-      +        # We sort:
-      +        # - inner dests by max_depth descending (dest nodes with larger max_depth first)
-      +        # - edges by the best (max) dest max_depth descending
-      +        def _edge_score(dests_list):
-      +            if not dests_list:
-      +                return -1
-      +            try:
-      +                return max(max_depth.get(int(d_idx), 0) for d_idx, _ in dests_list)
-      +            except Exception:
-      +                return -1
-      +
-      +        for _uid, _a_node in arena.items():
-      +            if not _a_node.children:
-      +                continue
-      +            new_children = []
-      +            for (pop, llm_bv), dests in _a_node.children:
-      +                sorted_dests = sorted(dests, key=lambda t: max_depth.get(int(t[0]), 0), reverse=True)
-      +                new_children.append(((pop, llm_bv), sorted_dests))
-      +            new_children.sort(key=lambda item: _edge_score(item[1]), reverse=True)
-      +            _a_node.children = new_children
-      +
-               constraint = ffi.GrammarConstraint.from_json_string(s)
-               tokenizer = constraint.tokenizer()
-               tokenizer_max_state = tokenizer.max_state()
-      @@ -553,6 +573,10 @@ class Model(GraphProvider):
-               final_mask: LLMTokenSet = RangeSet.empty()
+      -        @_acc_memoize()
+      +        @_acc_memoize(use_value_cache=False)
+               def apply_disallow(acc: PyAcc) -> PyAcc:
+                   current_set = acc.terminals_union.get(state_id, RangeSet.empty())
+                   if current_set.contains(terminal_id):
+      @@ -671,7 +674,7 @@
        
-               # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
-      +        # values: maps node -> accumulated GSS at that node
-               values: Dict[NodeID, GSS] = {}
-      +        # edge_progress: maps node -> (edge_idx, dest_idx) cursor into a_node.children[edge_idx][1][dest_idx]
-      +        edge_progress: Dict[NodeID, Tuple[int, int]] = {}
-      +        end_node_processed: Set[NodeID] = set()
-               depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
-               enqueued_nodes: Set[NodeID] = set()
+               stats.start('get_mask.seeding')
+               # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+      -        @_acc_memoize()
+      +        @_acc_memoize(use_value_cache=False)
+               def initialize_acc(acc: PyAcc) -> PyAcc:
+                   if False:  # placeholder to keep minimal diff context; decorator handles memoization
+                       if cached_acc is not None:
+      @@ -783,7 +786,7 @@
+                           continue
        
-      @@ -619,6 +643,7 @@ class Model(GraphProvider):
-                       values[r] = values[r].merge(gss_initialized)
-                       stats.stop('get_mask.seeding.gss.merge')
-                   else:
-      +                edge_progress[r] = (0, 0)
-                       values[r] = gss_initialized
-       
-                   d: int = max_depth[r]
-      @@ -641,46 +666,83 @@ class Model(GraphProvider):
-                   depth, node = dequeue()
-                   max_depth_reached = max(max_depth_reached, depth)
-                   stats.inc('get_mask.traversal.depth_heap.pops')
-                   stats.inc('get_mask.traversal.nodes_processed')
-      -            visited_nodes.add(node)
-      -            gss_node: GSS = values.pop(node)
-      +            if node not in visited_nodes:
-      +                visited_nodes.add(node)
-      +            gss_node: Optional[GSS] = values.get(node)
-                   enqueued_nodes.remove(node)
-      -            stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
-      +            if gss_node is None:
-      +                # This node may have been fully processed and cleared.
-      +                continue
-      +            stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
-       
-                   # End-node handling: just union the allowed LLM tokens
-      -            if is_end(node):
-      +            if is_end(node) and node not in end_node_processed:
-                       stats.inc('get_mask.traversal.end_nodes')
-                       stats.start('get_mask.main_loop.end_node.reduce_acc')
-                       reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                       stats.stop('get_mask.main_loop.end_node.reduce_acc')
-                       if reduced_acc:
-                           stats.start('get_mask.main_loop.end_node.final_mask_union')
-                           final_mask |= reduced_acc.llm_mask
-                           stats.stop('get_mask.main_loop.end_node.final_mask_union')
-      +                end_node_processed.add(node)
-       
-                   # Zombie traversal avoidance: if this node's edges can't possibly add
-                   # to the final mask given the current GSS mask, skip it.
-                   a_node = arena.get(node)
-                   node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-                   if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask, 'node'):
-      +                # Fully drop this node; no need to keep processing its edges.
-      +                values.pop(node, None)
-      +                edge_progress.pop(node, None)
-                       continue
-       
-                   # Traverse edges and propagate masks
-                   a_node = arena.get(node)
-                   edges = a_node.children if a_node else []
-      -            stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
-      -            stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
-      -            for (pop, llm_bv), dests in edges:
-      -                stats.inc('get_mask.traversal.edges_traversed')
-      -                stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
-      -                stats.start('get_mask.main_loop.edge.popn')
-      -                popped: GSS = gss_node.popn(pop)
-      -                stats.stop('get_mask.main_loop.edge.popn')
-      -                if popped.is_empty():
-      -                    stats.inc('get_mask.traversal.edge.popped_empty')
-      -                    continue
-      -
-      -                # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-      -                @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)
-      -                def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-      +            stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
-      +            stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
-      +
-      +            # Determine current cursor for this node (edge_idx, dest_idx); default to (0,0).
-      +            edge_idx, dest_idx = edge_progress.get(node, (0, 0))
-      +
-      +            # If no edges or we've exhausted all edges, finalize this node.
-      +            if not edges or edge_idx >= len(edges):
-      +                values.pop(node, None)
-      +                edge_progress.pop(node, None)
-      +                continue
-      +
-      +            # Process exactly one edge (the current best edge) and exactly one dest within it.
-      +            (pop, llm_bv), dests = edges[edge_idx]
-      +            stats.inc('get_mask.traversal.edges_traversed')
-      +            stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
-      +
-      +            # If current dest_idx is out of range, advance to the next edge.
-      +            if dest_idx >= len(dests):
-      +                edge_idx += 1
-      +                dest_idx = 0
-      +                edge_progress[node] = (edge_idx, dest_idx)
-      +                if edge_idx < len(edges):
-      +                    enqueue(max_depth[node], node)
-      +                else:
-      +                    values.pop(node, None)
-      +                    edge_progress.pop(node, None)
-      +                continue
-      +
-      +            stats.start('get_mask.main_loop.edge.popn')
-      +            popped: GSS = gss_node.popn(pop)
-      +            stats.stop('get_mask.main_loop.edge.popn')
-      +            if popped.is_empty():
-      +                stats.inc('get_mask.traversal.edge.popped_empty')
-      +                # Skip entire edge
-      +                edge_idx += 1
-      +                dest_idx = 0
-      +                edge_progress[node] = (edge_idx, dest_idx)
-      +                if edge_idx < len(edges):
-      +                    enqueue(max_depth[node], node)
-      +                else:
-      +                    values.pop(node, None)
-      +                    edge_progress.pop(node, None)
-      +                continue
-      +
-      +            # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-      +            @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)
-      +            def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                       # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
+      -                @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune')
+      +                @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)
+                       def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                            p = 'get_mask.main_loop.edge.intersect_and_prune'
                            stats.inc(f'{p}.calls')
-                           stats.start(f'{p}.intersection')
-      @@ -692,48 +754,87 @@ class Model(GraphProvider):
-                                   terminals_union=acc.terminals_union,
-                                   llm_mask=new_mask
-                               )
-      -
-      -                stats.start('get_mask.main_loop.edge.apply_and_prune')
-      -                popped = popped.apply_and_prune(intersect_and_prune)
-      -                stats.stop('get_mask.main_loop.edge.apply_and_prune')
-      -
-      -                if popped.is_empty():
-      -                    stats.inc('get_mask.traversal.edge.popped_pruned_empty')
-      -                    continue
-      -
-      -                if popped.reduce_acc().is_empty():
-      -                    stats.inc('get_mask.traversal.edge.popped_reduced_empty')
-      -                    continue
-      -
-      -                peeked = popped.peek()
-      -                # peeked = RangeSetStates.from_indices(popped.peek())
-      -                for dest_idx, state_bv in dests:
-      -                    stats.inc('get_mask.traversal.dests_traversed')
-      -
-      -                    stats.start('get_mask.main_loop.edge.peek_and_filter')
-      -                    values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-      -                    # values_to_keep = peeked & state_bv
-      -                    stats.stop('get_mask.main_loop.edge.peek_and_filter')
-      -
-      -                    if not values_to_keep:
-      -                        continue
-      -
-      -                    stats.start('get_mask.main_loop.edge.isolate_many')
-      -                    child_gss = popped.isolate_many(values_to_keep)
-      -                    stats.stop('get_mask.main_loop.edge.isolate_many')
-      -
-      -                    stats.inc('get_mask.main_loop.edge.intersect_and_prune.memo_size.sum', intersect_and_prune._acc_memo_size())
-      -                    if child_gss.is_empty():
-      -                        stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
-      -                        continue
-      -
-      -                    if child_gss.reduce_acc().is_empty():
-      -                        continue
-      -
-      -                    d: NodeID = int(dest_idx)
-      -                    if d in values:
-      -                        stats.inc('get_mask.traversal.edge.gss_merges')
-      -                        stats.start('get_mask.main_loop.edge.gss_merge')
-      -                        values[d] = values[d].merge(child_gss)
-      -                        stats.stop('get_mask.main_loop.edge.gss_merge')
-      -                    else:
-      -                        values[d] = child_gss
-      -                    enqueue(max_depth[d], d)
-      +            stats.start('get_mask.main_loop.edge.apply_and_prune')
-      +            popped = popped.apply_and_prune(intersect_and_prune)
-      +            stats.stop('get_mask.main_loop.edge.apply_and_prune')
-      +
-      +            if popped.is_empty():
-      +                stats.inc('get_mask.traversal.edge.popped_pruned_empty')
-      +                # Skip entire edge
-      +                edge_idx += 1
-      +                dest_idx = 0
-      +                edge_progress[node] = (edge_idx, dest_idx)
-      +                if edge_idx < len(edges):
-      +                    enqueue(max_depth[node], node)
-      +                else:
-      +                    values.pop(node, None)
-      +                    edge_progress.pop(node, None)
-      +                continue
-      +
-      +            if popped.reduce_acc().is_empty():
-      +                stats.inc('get_mask.traversal.edge.popped_reduced_empty')
-      +                # Skip entire edge
-      +                edge_idx += 1
-      +                dest_idx = 0
-      +                edge_progress[node] = (edge_idx, dest_idx)
-      +                if edge_idx < len(edges):
-      +                    enqueue(max_depth[node], node)
-      +                else:
-      +                    values.pop(node, None)
-      +                    edge_progress.pop(node, None)
-      +                continue
-      +
-      +            # Process exactly one destination for this iteration
-      +            stats.inc('get_mask.traversal.dests_traversed')
-      +            dest_node_id, state_bv = dests[dest_idx]
-      +
-      +            stats.start('get_mask.main_loop.edge.peek_and_filter')
-      +            peeked = popped.peek()
-      +            values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-      +            stats.stop('get_mask.main_loop.edge.peek_and_filter')
-      +
-      +            if not values_to_keep:
-      +                # Advance to next dest within this edge
-      +                dest_idx += 1
-      +                edge_progress[node] = (edge_idx, dest_idx)
-      +                # Re-enqueue this node if there is more to do
-      +                enqueue(max_depth[node], node)
-      +                continue
-      +
-      +            stats.start('get_mask.main_loop.edge.isolate_many')
-      +            child_gss = popped.isolate_many(values_to_keep)
-      +            stats.stop('get_mask.main_loop.edge.isolate_many')
-      +
-      +            stats.inc('get_mask.main_loop.edge.intersect_and_prune.memo_size.sum', intersect_and_prune._acc_memo_size())
-      +            if child_gss.is_empty():
-      +                stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
-      +                # Advance cursor and re-enqueue node for remaining work
-      +                dest_idx += 1
-      +                edge_progress[node] = (edge_idx, dest_idx)
-      +                enqueue(max_depth[node], node)
-      +                continue
-      +
-      +            if child_gss.reduce_acc().is_empty():
-      +                # Advance cursor and re-enqueue node for remaining work
-      +                dest_idx += 1
-      +                edge_progress[node] = (edge_idx, dest_idx)
-      +                enqueue(max_depth[node], node)
-      +                continue
-      +
-      +            d: NodeID = int(dest_node_id)
-      +            if d in values:
-      +                stats.inc('get_mask.traversal.edge.gss_merges')
-      +                stats.start('get_mask.main_loop.edge.gss_merge')
-      +                values[d] = values[d].merge(child_gss)
-      +                stats.stop('get_mask.main_loop.edge.gss_merge')
-      +            else:
-      +                values[d] = child_gss
-      +                # Initialize traversal progress for newly discovered node
-      +                edge_progress[d] = (0, 0)
-      +            enqueue(max_depth[d], d)
-      +
-      +            # Advance this node's cursor (one dest at a time)
-      +            dest_idx += 1
-      +            if dest_idx >= len(dests):
-      +                edge_idx += 1
-      +                dest_idx = 0
-      +            edge_progress[node] = (edge_idx, dest_idx)
-      +
-      +            # Re-enqueue this node if it still has remaining edges/dests to process; else finalize it.
-      +            if edge_idx < len(edges):
-      +                enqueue(max_depth[node], node)
-      +            else:
-      +                values.pop(node, None)
-      +                edge_progress.pop(node, None)
-               stats.stop('get_mask.main_loop')
-               stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
-               stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
+
       ```
     metadata:
   - user: |
@@ -3190,8 +2803,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor get_mask traversal to process
-      one edge/dest per pop for faster end-node convergence, and pre-sort edges by
-      max_depth in from_json_string"'
+  - user: 'Changes committed with message: "Refactor _acc_memoize to optionally disable
+      value cache, disabling it for get_mask and _disallow_terminal_in_state paths"'
     metadata:
 ...
