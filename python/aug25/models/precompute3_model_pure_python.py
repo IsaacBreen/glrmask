@@ -171,7 +171,7 @@ class Model(GraphProvider):
 
     # Token/Terminal mapping fields
     id_to_token: Dict[int, bytes]
-    internal_to_original_map: Dict[int, Set[int]]
+    internal_to_original_map: Dict[int, RangeSet]
     all_internal_llm_tokens_bitset: LLMTokenSet
     all_terminals_bitset: TerminalIdSet
     ignore_terminal_id: Optional[int]
@@ -309,7 +309,7 @@ class Model(GraphProvider):
         vocab = data['precompute3_vocab']
         internal_to_original_map_raw = dict(vocab['internal_to_original'])
         internal_to_original_map = {
-            int(k): set(v) for k, v in internal_to_original_map_raw.items()
+            int(k): RangeSet.from_indices(v) for k, v in internal_to_original_map_raw.items()
         }
         internal_max = vocab['internal_max_llm_token']
         all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, internal_max)])
