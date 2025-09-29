@@ -90,6 +90,39 @@ except NameError:
     # If not running under kernprof, create a dummy decorator.
     def profile(func): return func
 
+# --- Accumulator memoization decorator ---
+def _acc_memoize(stats_prefix: Optional[str] = None):
+    """
+    Per-invocation memoization for PyAcc transformers.
+    - Caches by id(acc) (including None results).
+    - Caches by value (acc) for non-None results.
+    If stats_prefix is provided, increments '{prefix}.memo_hits' on cache hits.
+    Exposes _acc_memo_size() to inspect id-cache size for stats.
+    """
+    def decorator(fn):
+        id_memo = {}
+        val_memo = {}
+        def wrapper(acc):
+            # Identity-based fast path
+            if id(acc) in id_memo:
+                if stats_prefix:
+                    Stats.get().inc(f'{stats_prefix}.memo_hits')
+                return id_memo[id(acc)]
+            # Structural equality-based cache (only non-None results are useful here)
+            cached = val_memo.get(acc)
+            if cached is not None:
+                id_memo[id(acc)] = cached
+                if stats_prefix:
+                    Stats.get().inc(f'{stats_prefix}.memo_hits')
+                return cached
+            result = fn(acc)
+            id_memo[id(acc)] = result
+            val_memo[acc] = result
+            return result
+        wrapper._acc_memo_size = lambda: len(id_memo)
+        return wrapper
+    return decorator
+
 
 @dataclass(frozen=True)
 class Reduce:
@@ -354,28 +387,16 @@ class Model(GraphProvider):
     @profile
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         terminal_to_add_rs = RangeSet.from_indices([terminal_id])
-        acc_id_memo = {}
-        acc_val_memo = {}
 
+        @_acc_memoize()
         def apply_disallow(acc: PyAcc) -> PyAcc:
-            if id(acc) in acc_id_memo:
-                return acc_id_memo[id(acc)]
-            cached_acc = acc_val_memo.get(acc)
-            if cached_acc is not None:
-                acc_id_memo[id(acc)] = cached_acc
-                return cached_acc
             current_set = acc.terminals_union.get(state_id, RangeSet.empty())
             if current_set.contains(terminal_id):
-                acc_id_memo[id(acc)] = acc
-                acc_val_memo[acc] = acc
                 return acc
 
             new_map = acc.terminals_union.copy()
             new_map[state_id] = current_set.union(terminal_to_add_rs)
-            result = PyAcc(terminals_union=new_map, llm_mask=acc.llm_mask)
-            acc_id_memo[id(acc)] = result
-            acc_val_memo[acc] = result
-            return result
+            return PyAcc(terminals_union=new_map, llm_mask=acc.llm_mask)
 
         return gss.apply(apply_disallow)
 
@@ -423,24 +444,14 @@ class Model(GraphProvider):
         # Prune and map per-state GSS in a single pass
         temp_states: Dict[int, GSS] = {}
         stats.start('commit.prune_and_map_gss')
-        acc_id_memo = {}
-        acc_val_memo = {}
+        @_acc_memoize()
         def mutator(acc: PyAcc) -> Optional[PyAcc]:
-            if id(acc) in acc_id_memo:
-                return acc_id_memo[id(acc)]
-            cached_acc = acc_val_memo.get(acc)
-            if cached_acc is not None:
-                acc_id_memo[id(acc)] = cached_acc
-                return cached_acc
             # Prune condition
             disallowed_terminals_map = acc.terminals_union
             for tsid, matched_bv in terminals_map.items():
                 disallowed_for_state = disallowed_terminals_map.get(tsid)
                 if disallowed_for_state and not matched_bv.isdisjoint(disallowed_for_state):
-                    acc_id_memo[id(acc)] = None
-                    acc_val_memo[acc] = None
                     return None
-
             # Map
             old_map = acc.terminals_union
             new_bvs: Dict[int, TerminalIdSet] = {}
@@ -451,10 +462,7 @@ class Model(GraphProvider):
                         new_bvs[new_sid] |= bv_source
                     else:
                         new_bvs[new_sid] = bv_source
-            result = PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
-            acc_id_memo[id(acc)] = result
-            acc_val_memo[acc] = result
-            return result
+            return PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
         cache = {}
         current_state_for_processing = {tsid: gss.apply_and_prune(mutator, cache) for tsid, gss in self.state.items()}
         current_state_for_processing = {tsid: gss for tsid, gss in current_state_for_processing.items() if not gss.is_empty()}
@@ -654,17 +662,14 @@ class Model(GraphProvider):
             stats.inc('get_mask.initial.terminals_union_size.sum', len(acc.terminals_union))
         stats.stop('get_mask.initial_stats')
 
+
         stats.start('get_mask.seeding')
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-        acc_id_memo = {}
-        acc_val_memo = {}
+        @_acc_memoize()
         def initialize_acc(acc: PyAcc) -> PyAcc:
-            if id(acc) in acc_id_memo:
-                return acc_id_memo[id(acc)]
-            cached_acc = acc_val_memo.get(acc)
-            if cached_acc is not None:
-                acc_id_memo[id(acc)] = cached_acc
-                return cached_acc
+            if False:  # placeholder to keep minimal diff context; decorator handles memoization
+                if cached_acc is not None:
+                    return cached_acc
 
             p = 'get_mask.seeding.initialize_acc'
             stats.inc(f'{p}.calls')
@@ -700,8 +705,6 @@ class Model(GraphProvider):
                 terminals_union={},  # consume
                 llm_mask=allowed_mask,
             )
-            acc_id_memo[id(acc)] = result
-            acc_val_memo[acc] = result
             return result
 
         cache = {}
@@ -788,34 +791,22 @@ class Model(GraphProvider):
                 llm_bv = llm_bv.difference(final_mask)
 
                 # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                acc_id_memo = {}
-                acc_val_memo = {}
-
+                @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune')
                 def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                     p = 'get_mask.main_loop.edge.intersect_and_prune'
                     stats.inc(f'{p}.calls')
-                    if id(acc) in acc_id_memo:
-                        stats.inc(f'{p}.memo_hits')
-                        return acc_id_memo[id(acc)]
-                    cached_acc = acc_val_memo.get(acc)
-                    if cached_acc is not None:
-                        acc_id_memo[id(acc)] = cached_acc
-                        return cached_acc
                     stats.start(f'{p}.intersection')
                     new_mask = acc.llm_mask.intersection(llm_bv)
                     stats.stop(f'{p}.intersection')
 
                     if new_mask.is_empty():
                         stats.inc(f'{p}.pruned_accs')
-                        result = None
+                        return None
                     else:
-                        result = PyAcc(
+                        return PyAcc(
                             terminals_union=acc.terminals_union,
                             llm_mask=new_mask
                         )
-                    acc_id_memo[id(acc)] = result
-                    acc_val_memo[acc] = result
-                    return result
 
                 stats.start('get_mask.main_loop.edge.apply_and_prune')
                 popped = popped.apply_and_prune(intersect_and_prune)
@@ -846,7 +837,7 @@ class Model(GraphProvider):
                     child_gss = popped.isolate_many(values_to_keep)
                     stats.stop('get_mask.main_loop.edge.isolate_many')
 
-                    stats.inc('get_mask.main_loop.edge.intersect_and_prune.memo_size.sum', len(acc_id_memo))
+                    stats.inc('get_mask.main_loop.edge.intersect_and_prune.memo_size.sum', intersect_and_prune._acc_memo_size())
                     if child_gss.is_empty():
                         stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
                         continue
