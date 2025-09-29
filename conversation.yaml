@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - python/gss_tester/implementations/leveled_impl.py
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     python/gss_tester/implementations/leveled_impl.py: |
@@ -1336,7 +1336,7 @@ local_system:
       from dataclasses import dataclass, field
       from functools import reduce
       from itertools import chain
-      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable, Type
+      from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable, Type, Literal
       from collections import Counter, defaultdict
 
       from ..interface import GSS, T, Acc, NewAcc, Mergeable
@@ -2078,13 +2078,13 @@ local_system:
           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
               return LeveledGSS(merge_upper(self.inner, other.inner))
 
-          def fuse(self, levels: Optional[int | str] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
+          def fuse(self, levels: Optional[int | Literal["to_interface"]] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
               if isinstance(levels, int) and levels <= 0:
                   return self
               if memo is None:
                   memo = {}
 
-              def fuse_lower_node(node: Lower[T], remain: Optional[int | str]) -> Lower[T]:
+              def fuse_lower_node(node: Lower[T], remain: Optional[int | Literal["to_interface"]]) -> Lower[T]:
                   if remain == "to_interface":
                       return node
                   key = ('L', id(node), remain)
@@ -2095,7 +2095,7 @@ local_system:
                       memo[key] = node
                       return node
 
-                  next_remain: Optional[int | str]
+                  next_remain: Optional[int | Literal["to_interface"]]
                   if isinstance(remain, int):
                       next_remain = None if remain is None else remain - 1
                   else:
@@ -2127,7 +2127,7 @@ local_system:
                   memo[key] = res
                   return res
 
-              def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int | str]) -> Upper[T, Acc]:
+              def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int | Literal["to_interface"]]) -> Upper[T, Acc]:
                   key = ('U', id(node), remain)
                   cached = memo.get(key)
                   if cached is not None:
@@ -2136,7 +2136,7 @@ local_system:
                       memo[key] = node
                       return node
 
-                  next_remain: Optional[int | str]
+                  next_remain: Optional[int | Literal["to_interface"]]
                   if isinstance(remain, int):
                       next_remain = None if remain is None else remain - 1
                   else:
@@ -2673,7 +2673,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gf
   code_completion_model:
     - cp
   commit_message_model:
@@ -4176,5 +4176,112 @@ messages:
     metadata:
   - user: "Changes committed with message: \"Feat: Allow fuse to stop at Interface
       level using 'to_interface' string for levels\""
+    metadata:
+  - user: |-
+      Diff of python/gss_tester/implementations/leveled_impl.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Make it a `typing.Literal`.
+    metadata:
+  - assistant: |-
+      This is a good refinement for type safety and clarity. I will update the type hints to use `typing.Literal["to_interface"]`.
+
+      ### Step-by-step Instructions
+
+      1.  **File:** `python/gss_tester/implementations/leveled_impl.py`
+
+      2.  **Update `typing` import:**
+          -   Locate the `from typing import ...` line around line 7.
+          -   Add `Literal` to the list of imported names.
+
+      3.  **Update `fuse` method signature:**
+          -   Locate the `fuse` method definition around line 822.
+          -   Change the type hint for `levels` from `Optional[int | str]` to `Optional[int | Literal["to_interface"]]`.
+
+      4.  **Update `fuse_lower_node` helper function signature:**
+          -   Locate the `fuse_lower_node` definition around line 828.
+          -   Change the type hint for `remain` from `Optional[int | str]` to `Optional[int | Literal["to_interface"]]`.
+
+      5.  **Update `fuse_upper_node` helper function signature:**
+          -   Locate the `fuse_upper_node` definition around line 868.
+          -   Change the type hint for `remain` from `Optional[int | str]` to `Optional[int | Literal["to_interface"]]`.
+
+      ### Git Diff
+
+      ```diff
+      diff --git a/python/gss_tester/implementations/leveled_impl.py b/python/gss_tester/implementations/leveled_impl.py
+      index 99252c4..9807212 100644
+      --- a/python/gss_tester/implementations/leveled_impl.py
+      +++ b/python/gss_tester/implementations/leveled_impl.py
+      @@ -5,7 +5,7 @@
+       from dataclasses import dataclass, field
+       from functools import reduce
+       from itertools import chain
+      -from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable, Type
+      +from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable, Type, Literal
+       from collections import Counter, defaultdict
+       
+       from ..interface import GSS, T, Acc, NewAcc, Mergeable
+      @@ -822,18 +822,18 @@
+           def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
+               return LeveledGSS(merge_upper(self.inner, other.inner))
+       
+      -    def fuse(self, levels: Optional[int | str] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
+      +    def fuse(self, levels: Optional[int | Literal["to_interface"]] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
+               if isinstance(levels, int) and levels <= 0:
+                   return self
+               if memo is None:
+                   memo = {}
+       
+      -        def fuse_lower_node(node: Lower[T], remain: Optional[int | str]) -> Lower[T]:
+      +        def fuse_lower_node(node: Lower[T], remain: Optional[int | Literal["to_interface"]]) -> Lower[T]:
+                   if remain == "to_interface":
+                       return node
+                   key = ('L', id(node), remain)
+                   cached = memo.get(key)
+                   if cached is not None:
+                       return cached
+                   if isinstance(remain, int) and remain == 0:
+      @@ -841,7 +841,7 @@
+                       return node
+       
+      -            next_remain: Optional[int | str]
+      +            next_remain: Optional[int | Literal["to_interface"]]
+                   if isinstance(remain, int):
+                       next_remain = None if remain is None else remain - 1
+                   else:
+      @@ -867,7 +867,7 @@
+                   memo[key] = res
+                   return res
+       
+      -        def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int | str]) -> Upper[T, Acc]:
+      +        def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int | Literal["to_interface"]]) -> Upper[T, Acc]:
+                   key = ('U', id(node), remain)
+                   cached = memo.get(key)
+                   if cached is not None:
+      @@ -876,7 +876,7 @@
+                       memo[key] = node
+                       return node
+       
+      -            next_remain: Optional[int | str]
+      +            next_remain: Optional[int | Literal["to_interface"]]
+                   if isinstance(remain, int):
+                       next_remain = None if remain is None else remain - 1
+                   else:
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/gss_tester/implementations/leveled_impl.py
+      Applying patch to 'python/gss_tester/implementations/leveled_impl.py' using custom patcher...
+      Successfully applied patch and wrote to python/gss_tester/implementations/leveled_impl.py.
+    metadata:
+  - user: "Changes committed with message: \"Refactor: Use Literal for 'to_interface'
+      level in fuse method and update internal helpers\""
     metadata:
 ...

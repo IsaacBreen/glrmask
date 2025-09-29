@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass, field
 from functools import reduce
 from itertools import chain
-from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable, Type
+from typing import Callable, Dict, Generic, List, Optional, Set, Tuple, Any, Generator, TypeVar, Iterator, Iterable, Type, Literal
 from collections import Counter, defaultdict
 
 from ..interface import GSS, T, Acc, NewAcc, Mergeable
@@ -746,13 +746,13 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def merge(self, other: LeveledGSS[T, Acc]) -> LeveledGSS[T, Acc]:
         return LeveledGSS(merge_upper(self.inner, other.inner))
 
-    def fuse(self, levels: Optional[int | str] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
+    def fuse(self, levels: Optional[int | Literal["to_interface"]] = None, memo: Optional[Dict] = None) -> LeveledGSS[T, Acc]:
         if isinstance(levels, int) and levels <= 0:
             return self
         if memo is None:
             memo = {}
 
-        def fuse_lower_node(node: Lower[T], remain: Optional[int | str]) -> Lower[T]:
+        def fuse_lower_node(node: Lower[T], remain: Optional[int | Literal["to_interface"]]) -> Lower[T]:
             if remain == "to_interface":
                 return node
             key = ('L', id(node), remain)
@@ -763,7 +763,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 memo[key] = node
                 return node
 
-            next_remain: Optional[int | str]
+            next_remain: Optional[int | Literal["to_interface"]]
             if isinstance(remain, int):
                 next_remain = None if remain is None else remain - 1
             else:
@@ -795,7 +795,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             memo[key] = res
             return res
 
-        def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int | str]) -> Upper[T, Acc]:
+        def fuse_upper_node(node: Upper[T, Acc], remain: Optional[int | Literal["to_interface"]]) -> Upper[T, Acc]:
             key = ('U', id(node), remain)
             cached = memo.get(key)
             if cached is not None:
@@ -804,7 +804,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 memo[key] = node
                 return node
 
-            next_remain: Optional[int | str]
+            next_remain: Optional[int | Literal["to_interface"]]
             if isinstance(remain, int):
                 next_remain = None if remain is None else remain - 1
             else:
