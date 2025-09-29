@@ -149,6 +149,10 @@ class Model(GraphProvider):
     """
     Precomputed trie model (third-generation), simplified and concise.
     """
+    stats = Stats.get()
+    stats.add_group('get_mask')
+    stats.add_group('commit')
+
     # Core data structures
     arena: Dict[NodeID, ArenaNode]
     roots_map: Dict[int, NodeID]
@@ -376,7 +380,7 @@ class Model(GraphProvider):
     @profile
     def commit(self, token_id: int):
         stats = Stats.get()
-        stats.start('commit.total')
+        stats.start('commit')
         token_bytes = self.id_to_token[token_id]
 
         # Build tokenizer maps
@@ -473,7 +477,7 @@ class Model(GraphProvider):
 
         stats.inc('commit.tokenizer_states_out', len(merged_states))
         self.state = merged_states
-        stats.stop('commit.total')
+        stats.stop('commit')
 
     @profile
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
@@ -549,7 +553,7 @@ class Model(GraphProvider):
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
         stats = Stats.get()
-        stats.start('get_mask.total')
+        stats.start('get_mask')
         state_map: Dict[int, GSS] = self.state
         stats.inc('get_mask.initial_tokenizer_states', len(state_map))
 
@@ -807,7 +811,7 @@ class Model(GraphProvider):
 
         stats.stop('get_mask.final_conversion')
 
-        stats.stop('get_mask.total')
+        stats.stop('get_mask')
         return result
 
     def finalize(self):
