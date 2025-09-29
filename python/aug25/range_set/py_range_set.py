@@ -96,8 +96,8 @@ class PyRangeSet(RangeSet[int]):
         intervals.append((start, prev))
         return PyRangeSet(intervals)
 
-    @staticmethod
-    def empty(self) -> 'PyRangeSet':
+    @classmethod
+    def empty(cls) -> 'PyRangeSet':
         """Creates an empty PyRangeSet."""
         return PyRangeSet()
 
