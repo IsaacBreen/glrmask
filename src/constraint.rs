@@ -1660,7 +1660,7 @@ impl<'r> Precomputer0<'r> {
                     for (dest_wrapper, bv) in dest_map {
                         let dest_arc = dest_wrapper.as_arc();
                         let dest_ptr = dest_arc;
-                        incoming_map.entry(*dest_ptr).or_default().entry(*gtid).or_default().push((*src_ptr, bv.clone()));
+                        incoming_map.entry(*dest_ptr).or_default().entry(gtid).or_default().push((*src_ptr, bv.clone()));
                     }
                 }
             }
@@ -1800,8 +1800,8 @@ impl<'r> Precomputer0<'r> {
         internal_max_llm_token: usize,
     ) -> (BTreeMap<TokenizerStateID, PrecomputeNode0Index>, Trie0GodWrapper) {
 
-        calculate_final_stats(&self.roots, &mut self.stats, &self.trie0_god);
-        print_precompute_stats(&self.stats, token_name_map, &self.trie0_god);
+        // calculate_final_stats(&self.roots, &mut self.stats, &self.trie0_god);
+        // print_precompute_stats(&self.stats, token_name_map, &self.trie0_god);
 
         (self.roots, self.trie0_god)
     }
