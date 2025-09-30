@@ -5,7 +5,7 @@ use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
 use std::collections::{HashSet, VecDeque, BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
-use bitvec::prelude::*;
+use bitvec::prelude::BitVec;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use bimap::BiBTreeMap;
 use crate::datastructures::ArcPtrWrapper;
@@ -160,7 +160,7 @@ pub fn dump_precompute_trie_recursive(
 impl GrammarConstraint { // This is in constraint_extra.rs
     /// Dumps the structure of the precomputed Trie map for visualization.
     pub fn dump_precomputed(&self) {
-        Self::_dump_precomputed(
+        GrammarConstraint::_dump_precomputed(
             &self.precomputed,
             &self.llm_vocab.original_to_internal_id_bimap,
             &self.token_name_map,

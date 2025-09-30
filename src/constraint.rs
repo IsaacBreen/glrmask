@@ -1,10 +1,10 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use crate::datastructures::hybrid_l2_bitset;
 use std::collections::btree_map::Entry as BTreeEntry;
 use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
+use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::ordered_hash_map::Retain;
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
@@ -97,19 +97,57 @@ impl JSONConvertible for TerminalAllowanceCheckMode {
     }
 }
 
+// JSON for (TokenizerStateID, TerminalID)
+impl JSONConvertible for (TokenizerStateID, TerminalID) {
+    fn to_json(&self) -> JSONNode {
+        JSONNode::Array(vec![self.0.to_json(), self.1.to_json()])
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Array(mut arr) if arr.len() == 2 => {
+                let right = TerminalID::from_json(arr.pop().unwrap())?;
+                let left = TokenizerStateID::from_json(arr.pop().unwrap())?;
+                Ok((left, right))
+            }
+            _ => Err("Expected [TokenizerStateID, TerminalID] array".to_string()),
+        }
+    }
+}
+
+// JSON for the PrecomputeNode0 edge key: (Option<TerminalID>, Option<(TokenizerStateID, TerminalID)>)
+impl JSONConvertible for (Option<TerminalID>, Option<(TokenizerStateID, TerminalID)>) {
+    fn to_json(&self) -> JSONNode {
+        JSONNode::Array(vec![self.0.to_json(), self.1.to_json()])
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Array(mut arr) if arr.len() == 2 => {
+                let right = Option::<(TokenizerStateID, TerminalID)>::from_json(arr.pop().unwrap())?;
+                let left = Option::<TerminalID>::from_json(arr.pop().unwrap())?;
+                Ok((left, right))
+            }
+            _ => Err("Expected [Option<TerminalID>, Option<(TokenizerStateID,TerminalID)>] array".to_string()),
+        }
+    }
+}
+
+// Precompute 0 (edge key includes terminal and an optional “disallow” pair for (end tokenizer state, matched terminal))
+pub type PrecomputeNode0 = Trie<(Option<TerminalID>, Option<(TokenizerStateID, TerminalID)>), LLMTokenBV, PrecomputedNodeContents>;
+pub type PrecomputeNode0Index = Trie2Index;
+
+pub type Precomputed0 = BTreeMap<TokenizerStateID, PrecomputeNode0Index>;
+
+pub type Trie0GodWrapper = GodWrapper<(Option<TerminalID>, Option<(TokenizerStateID, TerminalID)>), HybridBitset, PrecomputedNodeContents>;
+pub type Trie0God = God<(Option<TerminalID>, Option<(TokenizerStateID, TerminalID)>), HybridBitset, PrecomputedNodeContents>;
 
 pub type PrecomputeNode1 = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode3 = Trie<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
-// New: PrecomputeNode0 with (grammar token, optional (tokenizer end state, disallowed terminal))
-pub type PrecomputeNode0 = Trie<(Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>), LLMTokenBV, PrecomputedNodeContents>;
 
-pub type PrecomputeNode0Index = Trie2Index;
 pub type PrecomputeNode1Index = Trie2Index;
 pub type PrecomputeNode2Index = Trie2Index;
 pub type PrecomputeNode3Index = Trie2Index;
 
-pub type Precomputed0 = BTreeMap<TokenizerStateID, PrecomputeNode0Index>;
 pub type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode1Index>;
 pub type Precomputed2 = BTreeMap<TokenizerStateID, PrecomputeNode2Index>;
 pub type Precomputed3 = BTreeMap<TokenizerStateID, PrecomputeNode3Index>;
@@ -211,20 +249,19 @@ impl Default for GrammarConstraintConfig {
 pub struct GrammarConstraint {
     pub tokenizer:        Regex,
     pub parser:           GLRParser,
+    pub precomputed0:     Precomputed0,
     pub(crate) precomputed:      Precomputed,
     pub precomputed2:     Precomputed2,
     pub precomputed3:     Precomputed3,
-    // New: store precompute-0 too
-    pub precomputed0:     Precomputed0,
     pub llm_vocab:        Arc<LLMVocab>,
     pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
     pub possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+    pub trie0_god:        Trie0GodWrapper,
     pub(crate) trie1_god: Trie1GodWrapper,
     pub trie2_god: Trie2GodWrapper,
     pub trie3_god: Trie3GodWrapper,
     pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
     // Stage-local vocabularies for internal<->original mappings
-    pub trie0_god: Trie0GodWrapper,
     pub precompute_vocab: StageVocab,
     pub precompute2_vocab: StageVocab,
     pub precompute3_vocab: StageVocab,
@@ -234,6 +271,11 @@ impl GrammarConstraint {
     pub fn assert_eq(&self, other: &Self) {
         assert_eq!(self.tokenizer, other.tokenizer);
         assert_eq!(self.parser, other.parser);
+        assert_eq!(self.precomputed0.len(), other.precomputed0.len());
+        for ((sid1, arc1), (sid2, arc2)) in self.precomputed0.iter().zip(other.precomputed0.iter()) {
+            assert_eq!(sid1, sid2);
+            assert!(PrecomputeNode0::are_graphs_equal(&self.trie0_god, *arc1, &other.trie0_god, *arc2));
+        }
         assert_eq!(self.precomputed.len(), other.precomputed.len());
         for ((sid1, arc1), (sid2, arc2)) in self.precomputed.iter().zip(other.precomputed.iter()) {
             assert_eq!(sid1, sid2);
@@ -248,11 +290,6 @@ impl GrammarConstraint {
         for ((sid1, arc1), (sid2, arc2)) in self.precomputed3.iter().zip(other.precomputed3.iter()) {
             assert_eq!(sid1, sid2);
             assert!(PrecomputeNode3::are_graphs_equal(&self.trie3_god, *arc1, &other.trie3_god, *arc2));
-        }
-        assert_eq!(self.precomputed0.len(), other.precomputed0.len());
-        for ((sid1, arc1), (sid2, arc2)) in self.precomputed0.iter().zip(other.precomputed0.iter()) {
-            assert_eq!(sid1, sid2);
-            assert!(PrecomputeNode0::are_graphs_equal(&self.trie0_god, *arc1, &other.trie0_god, *arc2));
         }
         assert_eq!(self.llm_vocab.llm_token_map, other.llm_vocab.llm_token_map);
         assert_eq!(self.token_name_map, other.token_name_map);
@@ -269,20 +306,20 @@ impl JSONConvertible for GrammarConstraint {
         let mut obj = StdMap::new();
         obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
         obj.insert("parser".to_string(), self.parser.to_json());
+        obj.insert("precomputed0".to_string(), self.precomputed0.to_json());
         obj.insert("precomputed".to_string(), self.precomputed.to_json());
         obj.insert("precomputed2".to_string(), self.precomputed2.to_json());
         obj.insert("precomputed3".to_string(), self.precomputed3.to_json());
-        obj.insert("precomputed0".to_string(), self.precomputed0.to_json());
         obj.insert("llm_token_map".to_string(), self.llm_vocab.llm_token_map.to_json());
         obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
         obj.insert("max_original_llm_token_id".to_string(), self.llm_vocab.max_original_llm_token_id.to_json());
         obj.insert("original_to_internal_id_bimap".to_string(), self.llm_vocab.original_to_internal_id_bimap.to_json());
         obj.insert("internal_max_llm_token".to_string(), self.llm_vocab.internal_max_llm_token.to_json());
         obj.insert("possible_matches".to_string(), self.possible_matches.to_json());
+        obj.insert("trie0_god".to_string(), self.trie0_god.to_json());
         obj.insert("trie1_god".to_string(), self.trie1_god.to_json());
         obj.insert("trie2_god".to_string(), self.trie2_god.to_json());
         obj.insert("trie3_god".to_string(), self.trie3_god.to_json());
-        obj.insert("trie0_god".to_string(), self.trie0_god.to_json());
         obj.insert("post_commit_allow_check_mode".to_string(), self.post_commit_allow_check_mode.to_json());
         // Stage vocabs
         obj.insert("precompute_vocab".to_string(), self.precompute_vocab.to_json());
@@ -298,13 +335,14 @@ impl JSONConvertible for GrammarConstraint {
                                    .and_then(Regex::from_json)?;
                 let parser = obj.remove("parser").ok_or_else(|| "Missing field parser".to_string())
                                 .and_then(GLRParser::from_json)?;
+                let precomputed0 = obj.remove("precomputed0").ok_or_else(|| "Missing field precomputed0".to_string())
+                                     .and_then(|n| Precomputed0::from_json(n))?;
                 let precomputed = obj.remove("precomputed").ok_or_else(|| "Missing field precomputed".to_string())
                                      .and_then(|n| Precomputed::from_json(n))?;
                 let precomputed2 = obj.remove("precomputed2").ok_or_else(|| "Missing field precomputed2".to_string())
                                      .and_then(|n| Precomputed2::from_json(n))?;
                 let precomputed3 = obj.remove("precomputed3").ok_or_else(|| "Missing field precomputed3".to_string())
                                      .and_then(|n| Precomputed3::from_json(n))?;
-                let precomputed0_opt = obj.remove("precomputed0").map(|n| Precomputed0::from_json(n));
 
                 let llm_token_map = obj.remove("llm_token_map").ok_or_else(|| "Missing field llm_token_map".to_string())
                                        .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
@@ -318,14 +356,14 @@ impl JSONConvertible for GrammarConstraint {
                                                   .and_then(usize::from_json)?;
                 let possible_matches = obj.remove("possible_matches").ok_or_else(|| "Missing field possible_matches".to_string())
                                           .and_then(|n| BTreeMap::<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>::from_json(n))?;
+                let trie0_god = obj.remove("trie0_god").ok_or_else(|| "Missing field trie0_god".to_string())
+                                    .and_then(|n| Trie0GodWrapper::from_json(n))?;
                 let trie1_god = obj.remove("trie1_god").ok_or_else(|| "Missing field trie1_god".to_string())
                                     .and_then(|n| Trie1GodWrapper::from_json(n))?;
                 let trie2_god = obj.remove("trie2_god").ok_or_else(|| "Missing field trie2_god".to_string())
                                     .and_then(|n| Trie2GodWrapper::from_json(n))?;
                 let trie3_god = obj.remove("trie3_god").ok_or_else(|| "Missing field trie3_god".to_string())
                                     .and_then(|n| Trie3GodWrapper::from_json(n))?;
-                let trie0_god = obj.remove("trie0_god").map(|n| Trie0GodWrapper::from_json(n))
-                    .transpose()?.unwrap_or_else(|| Trie0GodWrapper::new());
                 let post_commit_allow_check_mode = match obj.remove("post_commit_allow_check_mode") {
                     Some(n) => TerminalAllowanceCheckMode::from_json(n)?,
                     None => TerminalAllowanceCheckMode::default(),
@@ -363,33 +401,17 @@ impl JSONConvertible for GrammarConstraint {
                 Ok(GrammarConstraint {
                     tokenizer,
                     parser,
+                    precomputed0,
                     precomputed,
                     precomputed2,
                     precomputed3,
                     llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_to_original_: global_ito, internal_max_llm_token }),
                     token_name_map,
                     possible_matches,
+                    trie0_god,
                     trie1_god,
                     trie2_god,
                     trie3_god,
-                    precomputed0: {
-                        // If precomputed0 was present, use it; otherwise, derive from precomputed1
-                        match precomputed0_opt {
-                            Some(Ok(p0)) => p0,
-                            _ => {
-                                let (p0, _t0) = GrammarConstraint::derive_precompute0_from_precompute1(&precomputed, &trie1_god);
-                                p0
-                            }
-                        }
-                    },
-                    trie0_god: {
-                        if trie0_god.is_empty() {
-                            let (_p0, t0) = GrammarConstraint::derive_precompute0_from_precompute1(&precomputed, &trie1_god);
-                            t0
-                        } else {
-                            trie0_god
-                        }
-                    },
                     post_commit_allow_check_mode,
                     precompute_vocab,
                     precompute2_vocab,
@@ -585,14 +607,14 @@ impl GrammarConstraint {
             return Self {
                 tokenizer,
                 parser,
+                precomputed0: BTreeMap::new(),
                 precomputed: BTreeMap::new(),
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
-                precomputed0: BTreeMap::new(),
-                trie0_god: Trie0GodWrapper::new(),
                 llm_vocab,
                 token_name_map,
                 possible_matches: computed_possible_matches,
+                trie0_god: Trie0GodWrapper::new(),
                 trie1_god: Trie1GodWrapper::new(),
                 trie2_god: Trie2GodWrapper::new(),
                 trie3_god: Trie3GodWrapper::new(),
@@ -603,7 +625,7 @@ impl GrammarConstraint {
             };
         }
 
-        let (precomputed, trie1_god) = Self::precompute1(
+        let (precomputed0, trie0_god) = Self::precompute0(
             &tokenizer,
             Some(&parser),
             Some(llm_vocab.clone()),
@@ -614,16 +636,12 @@ impl GrammarConstraint {
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
         );
-        // Derive Precompute 0 from Trie 1 (trivial lift), and then reduce back to Trie 1
-        let (precomputed0, trie0_god) = Self::derive_precompute0_from_precompute1(&precomputed, &trie1_god);
-        let (precomputed1_reduced, trie1_god_reduced) = Self::reduce_precompute0_to_precompute1(&precomputed0, &trie0_god);
-        // Sanity: graphs should match
-        for (sid, arc1) in &precomputed {
-            let arc2 = precomputed1_reduced.get(sid).unwrap();
-            assert!(PrecomputeNode1::are_graphs_equal(&trie1_god, *arc1, &trie1_god_reduced, *arc2));
-        }
-        // We will continue using the originally computed Trie1 (precomputed/trie1_god) for downstream
-        // but we keep precomputed0/trie0_god in the constraint for commit.
+
+        let (precomputed, trie1_god) = Self::precompute1_from0(
+            &precomputed0,
+            &trie0_god,
+            &computed_possible_matches,
+        );
 
         if config.optimize_trie1_merge_equivalent_llm_tokens {
             constraint_precompute1_utils::merge_equivalent_llm_tokens_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
@@ -694,20 +712,19 @@ impl GrammarConstraint {
         let mut gc = Self {
             tokenizer,
             parser,
+            precomputed0,
             precomputed,
             precomputed2,
             precomputed3,
-            precomputed0,
-            trie0_god,
             llm_vocab,
             token_name_map,
             possible_matches: computed_possible_matches,
+            trie0_god,
             trie1_god,
             trie2_god,
             trie3_god,
             post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
             precompute_vocab,
-            trie0_god: trie0_god,
             precompute2_vocab,
             precompute3_vocab,
         };
@@ -715,20 +732,19 @@ impl GrammarConstraint {
         gc
     }
 
-    pub fn precompute1(
+    // New precompute0 function (adapted from old precompute1)
+    pub fn precompute0(
         tokenizer:        &Regex,
         parser:           Option<&GLRParser>,
         llm_vocab:        Option<Arc<LLMVocab>>,
         internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-        token_name_map:   &BiBTreeMap<Terminal, usize>,
+        _token_name_map:  &BiBTreeMap<Terminal, usize>, // not needed here, kept for symmetry
         internal_max_llm_token: usize,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
-        possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-    ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
-        // return (BTreeMap::new(), Trie1GodWrapper::new()); // TEMP
-
-        let mut helper = Precomputer::new(
+        _possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>, // not needed here
+    ) -> (Precomputed0, Trie0GodWrapper) {
+        let mut helper = Precomputer0::new(
             tokenizer,
             parser,
             llm_vocab,
@@ -738,27 +754,109 @@ impl GrammarConstraint {
             terminal_follow_map,
             ignore_terminal_id,
         );
-
         helper.run_dfs();
-        // helper.optimize_precomputed_via_substring_parser();
         helper.replace_ignore_token_edges_with_none_edges();
-        helper.simplify_none_edges(); // This can invalidate max_depth.
-
-        // Recompute all max_depth values after major graph surgery.
-        Trie::recompute_all_max_depths(&helper.trie1_god, &helper.roots.values().cloned().collect::<Vec<_>>());
-
+        helper.simplify_none_edges();
+        Trie::recompute_all_max_depths(&helper.trie0_god, &helper.roots.values().cloned().collect::<Vec<_>>());
         helper.prune_dead_paths();
         helper.prune_on_no_terminal_follow();
         helper.prune_dead_paths();
-        // New: prune using substring parser in "everything state" mode
-        // helper.prune_with_substring_everything_state();
-        helper.prune_dead_paths(); // Clean up after GLR-based pruning
         helper.factor_common_destinations();
         helper.merge_nodes();
-        // helper.merge_nodes_basic();
         helper.gc();
-        Trie::recompute_all_max_depths(&helper.trie1_god, &helper.roots.values().cloned().collect::<Vec<_>>());
-        helper.finish(token_name_map, possible_matches, internal_max_llm_token)
+        Trie::recompute_all_max_depths(&helper.trie0_god, &helper.roots.values().cloned().collect::<Vec<_>>());
+        helper.finish0(internal_max_llm_token)
+    }
+
+    // New reduction function
+    pub fn precompute1_from0(
+        precomputed0: &Precomputed0,
+        trie0_god: &Trie0GodWrapper,
+        possible_matches: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+    ) -> (Precomputed, Trie1GodWrapper) {
+        // Drop the disallow part of the key: (Some(gtid), disallow_opt) -> Some(gtid), (None, _) -> None.
+        // Merge parallel edges with same (gtid_opt) by OR-ing their LLMTokenBV.
+        // Optional: to exactly match legacy precompute1 semantics, subtract the
+        // "matches at end" set for keys that had disallow_opt=Some((end_sid, gtid)):
+        //   bv -= possible_matches[&end_sid].get(&gtid).cloned().unwrap_or_default()
+        let trie1_god = Trie1GodWrapper::new();
+        use std::collections::VecDeque;
+
+        // Map PrecomputeNode0Index -> PrecomputeNode1Index
+        let mut map_nodes = BTreeMap::<PrecomputeNode0Index, PrecomputeNode1Index>::new();
+        let mut queue = VecDeque::new();
+
+        // Create roots
+        for (sid, root0) in precomputed0 {
+            let root1 = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::root(
+                possible_matches.keys().map(|_| ()).count(), // placeholder, not used
+            ))));
+            map_nodes.insert(*root0, root1.clone());
+            queue.push_back(*root0);
+        }
+
+        // BFS to clone structure with key projection and EV merging
+        while let Some(node0) = queue.pop_front() {
+            let node1 = map_nodes.get(&node0).cloned().expect("mapped");
+            let children: Vec<_> = {
+                let g0 = node0.read(trie0_god).expect("poison");
+                g0.children().iter().flat_map(|(ek, dst_map)| {
+                    dst_map.iter().map(move |(dst0, ev)| (ek.clone(), *dst0, ev.clone(), g0.value.clone()))
+                }).collect()
+            };
+
+            // Create missing child nodes first
+            for (_, dst0, _, _) in &children {
+                if !map_nodes.contains_key(dst0) {
+                    let val = dst0.read(trie0_god).expect("poison").value.clone();
+                    let new1 = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(val)));
+                    map_nodes.insert(*dst0, new1);
+                    queue.push_back(*dst0);
+                }
+            }
+
+            // Insert edges with projected key, with optional subtract to match legacy
+            {
+                let mut w1 = node1.write(&trie1_god).expect("poison");
+                for (ek0, dst0, mut bv, _val) in children {
+                    let (gtid_opt, disallow_opt) = ek0;
+                    let projected_key = gtid_opt; // dropping the disallow part
+
+                    // Legacy semantics: subtract tokens that could be matched again at end state for same gtid
+                    if let (Some(gtid), Some((end_sid, dis_gtid))) = (projected_key, disallow_opt) {
+                        if gtid == dis_gtid {
+                            let end_sid_tokenizer = end_sid; // TokenizerStateID
+                            if let Some(pm_for_end) = possible_matches.get(&end_sid_tokenizer) {
+                                if let Some(bv_end) = pm_for_end.get(&gtid) {
+                                    bv -= bv_end;
+                                }
+                            }
+                        }
+                    }
+
+                    if bv.is_empty() {
+                        continue;
+                    }
+
+                    let dst1 = map_nodes.get(&dst0).cloned().expect("mapped child");
+                    let dest_map = w1.children_mut().entry(projected_key).or_default();
+                    if let Some(existing) = dest_map.get_mut(&dst1) {
+                        *existing |= &bv;
+                    } else {
+                        dest_map.insert(dst1, bv.clone());
+                    }
+                    w1.value.live_tokens |= &bv;
+                }
+            }
+        }
+
+        // Roots (same tokenizer_state_id mapping)
+        let mut precomputed1 = BTreeMap::new();
+        for (sid, root0) in precomputed0 {
+            precomputed1.insert(*sid, map_nodes.get(root0).unwrap().clone());
+        }
+        Trie::recompute_all_max_depths(&trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+        (precomputed1, trie1_god)
     }
 
     /// Build the "Trie 2" precomputation.
@@ -928,124 +1026,6 @@ impl GrammarConstraint {
         (precomputed3, trie3_god)
     }
 
-    // Lift Trie1 -> Trie0 (trivial: attach disallow=None to every edge key)
-    pub fn derive_precompute0_from_precompute1(
-        precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-        trie1_god: &Trie1GodWrapper,
-    ) -> (Precomputed0, Trie0GodWrapper) {
-        let trie0_god = Trie0GodWrapper::new();
-        let mut precomputed0: Precomputed0 = BTreeMap::new();
-
-        // Map from Trie1Index -> Trie0Index
-        let mut map_1_to_0: HashMap<PrecomputeNode1Index, PrecomputeNode0Index> = HashMap::new();
-        let mut queue: VecDeque<PrecomputeNode1Index> = VecDeque::new();
-
-        // Create roots
-        for (sid, root1) in precomputed1.iter() {
-            let root_value = { root1.read(trie1_god).expect("poison").value.clone() };
-            let root0 = PrecomputeNode0Index::new(trie0_god.insert(PrecomputeNode0::new(root_value)));
-            precomputed0.insert(*sid, root0);
-            map_1_to_0.insert(*root1, root0);
-            queue.push_back(*root1);
-        }
-
-        // BFS clone: edges (gtid_opt) -> ((gtid_opt, None))
-        while let Some(n1) = queue.pop_front() {
-            let n0 = map_1_to_0.get(&n1).cloned().expect("must be present");
-            let children_snapshot: Vec<(Option<GrammarTokenID>, Vec<(PrecomputeNode1Index, LLMTokenBV)>)> = {
-                let g = n1.read(trie1_god).expect("poison");
-                g.children()
-                    .iter()
-                    .map(|(ek, dest_map)| {
-                        let entries = dest_map.iter().map(|(idx, ev)| (*idx, ev.clone())).collect::<Vec<_>>();
-                        (ek.clone(), entries)
-                    })
-                    .collect()
-            };
-            for (ek1, entries) in children_snapshot {
-                let ek0 = (ek1, None);
-                for (child1, ev) in entries {
-                    // ensure child0 exists
-                    let child0 = if let Some(&c0) = map_1_to_0.get(&child1) {
-                        c0
-                    } else {
-                        let child_value = { child1.read(trie1_god).expect("poison").value.clone() };
-                        let c0 = PrecomputeNode0Index::new(trie0_god.insert(PrecomputeNode0::new(child_value)));
-                        map_1_to_0.insert(child1, c0);
-                        queue.push_back(child1);
-                        c0
-                    };
-                    // insert edge
-                    let mut edge_val = Some(ev.clone());
-                    let mut n0w = n0.write(&trie0_god).expect("poison");
-                    n0w.try_insert_unchecked(ek0.clone(), &mut edge_val, child0);
-                    // propagate live tokens
-                    n0w.value.live_tokens |= &ev;
-                }
-            }
-        }
-        // Set max depths
-        let roots: Vec<_> = precomputed0.values().cloned().collect();
-        Trie::recompute_all_max_depths(&trie0_god, &roots);
-        (precomputed0, trie0_god)
-    }
-
-    // Reduce Trie0 -> Trie1 (drop disallow info)
-    pub fn reduce_precompute0_to_precompute1(
-        precomputed0: &Precomputed0,
-        trie0_god: &Trie0GodWrapper,
-    ) -> (Precomputed, Trie1GodWrapper) {
-        let trie1_god = Trie1GodWrapper::new();
-        let mut precomputed1: Precomputed = BTreeMap::new();
-
-        // Map 0->1
-        let mut map_0_to_1: HashMap<PrecomputeNode0Index, PrecomputeNode1Index> = HashMap::new();
-        let mut queue: VecDeque<PrecomputeNode0Index> = VecDeque::new();
-
-        for (sid, root0) in precomputed0.iter() {
-            let root_value = { root0.read(trie0_god).expect("poison").value.clone() };
-            let root1 = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(root_value)));
-            precomputed1.insert(*sid, root1);
-            map_0_to_1.insert(*root0, root1);
-            queue.push_back(*root0);
-        }
-
-        while let Some(n0) = queue.pop_front() {
-            let n1 = map_0_to_1.get(&n0).cloned().expect("must exist");
-            let children_snapshot: Vec<(((Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>)), Vec<(PrecomputeNode0Index, LLMTokenBV)>)> = {
-                let g = n0.read(trie0_god).expect("poison");
-                g.children()
-                    .iter()
-                    .map(|(ek, dest_map)| {
-                        let entries = dest_map.iter().map(|(idx, ev)| (*idx, ev.clone())).collect::<Vec<_>>();
-                        (ek.clone(), entries)
-                    })
-                    .collect()
-            };
-            for ((gt_opt, _disallow_opt), entries) in children_snapshot {
-                let ek1 = gt_opt;
-                for (child0, ev) in entries {
-                    let child1 = if let Some(&c1) = map_0_to_1.get(&child0) {
-                        c1
-                    } else {
-                        let child_value = { child0.read(trie0_god).expect("poison").value.clone() };
-                        let c1 = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(child_value)));
-                        map_0_to_1.insert(child0, c1);
-                        queue.push_back(child0);
-                        c1
-                    };
-                    let mut n1w = n1.write(&trie1_god).expect("poison");
-                    let mut edge_val = Some(ev.clone());
-                    n1w.try_insert_unchecked(ek1.clone(), &mut edge_val, child1);
-                    n1w.value.live_tokens |= &ev;
-                }
-            }
-        }
-        let roots: Vec<_> = precomputed1.values().cloned().collect();
-        Trie::recompute_all_max_depths(&trie1_god, &roots);
-        (precomputed1, trie1_god)
-    }
-
     pub fn init(&self) -> GrammarConstraintState<'_> {
         let mut state = BTreeMap::new();
         state.insert(
@@ -1202,12 +1182,12 @@ impl GrammarConstraint {
     }
 }
 
-struct Precomputer<'r> {
+struct Precomputer0<'r> {
     tokenizer:        &'r Regex,
     parser:           Option<&'r GLRParser>,
     llm_vocab:        Option<Arc<LLMVocab>>,
     vocab:            VocabPrefixTree,
-    roots:            BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+    roots:            BTreeMap<TokenizerStateID, PrecomputeNode0Index>,
     possible_matches: RefCell<BTreeMap<*const VocabPrefixTreeNode, BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>>,
     all_llm_tokens:   HybridBitset,
     merge_threshold:  usize,
@@ -1215,13 +1195,12 @@ struct Precomputer<'r> {
     stats:            PrecomputeStats,
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     ignore_terminal_id: Option<TerminalID>,
-    // Map each precompute node to the set of LLM tokens that can pass through it.
     // tags:             RefCell<HashMap<PrecomputeNodeIndex, LLMTokenBV>>, // Removed
-    end_node: PrecomputeNode1Index,
-    trie1_god:        Trie1GodWrapper,
+    end_node: PrecomputeNode0Index,
+    trie0_god:        Trie0GodWrapper,
 }
 
-impl<'r> Precomputer<'r> {
+impl<'r> Precomputer0<'r> {
     fn new(
         tokenizer:        &'r Regex,
         parser:           Option<&'r GLRParser>,
@@ -1242,11 +1221,11 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Done building vocab prefix tree");
 
         let mut roots = BTreeMap::new();
-        let trie1_god = Trie1GodWrapper::new();
+        let trie0_god = Trie0GodWrapper::new();
         for sid in tokenizer.iter_states() {
             roots.insert(
                 sid,
-                PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::root(internal_max_llm_token)))),
+                PrecomputeNode0Index::new(trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents::root(internal_max_llm_token)))),
             );
         }
 
@@ -1262,7 +1241,7 @@ impl<'r> Precomputer<'r> {
             pb.set_draw_target(ProgressDrawTarget::hidden());
         }
 
-        let end_node = PrecomputeNode2Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::leaf())));
+        let end_node = PrecomputeNode0Index::new(trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents::leaf())));
 
         Self {
             tokenizer,
@@ -1279,7 +1258,7 @@ impl<'r> Precomputer<'r> {
             ignore_terminal_id,
             // tags: RefCell::new(HashMap::new()), // Removed
             end_node,
-            trie1_god,
+            trie0_god,
         }
     }
 
@@ -1322,7 +1301,7 @@ impl<'r> Precomputer<'r> {
     fn run_dfs(&mut self) {
         let mut assoc: BTreeMap<
             TokenizerStateID,
-            OrderedHashSet<PrecomputeNode1Index>,
+            OrderedHashSet<PrecomputeNode0Index>,
         > = BTreeMap::new();
 
         for (sid, arc) in &self.roots {
@@ -1354,26 +1333,34 @@ impl<'r> Precomputer<'r> {
 
         // 1. Collect all unique nodes.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
-        let all_nodes = Trie::all_nodes(&self.trie1_god, &roots_vec);
+        let all_nodes = Trie::all_nodes(&self.trie0_god, &roots_vec);
         // 2. Iterate over each node and modify its children map.
         for node_arc in all_nodes {
-            let mut node_guard = node_arc.write(&self.trie1_god).expect("poison");
+            let mut node_guard = node_arc.write(&self.trie0_god).expect("poison");
 
             // Check if there are any edges with the ignore token key.
-            let ignore_key = Some(ignore_tid);
-            if let Some(dest_map_for_ignore_token) = node_guard.children_mut().remove(&ignore_key) {
-                // Get or create the destination map for None edges.
-                let dest_map_for_none = node_guard.children_mut().entry(None).or_default();
+            // The key is (Option<TerminalID>, Option<(TokenizerStateID, TerminalID)>)
+            let mut keys_to_remove = Vec::new();
+            let mut dest_map_for_none = node_guard.children_mut().entry((None, None)).or_default(); // New None key
 
-                // Move each destination from the ignore token map to the None map.
-                for (dest_wrapper, edge_bv) in dest_map_for_ignore_token {
-                    // If an edge to this destination already exists under None, merge the bitvectors.
-                    if let Some(existing_bv) = dest_map_for_none.get_mut(&dest_wrapper) {
-                        *existing_bv |= &edge_bv;
-                    } else {
-                        dest_map_for_none.insert(dest_wrapper, edge_bv);
+            for (key, dest_map_for_ignore_token) in node_guard.children_mut().iter_mut() {
+                if key.0 == Some(ignore_tid) { // Check only the terminal ID part
+                    keys_to_remove.push(key.clone());
+                    // Move each destination from the ignore token map to the None map.
+                    for (dest_wrapper, edge_bv) in dest_map_for_ignore_token.drain() {
+                        // If an edge to this destination already exists under None, merge the bitvectors.
+                        if let Some(existing_bv) = dest_map_for_none.get_mut(&dest_wrapper) {
+                            *existing_bv |= &edge_bv;
+                        } else {
+                            dest_map_for_none.insert(dest_wrapper, edge_bv);
+                        }
                     }
                 }
+            }
+
+            // Remove the old ignore token keys
+            for key in keys_to_remove {
+                node_guard.children_mut().remove(&key);
             }
         }
 
@@ -1381,25 +1368,16 @@ impl<'r> Precomputer<'r> {
     }
 
     /// Simplify out `None` edges by shortcutting predecessors to successors.
-    ///
-    /// For every `B -(None; bv2)-> C`, and for every incoming edge `A -(x; bv1)-> B`,
-    /// we:
-    ///   - add/merge an edge `A -(x; bv1 ∩ bv2)-> C`
-    ///   - remove the moved tokens `bv1 ∩ bv2` from `A -(x; ...)-> B`
-    /// After processing all incoming edges to B, we remove all `None` edges from B.
-    ///
-    /// This transformation preserves behavior while eliminating `None` edges and
-    /// allows subsequent pruning and merging passes to operate on a simpler graph.
     fn simplify_none_edges(&mut self) {
         crate::debug!(2, "Simplifying None edges (shortcut predecessors to successors)...");
 
-        let root_node_ptrs: HashSet<PrecomputeNode1Index> = self.roots.values().cloned().collect();
+        let root_node_ptrs: HashSet<PrecomputeNode0Index> = self.roots.values().cloned().collect();
 
         // 1) Collect all unique nodes reachable from any root
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
-        let all_nodes = Trie::all_nodes(&self.trie1_god, &roots_vec);
+        let all_nodes = Trie::all_nodes(&self.trie0_god, &roots_vec);
         // Map pointer -> Arc for quick retrieval
-        let mut arc_by_ptr: HashMap<PrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
+        let mut arc_by_ptr: HashMap<PrecomputeNode0Index, PrecomputeNode0Index> = HashMap::new();
         for n in &all_nodes {
             arc_by_ptr.insert(*n, n.clone());
         }
@@ -1409,18 +1387,18 @@ impl<'r> Precomputer<'r> {
         //    - none_edges_from[B] = vec of (C, bv2) for edges B -(None; bv2)-> C
         //    - none_union[B] = union of all bv2 for None edges from B
         let mut incoming: HashMap<
-            PrecomputeNode1Index,
-            Vec<(PrecomputeNode1Index, Option<GrammarTokenID>, LLMTokenBV)>
+            PrecomputeNode0Index,
+            Vec<(PrecomputeNode0Index, (Option<TerminalID>, Option<(TokenizerStateID, TerminalID)>), LLMTokenBV)>
         > = HashMap::new();
         let mut none_edges_from: HashMap<
-            PrecomputeNode1Index,
-            Vec<(PrecomputeNode1Index, LLMTokenBV)>
+            PrecomputeNode0Index,
+            Vec<(PrecomputeNode0Index, LLMTokenBV)>
         > = HashMap::new();
-        let mut none_union: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
+        let mut none_union: HashMap<PrecomputeNode0Index, LLMTokenBV> = HashMap::new();
 
         for src_arc in &all_nodes {
             let src_ptr = src_arc;
-            let guard = src_arc.read(&self.trie1_god).expect("poison");
+            let guard = src_arc.read(&self.trie0_god).expect("poison");
             // Record all outgoing edges for incoming map
             for (ek, dest_map) in guard.children().iter() {
                 for (child_wrap, ev_bv) in dest_map.iter() {
@@ -1431,8 +1409,8 @@ impl<'r> Precomputer<'r> {
                         .push((src_arc.clone(), ek.clone(), ev_bv.clone()));
                 }
             }
-            // Record None edges out of src_arc (B -> C)
-            if let Some(dest_map_none) = guard.children().get(&None) {
+            // Record None edges out of src_arc (B -> C). None key is (None, None)
+            if let Some(dest_map_none) = guard.children().get(&(None, None)) {
                 let list = none_edges_from.entry(*src_ptr).or_default();
                 for (child_wrap, ev_bv) in dest_map_none.iter() {
                     list.push((child_wrap.as_arc().clone(), ev_bv.clone()));
@@ -1453,17 +1431,14 @@ impl<'r> Precomputer<'r> {
                 Some(v) if !v.is_empty() => v.clone(),
                 _ => {
                     // No predecessors.
-                    // If B is a root node, we must not remove its None edges, as there are no
-                    // predecessors to shortcut from.
                     if root_node_ptrs.contains(&b_ptr) {
                         continue; // It's a root, leave its None edges.
                     }
 
                     // Not a root and no predecessors means it's an unreachable internal node.
-                    // It's safe to remove its outgoing None edges.
                     if let Some(b_arc) = arc_by_ptr.get(&b_ptr).cloned() {
-                        let mut b_guard = b_arc.write(&self.trie1_god).expect("poison");
-                        b_guard.children_mut().remove(&None);
+                        let mut b_guard = b_arc.write(&self.trie0_god).expect("poison");
+                        b_guard.children_mut().remove(&(None, None));
                     }
                     continue;
                 }
@@ -1476,16 +1451,14 @@ impl<'r> Precomputer<'r> {
             let b_key = b_arc.clone();
 
             // For each incoming edge A -(x; bv1)-> B, split tokens:
-            //   move:    to C with mask (bv1 ∩ bv2)
-            //   leftover on A->B: bv1 - union_over_C(bv1 ∩ bv2) = bv1 ∩ (!union_mask)
             for (a_arc, edge_key, bv1_original) in in_edges.into_iter() {
                 let mut total_to_move = bv1_original.clone();
-                total_to_move &= &union_mask; // total tokens to redirect to all C via None edges
+                total_to_move &= &union_mask;
                 if total_to_move.is_empty() {
                     continue;
                 }
 
-                let mut a_guard = a_arc.write(&self.trie1_god).expect("poison");
+                let mut a_guard = a_arc.write(&self.trie0_god).expect("poison");
                 let dest_map = a_guard.children_mut().entry(edge_key.clone()).or_default();
 
                 // Add/merge edges to each C with per-child mask
@@ -1516,8 +1489,8 @@ impl<'r> Precomputer<'r> {
 
             // Finally, remove all None edges out of B
             {
-                let mut b_guard = b_arc.write(&self.trie1_god).expect("poison");
-                b_guard.children_mut().remove(&None);
+                let mut b_guard = b_arc.write(&self.trie0_god).expect("poison");
+                b_guard.children_mut().remove(&(None, None));
             }
         }
 
@@ -1534,13 +1507,14 @@ impl<'r> Precomputer<'r> {
             .map(|root_arc| (root_arc.clone(), None))
             .collect();
 
-        type NodePtr = *const PrecomputeNode1;
-        let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<GrammarTokenID>>> = HashMap::new();
+        type NodePtr = *const PrecomputeNode0;
+        let mut edges_to_keep: HashMap<NodePtr, BTreeSet<(Option<TerminalID>, Option<(TokenizerStateID, TerminalID)>)>> = HashMap::new();
 
         Trie::special_map(
-            &self.trie1_god,
+            &self.trie0_god,
             initial_nodes_and_values,
-            |predecessors: &Option<BTreeSet<GrammarTokenID>>, edge_terminal_opt: &Option<GrammarTokenID>, _edge_bv, _child_node| {
+            |predecessors: &Option<BTreeSet<GrammarTokenID>>, edge_terminal_opt_pair, _edge_bv, _child_node| {
+                let edge_terminal_opt = edge_terminal_opt_pair.0;
                 match edge_terminal_opt {
                     Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
                     Some(t) => Some(Some(BTreeSet::from([*t]))),
@@ -1555,13 +1529,10 @@ impl<'r> Precomputer<'r> {
                 }
             },
             |node, maybe_all_immediate_predecessors| {
-                // If there are no preceding terminals (e.g., root or only None-edges path from root),
-                // all outgoing terminals are considered valid.
                 if maybe_all_immediate_predecessors.is_none() {
-                    return true; // Continue traversal, no pruning needed for this node.
+                    return true;
                 }
 
-                // Compute the set of all allowed terminals that can follow any of the immediate predecessors.
                 let mut allowed_follow_terminals = BTreeSet::new();
                 if let Some(all_immediate_predecessors) = &*maybe_all_immediate_predecessors {
                     for preceding_terminal in all_immediate_predecessors {
@@ -1571,11 +1542,10 @@ impl<'r> Precomputer<'r> {
                     }
                 }
 
-                let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_terminal_opt| {
+                let keys_to_keep: BTreeSet<_> = node.children().keys().filter(|edge_key_pair| {
+                    let edge_terminal_opt = edge_key_pair.0;
                     match edge_terminal_opt {
-                        // Keep edges with terminals that are in the allowed follow set (or ignore edges).
                         Some(edge_terminal) => allowed_follow_terminals.contains(edge_terminal) || Some(*edge_terminal) == ignore_terminal_id,
-                        // Always keep `None` edges, as they don't represent grammar terminals.
                         None => true,
                     }
                 }).cloned().collect();
@@ -1583,20 +1553,20 @@ impl<'r> Precomputer<'r> {
                 let node_ptr: NodePtr = node;
                 edges_to_keep.insert(node_ptr, keys_to_keep);
 
-                true // Continue traversal
+                true
             },
         );
 
         // Now, apply the pruning.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
-        let all_nodes = Trie::all_nodes(&self.trie1_god, &roots_vec);
+        let all_nodes = Trie::all_nodes(&self.trie0_god, &roots_vec);
         for node_arc in all_nodes {
             let node_ptr: NodePtr = {
-                let guard = node_arc.read(&self.trie1_god).expect("poison");
+                let guard = node_arc.read(&self.trie0_god).expect("poison");
                 &*guard as *const _
             };
             if let Some(keys_to_keep) = edges_to_keep.get(&node_ptr) {
-                let mut node_guard = node_arc.write(&self.trie1_god).unwrap();
+                let mut node_guard = node_arc.write(&self.trie0_god).unwrap();
                 node_guard.children_mut().retain(|k, _| keys_to_keep.contains(k));
             }
         }
@@ -1608,7 +1578,7 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Pruning dead paths from precomputed trie.");
 
         // A cache of nodes to the set of "live" LLM tokens reachable from them.
-        let mut live_tokens_cache: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
+        let mut live_tokens_cache: HashMap<PrecomputeNode0Index, LLMTokenBV> = HashMap::new();
 
         // For each root, run the pruning process. This will modify the trie in-place.
         // We do not remove the root from the map even if it becomes "dead" (has no live paths).
@@ -1632,8 +1602,8 @@ impl<'r> Precomputer<'r> {
     /// Returns a `LLMTokenBV` of all live tokens reachable from `node_wrapper`.
     fn get_live_tokens_and_prune(
         &self,
-        node_wrapper: PrecomputeNode1Index,
-        live_tokens_cache: &mut HashMap<PrecomputeNode1Index, LLMTokenBV>,
+        node_wrapper: PrecomputeNode0Index,
+        live_tokens_cache: &mut HashMap<PrecomputeNode0Index, LLMTokenBV>,
     ) -> LLMTokenBV {
         // If we've already computed the live tokens for this node, return the cached result.
         if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
@@ -1647,8 +1617,8 @@ impl<'r> Precomputer<'r> {
         let node_arc = node_wrapper.as_arc().clone();
 
         // We must collect children before recursing to avoid holding the lock.
-        let children_to_check: Vec<PrecomputeNode1Index> = {
-            let node_guard = node_arc.read(&self.trie1_god).unwrap();
+        let children_to_check: Vec<PrecomputeNode0Index> = {
+            let node_guard = node_arc.read(&self.trie0_god).unwrap();
             node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
         };
 
@@ -1660,7 +1630,7 @@ impl<'r> Precomputer<'r> {
         // Now that the cache is populated for all children, we can prune the current node.
         let mut live_tokens_for_this_node = LLMTokenBV::zeros();
         {
-            let mut node_guard = node_arc.write(&self.trie1_god).unwrap();
+            let mut node_guard = node_arc.write(&self.trie0_god).unwrap();
 
             // A node is live if it's an end node itself. The tokens that end here are
             // on the edges pointing to this node.
@@ -1718,28 +1688,28 @@ impl<'r> Precomputer<'r> {
 
         // 1. Collect all nodes in the graph.
         let roots_vec: Vec<_> = self.roots.values().cloned().collect();
-        let all_nodes = Trie::all_nodes(&self.trie1_god, &roots_vec);
+        let all_nodes = Trie::all_nodes(&self.trie0_god, &roots_vec);
         let arc_map: HashMap<_, _> = all_nodes.iter().map(|n| (n, n.clone())).collect();
 
         // 2. Build an incoming edge map for every node.
         // incoming_map: D_ptr -> (gtid -> Vec<(S_ptr, bv)>)
         let mut incoming_map: HashMap<
-            PrecomputeNode1Index, // Dst node ptr
+            PrecomputeNode0Index,
             HashMap<
-                GrammarTokenID, // Edge key 'gtid'
-                Vec<(PrecomputeNode1Index, LLMTokenBV)>, // List of (Src node ptr, edge bv)
+                TerminalID, // Edge key 'gtid'
+                Vec<(PrecomputeNode0Index, LLMTokenBV)>,
             >,
         > = HashMap::new();
 
         for src_arc in &all_nodes {
             let src_ptr = src_arc;
-            let guard = src_arc.read(&self.trie1_god).expect("poison");
-            for (ek_opt, dest_map) in guard.children() {
-                if let Some(gtid) = ek_opt { // Only consider non-None edges
+            let guard = src_arc.read(&self.trie0_god).expect("poison");
+            for (ek_opt_pair, dest_map) in guard.children() {
+                if let Some(gtid) = ek_opt_pair.0 { // Only consider non-None edges (first component)
                     for (dest_wrapper, bv) in dest_map {
                         let dest_arc = dest_wrapper.as_arc();
                         let dest_ptr = dest_arc;
-                        incoming_map.entry(*dest_ptr).or_default().entry(*gtid).or_default().push((*src_ptr, bv.clone()));
+                        incoming_map.entry(*dest_ptr).or_default().entry(gtid).or_default().push((*src_ptr, bv.clone()));
                     }
                 }
             }
@@ -1753,40 +1723,52 @@ impl<'r> Precomputer<'r> {
                     let dest_arc = arc_map.get(&dest_ptr).unwrap().clone();
 
                     // a. Create a new intermediate node `I`.
-                    let intermediate_node = PrecomputeNode1Index::new(self.trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
+                    let intermediate_node = PrecomputeNode0Index::new(self.trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents::internal())));
 
-                    // b. Add edge I --(gtid)--> D
+                    // b. Add edge I --(gtid, None)--> D
                     let mut union_bv = LLMTokenBV::zeros();
                     for (_, bv) in &sources {
                         union_bv |= bv;
                     }
 
                     {
-                        let mut intermediate_guard = intermediate_node.write(&self.trie1_god).expect("poison");
+                        let mut intermediate_guard = intermediate_node.write(&self.trie0_god).expect("poison");
                         let mut edge_val_opt = Some(union_bv.clone());
-                        // No cycle possible since I is new. Use unchecked for speed.
-                        // Depth will be propagated to D.
-                        intermediate_guard.try_insert_unchecked(Some(gtid), &mut edge_val_opt, dest_arc.clone());
-                        intermediate_guard.value.live_tokens |= &union_bv; // Update live_tokens for intermediate node
+                        // Edge key is (Some(gtid), None)
+                        intermediate_guard.try_insert_unchecked((Some(gtid), None), &mut edge_val_opt, dest_arc.clone());
+                        intermediate_guard.value.live_tokens |= &union_bv;
                     }
 
                     // c. For each source, remove old edge and add new `None` edge to `I`.
                     for (src_ptr, bv) in &sources {
                         let src_arc = arc_map.get(src_ptr).unwrap();
-                        let mut src_guard = src_arc.write(&self.trie1_god).expect("poison");
+                        let mut src_guard = src_arc.write(&self.trie0_god).expect("poison");
 
-                        // Remove S --(gtid)--> D
-                        if let Some(dest_map_for_gtid) = src_guard.children_mut().get_mut(&Some(gtid)) {
-                            dest_map_for_gtid.remove(&dest_arc.clone());
-                            if dest_map_for_gtid.is_empty() {
-                                src_guard.children_mut().remove(&Some(gtid));
+                        // Find and remove S --(gtid, disallow_opt)--> D for all disallow_opt
+                        let mut keys_to_remove = Vec::new();
+                        let mut dest_map_for_gtid = None;
+                        for (key, dest_map) in src_guard.children_mut().iter_mut() {
+                            if key.0 == Some(gtid) {
+                                keys_to_remove.push(key.clone());
+                                dest_map_for_gtid = Some(dest_map);
+                                break;
                             }
                         }
 
-                        // Add S --(None)--> I
+                        if let Some(dest_map) = dest_map_for_gtid {
+                            dest_map.remove(&dest_arc.clone());
+                            if dest_map.is_empty() {
+                                for key in keys_to_remove {
+                                    src_guard.children_mut().remove(&key);
+                                }
+                            }
+                        }
+
+                        // Add S --(None, None)--> I
                         let mut edge_val_opt = Some(bv.clone());
-                        src_guard.try_insert_unchecked(None, &mut edge_val_opt, intermediate_node.clone());
-                        src_guard.value.live_tokens |= bv; // Update live_tokens for source node
+                        // Edge key is (None, None)
+                        src_guard.try_insert_unchecked((None, None), &mut edge_val_opt, intermediate_node.clone());
+                        src_guard.value.live_tokens |= bv;
                     }
                 }
             }
@@ -1797,9 +1779,9 @@ impl<'r> Precomputer<'r> {
     fn merge_nodes(&mut self) {
         crate::debug!(2, "Merging identical subtrees in precomputed trie.");
         // A map from a node's content to its canonical Arc.
-        let mut canonical_nodes: HashMap<PrecomputeNode1, PrecomputeNode1Index> = HashMap::new();
+        let mut canonical_nodes: HashMap<PrecomputeNode0, PrecomputeNode0Index> = HashMap::new();
         // A map from a node's pointer to its canonicalized Arc, to avoid re-processing.
-        let mut visited: HashMap<PrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
+        let mut visited: HashMap<PrecomputeNode0Index, PrecomputeNode0Index> = HashMap::new();
 
         // We need to process all roots.
         let mut new_roots = BTreeMap::new();
@@ -1813,10 +1795,10 @@ impl<'r> Precomputer<'r> {
 
     fn deduplicate_recursive(
         &self,
-        node_arc: PrecomputeNode1Index,
-        canonical_nodes: &mut HashMap<PrecomputeNode1, PrecomputeNode1Index>,
-        visited: &mut HashMap<PrecomputeNode1Index, PrecomputeNode1Index>,
-    ) -> PrecomputeNode1Index {
+        node_arc: PrecomputeNode0Index,
+        canonical_nodes: &mut HashMap<PrecomputeNode0, PrecomputeNode0Index>,
+        visited: &mut HashMap<PrecomputeNode0Index, PrecomputeNode0Index>,
+    ) -> PrecomputeNode0Index {
         let node_ptr = node_arc;
         if let Some(canonical_arc) = visited.get(&node_ptr) {
             return canonical_arc.clone();
@@ -1830,7 +1812,7 @@ impl<'r> Precomputer<'r> {
         let mut children_changed = false;
 
         {
-            let node_guard = node_arc.read(&self.trie1_god).unwrap();
+            let node_guard = node_arc.read(&self.trie0_god).unwrap();
         for (edge_key, dest_map) in node_guard.children() {
             let mut new_dest_map = OrderedHashMap::new();
             for (node_ptr_wrapper, edge_val) in dest_map.iter() {
@@ -1849,14 +1831,13 @@ impl<'r> Precomputer<'r> {
         }
 
     if children_changed {
-        let mut node_guard = node_arc.write(&self.trie1_god).unwrap();
+        let mut node_guard = node_arc.write(&self.trie0_god).unwrap();
         *node_guard.children_mut() = new_children_map;
-        node_guard.recompute_max_depth(&self.trie1_god);
-        // The live_tokens field will be recomputed by prune_dead_paths after merging.
+        node_guard.recompute_max_depth(&self.trie0_god);
     }
 
     let canonical_arc = {
-            let node_guard = node_arc.read(&self.trie1_god).unwrap();
+            let node_guard = node_arc.read(&self.trie0_god).unwrap();
             let node_content = (*node_guard).clone();
             canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
         };
@@ -1869,33 +1850,31 @@ impl<'r> Precomputer<'r> {
     pub fn gc(&mut self) {
         crate::debug!(2, "Running garbage collection on precomputed trie.");
         let roots: Vec<_> = self.roots.values().cloned().collect();
-        Trie::gc(&self.trie1_god, &roots);
+        Trie::gc(&self.trie0_god, &roots);
     }
 
-    fn finish(
-        mut self,
-        token_name_map: &BiBTreeMap<Terminal, usize>,
-        possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-        internal_max_llm_token: usize,
-    ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
+    fn finish0(
+        self,
+        _internal_max_llm_token: usize,
+    ) -> (BTreeMap<TokenizerStateID, PrecomputeNode0Index>, Trie0GodWrapper) {
 
-        calculate_final_stats(&self.roots, &mut self.stats, &self.trie1_god);
-        print_precompute_stats(&self.stats, token_name_map, &self.trie1_god);
+        // calculate_final_stats(&self.roots, &mut self.stats, &self.trie0_god);
+        // print_precompute_stats(&self.stats, token_name_map, &self.trie0_god);
 
-        (self.roots, self.trie1_god)
+        (self.roots, self.trie0_god)
     }
 
     fn dfs(
         &self,
         vocab_node: &VocabPrefixTreeNode,
-        assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode1Index>>,
+        assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
     ) {
         self.pb.inc(1);
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let mut work_queue: BTreeMap<
                 usize,
-                BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode1Index>>,
+                BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
             > = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
 
@@ -1922,7 +1901,18 @@ impl<'r> Precomputer<'r> {
                         let terminal_id = GrammarTokenID(match_info.id);
                         let next_pos = pos + match_info.width;
 
-                        // TODO: could make this so much faster by moving loop down...
+                        // Compute disallow_opt
+                        let disallow_opt = if let Some(end_state_val) = exec_result.end_state {
+                            let end_sid = TokenizerStateID(end_state_val);
+                            if self.tokenizer.tokens_accessible_from_state(end_sid).contains(&terminal_id) {
+                                Some((end_sid, terminal_id))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
                         for src_node_wrapper in &precompute_nodes {
                             if next_pos == segment_bytes.len() {
                                 // TODO: should be some way of avoiding ignored terminal here.
@@ -1930,9 +1920,9 @@ impl<'r> Precomputer<'r> {
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let mut inserter = EdgeInserter::new(
-                                    &self.trie1_god,
+                                    &self.trie0_god,
                                     src_node_wrapper.as_arc().clone(),
-                                    Some(terminal_id),
+                                    (Some(terminal_id), disallow_opt),
                                     edge_bv,
                                     |e, n| *e |= n,
                                     |node_value, edge_value| {
@@ -1951,16 +1941,17 @@ impl<'r> Precomputer<'r> {
                             if next_pos == segment_bytes.len() {
                                 edge_bv.set(child_vocab_node.token_id(), false);
                             }
-                            if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
-                                edge_bv -= matches_for_terminal;
-                            }
+                            // Removed: subtraction of possible_matches_at_end here (moved to precompute1_from0)
+                            // if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
+                            //     edge_bv -= matches_for_terminal;
+                            // }
 
                             if edge_bv.is_empty() { continue; }
 
                             let mut inserter = EdgeInserter::new(
-                                &self.trie1_god,
+                                &self.trie0_god,
                                 src_node_wrapper.as_arc().clone(),
-                                Some(terminal_id),
+                                (Some(terminal_id), disallow_opt),
                                 edge_bv.clone(),
                                 |e, n| *e |= n,
                                 |node_value, edge_value| node_value.live_tokens |= edge_value,
@@ -1970,15 +1961,15 @@ impl<'r> Precomputer<'r> {
                             let next_tokenizer_state = self.tokenizer.initial_state_id();
                             let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
 
-                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| !w.read(&self.trie1_god).unwrap().value.end));
+                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| !w.read(&self.trie0_god).unwrap().value.end));
 
                             if true {
-                                let children_of_src: Vec<_> = src_node_wrapper.as_arc().read(&self.trie1_god).unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
+                                let children_of_src: Vec<_> = src_node_wrapper.as_arc().read(&self.trie0_god).unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
                                 // let tags = self.tags.borrow(); // Removed
                                 let eligible_children = children_of_src.iter().map(|child_node_ptr| {
                                     child_node_ptr.as_arc().clone()
                                 }).filter(|child_arc| {
-                                    (child_arc.read(&self.trie1_god).unwrap().value.live_tokens.clone() & &edge_bv).is_empty() && !child_arc.read(&self.trie1_god).unwrap().value.end
+                                    (child_arc.read(&self.trie0_god).unwrap().value.live_tokens.clone() & &edge_bv).is_empty() && !child_arc.read(&self.trie0_god).unwrap().value.end
                                 });
                                 inserter = inserter.try_destinations_iter(eligible_children);
                                 // drop(tags); // Removed
@@ -1994,14 +1985,21 @@ impl<'r> Precomputer<'r> {
                     if let Some(end_state_val) = exec_result.end_state {
                         let possible_final_tokens = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_val));
                         for terminal_id in possible_final_tokens {
+                            // Compute disallow_opt for end node edge
+                            let disallow_opt = if self.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_val)).contains(&terminal_id) {
+                                Some((TokenizerStateID(end_state_val), terminal_id))
+                            } else {
+                                None
+                            };
+
                             for src_node_wrapper in &precompute_nodes {
                                 let llm_token_id = child_vocab_node.token_id();
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let mut inserter = EdgeInserter::new(
-                                    &self.trie1_god,
+                                    &self.trie0_god,
                                     src_node_wrapper.as_arc().clone(),
-                                    Some(terminal_id),
+                                    (Some(terminal_id), disallow_opt),
                                     edge_bv,
                                     |e, n| *e |= n,
                                     |node_value, edge_value| node_value.live_tokens |= edge_value,
@@ -2154,8 +2152,6 @@ pub type Trie2GodWrapper = GodWrapper<(usize, Option<StateID>), HybridBitset, Pr
 pub type Trie2God = God<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
 pub type Trie3GodWrapper = GodWrapper<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
 pub type Trie3God = God<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
-pub type Trie0GodWrapper = GodWrapper<(Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>), HybridBitset, PrecomputedNodeContents>;
-pub type Trie0God = God<(Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>), HybridBitset, PrecomputedNodeContents>;
 
 impl<'a> PartialEq for GrammarConstraintState<'a> {
     fn eq(&self, other: &Self) -> bool {
@@ -2283,7 +2279,7 @@ impl<'a> GrammarConstraintState<'a> {
         let final_mask_internal = RefCell::new(HybridBitset::zeros());
 
         if self.state.is_empty() {
-            return self.parent.internal_bv_to_original_precompute(&final_mask_internal.into_inner());
+            return self.parent.internal_bv_to_original(&final_mask_internal.into_inner());
         }
 
         #[derive(Default, Clone, Copy, Debug)]
@@ -2985,18 +2981,18 @@ impl<'a> GrammarConstraintState<'a> {
                 }
                 results
             },
-            // merge
+            // merge_fn
             |glr_s1, glr_s2| {
                 crate::debug!(10, "    - MERGE: gss1(ptr={:p}) WITH gss2(ptr={:p})", glr_s1.active_state.stack, glr_s2.active_state.stack);
                 glr_s1.merge_with(glr_s2);
             },
-            // process
-            |node, carry: &mut CommitCarry<'a>| {
-                crate::debug!(10, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}", node as *const _, carry.glr.active_state.stack);
-                let mut glr_s_copy = carry.glr.clone();
+            // process_fn: (precomputed_node_data, final_state_for_this_path)
+            |precomputed_node_data, glr_s| {
+                crate::debug!(10, "  - PROCESS: node_ptr={:p}, gss_ptr={:p}", precomputed_node_data as *const _, glr_s.active_state.stack);
+                let mut glr_s_copy = glr_s.clone();
                 let glr_active_tokens = glr_s_copy.active_state.stack.allowed_llm_tokens();
                 let keep_going = glr_s_copy.is_ok();
-                if node.value.end {
+                if precomputed_node_data.value.end {
                     if !glr_active_tokens.is_empty() {
                         let before = final_mask_internal.borrow().len();
                         *final_mask_internal.borrow_mut() |= &glr_active_tokens;
@@ -3035,188 +3031,131 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
-        // Try to run using Precompute 0. Fallback to commit_bytes if anything unsupported happens.
-        let Some(llm_token_bytes) = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id) else {
-            return; // unknown token id, nothing to do
-        };
-        // Map to internal token id (for BV membership checks)
-        let Some(internal_id) = self.parent.llm_vocab.original_to_internal_id_bimap.get(&llm_token_id.0).cloned() else {
-            // Fallback: direct commit_bytes
-            self.commit_bytes(llm_token_bytes);
-            return;
-        };
+        // 1) Prepare
+        let llm_token_bytes = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id).unwrap();
+        let (state_map, terminals_map) = self.compute_commit_maps(llm_token_bytes);
 
-        if llm_token_bytes.is_empty() {
-            return;
-        }
-
-        // Reset LLM tokens on GSS
         let mut gss_transformation_memo = HashMap::new();
         for state in self.state.values_mut() {
             reset_llm_tokens(&mut state.active_state.stack, &mut gss_transformation_memo);
         }
         gss_transformation_memo.clear();
-
-        // Precompute commit maps via tokenizer (terminals_map and state_map)
-        let (state_map, terminals_map) = self.compute_commit_maps(llm_token_bytes);
-
-        // Prune disallowed terminals before we traverse precompute 0
         for state in self.state.values_mut() {
             prune_disallowed_terminals(&mut state.active_state.stack, &terminals_map, &mut gss_transformation_memo);
         }
         gss_transformation_memo.clear();
 
-        // Prepare traversal seeds (one per active tokenizer state)
-        #[derive(Clone)]
-        struct CommitCarry<'a> {
-            glr: GLRParserState<'a>,
-            start_tok: TokenizerStateID,
-        }
+        // 2) Convert to internal ID for Precompute0
+        let internal_id = match self.parent.precompute_vocab.original_to_internal.get(&llm_token_id.0) {
+            Some(&u) => u,
+            None => {
+                // If not in stage-local map, fall back to the global mapping
+                match self.parent.llm_vocab.original_to_internal_id_bimap.get(&llm_token_id.0) {
+                    Some(&u) => u,
+                    None => return, // token unknown
+                }
+            }
+        };
 
-        // Ensure we have precompute 0 roots
-        for sid in self.state.keys() {
-            if !self.parent.precomputed0.contains_key(sid) {
-                // Fallback if root missing
-                self.commit_bytes(llm_token_bytes);
-                return;
+        // 3) Seed traversal per tokenizer-state root
+        type V<'a> = (TokenizerStateID, GLRParserState<'a>);
+        let mut initial: Vec<(PrecomputeNode0Index, V<'a>)> = Vec::new();
+        for (&sid, glr) in &self.state {
+            if let Some(root0) = self.parent.precomputed0.get(&sid) {
+                initial.push((*root0, (sid, glr.clone())));
             }
         }
 
-        let mut seeds: Vec<(PrecomputeNode0Index, CommitCarry<'a>)> = Vec::new();
-        for (sid, glr_state) in &self.state {
-            if glr_state.active_state.stack.is_empty() {
-                continue;
-            }
-            if let Some(root0) = self.parent.precomputed0.get(sid) {
-                let mut glr_clone = glr_state.clone();
-                prune_llm_tokens_by_disallowed_terminals(
-                    &mut glr_clone.active_state.stack,
-                    &self.parent.possible_matches,
-                    &mut HashMap::new(),
-                );
-                seeds.push((
-                    root0.clone(),
-                    CommitCarry { glr: glr_clone, start_tok: *sid },
-                ));
-            }
-        }
-
-        // Nothing to do
-        if seeds.is_empty() {
+        if initial.is_empty() {
+            self.state.clear();
             return;
         }
 
-        // Collect resulting GLR states keyed by starting tokenizer state.
-        let mut collected_by_start: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
-
+        // 4) Traverse the Precompute0 trie, following only edges that contain `internal_id`
+        let mut acc_by_start: BTreeMap<TokenizerStateID, GLRParserState<'_>> = BTreeMap::new();
         Trie::special_map_grouped(
             &self.parent.trie0_god,
-            seeds,
-            // step
-            |carry: &CommitCarry<'a>, (gt_opt, disallow_opt), dest_map| {
-                // Filter destinations to those whose LLM BV contains the committed internal token id.
-                let mut results: Vec<(PrecomputeNode0Index, CommitCarry<'a>)> = Vec::new();
+            initial,
+            |(_start_sid, glr_s), (gtid_opt, disallow_opt), dests| {
+                let mut out = Vec::new();
+                let mut s = glr_s.clone();
 
-                // Step GLR if there is a grammar token on the edge
-                let mut glr_s = carry.glr.clone();
-                if let Some(gt) = gt_opt {
-                    glr_s.step(*gt);
-                    if !glr_s.is_ok() {
-                        return results; // no further
-                    }
-                }
-                // If the edge carries a disallow tuple (tokenizer end state, terminal), apply it.
-                if let Some((end_sid, dis_term)) = disallow_opt {
-                    // Build an L2 bitset to disallow this terminal in that specific tokenizer state.
-                    let mut disallowed = hybrid_l2_bitset::HybridL2Bitset::new();
-                    let mut bv = TerminalBV::zeros();
-                    bv.insert(dis_term.0);
-                    disallowed.insert_l2_bitset(end_sid.0, bv);
-                    disallow_terminals_and_prune_arc(&mut glr_s.active_state.stack, &disallowed, &mut HashMap::new());
-                    if !glr_s.is_ok() {
-                        return results;
+                if let Some(gtid) = gtid_opt {
+                    s.step(*gtid);
+                    if !s.is_ok() {
+                        return out;
                     }
                 }
 
-                for (child_idx, edge_bv) in dest_map.iter() {
-                    if edge_bv.contains(internal_id) {
-                        let mut glr2 = glr_s.clone();
-                        results.push((
-                            child_idx.clone(),
-                            CommitCarry {
-                                glr: glr2,
-                                start_tok: carry.start_tok,
-                            },
-                        ));
+                if let Some((end_sid, dis_tid)) = disallow_opt {
+                    let mut dis_bv = TerminalBV::zeros();
+                    dis_bv.insert(dis_tid.0);
+                    let mut l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
+                    l2.insert_l2_bitset(end_sid.0, dis_bv);
+                    disallow_terminals_and_prune_arc(&mut s.active_state.stack, &l2, &mut HashMap::new());
+                    if !s.is_ok() {
+                        return out;
                     }
                 }
-                results
+
+                for (child, ev) in dests.iter() {
+                    if ev.contains(internal_id) {
+                        out.push((*child, (*_start_sid, s.clone())));
+                    }
+                }
+
+                out
             },
-            // merge
-            |c1: &mut CommitCarry<'a>, c2: CommitCarry<'a>| {
-                let mut g1 = c1.glr.clone();
-                g1.merge_with(c2.glr);
-                c1.glr = g1;
+            |a, b| {
+                // a and b are (TokenizerStateID, GLRParserState)
+                // Merge the GLR states, keep the start SID from a.
+                a.1.merge_with(b.1);
             },
-            // process
-            |node, carry: &mut CommitCarry<'a>| {
+            |node, (start_sid, glr_s)| {
                 if node.value.end {
-                    // End of this LLM token: collect this GLR state for the start tokenizer state.
-                    collected_by_start
-                        .entry(carry.start_tok)
-                        .and_modify(|g| g.merge_with(carry.glr.clone()))
-                        .or_insert(carry.glr.clone());
-                    false
-                } else {
-                    carry.glr.is_ok()
+                    // Accumulate the GLR state associated with its starting tokenizer state
+                    acc_by_start.entry(*start_sid)
+                        .and_modify(|e| e.merge_with(glr_s.clone()))
+                        .or_insert(glr_s.clone());
+                    return false; // Stop traversal past end nodes
                 }
+                glr_s.is_ok()
             },
         );
 
-        // Build new overall state keyed by the end tokenizer states (from state_map) and collected GLR states.
-        let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
-        // Include collected GLR states (finished via precompute 0 traversal)
-        for (start_sid, glr_state) in collected_by_start {
-            if let Some(&end_sid) = state_map.get(&start_sid) {
-                new_overall_state
-                    .entry(end_sid)
-                    .and_modify(|g| g.merge_with(glr_state.clone()))
-                    .or_insert(glr_state.clone());
-            }
-        }
-        // Also carry forward states that end without consuming additional grammar tokens (as in commit_bytes path)
-        for (start_sid, glr_state) in &self.state {
-            if let Some(&end_sid) = state_map.get(start_sid) {
-                new_overall_state
-                    .entry(end_sid)
-                    .and_modify(|g| g.merge_with(glr_state.clone()))
-                    .or_insert(glr_state.clone());
+        // 6) Map stacks to end tokenizer states and build the new overall state
+        let mut new_overall: BTreeMap<TokenizerStateID, GLRParserState<'_>> = BTreeMap::new();
+        for (_start_sid, mut glr) in acc_by_start {
+            map_allowed_terminals_tokenizer_states(&mut glr.active_state.stack, &state_map, &mut gss_transformation_memo);
+            // The GSS nodes are now keyed by their final tokenizer state ID.
+            // We need to collect the roots of the GSS forest and merge them into the new_overall map.
+            for (_last_edge, gss_root_accs) in get_roots([glr.active_state.stack.as_ref()]) {
+                for gss_root_acc in gss_root_accs {
+                    for (final_tokenizer_state_id, root_node) in gss_root_acc.tokenizer_state_map() {
+                        let mut new_glr = glr.clone();
+                        new_glr.active_state.stack = root_node.clone();
+                        new_overall.entry(*final_tokenizer_state_id)
+                            .and_modify(|e| e.merge_with(new_glr.clone()))
+                            .or_insert(new_glr);
+                    }
+                }
             }
         }
 
-        // Replace our active state set
-        self.state = new_overall_state.clone();
-        // Map allowed terminals’ tokenizer states in the GSS according to state_map
-        for state in self.state.values_mut() {
-            map_allowed_terminals_tokenizer_states(&mut state.active_state.stack, &state_map, &mut gss_transformation_memo);
-        }
-        gss_transformation_memo.clear();
-
-        // Post-processing: reset LLM tokens for stability
+        self.state = new_overall;
+        // 7) Final cleanups (same as commit_bytes)
         for state in self.state.values_mut() {
             reset_llm_tokens(&mut state.active_state.stack, &mut gss_transformation_memo);
         }
         gss_transformation_memo.clear();
+        self.state.retain(|_, st| st.is_ok());
 
-        // Retain only alive states and fuse predecessors
-        self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
         let mut fuse_memo = HashMap::new();
-        for state in self.state.values_mut() {
-            state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 1, &mut fuse_memo);
+        for st in self.state.values_mut() {
+            st.active_state.stack = fuse_predecessors_recursive(&mut st.active_state.stack, 1, &mut fuse_memo);
         }
         fuse_memo.clear();
 
-        // Optional post-commit allowance checks (as before)
         match self.parent.post_commit_allow_check_mode {
             TerminalAllowanceCheckMode::None => {}
             TerminalAllowanceCheckMode::ImmediateSets => {
@@ -3249,8 +3188,6 @@ impl<'a> GrammarConstraintState<'a> {
                 });
             }
         }
-
-        crate::debug!(4, "Active tokenizer states after committing token via Precompute 0: {:?}", self.state.keys().map(|k|k.0).collect::<Vec<_>>());
     }
 
     #[time_it]
