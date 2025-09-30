@@ -6816,7 +6816,6 @@ local_system:
       // src/constraint.rs
       #![allow(clippy::too_many_arguments)]
 
-      use std::borrow::Borrow;
       use std::collections::btree_map::Entry as BTreeEntry;
       use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
       use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
@@ -6875,7 +6874,6 @@ local_system:
       use crate::datastructures::trie::{God, GodWrapper};
 
       const MERGE_THRESHOLD: usize = 20;
-      const DEDUP_START_ID: usize = 0;
 
       pub type StateIDBV = HybridBitset;
 
@@ -6979,160 +6977,6 @@ local_system:
           }
       }
 
-      /// A memory-sharing map: many keys can reference the same (large) value via an internal ID.
-      /// Externally, this behaves like a BTreeMap<K, V> for common operations: insert, get, iter, len.
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub struct DedupValueMap<K, V>
-      where
-          K: Ord + Clone + Eq,
-          V: Clone + Eq + std::hash::Hash,
-      {
-          key_to_id: BTreeMap<K, usize>,
-          id_to_value: BTreeMap<usize, V>,
-          value_to_id: std::collections::HashMap<V, usize>,
-          next_id: usize,
-      }
-
-      impl<K, V> Default for DedupValueMap<K, V>
-      where
-          K: Ord + Clone + Eq,
-          V: Clone + Eq + std::hash::Hash,
-      {
-          fn default() -> Self {
-              Self {
-                  key_to_id: BTreeMap::new(),
-                  id_to_value: BTreeMap::new(),
-                  value_to_id: std::collections::HashMap::new(),
-                  next_id: DEDUP_START_ID,
-              }
-          }
-      }
-
-      impl<K, V> DedupValueMap<K, V>
-      where
-          K: Ord + Clone + Eq,
-          V: Clone + Eq + std::hash::Hash,
-      {
-          pub fn new() -> Self {
-              Self::default()
-          }
-
-          fn intern_value(&mut self, v: V) -> usize {
-              if let Some(&id) = self.value_to_id.get(&v) {
-                  return id;
-              }
-              let id = self.next_id;
-              self.next_id = self.next_id.checked_add(1).expect("DedupValueMap ID overflow");
-              self.id_to_value.insert(id, v.clone());
-              self.value_to_id.insert(v, id);
-              id
-          }
-
-          pub fn len(&self) -> usize {
-              self.key_to_id.len()
-          }
-          pub fn is_empty(&self) -> bool {
-              self.key_to_id.is_empty()
-          }
-          pub fn contains_key<Q>(&self, k: &Q) -> bool
-          where
-              K: Borrow<Q>,
-              Q: Ord + ?Sized,
-          {
-              self.key_to_id.contains_key(k)
-          }
-
-          pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-              let id = self.intern_value(value);
-              let old = self.key_to_id.insert(key, id);
-              old.and_then(|old_id| self.id_to_value.get(&old_id).cloned())
-          }
-
-          pub fn get<Q>(&self, key: &Q) -> Option<&V>
-          where
-              K: Borrow<Q>,
-              Q: Ord + ?Sized,
-          {
-              let id = self.key_to_id.get(key)?;
-              self.id_to_value.get(id)
-          }
-
-          pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-              self.key_to_id.iter().map(|(k, id)| (k, self.id_to_value.get(id).expect("dangling id")))
-          }
-      }
-
-      impl<K, V> JSONConvertible for DedupValueMap<K, V>
-      where
-          K: Ord + Clone + Eq + JSONConvertible,
-          V: Clone + Eq + std::hash::Hash + JSONConvertible,
-      {
-          fn to_json(&self) -> JSONNode {
-              let mut obj = StdMap::new();
-              obj.insert("next_id".to_string(), self.next_id.to_json());
-              // Serialize values as array of [id, value]
-              let mut values_arr = Vec::new();
-              for (id, v) in &self.id_to_value {
-                  values_arr.push(JSONNode::Array(vec![id.to_json(), v.to_json()]));
-              }
-              obj.insert("values".to_string(), JSONNode::Array(values_arr));
-              // Serialize keys as array of [key, id]
-              let mut keys_arr = Vec::new();
-              for (k, id) in &self.key_to_id {
-                  keys_arr.push(JSONNode::Array(vec![k.to_json(), id.to_json()]));
-              }
-              obj.insert("keys".to_string(), JSONNode::Array(keys_arr));
-              JSONNode::Object(obj)
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              let mut obj = node.into_object()?;
-              let next_id = usize::from_json(obj.remove("next_id").ok_or("DedupValueMap: missing 'next_id'")?)?;
-              let values_arr = obj.remove("values").ok_or("DedupValueMap: missing 'values'")?;
-              let keys_arr = obj.remove("keys").ok_or("DedupValueMap: missing 'keys'")?;
-
-              let mut id_to_value = BTreeMap::new();
-              let mut value_to_id = std::collections::HashMap::new();
-              match values_arr {
-                  JSONNode::Array(a) => {
-                      for n in a {
-                          let mut pair = match n {
-                              JSONNode::Array(p) if p.len() == 2 => p,
-                              _ => return Err("DedupValueMap: values entry must be [id, value]".to_string()),
-                          };
-                          let v_node = pair.pop().unwrap();
-                          let id_node = pair.pop().unwrap();
-                          let id = usize::from_json(id_node)?;
-                          let v = V::from_json(v_node)?;
-                          id_to_value.insert(id, v.clone());
-                          value_to_id.insert(v, id);
-                      }
-                  }
-                  _ => return Err("DedupValueMap: 'values' must be an array".to_string()),
-              }
-
-              let mut key_to_id = BTreeMap::new();
-              match keys_arr {
-                  JSONNode::Array(a) => {
-                      for n in a {
-                          let mut pair = match n {
-                              JSONNode::Array(p) if p.len() == 2 => p,
-                              _ => return Err("DedupValueMap: keys entry must be [key, id]".to_string()),
-                          };
-                          let id_node = pair.pop().unwrap();
-                          let key_node = pair.pop().unwrap();
-                          let id = usize::from_json(id_node)?;
-                          let k = K::from_json(key_node)?;
-                          key_to_id.insert(k, id);
-                      }
-                  }
-                  _ => return Err("DedupValueMap: 'keys' must be an array".to_string()),
-              }
-
-              Ok(Self { key_to_id, id_to_value, value_to_id, next_id })
-          }
-      }
-
       #[derive(Debug, Clone)]
       pub struct GrammarConstraintConfig {
           pub optimize_trie2_prune_dead_paths: bool,
@@ -7228,8 +7072,6 @@ local_system:
               assert_eq!(self.llm_vocab.internal_max_llm_token, other.llm_vocab.internal_max_llm_token);
               assert_eq!(self.possible_matches, other.possible_matches);
               assert_eq!(self.post_commit_allow_check_mode, other.post_commit_allow_check_mode);
-              assert_eq!(self.state_map_by_llm, other.state_map_by_llm);
-              assert_eq!(self.terminal_map_by_llm, other.terminal_map_by_llm);
           }
       }
 
@@ -7254,8 +7096,6 @@ local_system:
               obj.insert("trie3_god".to_string(), self.trie3_god.to_json());
               obj.insert("post_commit_allow_check_mode".to_string(), self.post_commit_allow_check_mode.to_json());
               // Stage vocabs
-              obj.insert("state_map_by_llm".to_string(), self.state_map_by_llm.to_json());
-              obj.insert("terminal_map_by_llm".to_string(), self.terminal_map_by_llm.to_json());
               obj.insert("precompute_vocab".to_string(), self.precompute_vocab.to_json());
               obj.insert("precompute2_vocab".to_string(), self.precompute2_vocab.to_json());
               obj.insert("precompute3_vocab".to_string(), self.precompute3_vocab.to_json());
@@ -7302,14 +7142,6 @@ local_system:
                           Some(n) => TerminalAllowanceCheckMode::from_json(n)?,
                           None => TerminalAllowanceCheckMode::default(),
                       };
-                      let state_map_by_llm = match obj.remove("state_map_by_llm") {
-                          Some(n) => DedupValueMap::<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>::from_json(n)?,
-                          None => DedupValueMap::new(),
-                      };
-                      let terminal_map_by_llm = match obj.remove("terminal_map_by_llm") {
-                          Some(n) => DedupValueMap::<LLMTokenID, BTreeMap<TokenizerStateID, BTreeSet<TerminalID>>>::from_json(n)?,
-                          None => DedupValueMap::new(),
-                      };
                       // Stage vocabs (optional)
                       let precompute_vocab = match obj.remove("precompute_vocab") {
       					Some(n) => StageVocab::from_json(n)?,
@@ -7355,8 +7187,6 @@ local_system:
                           trie2_god,
                           trie3_god,
                           post_commit_allow_check_mode,
-                          state_map_by_llm,
-                          terminal_map_by_llm,
                           precompute_vocab,
                           precompute2_vocab,
                           precompute3_vocab,
@@ -7503,10 +7333,6 @@ local_system:
               crate::debug!(2, "Finished computing possible_matches");
               // pm_cache is dropped here as it's no longer needed.
 
-              // Build precomputed per-token (internal) maps.
-              let state_map_by_llm = Self::build_state_map_by_llm(&tokenizer, &vocab_for_possible_matches.root);
-              let terminal_map_by_llm = Self::rearrange_possible_matches(&computed_possible_matches);
-
               let grammar_productions = &parser.productions; // Assuming parser is the GLRParser instance
               let grammar_term_map = &parser.terminal_map;
 
@@ -7567,8 +7393,6 @@ local_system:
                       trie2_god: Trie2GodWrapper::new(),
                       trie3_god: Trie3GodWrapper::new(),
                       post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
-                      state_map_by_llm,
-                      terminal_map_by_llm,
                       precompute_vocab,
                       precompute2_vocab,
                       precompute3_vocab,
@@ -7673,8 +7497,6 @@ local_system:
                   trie2_god,
                   trie3_god,
                   post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
-                  state_map_by_llm,
-                  terminal_map_by_llm,
                   precompute_vocab,
                   precompute2_vocab,
                   precompute3_vocab,
@@ -7942,77 +7764,14 @@ local_system:
                       reset();
 
                       keep_going
-              }
-          }
+                  },
+              );
 
-          /// Build per-token (internal id) mapping from initial tokenizer state to final tokenizer state
-          /// after consuming the entire token. Computed by traversing the vocab prefix tree.
-          pub fn build_state_map_by_llm(
-              tokenizer: &Regex,
-              vocab_root: &VocabPrefixTreeNode,
-          ) -> DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>> {
-              // Build initial mapping: start_state -> start_state (no consumption yet).
-              let mut initial_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
-              for sid in tokenizer.iter_states() {
-                  initial_map.insert(sid, sid);
-              }
-              let mut out = DedupValueMap::new();
+              crate::debug!(2, "Finished precomputing Trie 3.");
+              let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
+              optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
 
-              fn dfs(
-                  tokenizer: &Regex,
-                  node: &VocabPrefixTreeNode,
-                  current_map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
-                  out: &mut DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>,
-              ) {
-                  for (segment_bytes, child) in node.iter_children() {
-                      // Advance mapping through this segment
-                      let mut next_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
-                      for (start, cur) in current_map {
-                          let exec = tokenizer.execute_from_state(&segment_bytes, *cur);
-                          if let Some(end_state) = exec.end_state {
-                              next_map.insert(*start, TokenizerStateID(end_state));
-                          }
-                      }
-
-                      // Record mapping for the token at this node (if applicable).
-                      // Assumption: token_id() corresponds to the token whose bytes equal the path to 'child'.
-                      let tok_id = child.token_id();
-                      out.insert(LLMTokenID(tok_id), next_map.clone());
-
-                      // Recurse to longer tokens sharing this prefix.
-                      dfs(tokenizer, child, &next_map, out);
-                  }
-              }
-
-              dfs(tokenizer, vocab_root, &initial_map, &mut out);
-              out
-          }
-
-          /// Rearrange possible_matches: state -> terminal -> BV(tokens)
-          /// into token -> state -> set(terminals).
-          pub fn rearrange_possible_matches(
-              pm: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-          ) -> DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, BTreeSet<TerminalID>>> {
-              let mut tmp: BTreeMap<LLMTokenID, BTreeMap<TokenizerStateID, BTreeSet<TerminalID>>> = BTreeMap::new();
-              for (sid, tmap) in pm {
-                  for (term, bv) in tmap {
-                      if bv.is_all() {
-                          // "All tokens" - we cannot enumerate efficiently; skip to avoid ballooning memory.
-                          // Commit falls back for missing entries.
-                          continue;
-                      }
-                      for tok in bv.iter() {
-                          let tok_id = LLMTokenID(tok);
-                          let per_state = tmp.entry(tok_id).or_default();
-                          per_state.entry(*sid).or_default().insert(*term);
-                      }
-                  }
-              }
-              let mut out = DedupValueMap::new();
-              for (tok, m) in tmp {
-                  out.insert(tok, m);
-              }
-              out
+              (precomputed3, trie3_god)
           }
 
           pub fn init(&self) -> GrammarConstraintState<'_> {
@@ -10023,141 +9782,9 @@ local_system:
               final_mask_mapped
           }
 
-          pub fn commit(&mut self, llm_token_id: LLMTokenID) { // original ID
-              // Convert to internal id; if not present or no precomputed entry, fall back.
-              let Some(internal_id) = self.parent.original_id_to_internal(llm_token_id) else {
-                  if let Some(bytes) = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id) {
-                      self.commit_bytes(bytes);
-                      return;
-                  }
-                  return;
-              };
-
-              let term_map_opt = self.parent.terminal_map_by_llm.get(&internal_id).cloned();
-              let state_map_opt = self.parent.state_map_by_llm.get(&internal_id).cloned();
-              if term_map_opt.is_none() || state_map_opt.is_none() {
-                  if let Some(bytes) = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id) {
-                      self.commit_bytes(bytes);
-                      return;
-                  }
-                  return;
-              }
-
-              let terminals_map_by_state: BTreeMap<TokenizerStateID, BTreeSet<TerminalID>> = term_map_opt.unwrap();
-              let state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = state_map_opt.unwrap();
-
-              if self.state.is_empty() {
-                  return;
-              }
-
-              // 1) Reset LLM tokens on current stacks.
-              {
-                  let mut memo = HashMap::new();
-                  for s in self.state.values_mut() {
-                      reset_llm_tokens(&mut s.active_state.stack, &mut memo);
-                  }
-              }
-
-              // 2) Build TerminalBV map limited to active tokenizer states.
-              let mut terminals_bv_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
-              for (sid, _glr) in &self.state {
-                  if let Some(set) = terminals_map_by_state.get(sid) {
-                      let mut bv = TerminalBV::zeros();
-                      for t in set {
-                          bv.insert(t.0);
-                      }
-                      terminals_bv_map.insert(*sid, bv);
-                  } else {
-                      terminals_bv_map.insert(*sid, TerminalBV::zeros());
-                  }
-              }
-
-              // 3) Prune disallowed terminals using the per-token precomputed terminal sets.
-              {
-                  let mut memo = HashMap::new();
-                  for s in self.state.values_mut() {
-                      prune_disallowed_terminals(&mut s.active_state.stack, &terminals_bv_map, &mut memo);
-                  }
-              }
-
-              // 4) Map allowed terminals to final tokenizer states (for this token).
-              {
-                  let mut memo = HashMap::new();
-                  for s in self.state.values_mut() {
-                      map_allowed_terminals_tokenizer_states(&mut s.active_state.stack, &state_map, &mut memo);
-                  }
-              }
-
-              // 5) Move surviving GLR states under their final tokenizer states, dropping those without entries.
-              let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
-              for (start_sid, glr) in std::mem::take(&mut self.state) {
-                  if let Some(final_sid) = state_map.get(&start_sid) {
-                      new_overall_state
-                          .entry(*final_sid)
-                          .and_modify(|existing| existing.merge_with(glr.clone()))
-                          .or_insert(glr);
-                  }
-              }
-              self.state = new_overall_state;
-
-              // 6) Cleanup: reset llm tokens to ensure order invariance; fuse; filter dead states.
-              {
-                  let mut memo = HashMap::new();
-                  for s in self.state.values_mut() {
-                      reset_llm_tokens(&mut s.active_state.stack, &mut memo);
-                  }
-              }
-              {
-                  let mut fuse_memo = HashMap::new();
-                  for s in self.state.values_mut() {
-                      s.active_state.stack = fuse_predecessors_recursive(&mut s.active_state.stack, 1, &mut fuse_memo);
-                  }
-              }
-              self.state.retain(|_, glr| glr.is_ok());
-
-              // 7) Post-commit allowance check (same logic as commit_bytes).
-              match self.parent.post_commit_allow_check_mode {
-                  TerminalAllowanceCheckMode::None => {}
-                  TerminalAllowanceCheckMode::ImmediateSets => {
-                      self.state.retain(|tokenizer_state_id, glr_state| {
-                          let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-                          if accessible.len() >= self.parent.parser.terminal_map.len() {
-                              return true;
-                          }
-                          let mut union = glr_state.immediate_shift_terminals();
-                          union.extend(glr_state.immediate_reduce_terminals());
-                          !union.is_disjoint(&accessible)
-                      });
-                  }
-                  TerminalAllowanceCheckMode::ImmediateProbe => {
-                      self.state.retain(|tokenizer_state_id, glr_state| {
-                          let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-                          if accessible.len() >= self.parent.parser.terminal_map.len() {
-                              return true;
-                          }
-                          for tid in &accessible {
-                              if glr_state.has_immediate_action_for_terminal(*tid).unwrap_or(false) {
-                                  return true;
-                              }
-                          }
-                          false
-                      });
-                  }
-                  TerminalAllowanceCheckMode::StepProbe => {
-                      self.state.retain(|tokenizer_state_id, glr_state| {
-                          let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-                          if accessible.len() >= self.parent.parser.terminal_map.len() {
-                              return true;
-                          }
-                          for tid in &accessible {
-                              if glr_state.allows_terminal(*tid) {
-                                  return true;
-                              }
-                          }
-                          false
-                      });
-                  }
-              }
+          pub fn commit(&mut self, llm_token_id: LLMTokenID) { // llm_token_id is original
+              let llm_token_bytes = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id).unwrap();
+              self.commit_bytes(llm_token_bytes);
           }
 
           #[time_it]
@@ -10384,7 +10011,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -15542,7 +15169,6 @@ messages:
 
       Git diffs
 
-      ```diff
       diff --git a/src/constraint.rs b/src/constraint.rs
       index 3d40c3b..f7f1c88 100644
       --- a/src/constraint.rs
@@ -16052,7 +15678,6 @@ messages:
        pub type Trie2God = God<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
        pub type Trie3GodWrapper = GodWrapper<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
        pub type Trie3God = God<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
-      ```
 
       Notes on what changed and why
 
@@ -16075,16 +15700,10 @@ messages:
 
       This implements the “next step” you asked for: adding the precomputed data structures and using them in commit, while keeping commit_bytes intact and ensuring the system remains functional and backward compatible.
     metadata:
-  - user: |
+  - user: |-
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
+      No git diff blocks (```diff) found in the last assistant message.
     metadata:
-  - user: 'Changes committed with message: "Implement precomputation of state/terminal
-      maps for LLM tokens and use them in commit"'
+  - user: 'Changes committed with message: "No changes applied: Empty diff provided"'
     metadata:
 ...
