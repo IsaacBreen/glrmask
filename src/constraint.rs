@@ -1319,7 +1319,7 @@ impl<'r> Precomputer0<'r> {
                 for (child_wrap, ev_bv) in dest_map.iter() {
                     let child_arc = child_wrap.as_arc().clone();
                     let child_ptr = child_arc;
-                    incoming.entry(*child_ptr)
+                    incoming.entry(child_ptr)
                         .or_default()
                         .push((src_arc.clone(), ek.clone(), ev_bv.clone()));
                 }
