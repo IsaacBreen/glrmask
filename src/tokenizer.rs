@@ -126,3 +126,4 @@ impl Regex {
         (0..self.max_state()).map(|id| TokenizerStateID(id))
     }
 }
+
