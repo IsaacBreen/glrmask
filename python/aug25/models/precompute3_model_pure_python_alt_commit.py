@@ -119,7 +119,6 @@ class Precompute0Model(Model):
             state_map_by_llm=state_map_by_llm,
         )
 
-    @profile
     def commit(self, token_id: int):
         """
         Overrides the base `commit` method. This version uses the precomputed0 trie
@@ -203,3 +202,6 @@ class Precompute0Model(Model):
         self.state = {sid: gss for sid, gss in merged_states.items() if not gss.is_empty()}
 
         stats.stop('commit_precompute0')
+
+
+__all__ = ['Precompute0Model']
