@@ -29,7 +29,7 @@ class Precompute0NodeContents:
 
 @dataclass
 class Precompute0Node:
-    children: List[Tuple[Tuple[Optional[int], Optional[Tuple[int, int]]], List[Tuple[NodeID, LLMTokenSet]]]] = field(default_factory=list)
+    children: List[Tuple[Optional[Tuple[int, Optional[int]]], List[Tuple[NodeID, LLMTokenSet]]]] = field(default_factory=list)
     value: Precompute0NodeContents = field(default_factory=lambda: Precompute0NodeContents(None, RangeSet.empty()))
 
 # --- The New Model ---
@@ -69,9 +69,12 @@ class Precompute0Model(Model):
             children = node.get("children") or []
             new_children = []
             for edge_key_json, dest_map in children:
-                gtid_opt, disallow_opt_json = edge_key_json
-                disallow_opt = tuple(disallow_opt_json) if disallow_opt_json else None
-                edge_key = (gtid_opt, disallow_opt)
+                if edge_key_json is None:
+                    edge_key = None
+                else:
+                    gtid, disallow_opt = edge_key_json
+                    edge_key = (gtid, disallow_opt)
+
                 new_dest_map = []
                 for dest_idx, llm_bv_json in dest_map:
                     llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
@@ -177,18 +180,20 @@ class Precompute0Model(Model):
                 new_overall_state_parts[node.value.final_tokenizer_state].append(gss)
                 continue
 
-            for (gtid_opt, disallow_opt), dest_map in node.children:
+            for edge_key, dest_map in node.children:
                 for dest_node_id, edge_bv in dest_map:
                     if not edge_bv.contains(internal_id):
                         continue
                     
                     processed_gss = gss
-                    if gtid_opt is not None:
-                        processed_gss = self._process_token(gss, gtid_opt)
+                    if edge_key is not None:
+                        gtid, disallow_opt = edge_key
+                        processed_gss = self._process_token(gss, gtid)
                     
-                    if disallow_opt and not processed_gss.is_empty():
-                        end_state, term_id = disallow_opt
-                        processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, term_id)
+                        if disallow_opt is not None and not processed_gss.is_empty():
+                            end_state = disallow_opt
+                            term_id = gtid
+                            processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, term_id)
 
                     if not processed_gss.is_empty():
                         q.append((dest_node_id, processed_gss))

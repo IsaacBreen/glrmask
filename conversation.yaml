@@ -1,6 +1,7 @@
 local_system:
   attached_files:
     - src/constraint.rs
+    - python/aug25/models/precompute3_model_pure_python_alt_commit.py
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -1543,40 +1544,65 @@ local_system:
                   return canonical_arc.clone();
               }
 
+              // Mark as visited early to break potential cycles.
               visited.insert(node_ptr, node_arc.clone());
 
+              // Snapshot children under a short-lived read lock, then drop it before recursing.
+              let children_snapshot: Vec<(
+                  Option<GrammarTokenID>,
+                  Vec<(PrecomputeNode1Index, LLMTokenBV)>,
+              )> = {
+                  let g = node_arc.read(trie1_god).unwrap();
+                  g.children()
+                      .iter()
+                      .map(|(ek, dest_map)| {
+                          let entries = dest_map
+                              .iter()
+                              .map(|(node_ptr, ev)| (node_ptr.clone(), ev.clone()))
+                              .collect::<Vec<_>>();
+                          (ek.clone(), entries)
+                      })
+                      .collect()
+              };
+
+              // Rebuild children map with canonicalized children (no locks held on the current node).
               let mut new_children_map = BTreeMap::new();
               let mut children_changed = false;
-
-              {
-                  let node_guard = node_arc.read(trie1_god).unwrap();
-                  for (edge_key, dest_map) in node_guard.children() {
-                      let mut new_dest_map = OrderedHashMap::new();
-                      for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                          let child_arc = node_ptr_wrapper.as_arc().clone();
-                          let canonical_child_arc = Self::deduplicate_recursive_trie1(child_arc.clone(), canonical_nodes, visited, trie1_god);
-                          if &child_arc != &canonical_child_arc {
-                              children_changed = true;
-                          }
-                          let new_node_ptr_wrapper = canonical_child_arc;
-                          new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
+              for (edge_key, entries) in children_snapshot {
+                  let mut new_dest_map = OrderedHashMap::new();
+                  for (child_arc, edge_val) in entries {
+                      let canonical_child_arc = Self::deduplicate_recursive_trie1(
+                          child_arc.clone(),
+                          canonical_nodes,
+                          visited,
+                          trie1_god,
+                      );
+                      if child_arc != canonical_child_arc {
+                          children_changed = true;
                       }
-                      if !new_dest_map.is_empty() {
-                          new_children_map.insert(edge_key.clone(), new_dest_map);
-                      }
+                      new_dest_map.insert(canonical_child_arc, edge_val);
+                  }
+                  if !new_dest_map.is_empty() {
+                      new_children_map.insert(edge_key, new_dest_map);
                   }
               }
 
+              // Write back updated children; avoid recompute_max_depth here to prevent lock re-entrancy.
               if children_changed {
-                  let mut node_guard = node_arc.write(trie1_god).unwrap();
-                  *node_guard.children_mut() = new_children_map;
-                  node_guard.recompute_max_depth(trie1_god);
+                  let mut g = node_arc.write(trie1_god).unwrap();
+                  *g.children_mut() = new_children_map;
+                  // Depths are recomputed globally after merging:
+                  // Trie::recompute_all_max_depths(...) is invoked by the caller.
               }
 
+              // Canonicalize the current node by content after potential child rewrites.
               let canonical_arc = {
-                  let node_guard = node_arc.read(trie1_god).unwrap();
-                  let node_content = (*node_guard).clone();
-                  canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
+                  let g = node_arc.read(trie1_god).unwrap();
+                  let node_content = (*g).clone();
+                  canonical_nodes
+                      .entry(node_content)
+                      .or_insert_with(|| node_arc.clone())
+                      .clone()
               };
 
               visited.insert(node_ptr, canonical_arc.clone());
@@ -4199,6 +4225,207 @@ local_system:
               &self.state
           }
       }
+    python/aug25/models/precompute3_model_pure_python_alt_commit.py: |-
+      # python/aug25/models/precompute3_model_pure_python_alt_commit.py
+      from __future__ import annotations
+
+      import json
+      import collections
+      from typing import Dict, List, Tuple, Optional
+      from dataclasses import dataclass, field
+
+      import _sep1 as ffi
+      from .precompute3_model_pure_python import (
+          Model,
+          PyAcc,
+          GSS,
+          _acc_memoize,
+          Stats,
+          RangeSet,
+          profile,
+          NodeID,
+          LLMTokenSet,
+          TerminalIdSet,
+      )
+
+      # --- Dataclasses for the Precompute0 Trie Structure ---
+
+      @dataclass
+      class Precompute0NodeContents:
+          final_tokenizer_state: Optional[int]
+          live_tokens: LLMTokenSet
+
+      @dataclass
+      class Precompute0Node:
+          children: List[Tuple[Tuple[Optional[int], Optional[Tuple[int, int]]], List[Tuple[NodeID, LLMTokenSet]]]] = field(default_factory=list)
+          value: Precompute0NodeContents = field(default_factory=lambda: Precompute0NodeContents(None, RangeSet.empty()))
+
+      # --- The New Model ---
+
+      @dataclass
+      class Precompute0Model(Model):
+          """
+          A model that subclasses the base Model to provide an alternative `commit` implementation.
+          This version uses the precomputed0 trie, which is specialized for single-token commits
+          and avoids using the tokenizer at commit time, similar to the Rust `commit(token_id)` logic.
+          """
+          # New fields specific to this model
+          arena0: Dict[NodeID, Precompute0Node] = field(default_factory=dict)
+          roots_map0: Dict[int, NodeID] = field(default_factory=dict)
+          terminal_map_by_llm: Dict[int, Dict[int, TerminalIdSet]] = field(default_factory=dict)
+          state_map_by_llm: Dict[int, Dict[int, int]] = field(default_factory=dict)
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Precompute0Model':
+              """
+              Constructs the model by first loading the base model and then parsing
+              the additional data structures required for this alternative commit strategy.
+              """
+              base_model = Model.from_json_string(s)
+              data = json.loads(s)
+              dumps = json.dumps
+              bs_from_json = ffi.Bitset.from_json_string
+
+              # --- Load precompute0 trie ---
+              roots_map0_raw = data["precomputed0"]
+              arena0_json = data["trie0_god"]
+              arena0_values = arena0_json.get("values", [])
+              arena0_dict = {int(k): v for k, v in arena0_values}
+              roots_map0 = {int(s): int(r) for s, r in roots_map0_raw}
+
+              for node in arena0_dict.values():
+                  children = node.get("children") or []
+                  new_children = []
+                  for edge_key_json, dest_map in children:
+                      gtid_opt, disallow_opt_json = edge_key_json
+                      disallow_opt = tuple(disallow_opt_json) if disallow_opt_json else None
+                      edge_key = (gtid_opt, disallow_opt)
+                      new_dest_map = []
+                      for dest_idx, llm_bv_json in dest_map:
+                          llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
+                          llm_bv: LLMTokenSet = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
+                          new_dest_map.append((int(dest_idx), llm_bv))
+                      new_children.append((edge_key, new_dest_map))
+                  node["children"] = new_children
+                  value_json = node.get("value", {})
+                  live_tokens_json = value_json.get("live_tokens", [])
+                  live_tokens_bitset = bs_from_json(dumps(live_tokens_json))
+                  node["value"] = Precompute0NodeContents(
+                      final_tokenizer_state=value_json.get("final_tokenizer_state"),
+                      live_tokens=RangeSet.from_ranges(live_tokens_bitset.to_ranges())
+                  )
+              arena0 = {uid: Precompute0Node(children=nd.get("children", []), value=nd["value"]) for uid, nd in arena0_dict.items()}
+
+              # --- Load precomputed per-token maps ---
+              def parse_dedup_map(raw_map, value_parser):
+                  id_to_value = {item[0]: value_parser(item[1]) for item in raw_map['values']}
+                  key_to_id = {item[0]: item[1] for item in raw_map['keys']}
+                  return {int(key): id_to_value[id_] for key, id_ in key_to_id.items()}
+
+              def parse_terminal_map_value(raw_value):
+                  out = {}
+                  for sid_str, bv_json in raw_value:
+                      bs = bs_from_json(dumps(bv_json))
+                      out[int(sid_str)] = RangeSet.from_ranges(bs.to_ranges())
+                  return out
+
+              def parse_state_map_value(raw_value):
+                  return {int(k): v for k, v in raw_value}
+
+              terminal_map_by_llm = parse_dedup_map(data['terminal_map_by_llm'], parse_terminal_map_value)
+              state_map_by_llm = parse_dedup_map(data['state_map_by_llm'], parse_state_map_value)
+
+              # Construct the final model using all fields from the base model plus the new ones
+              return Precompute0Model(
+                  **base_model.__dict__,
+                  arena0=arena0,
+                  roots_map0=roots_map0,
+                  terminal_map_by_llm=terminal_map_by_llm,
+                  state_map_by_llm=state_map_by_llm,
+              )
+
+          @profile
+          def commit(self, token_id: int):
+              """
+              Overrides the base `commit` method. This version uses the precomputed0 trie
+              to update the GLR state without invoking the tokenizer.
+              """
+              stats = Stats.get()
+              stats.start('commit_precompute0')
+
+              internal_id = self.original_to_internal_map.get(token_id)
+              if internal_id is None:
+                  raise ValueError(f"LLM token ID {token_id} not found in internal mapping.")
+
+              terminals_map = self.terminal_map_by_llm.get(internal_id, {})
+              state_map = self.state_map_by_llm.get(internal_id, {})
+
+              # 1. Prepare GSS: Prune based on terminals matched by the token and map tokenizer states.
+              @_acc_memoize()
+              def mutator(acc: PyAcc) -> Optional[PyAcc]:
+                  disallowed_terminals_map = acc.terminals_union
+                  for tsid, matched_bv in terminals_map.items():
+                      disallowed_for_state = disallowed_terminals_map.get(tsid)
+                      if disallowed_for_state and not matched_bv.isdisjoint(disallowed_for_state):
+                          return None
+                  new_bvs: Dict[int, TerminalIdSet] = {}
+                  for old_sid, new_sid in state_map.items():
+                      bv_source = acc.terminals_union.get(old_sid)
+                      if bv_source and not bv_source.is_empty():
+                          if new_sid in new_bvs:
+                              new_bvs[new_sid] |= bv_source
+                          else:
+                              new_bvs[new_sid] = bv_source
+                  return PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
+
+              cache = {}
+              current_state = {tsid: gss.apply_and_prune(mutator, cache) for tsid, gss in self.state.items()}
+              current_state = {tsid: gss for tsid, gss in current_state.items() if not gss.is_empty()}
+
+              # 2. Traverse the precompute0 trie with the prepared GSS.
+              q = collections.deque()
+              for tokenizer_sid, gss in current_state.items():
+                  root_node_id = self.roots_map0[tokenizer_sid]
+                  q.append((root_node_id, gss))
+
+              new_overall_state_parts = collections.defaultdict(list)
+              visited: Dict[NodeID, GSS] = {}
+
+              while q:
+                  node_id, gss = q.popleft()
+                  if node_id in visited:
+                      merged_gss = gss.merge(visited[node_id])
+                      if len(merged_gss.peek()) == len(visited[node_id].peek()):
+                          continue
+                      gss = merged_gss
+                  visited[node_id] = gss
+
+                  node = self.arena0[node_id]
+                  if node.value.final_tokenizer_state is not None:
+                      new_overall_state_parts[node.value.final_tokenizer_state].append(gss)
+                      continue
+
+                  for (gtid_opt, disallow_opt), dest_map in node.children:
+                      for dest_node_id, edge_bv in dest_map:
+                          if not edge_bv.contains(internal_id):
+                              continue
+                          
+                          processed_gss = gss
+                          if gtid_opt is not None:
+                              processed_gss = self._process_token(gss, gtid_opt)
+                          
+                          if disallow_opt and not processed_gss.is_empty():
+                              end_state, term_id = disallow_opt
+                              processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, term_id)
+
+                          if not processed_gss.is_empty():
+                              q.append((dest_node_id, processed_gss))
+
+              # 3. Finalize the new state.
+              merged_states = {sid: GSS.merge_many(gss_list) for sid, gss_list in new_overall_state_parts.items() if gss_list}
+              self.state = {sid: gss for sid, gss in merged_states.items() if not gss.is_empty()}
+
+              stats.stop('commit_precompute0')
   prev_file_contents:
     src/constraint.rs: |
       // src/constraint.rs
@@ -8420,6 +8647,212 @@ local_system:
               &self.state
           }
       }
+    python/aug25/models/precompute3_model_pure_python_alt_commit.py: |-
+      # python/aug25/models/precompute3_model_pure_python_alt_commit.py
+      from __future__ import annotations
+
+      import json
+      import collections
+      from typing import Dict, List, Tuple, Optional
+      from dataclasses import dataclass, field
+
+      import _sep1 as ffi
+      from .precompute3_model_pure_python import (
+          Model,
+          PyAcc,
+          GSS,
+          _acc_memoize,
+          Stats,
+          RangeSet,
+          profile,
+          NodeID,
+          LLMTokenSet,
+          TerminalIdSet,
+      )
+
+      # --- Dataclasses for the Precompute0 Trie Structure ---
+
+      @dataclass
+      class Precompute0NodeContents:
+          final_tokenizer_state: Optional[int]
+          live_tokens: LLMTokenSet
+
+      @dataclass
+      class Precompute0Node:
+          children: List[Tuple[Optional[Tuple[int, Optional[int]]], List[Tuple[NodeID, LLMTokenSet]]]] = field(default_factory=list)
+          value: Precompute0NodeContents = field(default_factory=lambda: Precompute0NodeContents(None, RangeSet.empty()))
+
+      # --- The New Model ---
+
+      @dataclass
+      class Precompute0Model(Model):
+          """
+          A model that subclasses the base Model to provide an alternative `commit` implementation.
+          This version uses the precomputed0 trie, which is specialized for single-token commits
+          and avoids using the tokenizer at commit time, similar to the Rust `commit(token_id)` logic.
+          """
+          # New fields specific to this model
+          arena0: Dict[NodeID, Precompute0Node] = field(default_factory=dict)
+          roots_map0: Dict[int, NodeID] = field(default_factory=dict)
+          terminal_map_by_llm: Dict[int, Dict[int, TerminalIdSet]] = field(default_factory=dict)
+          state_map_by_llm: Dict[int, Dict[int, int]] = field(default_factory=dict)
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Precompute0Model':
+              """
+              Constructs the model by first loading the base model and then parsing
+              the additional data structures required for this alternative commit strategy.
+              """
+              base_model = Model.from_json_string(s)
+              data = json.loads(s)
+              dumps = json.dumps
+              bs_from_json = ffi.Bitset.from_json_string
+
+              # --- Load precompute0 trie ---
+              roots_map0_raw = data["precomputed0"]
+              arena0_json = data["trie0_god"]
+              arena0_values = arena0_json.get("values", [])
+              arena0_dict = {int(k): v for k, v in arena0_values}
+              roots_map0 = {int(s): int(r) for s, r in roots_map0_raw}
+
+              for node in arena0_dict.values():
+                  children = node.get("children") or []
+                  new_children = []
+                  for edge_key_json, dest_map in children:
+                      if edge_key_json is None:
+                          edge_key = None
+                      else:
+                          gtid, disallow_opt = edge_key_json
+                          edge_key = (gtid, disallow_opt)
+
+                      new_dest_map = []
+                      for dest_idx, llm_bv_json in dest_map:
+                          llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
+                          llm_bv: LLMTokenSet = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
+                          new_dest_map.append((int(dest_idx), llm_bv))
+                      new_children.append((edge_key, new_dest_map))
+                  node["children"] = new_children
+                  value_json = node.get("value", {})
+                  live_tokens_json = value_json.get("live_tokens", [])
+                  live_tokens_bitset = bs_from_json(dumps(live_tokens_json))
+                  node["value"] = Precompute0NodeContents(
+                      final_tokenizer_state=value_json.get("final_tokenizer_state"),
+                      live_tokens=RangeSet.from_ranges(live_tokens_bitset.to_ranges())
+                  )
+              arena0 = {uid: Precompute0Node(children=nd.get("children", []), value=nd["value"]) for uid, nd in arena0_dict.items()}
+
+              # --- Load precomputed per-token maps ---
+              def parse_dedup_map(raw_map, value_parser):
+                  id_to_value = {item[0]: value_parser(item[1]) for item in raw_map['values']}
+                  key_to_id = {item[0]: item[1] for item in raw_map['keys']}
+                  return {int(key): id_to_value[id_] for key, id_ in key_to_id.items()}
+
+              def parse_terminal_map_value(raw_value):
+                  out = {}
+                  for sid_str, bv_json in raw_value:
+                      bs = bs_from_json(dumps(bv_json))
+                      out[int(sid_str)] = RangeSet.from_ranges(bs.to_ranges())
+                  return out
+
+              def parse_state_map_value(raw_value):
+                  return {int(k): v for k, v in raw_value}
+
+              terminal_map_by_llm = parse_dedup_map(data['terminal_map_by_llm'], parse_terminal_map_value)
+              state_map_by_llm = parse_dedup_map(data['state_map_by_llm'], parse_state_map_value)
+
+              # Construct the final model using all fields from the base model plus the new ones
+              return Precompute0Model(
+                  **base_model.__dict__,
+                  arena0=arena0,
+                  roots_map0=roots_map0,
+                  terminal_map_by_llm=terminal_map_by_llm,
+                  state_map_by_llm=state_map_by_llm,
+              )
+
+          @profile
+          def commit(self, token_id: int):
+              """
+              Overrides the base `commit` method. This version uses the precomputed0 trie
+              to update the GLR state without invoking the tokenizer.
+              """
+              stats = Stats.get()
+              stats.start('commit_precompute0')
+
+              internal_id = self.original_to_internal_map.get(token_id)
+              if internal_id is None:
+                  raise ValueError(f"LLM token ID {token_id} not found in internal mapping.")
+
+              terminals_map = self.terminal_map_by_llm.get(internal_id, {})
+              state_map = self.state_map_by_llm.get(internal_id, {})
+
+              # 1. Prepare GSS: Prune based on terminals matched by the token and map tokenizer states.
+              @_acc_memoize()
+              def mutator(acc: PyAcc) -> Optional[PyAcc]:
+                  disallowed_terminals_map = acc.terminals_union
+                  for tsid, matched_bv in terminals_map.items():
+                      disallowed_for_state = disallowed_terminals_map.get(tsid)
+                      if disallowed_for_state and not matched_bv.isdisjoint(disallowed_for_state):
+                          return None
+                  new_bvs: Dict[int, TerminalIdSet] = {}
+                  for old_sid, new_sid in state_map.items():
+                      bv_source = acc.terminals_union.get(old_sid)
+                      if bv_source and not bv_source.is_empty():
+                          if new_sid in new_bvs:
+                              new_bvs[new_sid] |= bv_source
+                          else:
+                              new_bvs[new_sid] = bv_source
+                  return PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
+
+              cache = {}
+              current_state = {tsid: gss.apply_and_prune(mutator, cache) for tsid, gss in self.state.items()}
+              current_state = {tsid: gss for tsid, gss in current_state.items() if not gss.is_empty()}
+
+              # 2. Traverse the precompute0 trie with the prepared GSS.
+              q = collections.deque()
+              for tokenizer_sid, gss in current_state.items():
+                  root_node_id = self.roots_map0[tokenizer_sid]
+                  q.append((root_node_id, gss))
+
+              new_overall_state_parts = collections.defaultdict(list)
+              visited: Dict[NodeID, GSS] = {}
+
+              while q:
+                  node_id, gss = q.popleft()
+                  if node_id in visited:
+                      merged_gss = gss.merge(visited[node_id])
+                      if len(merged_gss.peek()) == len(visited[node_id].peek()):
+                          continue
+                      gss = merged_gss
+                  visited[node_id] = gss
+
+                  node = self.arena0[node_id]
+                  if node.value.final_tokenizer_state is not None:
+                      new_overall_state_parts[node.value.final_tokenizer_state].append(gss)
+                      continue
+
+                  for edge_key, dest_map in node.children:
+                      for dest_node_id, edge_bv in dest_map:
+                          if not edge_bv.contains(internal_id):
+                              continue
+                          
+                          processed_gss = gss
+                          if edge_key is not None:
+                              gtid, disallow_opt = edge_key
+                              processed_gss = self._process_token(gss, gtid)
+                          
+                              if disallow_opt is not None and not processed_gss.is_empty():
+                                  end_state = disallow_opt
+                                  term_id = gtid
+                                  processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, term_id)
+
+                          if not processed_gss.is_empty():
+                              q.append((dest_node_id, processed_gss))
+
+              # 3. Finalize the new state.
+              merged_states = {sid: GSS.merge_many(gss_list) for sid, gss_list in new_overall_state_parts.items() if gss_list}
+              self.state = {sid: gss for sid, gss in merged_states.items() if not gss.is_empty()}
+
+              stats.stop('commit_precompute0')
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -8430,7 +8863,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -10001,40 +10434,65 @@ messages:
                   return canonical_arc.clone();
               }
 
+              // Mark as visited early to break potential cycles.
               visited.insert(node_ptr, node_arc.clone());
 
+              // Snapshot children under a short-lived read lock, then drop it before recursing.
+              let children_snapshot: Vec<(
+                  Option<GrammarTokenID>,
+                  Vec<(PrecomputeNode1Index, LLMTokenBV)>,
+              )> = {
+                  let g = node_arc.read(trie1_god).unwrap();
+                  g.children()
+                      .iter()
+                      .map(|(ek, dest_map)| {
+                          let entries = dest_map
+                              .iter()
+                              .map(|(node_ptr, ev)| (node_ptr.clone(), ev.clone()))
+                              .collect::<Vec<_>>();
+                          (ek.clone(), entries)
+                      })
+                      .collect()
+              };
+
+              // Rebuild children map with canonicalized children (no locks held on the current node).
               let mut new_children_map = BTreeMap::new();
               let mut children_changed = false;
-
-              {
-                  let node_guard = node_arc.read(trie1_god).unwrap();
-                  for (edge_key, dest_map) in node_guard.children() {
-                      let mut new_dest_map = OrderedHashMap::new();
-                      for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                          let child_arc = node_ptr_wrapper.as_arc().clone();
-                          let canonical_child_arc = Self::deduplicate_recursive_trie1(child_arc.clone(), canonical_nodes, visited, trie1_god);
-                          if &child_arc != &canonical_child_arc {
-                              children_changed = true;
-                          }
-                          let new_node_ptr_wrapper = canonical_child_arc;
-                          new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
+              for (edge_key, entries) in children_snapshot {
+                  let mut new_dest_map = OrderedHashMap::new();
+                  for (child_arc, edge_val) in entries {
+                      let canonical_child_arc = Self::deduplicate_recursive_trie1(
+                          child_arc.clone(),
+                          canonical_nodes,
+                          visited,
+                          trie1_god,
+                      );
+                      if child_arc != canonical_child_arc {
+                          children_changed = true;
                       }
-                      if !new_dest_map.is_empty() {
-                          new_children_map.insert(edge_key.clone(), new_dest_map);
-                      }
+                      new_dest_map.insert(canonical_child_arc, edge_val);
+                  }
+                  if !new_dest_map.is_empty() {
+                      new_children_map.insert(edge_key, new_dest_map);
                   }
               }
 
+              // Write back updated children; avoid recompute_max_depth here to prevent lock re-entrancy.
               if children_changed {
-                  let mut node_guard = node_arc.write(trie1_god).unwrap();
-                  *node_guard.children_mut() = new_children_map;
-                  node_guard.recompute_max_depth(trie1_god);
+                  let mut g = node_arc.write(trie1_god).unwrap();
+                  *g.children_mut() = new_children_map;
+                  // Depths are recomputed globally after merging:
+                  // Trie::recompute_all_max_depths(...) is invoked by the caller.
               }
 
+              // Canonicalize the current node by content after potential child rewrites.
               let canonical_arc = {
-                  let node_guard = node_arc.read(trie1_god).unwrap();
-                  let node_content = (*node_guard).clone();
-                  canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
+                  let g = node_arc.read(trie1_god).unwrap();
+                  let node_content = (*g).clone();
+                  canonical_nodes
+                      .entry(node_content)
+                      .or_insert_with(|| node_arc.clone())
+                      .clone()
               };
 
               visited.insert(node_ptr, canonical_arc.clone());
@@ -12661,8 +13119,221 @@ messages:
       ```
     metadata:
       filename: src/constraint.rs
-  - user: We get a deadlock at "Merging identical subtrees in Trie1". It hangs there
-      and never finishes. Fix it.
+  - user: |-
+      ```python 'python/aug25/models/precompute3_model_pure_python_alt_commit.py'
+      # python/aug25/models/precompute3_model_pure_python_alt_commit.py
+      from __future__ import annotations
+
+      import json
+      import collections
+      from typing import Dict, List, Tuple, Optional
+      from dataclasses import dataclass, field
+
+      import _sep1 as ffi
+      from .precompute3_model_pure_python import (
+          Model,
+          PyAcc,
+          GSS,
+          _acc_memoize,
+          Stats,
+          RangeSet,
+          profile,
+          NodeID,
+          LLMTokenSet,
+          TerminalIdSet,
+      )
+
+      # --- Dataclasses for the Precompute0 Trie Structure ---
+
+      @dataclass
+      class Precompute0NodeContents:
+          final_tokenizer_state: Optional[int]
+          live_tokens: LLMTokenSet
+
+      @dataclass
+      class Precompute0Node:
+          children: List[Tuple[Tuple[Optional[int], Optional[Tuple[int, int]]], List[Tuple[NodeID, LLMTokenSet]]]] = field(default_factory=list)
+          value: Precompute0NodeContents = field(default_factory=lambda: Precompute0NodeContents(None, RangeSet.empty()))
+
+      # --- The New Model ---
+
+      @dataclass
+      class Precompute0Model(Model):
+          """
+          A model that subclasses the base Model to provide an alternative `commit` implementation.
+          This version uses the precomputed0 trie, which is specialized for single-token commits
+          and avoids using the tokenizer at commit time, similar to the Rust `commit(token_id)` logic.
+          """
+          # New fields specific to this model
+          arena0: Dict[NodeID, Precompute0Node] = field(default_factory=dict)
+          roots_map0: Dict[int, NodeID] = field(default_factory=dict)
+          terminal_map_by_llm: Dict[int, Dict[int, TerminalIdSet]] = field(default_factory=dict)
+          state_map_by_llm: Dict[int, Dict[int, int]] = field(default_factory=dict)
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Precompute0Model':
+              """
+              Constructs the model by first loading the base model and then parsing
+              the additional data structures required for this alternative commit strategy.
+              """
+              base_model = Model.from_json_string(s)
+              data = json.loads(s)
+              dumps = json.dumps
+              bs_from_json = ffi.Bitset.from_json_string
+
+              # --- Load precompute0 trie ---
+              roots_map0_raw = data["precomputed0"]
+              arena0_json = data["trie0_god"]
+              arena0_values = arena0_json.get("values", [])
+              arena0_dict = {int(k): v for k, v in arena0_values}
+              roots_map0 = {int(s): int(r) for s, r in roots_map0_raw}
+
+              for node in arena0_dict.values():
+                  children = node.get("children") or []
+                  new_children = []
+                  for edge_key_json, dest_map in children:
+                      gtid_opt, disallow_opt_json = edge_key_json
+                      disallow_opt = tuple(disallow_opt_json) if disallow_opt_json else None
+                      edge_key = (gtid_opt, disallow_opt)
+                      new_dest_map = []
+                      for dest_idx, llm_bv_json in dest_map:
+                          llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
+                          llm_bv: LLMTokenSet = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
+                          new_dest_map.append((int(dest_idx), llm_bv))
+                      new_children.append((edge_key, new_dest_map))
+                  node["children"] = new_children
+                  value_json = node.get("value", {})
+                  live_tokens_json = value_json.get("live_tokens", [])
+                  live_tokens_bitset = bs_from_json(dumps(live_tokens_json))
+                  node["value"] = Precompute0NodeContents(
+                      final_tokenizer_state=value_json.get("final_tokenizer_state"),
+                      live_tokens=RangeSet.from_ranges(live_tokens_bitset.to_ranges())
+                  )
+              arena0 = {uid: Precompute0Node(children=nd.get("children", []), value=nd["value"]) for uid, nd in arena0_dict.items()}
+
+              # --- Load precomputed per-token maps ---
+              def parse_dedup_map(raw_map, value_parser):
+                  id_to_value = {item[0]: value_parser(item[1]) for item in raw_map['values']}
+                  key_to_id = {item[0]: item[1] for item in raw_map['keys']}
+                  return {int(key): id_to_value[id_] for key, id_ in key_to_id.items()}
+
+              def parse_terminal_map_value(raw_value):
+                  out = {}
+                  for sid_str, bv_json in raw_value:
+                      bs = bs_from_json(dumps(bv_json))
+                      out[int(sid_str)] = RangeSet.from_ranges(bs.to_ranges())
+                  return out
+
+              def parse_state_map_value(raw_value):
+                  return {int(k): v for k, v in raw_value}
+
+              terminal_map_by_llm = parse_dedup_map(data['terminal_map_by_llm'], parse_terminal_map_value)
+              state_map_by_llm = parse_dedup_map(data['state_map_by_llm'], parse_state_map_value)
+
+              # Construct the final model using all fields from the base model plus the new ones
+              return Precompute0Model(
+                  **base_model.__dict__,
+                  arena0=arena0,
+                  roots_map0=roots_map0,
+                  terminal_map_by_llm=terminal_map_by_llm,
+                  state_map_by_llm=state_map_by_llm,
+              )
+
+          @profile
+          def commit(self, token_id: int):
+              """
+              Overrides the base `commit` method. This version uses the precomputed0 trie
+              to update the GLR state without invoking the tokenizer.
+              """
+              stats = Stats.get()
+              stats.start('commit_precompute0')
+
+              internal_id = self.original_to_internal_map.get(token_id)
+              if internal_id is None:
+                  raise ValueError(f"LLM token ID {token_id} not found in internal mapping.")
+
+              terminals_map = self.terminal_map_by_llm.get(internal_id, {})
+              state_map = self.state_map_by_llm.get(internal_id, {})
+
+              # 1. Prepare GSS: Prune based on terminals matched by the token and map tokenizer states.
+              @_acc_memoize()
+              def mutator(acc: PyAcc) -> Optional[PyAcc]:
+                  disallowed_terminals_map = acc.terminals_union
+                  for tsid, matched_bv in terminals_map.items():
+                      disallowed_for_state = disallowed_terminals_map.get(tsid)
+                      if disallowed_for_state and not matched_bv.isdisjoint(disallowed_for_state):
+                          return None
+                  new_bvs: Dict[int, TerminalIdSet] = {}
+                  for old_sid, new_sid in state_map.items():
+                      bv_source = acc.terminals_union.get(old_sid)
+                      if bv_source and not bv_source.is_empty():
+                          if new_sid in new_bvs:
+                              new_bvs[new_sid] |= bv_source
+                          else:
+                              new_bvs[new_sid] = bv_source
+                  return PyAcc(terminals_union=new_bvs, llm_mask=acc.llm_mask)
+
+              cache = {}
+              current_state = {tsid: gss.apply_and_prune(mutator, cache) for tsid, gss in self.state.items()}
+              current_state = {tsid: gss for tsid, gss in current_state.items() if not gss.is_empty()}
+
+              # 2. Traverse the precompute0 trie with the prepared GSS.
+              q = collections.deque()
+              for tokenizer_sid, gss in current_state.items():
+                  root_node_id = self.roots_map0[tokenizer_sid]
+                  q.append((root_node_id, gss))
+
+              new_overall_state_parts = collections.defaultdict(list)
+              visited: Dict[NodeID, GSS] = {}
+
+              while q:
+                  node_id, gss = q.popleft()
+                  if node_id in visited:
+                      merged_gss = gss.merge(visited[node_id])
+                      if len(merged_gss.peek()) == len(visited[node_id].peek()):
+                          continue
+                      gss = merged_gss
+                  visited[node_id] = gss
+
+                  node = self.arena0[node_id]
+                  if node.value.final_tokenizer_state is not None:
+                      new_overall_state_parts[node.value.final_tokenizer_state].append(gss)
+                      continue
+
+                  for (gtid_opt, disallow_opt), dest_map in node.children:
+                      for dest_node_id, edge_bv in dest_map:
+                          if not edge_bv.contains(internal_id):
+                              continue
+                          
+                          processed_gss = gss
+                          if gtid_opt is not None:
+                              processed_gss = self._process_token(gss, gtid_opt)
+                          
+                          if disallow_opt and not processed_gss.is_empty():
+                              end_state, term_id = disallow_opt
+                              processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, term_id)
+
+                          if not processed_gss.is_empty():
+                              q.append((dest_node_id, processed_gss))
+
+              # 3. Finalize the new state.
+              merged_states = {sid: GSS.merge_many(gss_list) for sid, gss_list in new_overall_state_parts.items() if gss_list}
+              self.state = {sid: gss for sid, gss in merged_states.items() if not gss.is_empty()}
+
+              stats.stop('commit_precompute0')
+      ```
+    metadata:
+      filename: python/aug25/models/precompute3_model_pure_python_alt_commit.py
+  - user: |-
+      The structure of the precompute0 tree has changed from this
+      ```rust
+      pub type PrecomputeNode0 = Trie<Option<GrammarTokenID>, BTreeMap<Option<TokenizerStateID>, LLMTokenBV>, PrecomputedNodeContents0>;
+      ```
+      to this
+      ```rust
+      pub type PrecomputeNode0 = Trie<(Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>), LLMTokenBV, PrecomputedNodeContents0>;
+      ```
+      Update the Python code accordingly.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -12681,150 +13352,149 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here’s how to fix the hang during “Merging identical subtrees in Trie1”:
+      Based on the Rust code you provided, the edge key for `PrecomputeNode0` is `Option<(GrammarTokenID, Option<TokenizerStateID>)>`. The Python code needs to be updated to reflect this structure for parsing the model and for the `commit` logic.
 
-      Overview of the root cause and fix
-      - Cause: deduplicate_recursive_trie1 was holding a read lock on the current node while recursing into children, and also invoked recompute_max_depth while holding a write lock on the same node. This combination can lead to lock contention and self-deadlock in complex cyclic graphs, especially when recompute_max_depth traverses back across the graph while other recursive frames still hold locks.
-      - Fix:
-        1) Snapshot children under a short-lived read lock, then drop the lock before recursing to canonicalize children. This prevents nested lock entanglement.
-        2) Remove the per-node recompute_max_depth call in deduplicate_recursive_trie1. A full recompute_all_max_depths() is already performed after merging, so the per-node recomputation is redundant and was a potential source of deadlock.
+      Here are the step-by-step instructions to update your Python file:
 
-      Step-by-step instructions
-      1) Edit src/constraint.rs.
-      2) Locate the function:
-         - fn deduplicate_recursive_trie1(...) -> PrecomputeNode1Index
-      3) Replace the section that:
-         - Iterates children and recurses while still holding the read lock on the node.
-         - Calls node_guard.recompute_max_depth(trie1_god) under a write lock.
-      4) Replace it with:
-         - A snapshot of the children to a local Vec while under a read lock, then release the lock before recursing.
-         - Build the new children using canonicalized child nodes.
-         - Write the updated children back without calling recompute_max_depth here (it will be handled later by the global recompute_all_max_depths after merging).
-      5) Save the file and rebuild.
+      ### Step-by-step Instructions
 
-      Diff patch
+      File to edit: `python/aug25/models/precompute3_model_pure_python_alt_commit.py`
+
+      1.  **Update `Precompute0Node` Dataclass:**
+          In the `Precompute0Node` dataclass definition, modify the type hint for the `children` field to match the new edge key structure `Optional[Tuple[int, Optional[int]]]`.
+
+          *   **Find** this line:
+              ```python
+              children: List[Tuple[Tuple[Optional[int], Optional[Tuple[int, int]]], List[Tuple[NodeID, LLMTokenSet]]]] = field(default_factory=list)
+              ```
+          *   **Replace** it with:
+              ```python
+              children: List[Tuple[Optional[Tuple[int, Optional[int]]], List[Tuple[NodeID, LLMTokenSet]]]] = field(default_factory=list)
+              ```
+
+      2.  **Update JSON Parsing in `from_json_string`:**
+          Adjust the logic that parses the edge keys from the JSON representation to handle `null` for `None` and a 2-element array for `Some(...)`.
+
+          *   **Find** these lines inside the `from_json_string` method:
+              ```python
+                      gtid_opt, disallow_opt_json = edge_key_json
+                      disallow_opt = tuple(disallow_opt_json) if disallow_opt_json else None
+                      edge_key = (gtid_opt, disallow_opt)
+              ```
+          *   **Replace** them with the following logic:
+              ```python
+                      if edge_key_json is None:
+                          edge_key = None
+                      else:
+                          gtid, disallow_opt = edge_key_json
+                          edge_key = (gtid, disallow_opt)
+              ```
+
+      3.  **Update Trie Traversal in `commit` Method:**
+          Modify the loop that traverses the `precompute0` trie to correctly unpack the new edge key structure and apply the GLR processing logic.
+
+          *   **Find** this block of code inside the `commit` method:
+              ```python
+                  for (gtid_opt, disallow_opt), dest_map in node.children:
+                      for dest_node_id, edge_bv in dest_map:
+                          if not edge_bv.contains(internal_id):
+                              continue
+                          
+                          processed_gss = gss
+                          if gtid_opt is not None:
+                              processed_gss = self._process_token(gss, gtid_opt)
+                          
+                          if disallow_opt and not processed_gss.is_empty():
+                              end_state, term_id = disallow_opt
+                              processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, term_id)
+
+                          if not processed_gss.is_empty():
+                              q.append((dest_node_id, processed_gss))
+              ```
+          *   **Replace** it with the updated logic:
+              ```python
+                  for edge_key, dest_map in node.children:
+                      for dest_node_id, edge_bv in dest_map:
+                          if not edge_bv.contains(internal_id):
+                              continue
+                          
+                          processed_gss = gss
+                          if edge_key is not None:
+                              gtid, disallow_opt = edge_key
+                              processed_gss = self._process_token(gss, gtid)
+                          
+                              if disallow_opt is not None and not processed_gss.is_empty():
+                                  end_state = disallow_opt
+                                  term_id = gtid
+                                  processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, term_id)
+
+                          if not processed_gss.is_empty():
+                              q.append((dest_node_id, processed_gss))
+              ```
+
+      ### Git Diff
+
+      Here is the git diff for the changes described above.
+
       ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -846,43 +846,60 @@
-           fn deduplicate_recursive_trie1(
-               node_arc: PrecomputeNode1Index,
-               canonical_nodes: &mut HashMap<PrecomputeNode1, PrecomputeNode1Index>,
-               visited: &mut HashMap<PrecomputeNode1Index, PrecomputeNode1Index>,
-               trie1_god: &Trie1GodWrapper,
-           ) -> PrecomputeNode1Index {
-      -        let node_ptr = node_arc;
-      -        if let Some(canonical_arc) = visited.get(&node_ptr) {
-      +        let node_ptr = node_arc;
-      +        if let Some(canonical_arc) = visited.get(&node_ptr) {
-                   return canonical_arc.clone();
-      -        }
-      -
-      -        visited.insert(node_ptr, node_arc.clone());
-      -
-      -        let mut new_children_map = BTreeMap::new();
-      -        let mut children_changed = false;
-      -
-      -        {
-      -            let node_guard = node_arc.read(trie1_god).unwrap();
-      -            for (edge_key, dest_map) in node_guard.children() {
-      -                let mut new_dest_map = OrderedHashMap::new();
-      -                for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-      -                    let child_arc = node_ptr_wrapper.as_arc().clone();
-      -                    let canonical_child_arc = Self::deduplicate_recursive_trie1(child_arc.clone(), canonical_nodes, visited, trie1_god);
-      -                    if &child_arc != &canonical_child_arc {
-      -                        children_changed = true;
-      -                    }
-      -                    let new_node_ptr_wrapper = canonical_child_arc;
-      -                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
-      -                }
-      -                if !new_dest_map.is_empty() {
-      -                    new_children_map.insert(edge_key.clone(), new_dest_map);
-      -                }
-      -            }
-      -        }
-      -
-      -        if children_changed {
-      -            let mut node_guard = node_arc.write(trie1_god).unwrap();
-      -            *node_guard.children_mut() = new_children_map;
-      -            node_guard.recompute_max_depth(trie1_god);
-      -        }
-      -
-      -        let canonical_arc = {
-      -            let node_guard = node_arc.read(trie1_god).unwrap();
-      -            let node_content = (*node_guard).clone();
-      -            canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
-      -        };
-      -
-      -        visited.insert(node_ptr, canonical_arc.clone());
-      -        canonical_arc
-      +        }
+      diff --git a/python/aug25/models/precompute3_model_pure_python_alt_commit.py b/python/aug25/models/precompute3_model_pure_python_alt_commit.py
+      index 9832717..058913b 100644
+      --- a/python/aug25/models/precompute3_model_pure_python_alt_commit.py
+      +++ b/python/aug25/models/precompute3_model_pure_python_alt_commit.py
+      @@ -23,7 +23,7 @@
+       
+       @dataclass
+       class Precompute0Node:
+      -    children: List[Tuple[Tuple[Optional[int], Optional[Tuple[int, int]]], List[Tuple[NodeID, LLMTokenSet]]]] = field(default_factory=list)
+      +    children: List[Tuple[Optional[Tuple[int, Optional[int]]], List[Tuple[NodeID, LLMTokenSet]]]] = field(default_factory=list)
+           value: Precompute0NodeContents = field(default_factory=lambda: Precompute0NodeContents(None, RangeSet.empty()))
+       
+       # --- The New Model ---
+      @@ -58,9 +58,12 @@
+                   children = node.get("children") or []
+                   new_children = []
+                   for edge_key_json, dest_map in children:
+      -                gtid_opt, disallow_opt_json = edge_key_json
+      -                disallow_opt = tuple(disallow_opt_json) if disallow_opt_json else None
+      -                edge_key = (gtid_opt, disallow_opt)
+      +                if edge_key_json is None:
+      +                    edge_key = None
+      +                else:
+      +                    gtid, disallow_opt = edge_key_json
+      +                    edge_key = (gtid, disallow_opt)
       +
-      +        // Mark as visited early to break potential cycles.
-      +        visited.insert(node_ptr, node_arc.clone());
-      +
-      +        // Snapshot children under a short-lived read lock, then drop it before recursing.
-      +        let children_snapshot: Vec<(
-      +            Option<GrammarTokenID>,
-      +            Vec<(PrecomputeNode1Index, LLMTokenBV)>,
-      +        )> = {
-      +            let g = node_arc.read(trie1_god).unwrap();
-      +            g.children()
-      +                .iter()
-      +                .map(|(ek, dest_map)| {
-      +                    let entries = dest_map
-      +                        .iter()
-      +                        .map(|(node_ptr, ev)| (node_ptr.clone(), ev.clone()))
-      +                        .collect::<Vec<_>>();
-      +                    (ek.clone(), entries)
-      +                })
-      +                .collect()
-      +        };
-      +
-      +        // Rebuild children map with canonicalized children (no locks held on the current node).
-      +        let mut new_children_map = BTreeMap::new();
-      +        let mut children_changed = false;
-      +        for (edge_key, entries) in children_snapshot {
-      +            let mut new_dest_map = OrderedHashMap::new();
-      +            for (child_arc, edge_val) in entries {
-      +                let canonical_child_arc = Self::deduplicate_recursive_trie1(
-      +                    child_arc.clone(),
-      +                    canonical_nodes,
-      +                    visited,
-      +                    trie1_god,
-      +                );
-      +                if child_arc != canonical_child_arc {
-      +                    children_changed = true;
-      +                }
-      +                new_dest_map.insert(canonical_child_arc, edge_val);
-      +            }
-      +            if !new_dest_map.is_empty() {
-      +                new_children_map.insert(edge_key, new_dest_map);
-      +            }
-      +        }
-      +
-      +        // Write back updated children; avoid recompute_max_depth here to prevent lock re-entrancy.
-      +        if children_changed {
-      +            let mut g = node_arc.write(trie1_god).unwrap();
-      +            *g.children_mut() = new_children_map;
-      +            // Depths are recomputed globally after merging:
-      +            // Trie::recompute_all_max_depths(...) is invoked by the caller.
-      +        }
-      +
-      +        // Canonicalize the current node by content after potential child rewrites.
-      +        let canonical_arc = {
-      +            let g = node_arc.read(trie1_god).unwrap();
-      +            let node_content = (*g).clone();
-      +            canonical_nodes
-      +                .entry(node_content)
-      +                .or_insert_with(|| node_arc.clone())
-      +                .clone()
-      +        };
-      +
-      +        visited.insert(node_ptr, canonical_arc.clone());
-      +        canonical_arc
-           }
+                       new_dest_map = []
+                       for dest_idx, llm_bv_json in dest_map:
+                           llm_bv_bitset = bs_from_json(dumps(llm_bv_json))
+      @@ -155,18 +158,19 @@
+                       new_overall_state_parts[node.value.final_tokenizer_state].append(gss)
+                       continue
+       
+      -            for (gtid_opt, disallow_opt), dest_map in node.children:
+      +            for edge_key, dest_map in node.children:
+                       for dest_node_id, edge_bv in dest_map:
+                           if not edge_bv.contains(internal_id):
+                               continue
+                           
+                           processed_gss = gss
+      -                    if gtid_opt is not None:
+      -                        processed_gss = self._process_token(gss, gtid_opt)
+      -                    
+      -                    if disallow_opt and not processed_gss.is_empty():
+      -                        end_state, term_id = disallow_opt
+      -                        processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, term_id)
+      +                    if edge_key is not None:
+      +                        gtid, disallow_opt = edge_key
+      +                        processed_gss = self._process_token(gss, gtid)
+      +                    
+      +                        if disallow_opt is not None and not processed_gss.is_empty():
+      +                            end_state = disallow_opt
+      +                            term_id = gtid
+      +                            processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, term_id)
+       
+                           if not processed_gss.is_empty():
+                               q.append((dest_node_id, processed_gss))
+
       ```
     metadata:
   - user: |
@@ -12832,11 +13502,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/constraint.rs
-      Applying patch to 'src/constraint.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint.rs.
+      Identified target file: python/aug25/models/precompute3_model_pure_python_alt_commit.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python_alt_commit.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_alt_commit.py.
     metadata:
-  - user: 'Changes committed with message: "Fix: Prevent deadlock in deduplicate_recursive_trie1
-      by snapshotting children before recursion and removing in-place max depth recomputation"'
+  - user: 'Changes committed with message: "Update Precompute0Model to match Rust
+      Trie edge key change: (GTID, Option<TerminalID>)"'
     metadata:
 ...
