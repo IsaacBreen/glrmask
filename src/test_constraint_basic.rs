@@ -81,6 +81,24 @@ fn test_trivial() {
     println!("Initializing constraint state...");
     let mut state = constraint.init();
 
+
+
+    // TEMP
+    println!("Initializing constraint state...");
+    let mut state = constraint.init();
+    println!("Committing bytes for 'a' (LLMTokenID 0) with commit_bytes");
+    state.commit_bytes(b"a");
+    assert!(state.is_active());
+
+    // TEMP
+    println!("Initializing constraint state...");
+    let mut state = constraint.init();
+    println!("Committing bytes for 'a' (LLMTokenID 0) with commit");
+    state.commit(LLMTokenID(0));
+    assert!(state.is_active());
+
+
+
     // Initial mask should allow "a"
     let mask1 = state.get_mask();
     assert_eq!(mask1, HybridBitset::from_iter(vec![0]));
