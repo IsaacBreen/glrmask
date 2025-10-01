@@ -3368,6 +3368,9 @@ impl<'a> GrammarConstraintState<'a> {
         // 2) Prune disallowed terminals using the per-token precomputed terminal sets.
         self.transform_gss_stacks(|stack, memo| prune_disallowed_terminals(stack, terminals_map_by_state, memo));
 
+        // 3) Map tokenizer states
+        self.transform_gss_stacks(|stack, memo| map_allowed_terminals_tokenizer_states(stack, state_map, memo));
+
         // 3) Traverse the precomputed Trie 0 specialized to this token, stepping the GLR state.
         //    We only follow edges whose LLMTokenBV contains this token's internal ID.
         //    We also apply any per-edge "disallowed" terminal constraints as encoded in the edge key.
