@@ -2251,7 +2251,7 @@ impl<'r> Precomputer0<'r> {
 
                         for src_node_wrapper in &precompute_nodes {
                             if next_pos == segment_bytes.len() {
-                                println!("At end of segment after matching terminal {:?} at pos {}. Inserting end node edge with LLM token {:?}.", terminal_id, next_pos, child_vocab_node.token_id());
+                                println!("At end of segment after matching terminal {:?} at pos {}. Inserting end node edge with LLM token {:?} from node {:?}.", terminal_id, next_pos, child_vocab_node.token_id(), src_node_wrapper.as_arc());
                                 // Exact end-of-segment terminal match: finishing LLM token here goes to tokenizer initial state.
                                 let llm_token_id = child_vocab_node.token_id();
                                 let mut edge_bv = HybridBitset::zeros();
