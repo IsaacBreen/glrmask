@@ -734,6 +734,7 @@ fn test_a_plus_commit_equivalence() {
         token_name_map,
         max_original_llm_token_id,
     );
+    constraint.dump_precomputed0();
 
     // Scenario 1: Commit "a" three times
     let mut state1 = constraint.init();
