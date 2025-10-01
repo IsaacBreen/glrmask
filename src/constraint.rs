@@ -3920,28 +3920,11 @@ impl<'a> GrammarConstraintState<'a> {
 
                     let mut glr_s = glr_s0.clone();
 
-                    if let Some((gtid, disallowed_opt)) = edge_key {
-                        // Step the GLR state on this grammar token (if any).
+                    if let Some((gtid, _disallowed_opt)) = edge_key {
+                        // Step the GLR state on this grammar token. Do NOT prune here for the
+                        // boundary “disallow”; that constraint applies to the next token.
                         glr_s.process_token(*gtid);
-                        if !glr_s.is_ok() {
-                            continue;
-                        }
-
-                        // Apply "disallow" rule for immediate repetition at segment boundary if needed.
-                        if let Some(end_state) = disallowed_opt {
-                            let mut disallowed = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
-                            let mut tbv = TerminalBV::zeros();
-                            tbv.insert(gtid.0);
-                            disallowed.insert_l2_bitset(end_state.0, tbv);
-                            disallow_terminals_and_prune_arc(
-                                &mut glr_s.active_state.stack,
-                                &disallowed,
-                                &mut HashMap::new(),
-                            );
-                            if !glr_s.is_ok() {
-                                continue;
-                            }
-                        }
+                        if !glr_s.is_ok() { continue; }
                     }
 
                     out.push((*child_idx, glr_s));
