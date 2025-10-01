@@ -1230,13 +1230,7 @@ impl GrammarConstraint {
 
     #[inline]
     pub(crate) fn internal_id_to_original(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
-        // Correct reverse lookup: internal -> original may be many-to-one.
-        // Choose a representative original id (min) if multiple exist.
-        self.llm_vocab
-            .internal_to_original_
-            .get(&internal_id.0)
-            .and_then(|bv| bv.iter().next())
-            .map(LLMTokenID)
+        self.llm_vocab.original_to_internal_id_bimap.get(&internal_id.0).map(|original_val| LLMTokenID(*original_val))
     }
 
     #[allow(dead_code)]
@@ -3386,25 +3380,6 @@ impl<'a> GrammarConstraintState<'a> {
                 }
             },
         );
-
-        // Fallback: if no precomputed grammar path succeeded (e.g., GLR constraints
-        // or conservative pruning prevented reaching an end node), mirror commit_bytes'
-        // "carry-through" behavior by forwarding the (already filtered/mapped) GLR
-        // states to the final tokenizer states for this token. This uses only
-        // precomputed data (state_map_by_llm) and does not consult the tokenizer.
-        if new_overall_state.is_empty() {
-            for (start_tid, glr_state) in &self.state {
-                if let Some(&final_tid) = state_map.get(start_tid) {
-                    new_overall_state
-                        .entry(final_tid)
-                        .and_modify(|g| g.merge_with(glr_state.clone()))
-                        .or_insert(glr_state.clone());
-                }
-            }
-        }
-        // If still empty, we preserve the semantics that this token is not valid
-        // from any current configuration.
-        // Otherwise, we proceed with the standard post-processing below.
 
         // Replace with the newly computed per-final-tokenizer-state GLR states.
         self.state = new_overall_state;
