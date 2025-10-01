@@ -1072,7 +1072,8 @@ impl GrammarConstraint {
                 node0_guard.children().clone()
             };
 
-            for ((gtid_opt, _disallow_opt), dest_map0) in children0 {
+            for (edge_key, dest_map0) in children0 {
+                let gtid_opt = edge_key.map(|(gtid, _)| gtid);
                 for (child0_idx, edge_val) in dest_map0 {
                     let child0_guard = child0_idx.read(trie0_god).unwrap();
                     if child0_guard.value.final_tokenizer_state.is_some() {
@@ -2309,8 +2310,8 @@ impl<'r> Precomputer0<'r> {
             initial_nodes_and_values,
             |predecessors: &Option<BTreeSet<GrammarTokenID>>, edge_key: &Option<(GrammarTokenID, Option<TokenizerStateID>)>, _edge_bv, _child_node| {
                 match edge_key {
-                    Some(t) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
-                    Some(t) => Some(Some(BTreeSet::from([*t]))),
+                    Some((t, _)) if Some(*t) == ignore_terminal_id => Some(predecessors.clone()),
+                    Some((t, _)) => Some(Some(BTreeSet::from([*t]))),
                     None => Some(predecessors.clone()),
                 }
             },
