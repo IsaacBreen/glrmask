@@ -1102,6 +1102,9 @@ impl GrammarConstraint {
         for (node0_idx, node1_idx) in &node0_to_node1_map {
             let node0_guard = node0_idx.read(trie0_god).unwrap();
             if let Some(final_tokenizer_state) = node0_guard.value.final_tokenizer_state {
+                if final_tokenizer_state == tokenizer.initial_state_id() {
+                    continue;
+                }
                 // This was an end node in Trie0. In Trie1, it's no longer an end node itself.
                 // Instead, it will have outgoing edges for all possible subsequent terminals.
                 let mut node1_guard = node1_idx.write(&trie1_god).unwrap();
