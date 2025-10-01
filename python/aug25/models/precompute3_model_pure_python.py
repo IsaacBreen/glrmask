@@ -728,13 +728,13 @@ class Model(GraphProvider):
                 continue
 
             # Traverse edges and propagate masks
-            a_node = arena.get(node)
             edges = a_node.children if a_node else []
             # Process only one edge per pop; resume where we left off
             start_edge_idx = edge_cursor.get(node, 0)
             spawned_any = False
-            for edge_i in range(start_edge_idx, len(edges)):
-                (pop, llm_bv), dests = edges[edge_i]
+            for (pop, llm_bv_from_edge), dests in edges[start_edge_idx:]:
+                llm_bv = llm_bv_from_edge.difference(final_mask)
+                if llm_bv.is_empty():
 
                 popped_gss: GSS = gss_node.popn(pop)
                 if popped_gss.is_empty():
@@ -913,6 +913,7 @@ class Model(GraphProvider):
                     continue
 
                 peeked = pruned_gss.peek()
+                child_spawned = False
                 for dest_idx, state_bv in dests:
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
                     if not values_to_keep:
