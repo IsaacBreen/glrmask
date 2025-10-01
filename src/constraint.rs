@@ -2038,8 +2038,11 @@ impl<'r> Precomputer0<'r> {
                 PrecomputeNode0Index::new(trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents0::root(internal_max_llm_token)))),
             );
         }
+        crate::debug!(2, "Created trie0 roots for {} tokenizer states", tokenizer.iter_states().count());
 
+        crate::debug!(2, "Counting vocab nodes for progress bar...");
         let total_nodes = count_vocab_nodes(&vocab.root);
+        crate::debug!(2, "Counted {} vocab nodes", total_nodes);
         let pb = ProgressBar::new(total_nodes);
         pb.set_style(
             ProgressStyle::default_bar()
@@ -2054,6 +2057,7 @@ impl<'r> Precomputer0<'r> {
         let end_nodes = tokenizer.iter_states()
             .map(|tsid| (tsid, PrecomputeNode0Index::new(trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents0::leaf(tsid))))))
             .collect();
+        crate::debug!(2, "Created trie0 end nodes for {} tokenizer states", tokenizer.iter_states().count());
 
         Self {
             tokenizer,
