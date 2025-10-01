@@ -3276,8 +3276,133 @@ impl<'a> GrammarConstraintState<'a> {
         // 3) Map allowed terminals to final tokenizer states (for this token).
         self.transform_gss_stacks(|stack, memo| map_allowed_terminals_tokenizer_states(stack, state_map, memo));
 
-        // 4) [Special map stuff, the main bit. REPLACE THIS.]
-        // TODO
+        // 4) Traverse the precomputed Trie 0 specialized to this token, stepping the GLR state.
+        //    We only follow edges whose LLMTokenBV contains this token's internal ID.
+        //    We also apply any per-edge "disallowed" terminal constraints as encoded in the edge key.
+        //
+        //    We aggregate results per final tokenizer state (as provided by state_map), merging GLR states.
+        if self.state.is_empty() {
+            return;
+        }
+
+        // Seed the traversal with one entry per active tokenizer state.
+        // Value type (V) carried through the traversal is a per-final-tokenizer-state map of GLR states:
+        //   V == BTreeMap<TokenizerStateID, GLRParserState<'a>>
+        let mut initial_values_for_map: Vec<(PrecomputeNode0Index, BTreeMap<TokenizerStateID, GLRParserState<'a>>)> = Vec::new();
+        for (tokenizer_state_id, glr_state) in &self.state {
+            if let (Some(root_idx), Some(&final_tid)) = (
+                self.parent.precomputed0.get(tokenizer_state_id),
+                state_map.get(tokenizer_state_id),
+            ) {
+                let mut v = BTreeMap::new();
+                v.insert(final_tid, glr_state.clone());
+                initial_values_for_map.push((*root_idx, v));
+            }
+        }
+
+        if initial_values_for_map.is_empty() {
+            // Fallback: if something went wrong with precomputation seeding, fallback to commit_bytes.
+            if let Some(bytes) = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id) {
+                self.commit_bytes(bytes);
+                return;
+            }
+            return;
+        }
+
+        let internal_id_val = internal_id.0;
+        let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
+
+        Trie::special_map_grouped(
+            &self.parent.trie0_god,
+            initial_values_for_map,
+            // step: for a given edge key, propagate only along children whose edge BV contains the token.
+            |acc_map: &BTreeMap<TokenizerStateID, GLRParserState<'a>>,
+             (gtid_opt, disallowed_opt): &(Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>),
+             dest_map: &ordered_hash_map::OrderedHashMap<Trie2Index, LLMTokenBV>| {
+                let mut out = Vec::new();
+
+                for (child_idx, edge_bv) in dest_map.iter() {
+                    // Only propagate to children compatible with the chosen token.
+                    if !(edge_bv.is_all() || edge_bv.contains(internal_id_val)) {
+                        continue;
+                    }
+
+                    // Build the next aggregated value for this child.
+                    let mut child_v: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
+
+                    for (final_tid, glr_s0) in acc_map.iter() {
+                        let mut glr_s = glr_s0.clone();
+
+                        // Step the GLR state on this grammar token (if any).
+                        if let Some(gtid) = gtid_opt {
+                            glr_s.process_token(*gtid);
+                            if !glr_s.is_ok() {
+                                continue;
+                            }
+                        }
+
+                        // Apply "disallow" rule for immediate repetition at segment boundary if needed.
+                        if let Some((end_state, term_id)) = disallowed_opt {
+                            let mut disallowed = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
+                            let mut tbv = TerminalBV::zeros();
+                            tbv.insert(term_id.0);
+                            disallowed.insert_l2_bitset(end_state.0, tbv);
+                            disallow_terminals_and_prune_arc(
+                                &mut glr_s.active_state.stack,
+                                &disallowed,
+                                &mut HashMap::new(),
+                            );
+                            if !glr_s.is_ok() {
+                                continue;
+                            }
+                        }
+
+                        // Merge into the child's accumulator per final tokenizer state.
+                        child_v
+                            .entry(*final_tid)
+                            .and_modify(|g| g.merge_with(glr_s.clone()))
+                            .or_insert(glr_s);
+                    }
+
+                    if !child_v.is_empty() {
+                        out.push((*child_idx, child_v));
+                    }
+                }
+
+                out
+            },
+            // merge: merge per-final-tokenizer-state maps, merging GLR states per key.
+            |dst: &mut BTreeMap<TokenizerStateID, GLRParserState<'a>>,
+             src: BTreeMap<TokenizerStateID, GLRParserState<'a>>| {
+                for (tid, glr_s) in src {
+                    dst.entry(tid)
+                        .and_modify(|g| g.merge_with(glr_s.clone()))
+                        .or_insert(glr_s);
+                }
+            },
+            // process: if at end node, accumulate results to new_overall_state and stop; otherwise continue if any GLR state is alive.
+            |node, v: &mut BTreeMap<TokenizerStateID, GLRParserState<'a>>| {
+                // Drop dead GLR sub-states early to reduce fan-out.
+                v.retain(|_, g| g.is_ok());
+                if v.is_empty() {
+                    return false;
+                }
+                if node.value.end {
+                    for (tid, glr_s) in v.iter() {
+                        new_overall_state
+                            .entry(*tid)
+                            .and_modify(|g| g.merge_with(glr_s.clone()))
+                            .or_insert(glr_s.clone());
+                    }
+                    false
+                } else {
+                    true
+                }
+            },
+        );
+
+        // Replace with the newly computed per-final-tokenizer-state GLR states.
+        self.state = new_overall_state;
 
         // 5) Cleanup: reset llm tokens to ensure order invariance; fuse; filter dead states.
         self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
