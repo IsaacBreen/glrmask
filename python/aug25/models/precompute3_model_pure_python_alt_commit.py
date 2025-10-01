@@ -49,7 +49,6 @@ class Model(_Model):
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
-        raise Exception
         """
         Constructs the model by first loading the base model and then parsing
         the additional data structures required for this alternative commit strategy.
@@ -205,4 +204,4 @@ class Model(_Model):
         stats.stop('commit_precompute0')
 
 
-__all__ = ['Model']
+__all__ = ['Precompute0Model']
