@@ -74,7 +74,7 @@ fn test_trivial() {
         1, // max_original_llm_token_id
     );
     constraint.dump_precomputed0();
-    // constraint.dump_precomputed1();
+    constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
     constraint.dump_precomputed3();
 
