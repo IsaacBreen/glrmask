@@ -372,7 +372,7 @@ pub struct GrammarConstraint {
     pub(crate) token_name_map:   BiBTreeMap<Terminal, usize>,
     pub possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     pub state_map_by_llm: DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>,
-    pub terminal_map_by_llm: DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, BTreeSet<TerminalID>>>,
+    pub terminal_map_by_llm: DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TerminalBV>>,
     pub(crate) trie0_god: Trie0GodWrapper,
     pub(crate) trie1_god: Trie1GodWrapper,
     pub trie2_god: Trie2GodWrapper,
@@ -494,7 +494,7 @@ impl JSONConvertible for GrammarConstraint {
                     None => DedupValueMap::new(),
                 };
                 let terminal_map_by_llm = match obj.remove("terminal_map_by_llm") {
-                    Some(n) => DedupValueMap::<LLMTokenID, BTreeMap<TokenizerStateID, BTreeSet<TerminalID>>>::from_json(n)?,
+                    Some(n) => DedupValueMap::<LLMTokenID, BTreeMap<TokenizerStateID, TerminalBV>>::from_json(n)?,
                     None => DedupValueMap::new(),
                 };
                 // Stage vocabs (optional)
@@ -1186,8 +1186,8 @@ impl GrammarConstraint {
     /// into token -> state -> set(terminals).
     pub fn rearrange_possible_matches(
         pm: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-    ) -> DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, BTreeSet<TerminalID>>> {
-        let mut tmp: BTreeMap<LLMTokenID, BTreeMap<TokenizerStateID, BTreeSet<TerminalID>>> = BTreeMap::new();
+    ) -> DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TerminalBV>> {
+        let mut tmp: BTreeMap<LLMTokenID, BTreeMap<TokenizerStateID, TerminalBV>> = BTreeMap::new();
         for (sid, tmap) in pm {
             for (term, bv) in tmap {
                 if bv.is_all() {
@@ -1198,7 +1198,7 @@ impl GrammarConstraint {
                 for tok in bv.iter() {
                     let tok_id = LLMTokenID(tok);
                     let per_state = tmp.entry(tok_id).or_default();
-                    per_state.entry(*sid).or_default().insert(*term);
+                    per_state.entry(*sid).or_default().insert(term.0);
                 }
             }
         }
@@ -3237,7 +3237,7 @@ impl<'a> GrammarConstraintState<'a> {
             return;
         }
 
-        let terminals_map_by_state: BTreeMap<TokenizerStateID, BTreeSet<TerminalID>> = term_map_opt.unwrap();
+        let terminals_map_by_state: BTreeMap<TokenizerStateID, TerminalBV> = term_map_opt.unwrap();
         let state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = state_map_opt.unwrap();
 
         if self.state.is_empty() {
@@ -3255,12 +3255,8 @@ impl<'a> GrammarConstraintState<'a> {
         // 2) Build TerminalBV map limited to active tokenizer states.
         let mut terminals_bv_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
         for (sid, _glr) in &self.state {
-            if let Some(set) = terminals_map_by_state.get(sid) {
-                let mut bv = TerminalBV::zeros();
-                for t in set {
-                    bv.insert(t.0);
-                }
-                terminals_bv_map.insert(*sid, bv);
+            if let Some(bv) = terminals_map_by_state.get(sid) {
+                terminals_bv_map.insert(*sid, bv.clone());
             } else {
                 terminals_bv_map.insert(*sid, TerminalBV::zeros());
             }
