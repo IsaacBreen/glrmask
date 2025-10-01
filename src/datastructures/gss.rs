@@ -40,29 +40,9 @@ pub(crate)type StoredPrecomputeNode = PrecomputeNode3;
 pub(crate)type StoredTrieGod = Trie3God;
 pub(crate) type StoredTrieGodWrapper = Trie3GodWrapper;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PrecomputedNodeContents {
-    pub(crate) end: bool,
-    pub(crate) live_tokens: LLMTokenBV,
-}
-
-impl PrecomputedNodeContents {
-    pub(crate) fn root(internal_max_llm_token_id: usize) -> Self {
-        Self { end: false, live_tokens: LLMTokenBV::ones(internal_max_llm_token_id + 1) }
-    }
-
-    pub(crate) fn internal() -> Self {
-        Self { end: false, live_tokens: LLMTokenBV::zeros() }
-    }
-
-    pub(crate) fn leaf() -> Self {
-        Self { end: true, live_tokens: LLMTokenBV::zeros() }
-    }
-}
-
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, StateIDBV, Trie3God, Trie3GodWrapper};
+use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, Trie3GodWrapper};
 use crate::datastructures::trie::God;
 
 impl JSONConvertible for PrecomputedNodeContents {

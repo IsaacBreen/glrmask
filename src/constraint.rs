@@ -29,7 +29,7 @@ use crate::constraint_precompute2_utils;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::entry_api::EntryApi;
 use crate::datastructures::gss::Acc;
-use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig, LLMTokenBV, PrecomputedNodeContents, TerminalBV};
+use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig, LLMTokenBV, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -317,6 +317,29 @@ where
         Ok(Self { key_to_id, id_to_value, value_to_id, next_id })
     }
 }
+
+
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PrecomputedNodeContents {
+    pub(crate) end: bool,
+    pub(crate) live_tokens: LLMTokenBV,
+}
+
+impl PrecomputedNodeContents {
+    pub(crate) fn root(internal_max_llm_token_id: usize) -> Self {
+        Self { end: false, live_tokens: LLMTokenBV::ones(internal_max_llm_token_id + 1) }
+    }
+
+    pub(crate) fn internal() -> Self {
+        Self { end: false, live_tokens: LLMTokenBV::zeros() }
+    }
+
+    pub(crate) fn leaf() -> Self {
+        Self { end: true, live_tokens: LLMTokenBV::zeros() }
+    }
+}
+
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintConfig {
