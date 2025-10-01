@@ -3276,17 +3276,8 @@ impl<'a> GrammarConstraintState<'a> {
         // 3) Map allowed terminals to final tokenizer states (for this token).
         self.transform_gss_stacks(|stack, memo| map_allowed_terminals_tokenizer_states(stack, state_map, memo));
 
-        // 4) Move surviving GLR states under their final tokenizer states, dropping those without entries.
-        let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
-        for (start_sid, glr) in std::mem::take(&mut self.state) {
-            if let Some(final_sid) = state_map.get(&start_sid) {
-                new_overall_state
-                    .entry(*final_sid)
-                    .and_modify(|existing| existing.merge_with(glr.clone()))
-                    .or_insert(glr);
-            }
-        }
-        self.state = new_overall_state;
+        // 4) [Special map stuff, the main bit. REPLACE THIS.]
+        // TODO
 
         // 5) Cleanup: reset llm tokens to ensure order invariance; fuse; filter dead states.
         self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
