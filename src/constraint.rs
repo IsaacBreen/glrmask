@@ -3231,18 +3231,15 @@ impl<'a> GrammarConstraintState<'a> {
             return;
         };
 
-        let term_map_opt = self.parent.terminal_map_by_llm.get(&internal_id).cloned();
-        let state_map_opt = self.parent.state_map_by_llm.get(&internal_id).cloned();
-        if term_map_opt.is_none() || state_map_opt.is_none() {
+        let (Some(terminals_map_by_state), Some(state_map)) = (
+            self.parent.terminal_map_by_llm.get(&internal_id),
+            self.parent.state_map_by_llm.get(&internal_id),
+        ) else {
             if let Some(bytes) = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id) {
                 self.commit_bytes(bytes);
-                return;
             }
             return;
-        }
-
-        let terminals_map_by_state: BTreeMap<TokenizerStateID, TerminalBV> = term_map_opt.unwrap();
-        let state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = state_map_opt.unwrap();
+        };
 
         if self.state.is_empty() {
             return;
@@ -3256,33 +3253,23 @@ impl<'a> GrammarConstraintState<'a> {
             }
         }
 
-        // 2) Build TerminalBV map limited to active tokenizer states.
-        let mut terminals_bv_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
-        for (sid, _glr) in &self.state {
-            if let Some(bv) = terminals_map_by_state.get(sid) {
-                terminals_bv_map.insert(*sid, bv.clone());
-            } else {
-                terminals_bv_map.insert(*sid, TerminalBV::zeros());
-            }
-        }
-
-        // 3) Prune disallowed terminals using the per-token precomputed terminal sets.
+        // 2) Prune disallowed terminals using the per-token precomputed terminal sets.
         {
             let mut memo = HashMap::new();
             for s in self.state.values_mut() {
-                prune_disallowed_terminals(&mut s.active_state.stack, &terminals_bv_map, &mut memo);
+                prune_disallowed_terminals(&mut s.active_state.stack, terminals_map_by_state, &mut memo);
             }
         }
 
-        // 4) Map allowed terminals to final tokenizer states (for this token).
+        // 3) Map allowed terminals to final tokenizer states (for this token).
         {
             let mut memo = HashMap::new();
             for s in self.state.values_mut() {
-                map_allowed_terminals_tokenizer_states(&mut s.active_state.stack, &state_map, &mut memo);
+                map_allowed_terminals_tokenizer_states(&mut s.active_state.stack, state_map, &mut memo);
             }
         }
 
-        // 5) Move surviving GLR states under their final tokenizer states, dropping those without entries.
+        // 4) Move surviving GLR states under their final tokenizer states, dropping those without entries.
         let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
         for (start_sid, glr) in std::mem::take(&mut self.state) {
             if let Some(final_sid) = state_map.get(&start_sid) {
@@ -3294,7 +3281,7 @@ impl<'a> GrammarConstraintState<'a> {
         }
         self.state = new_overall_state;
 
-        // 6) Cleanup: reset llm tokens to ensure order invariance; fuse; filter dead states.
+        // 5) Cleanup: reset llm tokens to ensure order invariance; fuse; filter dead states.
         {
             let mut memo = HashMap::new();
             for s in self.state.values_mut() {
@@ -3309,7 +3296,7 @@ impl<'a> GrammarConstraintState<'a> {
         }
         self.state.retain(|_, glr| glr.is_ok());
 
-        // 7) Post-commit allowance check (same logic as commit_bytes).
+        // 6) Post-commit allowance check (same logic as commit_bytes).
         match self.parent.post_commit_allow_check_mode {
             TerminalAllowanceCheckMode::None => {}
             TerminalAllowanceCheckMode::ImmediateSets => {
