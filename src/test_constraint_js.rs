@@ -597,7 +597,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         LLMTokenID(dummy_eof_placeholder),
         max_original_llm_token_id_val
     );
-    // grammar_constraint.dump_precomputed();
+    // grammar_constraint.dump_precomputed1();
     // grammar_constraint.dump_precomputed2();
     grammar_constraint.dump_precomputed3_stats();
     println!("GrammarConstraint constructed successfully.");
@@ -811,7 +811,7 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
     );
 
     println!("\n--- Created GrammarConstraint ---");
-    constraint.dump_precomputed();
+    constraint.dump_precomputed1();
 
     println!("\n--- Running Constraint with Minimized Grammar (Step-by-Step) ---");
 
@@ -914,7 +914,7 @@ fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std:
     );
 
     println!("\n--- Created GrammarConstraint ---");
-    constraint.dump_precomputed();
+    constraint.dump_precomputed1();
 
     println!("\n--- Running Constraint with Loaded Grammar (Step-by-Step) ---");
 
@@ -1015,7 +1015,7 @@ fn test_template_from_minimized_ebnf_for_constraint_28_jul_2025() -> Result<(), 
     );
 
     println!("\n--- Created GrammarConstraint ---");
-    constraint.dump_precomputed();
+    constraint.dump_precomputed1();
 
     println!("\n--- Running Constraint with Loaded Grammar (Step-by-Step) ---");
 

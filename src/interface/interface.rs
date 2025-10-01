@@ -1327,7 +1327,7 @@ mod tests {
     //     let eof_llm_token_id = llm_tokens.len();
     //     let max_llm_token_id = llm_tokens.len();
     //     let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), LLMTokenID(eof_llm_token_id), max_llm_token_id);
-    //     grammar_constraint.dump_precomputed();
+    //     grammar_constraint.dump_precomputed1();
     //     let mut grammar_constraint_state = grammar_constraint.init();
     //
     //     macro_rules! llm_token_vec {
@@ -1367,7 +1367,7 @@ mod tests {
     //     let eof_llm_token_id = llm_tokens.len();
     //     let max_llm_token_id = llm_tokens.len();
     //     let grammar_constraint = GrammarConstraint::from_compiled_grammar(compiled_grammar, llm_token_map.clone(), LLMTokenID(eof_llm_token_id), max_llm_token_id);
-    //     grammar_constraint.dump_precomputed();
+    //     grammar_constraint.dump_precomputed1();
     //     let mut grammar_constraint_state = grammar_constraint.init();
     //
     //     macro_rules! llm_token_vec {

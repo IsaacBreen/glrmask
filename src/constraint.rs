@@ -369,7 +369,7 @@ pub struct GrammarConstraint {
     pub tokenizer:        Regex,
     pub parser:           GLRParser,
     pub(crate) precomputed0:     Precomputed0,
-    pub(crate) precomputed:      Precomputed,
+    pub(crate) precomputed1:      Precomputed,
     pub precomputed2:     Precomputed2,
     pub precomputed3:     Precomputed3,
     pub llm_vocab:        Arc<LLMVocab>,
@@ -397,8 +397,8 @@ impl GrammarConstraint {
             assert_eq!(sid1, sid2);
             assert!(PrecomputeNode0::are_graphs_equal(&self.trie0_god, *arc1, &other.trie0_god, *arc2));
         }
-        assert_eq!(self.precomputed.len(), other.precomputed.len());
-        for ((sid1, arc1), (sid2, arc2)) in self.precomputed.iter().zip(other.precomputed.iter()) {
+        assert_eq!(self.precomputed1.len(), other.precomputed1.len());
+        for ((sid1, arc1), (sid2, arc2)) in self.precomputed1.iter().zip(other.precomputed1.iter()) {
             assert_eq!(sid1, sid2);
             assert!(PrecomputeNode1::are_graphs_equal(&self.trie1_god, *arc1, &other.trie1_god, *arc2));
         }
@@ -430,7 +430,7 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
         obj.insert("parser".to_string(), self.parser.to_json());
         obj.insert("precomputed0".to_string(), self.precomputed0.to_json());
-        obj.insert("precomputed".to_string(), self.precomputed.to_json());
+        obj.insert("precomputed1".to_string(), self.precomputed1.to_json());
         obj.insert("precomputed2".to_string(), self.precomputed2.to_json());
         obj.insert("precomputed3".to_string(), self.precomputed3.to_json());
         obj.insert("llm_token_map".to_string(), self.llm_vocab.llm_token_map.to_json());
@@ -462,7 +462,7 @@ impl JSONConvertible for GrammarConstraint {
                                 .and_then(GLRParser::from_json)?;
                 let precomputed0 = obj.remove("precomputed0").ok_or_else(|| "Missing field precomputed0".to_string())
                                      .and_then(|n| Precomputed0::from_json(n))?;
-                let precomputed = obj.remove("precomputed").ok_or_else(|| "Missing field precomputed".to_string())
+                let precomputed1 = obj.remove("precomputed1").ok_or_else(|| "Missing field precomputed1".to_string())
                                      .and_then(|n| Precomputed::from_json(n))?;
                 let precomputed2 = obj.remove("precomputed2").ok_or_else(|| "Missing field precomputed2".to_string())
                                      .and_then(|n| Precomputed2::from_json(n))?;
@@ -535,7 +535,7 @@ impl JSONConvertible for GrammarConstraint {
                     tokenizer,
                     parser,
                     precomputed0,
-                    precomputed,
+                    precomputed1,
                     precomputed2,
                     precomputed3,
                     llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id, original_to_internal_id_bimap, internal_to_original_: global_ito, internal_max_llm_token }),
@@ -747,7 +747,7 @@ impl GrammarConstraint {
                 tokenizer,
                 parser,
                 precomputed0: BTreeMap::new(),
-                precomputed: BTreeMap::new(),
+                precomputed1: BTreeMap::new(),
                 precomputed2: BTreeMap::new(),
                 precomputed3: BTreeMap::new(),
                 llm_vocab,
@@ -778,26 +778,26 @@ impl GrammarConstraint {
             &mut computed_possible_matches,
         );
 
-        let (precomputed, trie1_god) = Self::precompute1(
+        let (precomputed1, trie1_god) = Self::precompute1(
             &precomputed0,
             &trie0_god,
         );
 
         if config.optimize_trie1_merge_equivalent_llm_tokens {
-            constraint_precompute1_utils::merge_equivalent_llm_tokens_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
+            constraint_precompute1_utils::merge_equivalent_llm_tokens_trie1(&precomputed1, &trie1_god, &mut precompute_vocab);
         }
         if config.optimize_trie1_reorder_llm_tokens {
-            constraint_precompute1_utils::reorder_llm_tokens_for_range_minimization_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
+            constraint_precompute1_utils::reorder_llm_tokens_for_range_minimization_trie1(&precomputed1, &trie1_god, &mut precompute_vocab);
         }
 
         // Rerun token optimizations at the end.
         if config.optimize_trie1_merge_equivalent_llm_tokens {
-            constraint_precompute1_utils::merge_equivalent_llm_tokens_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
+            constraint_precompute1_utils::merge_equivalent_llm_tokens_trie1(&precomputed1, &trie1_god, &mut precompute_vocab);
         }
         // Always run normalization pass after potential token changes.
-        constraint_precompute1_utils::optimize_state_masks_and_edges_trie1(&precomputed, &trie1_god);
+        constraint_precompute1_utils::optimize_state_masks_and_edges_trie1(&precomputed1, &trie1_god);
         if config.optimize_trie1_reorder_llm_tokens {
-            constraint_precompute1_utils::reorder_llm_tokens_for_range_minimization_trie1(&precomputed, &trie1_god, &mut precompute_vocab);
+            constraint_precompute1_utils::reorder_llm_tokens_for_range_minimization_trie1(&precomputed1, &trie1_god, &mut precompute_vocab);
         }
 
         // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
@@ -805,7 +805,7 @@ impl GrammarConstraint {
         precompute3_vocab = precompute_vocab.clone();
 
         let (precomputed2, trie2_god) = Self::precompute2(
-            &precomputed,
+            &precomputed1,
             &trie1_god,
             &tokenizer,
             Some(&parser),
@@ -831,7 +831,7 @@ impl GrammarConstraint {
         // );
 
         let (precomputed3, trie3_god) = Self::precompute3(
-            &precomputed,
+            &precomputed1,
             &trie1_god,
             &tokenizer, Some(&parser), Some(llm_vocab.clone()), &internal_llm_token_map_for_precompute, &token_name_map, internal_max_llm_token, &terminal_follow_map, parser.ignore_terminal_id, &mut computed_possible_matches,
             config,
@@ -853,7 +853,7 @@ impl GrammarConstraint {
             tokenizer,
             parser,
             precomputed0,
-            precomputed,
+            precomputed1,
             precomputed2,
             precomputed3,
             llm_vocab,
@@ -978,7 +978,7 @@ impl GrammarConstraint {
 
     /// Build the "Trie 2" precomputation.
     pub fn precompute2(
-        precomputed: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+        precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
         _trie1_god: &Trie1GodWrapper,
         _tokenizer: &Regex,
         _parser: Option<&GLRParser>,
@@ -995,7 +995,7 @@ impl GrammarConstraint {
     }
 
     pub fn precompute3(
-        precomputed: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+        precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
         trie1_god: &Trie1GodWrapper,
         tokenizer: &Regex,
         parser: Option<&GLRParser>,
@@ -1024,9 +1024,9 @@ impl GrammarConstraint {
         let mut initial_values_for_map: Vec<(PrecomputeNode1Index, GLRParserState)> = Vec::new();
 
         #[cfg(not(rustrover))]
-        let it = tqdm!(precomputed.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=false);
+        let it = tqdm!(precomputed1.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=false);
         #[cfg(rustrover)]
-        let it = precomputed.iter();
+        let it = precomputed1.iter();
         for (tokenizer_state_id, trie1_root) in it {
             let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
             precomputed3.insert(*tokenizer_state_id, trie3_root.clone());
@@ -2510,7 +2510,7 @@ impl<'a> GrammarConstraintState<'a> {
             if glr_state.active_state.stack.is_empty() {
                 continue;
             }
-            if let Some(precomputed_trie_root_arc) = self.parent.precomputed.get(tokenizer_state_id) {
+            if let Some(precomputed_trie_root_arc) = self.parent.precomputed1.get(tokenizer_state_id) {
                 let mut glr_state = glr_state.clone();
                 prune_llm_tokens_by_disallowed_terminals(
                     &mut glr_state.active_state.stack,

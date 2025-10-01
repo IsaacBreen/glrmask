@@ -696,7 +696,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
         LLMTokenID(dummy_eof_placeholder),
         max_original_llm_token_id_val
     );
-    grammar_constraint.dump_precomputed();
+    grammar_constraint.dump_precomputed1();
     println!("GrammarConstraint constructed successfully.");
     println!("GrammarConstraint original to internal ID map:");
     let mut temp = grammar_constraint.llm_vocab.original_to_internal_id_bimap.iter().collect::<Vec<_>>();
@@ -752,7 +752,7 @@ fn test_constraint_from_serialized_compiled_grammar_and_gpt2_vocab() -> Result<(
     //     max_original_llm_token_id_val
     // ));
 
-    // grammar_constraint.dump_precomputed(); // Temporarily commented out due to potential verbosity
+    // grammar_constraint.dump_precomputed1(); // Temporarily commented out due to potential verbosity
 
     // --- TOKENIZATION AND SEQUENCE TESTING ---
 
