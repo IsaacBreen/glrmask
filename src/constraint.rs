@@ -4102,10 +4102,9 @@ impl<'a> GrammarConstraintState<'a> {
 
         // TODO: this shouldn't be necessary, but due to some order-dependent LLM token BV weirdness in GSS, it is necessary to ensure commit order invariance.
         self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
-
+        self.map_gss_stacks(|stack, memo| fuse_predecessors_recursive(stack, 1, memo));
         self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
 
-        self.map_gss_stacks(|stack, memo| fuse_predecessors_recursive(stack, 1, memo));
 
         // Post-commit allowance check: ensure each surviving state allows at least one
         // token the tokenizer can produce from its current tokenizer state.
