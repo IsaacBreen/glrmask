@@ -2042,7 +2042,7 @@ impl<'r> Precomputer0<'r> {
         let mut incoming_map: HashMap<
             PrecomputeNode0Index, // Dst node ptr
             HashMap<
-                GrammarTokenID, // Edge key 'gtid'
+                (Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>), // Full edge key
                 Vec<(PrecomputeNode0Index, LLMTokenBV)>, // List of (Src node ptr, edge bv)
             >,
         > = HashMap::new();
@@ -2050,12 +2050,12 @@ impl<'r> Precomputer0<'r> {
         for src_arc in &all_nodes {
             let src_ptr = src_arc;
             let guard = src_arc.read(&self.trie0_god).expect("poison");
-            for (ek_opt, dest_map) in guard.children() {
-                if let Some(gtid) = ek_opt.0 { // Only consider non-None edges
+            for (edge_key, dest_map) in guard.children() {
+                if edge_key.0.is_some() { // Only consider non-None edges
                     for (dest_wrapper, bv) in dest_map {
                         let dest_arc = dest_wrapper.as_arc();
                         let dest_ptr = dest_arc;
-                        incoming_map.entry(*dest_ptr).or_default().entry(gtid).or_default().push((*src_ptr, bv.clone()));
+                        incoming_map.entry(*dest_ptr).or_default().entry(edge_key.clone()).or_default().push((*src_ptr, bv.clone()));
                     }
                 }
             }
@@ -2063,7 +2063,7 @@ impl<'r> Precomputer0<'r> {
 
         // 3. Iterate through the map and find factoring opportunities.
         for (dest_ptr, edges_by_key) in incoming_map {
-            for (gtid, sources) in edges_by_key {
+            for (edge_key, sources) in edges_by_key {
                 if sources.len() >= MIN_INCOMING_EDGES_FOR_FACTORING {
                     // Opportunity found!
                     let dest_arc = arc_map.get(&dest_ptr).unwrap().clone();
@@ -2071,7 +2071,7 @@ impl<'r> Precomputer0<'r> {
                     // a. Create a new intermediate node `I`.
                     let intermediate_node = PrecomputeNode0Index::new(self.trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents0::internal())));
 
-                    // b. Add edge I --(gtid)--> D
+                    // b. Add edge I --(edge_key)--> D
                     let mut union_bv = LLMTokenBV::zeros();
                     for (_, bv) in &sources {
                         union_bv |= bv;
@@ -2082,7 +2082,7 @@ impl<'r> Precomputer0<'r> {
                         let mut edge_val_opt = Some(union_bv.clone());
                         // No cycle possible since I is new. Use unchecked for speed.
                         // Depth will be propagated to D.
-                        intermediate_guard.try_insert_unchecked((Some(gtid), None), &mut edge_val_opt, dest_arc.clone());
+                        intermediate_guard.try_insert_unchecked(edge_key.clone(), &mut edge_val_opt, dest_arc.clone());
                         intermediate_guard.value.live_tokens |= &union_bv; // Update live_tokens for intermediate node
                     }
 
@@ -2091,11 +2091,11 @@ impl<'r> Precomputer0<'r> {
                         let src_arc = arc_map.get(src_ptr).unwrap();
                         let mut src_guard = src_arc.write(&self.trie0_god).expect("poison");
 
-                        // Remove S --(gtid)--> D
-                        if let Some(dest_map_for_gtid) = src_guard.children_mut().get_mut(&(Some(gtid), None)) {
-                            dest_map_for_gtid.remove(&dest_arc.clone());
-                            if dest_map_for_gtid.is_empty() {
-                                src_guard.children_mut().remove(&(Some(gtid), None));
+                        // Remove S --(edge_key)--> D
+                        if let Some(dest_map_for_key) = src_guard.children_mut().get_mut(&edge_key) {
+                            dest_map_for_key.remove(&dest_arc.clone());
+                            if dest_map_for_key.is_empty() {
+                                src_guard.children_mut().remove(&edge_key);
                             }
                         }
 
