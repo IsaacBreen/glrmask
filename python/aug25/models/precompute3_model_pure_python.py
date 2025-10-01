@@ -410,10 +410,7 @@ class Model(GraphProvider):
         return self.roots_map[int(state_id)]
 
     def is_end(self, node: NodeID) -> bool:
-        a_node = self.arena.get(node)
-        if not a_node:
-            return False
-        return a_node.clean_end
+        return self.arena[node].clean_end
 
     def iter_edges(self, node: NodeID, token: int):
         """
