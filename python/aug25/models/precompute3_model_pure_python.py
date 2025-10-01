@@ -645,12 +645,10 @@ class Model(GraphProvider):
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
 
-        Changes for get_mask_only:
-        - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-          the forbidden terminals -> forbidden LLM tokens and taking the complement.
-        - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-        - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-        - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+        This version uses an "edge cursor" to process only one edge per node visit,
+        re-enqueuing the node to process subsequent edges later. This prioritizes
+        exploring deeper into the trie along what seems to be the most promising
+        path (as determined by the max_depth heuristic).
         """
         state_map: Dict[int, GSS] = self.state
 
@@ -806,12 +804,9 @@ class Model(GraphProvider):
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
 
-        Changes for get_mask_only:
-        - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-          the forbidden terminals -> forbidden LLM tokens and taking the complement.
-        - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-        - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-        - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+        This version processes all edges of a node when it is visited. It includes an
+        optimization to prune the token set of each edge against the `final_mask` of
+        tokens that have already been accepted by reaching an end node.
         """
         state_map: Dict[int, GSS] = self.state
 
@@ -835,7 +830,7 @@ class Model(GraphProvider):
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
             # Compute allowed LLM tokens from disallowed terminals for this accumulator
-            disallowed_llm_mask = RangeSet.empty()
+            disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
             disallowed_map = acc.terminals_union
 
             for tsid, disallowed_terminals in disallowed_map.items():
@@ -844,9 +839,7 @@ class Model(GraphProvider):
                 terminals_to_llm = pmc[tsid]
                 for terminal_id in disallowed_terminals.iter_indices():
                     if terminal_id in terminals_to_llm:
-                        disallowed_llm_mask = disallowed_llm_mask.union(
-                            terminals_to_llm[terminal_id]
-                        )
+                        disallowed_llm_mask |= terminals_to_llm[terminal_id]
 
             allowed_mask = all_ones.difference(disallowed_llm_mask)
 
