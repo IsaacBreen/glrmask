@@ -667,7 +667,7 @@ class Model(GraphProvider):
         values: Dict[NodeID, GSS] = {}
         depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
         enqueued_nodes: Set[NodeID] = set()
-        edge_cursor: Dict[NodeID, int] = {}  # Next edge index to process per node
+        edge_cursor: Dict[NodeID, Tuple[int, int]] = {}  # node -> (next_edge_idx, gss_id)
 
         hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
@@ -778,6 +778,7 @@ class Model(GraphProvider):
             stats.inc('get_mask.traversal.nodes_processed')
             visited_nodes.add(node)
             gss_node: GSS = values.pop(node)
+            gss_id = id(gss_node)
             enqueued_nodes.remove(node)
             stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
 
@@ -805,7 +806,8 @@ class Model(GraphProvider):
             stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
             stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
             # Process only one edge per pop; resume where we left off
-            start_edge_idx = edge_cursor.get(node, 0)
+            saved_cursor = edge_cursor.get(node)
+            start_edge_idx = saved_cursor[0] if saved_cursor and saved_cursor[1] == gss_id else 0
             spawned_any = False
             for edge_i in range(start_edge_idx, len(edges)):
                 (pop, llm_bv), dests = edges[edge_i]
@@ -880,8 +882,10 @@ class Model(GraphProvider):
                 if child_spawned:
                     spawned_any = True
                     # Save progress and re-enqueue this node to process the next edge later
-                    edge_cursor[node] = edge_i + 1
-                    values[node] = gss_node
+                    # Merge into any existing value (e.g., from self-loops) to avoid clobbering new contributions.
+                    merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
+                    values[node] = merged_for_requeue
+                    edge_cursor[node] = (edge_i + 1, id(merged_for_requeue))
                     enqueue(max_depth[node], node)
                     break
 
