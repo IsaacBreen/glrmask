@@ -3979,49 +3979,18 @@ impl<'a> GrammarConstraintState<'a> {
         self.map_gss_stacks(|stack, memo| fuse_predecessors_recursive(stack, 1, memo));
         self.state.retain(|_, glr| glr.is_ok());
 
-        // 6) Post-commit allowance check (same logic as commit_bytes).
-        match self.parent.post_commit_allow_check_mode {
-            TerminalAllowanceCheckMode::None => {}
-            TerminalAllowanceCheckMode::ImmediateSets => {
-                self.state.retain(|tokenizer_state_id, glr_state| {
-                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-                    if accessible.len() >= self.parent.parser.terminal_map.len() {
-                        return true;
-                    }
-                    let mut union = glr_state.immediate_shift_terminals();
-                    union.extend(glr_state.immediate_reduce_terminals());
-                    !union.is_disjoint(&accessible)
-                });
-            }
-            TerminalAllowanceCheckMode::ImmediateProbe => {
-                self.state.retain(|tokenizer_state_id, glr_state| {
-                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-                    if accessible.len() >= self.parent.parser.terminal_map.len() {
-                        return true;
-                    }
-                    for tid in &accessible {
-                        if glr_state.has_immediate_action_for_terminal(*tid).unwrap_or(false) {
-                            return true;
-                        }
-                    }
-                    false
-                });
-            }
-            TerminalAllowanceCheckMode::StepProbe => {
-                self.state.retain(|tokenizer_state_id, glr_state| {
-                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-                    if accessible.len() >= self.parent.parser.terminal_map.len() {
-                        return true;
-                    }
-                    for tid in &accessible {
-                        if glr_state.allows_terminal(*tid) {
-                            return true;
-                        }
-                    }
-                    false
-                });
-            }
-        }
+        // self.state.retain(|tokenizer_state_id, glr_state| {
+        //     let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
+        //     if accessible.len() >= self.parent.parser.terminal_map.len() {
+        //         return true;
+        //     }
+        //     for tid in &accessible {
+        //         if glr_state.allows_terminal(*tid) {
+        //             return true;
+        //         }
+        //     }
+        //     false
+        // });
     }
 
     #[time_it]
