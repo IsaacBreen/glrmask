@@ -555,6 +555,7 @@ fn test_aborted_tokenizer_restart_equivalence() {
         token_name_map_for_constraint,
         max_original_llm_token_id,
     );
+    constraint.dump_precomputed0();
 
     // Scenario 1: Commit "#", then "a"
     let mut constraint_state1 = constraint.init();
