@@ -1536,40 +1536,65 @@ impl GrammarConstraint {
             return canonical_arc.clone();
         }
 
+        // Mark as visited early to break potential cycles.
         visited.insert(node_ptr, node_arc.clone());
 
+        // Snapshot children under a short-lived read lock, then drop it before recursing.
+        let children_snapshot: Vec<(
+            Option<GrammarTokenID>,
+            Vec<(PrecomputeNode1Index, LLMTokenBV)>,
+        )> = {
+            let g = node_arc.read(trie1_god).unwrap();
+            g.children()
+                .iter()
+                .map(|(ek, dest_map)| {
+                    let entries = dest_map
+                        .iter()
+                        .map(|(node_ptr, ev)| (node_ptr.clone(), ev.clone()))
+                        .collect::<Vec<_>>();
+                    (ek.clone(), entries)
+                })
+                .collect()
+        };
+
+        // Rebuild children map with canonicalized children (no locks held on the current node).
         let mut new_children_map = BTreeMap::new();
         let mut children_changed = false;
-
-        {
-            let node_guard = node_arc.read(trie1_god).unwrap();
-            for (edge_key, dest_map) in node_guard.children() {
-                let mut new_dest_map = OrderedHashMap::new();
-                for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                    let child_arc = node_ptr_wrapper.as_arc().clone();
-                    let canonical_child_arc = Self::deduplicate_recursive_trie1(child_arc.clone(), canonical_nodes, visited, trie1_god);
-                    if &child_arc != &canonical_child_arc {
-                        children_changed = true;
-                    }
-                    let new_node_ptr_wrapper = canonical_child_arc;
-                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
+        for (edge_key, entries) in children_snapshot {
+            let mut new_dest_map = OrderedHashMap::new();
+            for (child_arc, edge_val) in entries {
+                let canonical_child_arc = Self::deduplicate_recursive_trie1(
+                    child_arc.clone(),
+                    canonical_nodes,
+                    visited,
+                    trie1_god,
+                );
+                if child_arc != canonical_child_arc {
+                    children_changed = true;
                 }
-                if !new_dest_map.is_empty() {
-                    new_children_map.insert(edge_key.clone(), new_dest_map);
-                }
+                new_dest_map.insert(canonical_child_arc, edge_val);
+            }
+            if !new_dest_map.is_empty() {
+                new_children_map.insert(edge_key, new_dest_map);
             }
         }
 
+        // Write back updated children; avoid recompute_max_depth here to prevent lock re-entrancy.
         if children_changed {
-            let mut node_guard = node_arc.write(trie1_god).unwrap();
-            *node_guard.children_mut() = new_children_map;
-            node_guard.recompute_max_depth(trie1_god);
+            let mut g = node_arc.write(trie1_god).unwrap();
+            *g.children_mut() = new_children_map;
+            // Depths are recomputed globally after merging:
+            // Trie::recompute_all_max_depths(...) is invoked by the caller.
         }
 
+        // Canonicalize the current node by content after potential child rewrites.
         let canonical_arc = {
-            let node_guard = node_arc.read(trie1_god).unwrap();
-            let node_content = (*node_guard).clone();
-            canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
+            let g = node_arc.read(trie1_god).unwrap();
+            let node_content = (*g).clone();
+            canonical_nodes
+                .entry(node_content)
+                .or_insert_with(|| node_arc.clone())
+                .clone()
         };
 
         visited.insert(node_ptr, canonical_arc.clone());
