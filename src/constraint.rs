@@ -3303,7 +3303,7 @@ impl<'a> GrammarConstraintState<'a> {
 
                 for (child_idx, edge_bv) in dest_map.iter() {
                     // Only propagate to children compatible with the chosen token.
-                    if !(edge_bv.is_all() || edge_bv.contains(internal_id_val)) {
+                    if !edge_bv.contains(internal_id_val) {
                         continue;
                     }
 
