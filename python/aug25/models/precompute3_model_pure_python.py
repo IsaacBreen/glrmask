@@ -713,7 +713,6 @@ class Model(GraphProvider):
         # Main loop
         while depth_heap:
             neg_depth, node = hpop(depth_heap)
-            depth = -neg_depth
             gss_node: GSS = values.pop(node)
             enqueued_nodes.remove(node)
 
@@ -739,8 +738,8 @@ class Model(GraphProvider):
             for edge_i in range(start_edge_idx, len(edges)):
                 (pop, llm_bv), dests = edges[edge_i]
 
-                popped: GSS = gss_node.popn(pop)
-                if popped.is_empty():
+                popped_gss: GSS = gss_node.popn(pop)
+                if popped_gss.is_empty():
                     continue
 
                 @_acc_memoize(use_value_cache=False)
@@ -750,22 +749,22 @@ class Model(GraphProvider):
                         return None
                     return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
 
-                popped = popped.apply_and_prune(intersect_and_prune)
+                pruned_gss = popped_gss.apply_and_prune(intersect_and_prune)
 
-                if popped.is_empty():
+                if pruned_gss.is_empty():
                     continue
 
-                if popped.reduce_acc().is_empty():
+                if pruned_gss.reduce_acc().is_empty():
                     continue
 
-                peeked = popped.peek()
+                peeked = pruned_gss.peek()
                 child_spawned = False
                 for dest_idx, state_bv in dests:
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
                     if not values_to_keep:
                         continue
 
-                    child_gss = popped.isolate_many(values_to_keep)
+                    child_gss = pruned_gss.isolate_many(values_to_keep)
 
                     if child_gss.is_empty():
                         continue
@@ -803,7 +802,7 @@ class Model(GraphProvider):
             if i in self.internal_to_original_map:
                 original_indices |= self.internal_to_original_map[i]
         return original_indices
-    def get_mask2(self) -> RangeSet:
+    def get_mask2(self) -> LLMTokenSet:
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
 
@@ -816,13 +815,13 @@ class Model(GraphProvider):
         """
         state_map: Dict[int, GSS] = self.state
 
-        all_ones: RangeSet = self.all_internal_llm_tokens_bitset
-        final_mask: RangeSet = RangeSet.empty()
+        all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
+        final_mask: LLMTokenSet = RangeSet.empty()
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
         values: Dict[NodeID, GSS] = {}
         depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
-        enqueued_nodes: Set = set()
+        enqueued_nodes: Set[NodeID] = set()
 
         hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
@@ -833,6 +832,7 @@ class Model(GraphProvider):
         max_state: int = self.tokenizer_max_state
 
         # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+        @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
             # Compute allowed LLM tokens from disallowed terminals for this accumulator
             disallowed_llm_mask = RangeSet.empty()
@@ -842,7 +842,7 @@ class Model(GraphProvider):
                 if tsid > max_state or tsid not in pmc:
                     continue
                 terminals_to_llm = pmc[tsid]
-                for terminal_id in disallowed_terminals.to_indices():
+                for terminal_id in disallowed_terminals.iter_indices():
                     if terminal_id in terminals_to_llm:
                         disallowed_llm_mask = disallowed_llm_mask.union(
                             terminals_to_llm[terminal_id]
@@ -855,9 +855,10 @@ class Model(GraphProvider):
                 llm_mask=allowed_mask,
             )
 
+        cache = {}
         for sid, gss in state_map.items():
             r: NodeID = roots_map[int(sid)]
-            gss_initialized: GSS = gss.apply(initialize_acc)
+            gss_initialized: GSS = gss.apply(initialize_acc, cache)
             if r in values:
                 values[r] = values[r].merge(gss_initialized)
             else:
@@ -878,70 +879,52 @@ class Model(GraphProvider):
             if is_end(node):
                 reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                 if reduced_acc:
-                    final_mask = final_mask.union(reduced_acc.llm_mask)
+                    final_mask |= reduced_acc.llm_mask
 
             # Zombie traversal avoidance
-            node_llm_bv_union = self.arena[node].llm_bv_union
-            potential_new_tokens = node_llm_bv_union.difference(final_mask)
-            if potential_new_tokens.is_empty():
+            a_node = arena.get(node)
+            node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
+            if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask):
                 continue
 
-            gss_mask_acc = gss_node.reduce_acc()
-            if gss_mask_acc:
-                gss_potential_overlap = gss_mask_acc.llm_mask.intersection(potential_new_tokens)
-                if gss_potential_overlap.is_empty():
-                    continue
-
             # Traverse edges and propagate masks
-            edges = self.arena[node].children
-            for (pop, llm_bv_edge), dests in edges:
-                llm_bv = llm_bv_edge.difference(final_mask)
+            edges = a_node.children if a_node else []
+            for (pop, llm_bv_from_edge), dests in edges:
+                llm_bv = llm_bv_from_edge.difference(final_mask)
                 if llm_bv.is_empty():
                     continue
 
-                popped_before_limit: GSS = gss_node.popn(pop)
-                if popped_before_limit.is_empty():
+                popped_gss: GSS = gss_node.popn(pop)
+                if popped_gss.is_empty():
                     continue
 
-                # Apply edge LLM mask by intersecting per-acc llm_mask with llm_bv
-                acc_memo: Dict[PyAcc, Optional[PyAcc]] = {}
-
+                @_acc_memoize(use_value_cache=False)
                 def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                    if acc in acc_memo:
-                        return acc_memo[acc]
                     new_mask = acc.llm_mask.intersection(llm_bv)
                     if new_mask.is_empty():
-                        result = None
-                    else:
-                        result = PyAcc(
-                            terminals_union=acc.terminals_union,
-                            llm_mask=new_mask
-                        )
-                    acc_memo[acc] = result
-                    return result
+                        return None
+                    return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
 
-                popped = popped_before_limit.apply_and_prune(intersect_and_prune)
+                pruned_gss = popped_gss.apply_and_prune(intersect_and_prune)
 
-                if popped.is_empty():
+                if pruned_gss.is_empty():
                     continue
 
-                reduced = popped.reduce_acc()
-                if not reduced or reduced.is_empty():
+                if pruned_gss.reduce_acc().is_empty():
                     continue
 
+                peeked = pruned_gss.peek()
                 for dest_idx, state_bv in dests:
-                    peeked = popped.peek()
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
 
                     if not values_to_keep:
                         continue
 
-                    child_gss: GSS = popped.isolate_many(values_to_keep)
+                    child_gss = pruned_gss.isolate_many(values_to_keep)
                     if child_gss.is_empty():
                         continue
 
-                    reduced_child = child_gss.reduce_acc()
-                    if not reduced_child or reduced_child.is_empty():
+                    if child_gss.reduce_acc().is_empty():
                         continue
 
                     d: NodeID = int(dest_idx)
@@ -954,12 +937,11 @@ class Model(GraphProvider):
                         hp(depth_heap, (-max_depth[d], d))
 
         # Convert internal mask back to original IDs
-        original_indices: List[int] = []
-        for i in final_mask.to_indices():
+        original_indices = RangeSetOut.empty()
+        for i in final_mask.iter_indices():
             if i in self.internal_to_original_map:
-                original_indices.extend(self.internal_to_original_map[i])
-
-        return RangeSet.from_indices(original_indices)
+                original_indices |= self.internal_to_original_map[i]
+        return original_indices
 
     def finalize(self):
         """Called at the end of a benchmark run to perform any final actions, like printing stats."""
