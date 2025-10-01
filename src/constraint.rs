@@ -702,12 +702,12 @@ impl GrammarConstraint {
         original_llm_token_map: &LLMTokenMap,
     ) -> BTreeMap<usize, usize>
     {
-        // // TODO: delete this
-        // let mut original_to_internal_id_bimap = BiBTreeMap::new();
-        // for (_, id) in original_llm_token_map.iter() {
-        //     original_to_internal_id_bimap.insert(id.0, id.0);
-        // }
-        // return original_to_internal_id_bimap;
+        // TODO: delete this
+        let mut original_to_internal_id_bimap = BTreeMap::new();
+        for (_, id) in original_llm_token_map.iter() {
+            original_to_internal_id_bimap.insert(id.0, id.0);
+        }
+        return original_to_internal_id_bimap;
 
         let mut sorted_tokens_with_original_ids: Vec<(Vec<u8>, LLMTokenID)> = original_llm_token_map
             .iter()
@@ -2206,9 +2206,11 @@ impl<'r> Precomputer0<'r> {
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
     ) {
+        println!("DFS at vocab node: {:?}. Tokenizer state IDs: {:?}", vocab_node.prefix(), assoc_by_state.keys());
         self.pb.inc(1);
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
+            println!("Processing segment: {:?}", String::from_utf8_lossy(segment_bytes));
             let mut work_queue: BTreeMap<
                 usize,
                 BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
@@ -2249,6 +2251,7 @@ impl<'r> Precomputer0<'r> {
 
                         for src_node_wrapper in &precompute_nodes {
                             if next_pos == segment_bytes.len() {
+                                println!("At end of segment after matching terminal {:?} at pos {}. Inserting end node edge with LLM token {:?}.", terminal_id, next_pos, child_vocab_node.token_id());
                                 // Exact end-of-segment terminal match: finishing LLM token here goes to tokenizer initial state.
                                 let llm_token_id = child_vocab_node.token_id();
                                 let mut edge_bv = HybridBitset::zeros();
@@ -2336,7 +2339,9 @@ impl<'r> Precomputer0<'r> {
             }
 
             if !next_level_assoc.is_empty() {
+                println!("DFS: Recursing into child vocab node: {:?}", child_vocab_node.prefix());
                 self.dfs(child_vocab_node, next_level_assoc);
+                println!("DFS: Done recursing into child vocab node: {:?}", child_vocab_node.prefix());
             }
         }
     }
