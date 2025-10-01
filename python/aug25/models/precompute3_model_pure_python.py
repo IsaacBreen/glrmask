@@ -735,6 +735,7 @@ class Model(GraphProvider):
             for (pop, llm_bv_from_edge), dests in edges:
                 llm_bv = llm_bv_from_edge.difference(final_mask)
                 if llm_bv.is_empty():
+                    continue
 
                 popped_gss: GSS = gss_node.popn(pop)
                 if popped_gss.is_empty():
