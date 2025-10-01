@@ -45,27 +45,6 @@ use std::collections::BTreeMap as StdMap;
 use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, Trie3GodWrapper};
 use crate::datastructures::trie::God;
 
-impl JSONConvertible for PrecomputedNodeContents {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("clean_end".to_string(), self.end.to_json());
-        obj.insert("live_tokens".to_string(), self.live_tokens.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
-                                   .and_then(bool::from_json)?;
-                let live_tokens = obj.remove("live_tokens").ok_or_else(|| "Missing field live_tokens for PrecomputedNodeContents".to_string())
-                                       .and_then(LLMTokenBV::from_json)?;
-                Ok(PrecomputedNodeContents { end, live_tokens })
-            }
-            _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
-        }
-    }
-}
-
 /// Recursively traverses a GSS, and for each node (both internal and root) that has
 /// `stored_trie_nodes`, it:
 /// 1. Gets a new destination trie node from `destination_provider`.
