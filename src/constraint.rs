@@ -2253,7 +2253,6 @@ impl<'r> Precomputer0<'r> {
                             if next_pos == segment_bytes.len() {
                                 // Exact end-of-segment terminal match: finishing LLM token here goes to tokenizer initial state.
                                 let llm_token_id = child_vocab_node.token_id();
-                                if llm_token_id == 0 { continue; }
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
                                 let edge_key = (Some(terminal_id), disallowed_terminal_info);
