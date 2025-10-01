@@ -119,8 +119,8 @@ pub fn dump_precompute_trie0_recursive(
             },
             None => "ε".to_string(),
         };
-        let disallow_display = if let Some(sid) = disallow_opt {
-            format!(", disallow in S{}", sid.0)
+        let disallow_display = if let Some((sid, tid)) = disallow_opt {
+            format!(", disallow=(S{}, T{})", sid.0, tid.0)
         } else {
             "".to_string()
         };
