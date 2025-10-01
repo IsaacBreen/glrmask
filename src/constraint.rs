@@ -3282,12 +3282,11 @@ impl<'a> GrammarConstraintState<'a> {
         for (tokenizer_state_id, glr_state) in &self.state {
             let root_idx = self.parent.precomputed0.get(tokenizer_state_id)
                 .unwrap_or_else(|| panic!("No precomputed trie root for tokenizer state {:?} during commit.", tokenizer_state_id));
-            let &final_tid = state_map.get(tokenizer_state_id)
-                .unwrap_or_else(|| panic!("No final tokenizer state in state_map for tokenizer state {:?} and token {:?} during commit.", tokenizer_state_id, llm_token_id));
-
-            let mut v = BTreeMap::new();
-            v.insert(final_tid, glr_state.clone());
-            initial_values_for_map.push((*root_idx, v));
+            if let Some(&final_tid) = state_map.get(tokenizer_state_id) {
+                let mut v = BTreeMap::new();
+                v.insert(final_tid, glr_state.clone());
+                initial_values_for_map.push((*root_idx, v));
+            }
         }
 
         let internal_id_val = internal_id.0;
