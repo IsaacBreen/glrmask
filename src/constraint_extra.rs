@@ -137,7 +137,6 @@ pub fn dump_precompute_trie0_recursive(
             child_ptr = child_arc;
             is_visited = visited.contains(&child_ptr);
             is_end_node = child_node.value.final_tokenizer_state.is_some();
-            // println!("original_internal_bimap: {:?}, llm_token_map: {:?}", original_internal_bimap, llm_token_map);
             let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, original_internal_bimap, llm_token_map, 5);
             let end_str = if is_end_node {
                 if let Some(sid) = child_node.value.final_tokenizer_state {
