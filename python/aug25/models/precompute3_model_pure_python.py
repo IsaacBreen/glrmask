@@ -804,19 +804,21 @@ class Model(GraphProvider):
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
 
-        This version processes all edges of a node when it is visited. It includes an
-        optimization to prune the token set of each edge against the `final_mask` of
-        tokens that have already been accepted by reaching an end node.
+        This version uses an "edge cursor" to process only one edge per node visit,
+        re-enqueuing the node to process subsequent edges later. This prioritizes
+        exploring deeper into the trie along what seems to be the most promising
+        path (as determined by the max_depth heuristic).
         """
         state_map: Dict[int, GSS] = self.state
 
         all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
         final_mask: LLMTokenSet = RangeSet.empty()
 
-        # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
+        # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask.
         values: Dict[NodeID, GSS] = {}
         depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
         enqueued_nodes: Set[NodeID] = set()
+        edge_cursor: Dict[NodeID, int] = {}  # Next edge index to process per node
 
         hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
@@ -837,6 +839,7 @@ class Model(GraphProvider):
                 if tsid > max_state or tsid not in pmc:
                     continue
                 terminals_to_llm = pmc[tsid]
+
                 for terminal_id in disallowed_terminals.iter_indices():
                     if terminal_id in terminals_to_llm:
                         disallowed_llm_mask |= terminals_to_llm[terminal_id]
@@ -851,7 +854,9 @@ class Model(GraphProvider):
         cache = {}
         for sid, gss in state_map.items():
             r: NodeID = roots_map[int(sid)]
+
             gss_initialized: GSS = gss.apply(initialize_acc, cache)
+
             if r in values:
                 values[r] = values[r].merge(gss_initialized)
             else:
@@ -874,7 +879,8 @@ class Model(GraphProvider):
                 if reduced_acc:
                     final_mask |= reduced_acc.llm_mask
 
-            # Zombie traversal avoidance
+            # Zombie traversal avoidance: if this node's edges can't possibly add
+            # to the final mask given the current GSS mask, skip it.
             a_node = arena.get(node)
             node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
             if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask):
@@ -909,11 +915,11 @@ class Model(GraphProvider):
                 peeked = pruned_gss.peek()
                 for dest_idx, state_bv in dests:
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-
                     if not values_to_keep:
                         continue
 
                     child_gss = pruned_gss.isolate_many(values_to_keep)
+
                     if child_gss.is_empty():
                         continue
 
