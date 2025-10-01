@@ -652,12 +652,10 @@ local_system:
               """
               Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
 
-              Changes for get_mask_only:
-              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-                the forbidden terminals -> forbidden LLM tokens and taking the complement.
-              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+              This version uses an "edge cursor" to process only one edge per node visit,
+              re-enqueuing the node to process subsequent edges later. This prioritizes
+              exploring deeper into the trie along what seems to be the most promising
+              path (as determined by the max_depth heuristic).
               """
               state_map: Dict[int, GSS] = self.state
 
@@ -737,13 +735,15 @@ local_system:
                       continue
 
                   # Traverse edges and propagate masks
-                  a_node = arena.get(node)
-                  edges = a_node.children if a_node else []
                   # Process only one edge per pop; resume where we left off
-                  start_edge_idx = edge_cursor.get(node, 0)
                   spawned_any = False
+                  start_edge_idx = edge_cursor.get(node, 0)
+                  edges = a_node.children if a_node else []
                   for edge_i in range(start_edge_idx, len(edges)):
-                      (pop, llm_bv), dests = edges[edge_i]
+                      (pop, llm_bv_from_edge), dests = edges[edge_i]
+                      llm_bv = llm_bv_from_edge.difference(final_mask)
+                      if llm_bv.is_empty():
+                          continue
 
                       popped_gss: GSS = gss_node.popn(pop)
                       if popped_gss.is_empty():
@@ -813,22 +813,21 @@ local_system:
               """
               Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
 
-              Changes for get_mask_only:
-              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-                the forbidden terminals -> forbidden LLM tokens and taking the complement.
-              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+              This version uses an "edge cursor" to process only one edge per node visit,
+              re-enqueuing the node to process subsequent edges later. This prioritizes
+              exploring deeper into the trie along what seems to be the most promising
+              path (as determined by the max_depth heuristic).
               """
               state_map: Dict[int, GSS] = self.state
 
               all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
               final_mask: LLMTokenSet = RangeSet.empty()
 
-              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
+              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask.
               values: Dict[NodeID, GSS] = {}
               depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
               enqueued_nodes: Set[NodeID] = set()
+              edge_cursor: Dict[NodeID, int] = {}  # Next edge index to process per node
 
               hp, hpop = heapq.heappush, heapq.heappop
               roots_map: Dict[int, NodeID] = self.roots_map
@@ -842,18 +841,17 @@ local_system:
               @_acc_memoize(use_value_cache=False)
               def initialize_acc(acc: PyAcc) -> PyAcc:
                   # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                  disallowed_llm_mask = RangeSet.empty()
+                  disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
                   disallowed_map = acc.terminals_union
 
                   for tsid, disallowed_terminals in disallowed_map.items():
                       if tsid > max_state or tsid not in pmc:
                           continue
                       terminals_to_llm = pmc[tsid]
+
                       for terminal_id in disallowed_terminals.iter_indices():
                           if terminal_id in terminals_to_llm:
-                              disallowed_llm_mask = disallowed_llm_mask.union(
-                                  terminals_to_llm[terminal_id]
-                              )
+                              disallowed_llm_mask |= terminals_to_llm[terminal_id]
 
                   allowed_mask = all_ones.difference(disallowed_llm_mask)
 
@@ -865,7 +863,9 @@ local_system:
               cache = {}
               for sid, gss in state_map.items():
                   r: NodeID = roots_map[int(sid)]
+
                   gss_initialized: GSS = gss.apply(initialize_acc, cache)
+
                   if r in values:
                       values[r] = values[r].merge(gss_initialized)
                   else:
@@ -888,15 +888,20 @@ local_system:
                       if reduced_acc:
                           final_mask |= reduced_acc.llm_mask
 
-                  # Zombie traversal avoidance
+                  # Zombie traversal avoidance: if this node's edges can't possibly add
+                  # to the final mask given the current GSS mask, skip it.
                   a_node = arena.get(node)
                   node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
                   if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask):
                       continue
 
                   # Traverse edges and propagate masks
+                  # Process only one edge per pop; resume where we left off
+                  spawned_any = False
+                  start_edge_idx = 0
                   edges = a_node.children if a_node else []
-                  for (pop, llm_bv_from_edge), dests in edges:
+                  for edge_i in range(start_edge_idx, len(edges)):
+                      (pop, llm_bv_from_edge), dests = edges[edge_i]
                       llm_bv = llm_bv_from_edge.difference(final_mask)
                       if llm_bv.is_empty():
                           continue
@@ -921,13 +926,14 @@ local_system:
                           continue
 
                       peeked = pruned_gss.peek()
+                      child_spawned = False
                       for dest_idx, state_bv in dests:
                           values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-
                           if not values_to_keep:
                               continue
 
                           child_gss = pruned_gss.isolate_many(values_to_keep)
+
                           if child_gss.is_empty():
                               continue
 
@@ -942,6 +948,11 @@ local_system:
                           if d not in enqueued_nodes:
                               enqueued_nodes.add(d)
                               hp(depth_heap, (-max_depth[d], d))
+                          child_spawned = True
+
+                  # If we didn't spawn any child across remaining edges, this node is done
+                  if not spawned_any:
+                      edge_cursor.pop(node, None)
 
               # Convert internal mask back to original IDs
               original_indices = RangeSetOut.empty()
@@ -1617,6 +1628,171 @@ local_system:
               values: Dict[NodeID, GSS] = {}
               depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
               enqueued_nodes: Set[NodeID] = set()
+              edge_cursor: Dict[NodeID, Tuple[int, int]] = {}  # node -> (next_edge_idx, gss_id)
+
+              hp, hpop = heapq.heappush, heapq.heappop
+              roots_map: Dict[int, NodeID] = self.roots_map
+              max_depth: Dict[NodeID, int] = self.max_depth
+              arena: Dict[NodeID, ArenaNode] = self.arena
+              is_end = self.is_end
+              pmc: Dict[int, Dict[int, LLMTokenSet]] = self.possible_matches_cache or {}
+              max_state: int = self.tokenizer_max_state
+
+              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+              @_acc_memoize(use_value_cache=False)
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  # Compute allowed LLM tokens from disallowed terminals for this accumulator
+                  disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
+                  disallowed_map = acc.terminals_union
+
+                  for tsid, disallowed_terminals in disallowed_map.items():
+                      if tsid > max_state or tsid not in pmc:
+                          continue
+                      terminals_to_llm = pmc[tsid]
+
+                      for terminal_id in disallowed_terminals.iter_indices():
+                          if terminal_id in terminals_to_llm:
+                              disallowed_llm_mask |= terminals_to_llm[terminal_id]
+
+                  allowed_mask = all_ones.difference(disallowed_llm_mask)
+
+                  return PyAcc(
+                      terminals_union={},  # consume
+                      llm_mask=allowed_mask,
+                  )
+
+              cache = {}
+              for sid, gss in state_map.items():
+                  r: NodeID = roots_map[int(sid)]
+
+                  gss_initialized: GSS = gss.apply(initialize_acc, cache)
+
+                  if r in values:
+                      values[r] = values[r].merge(gss_initialized)
+                  else:
+                      values[r] = gss_initialized
+
+                  d: int = max_depth[r]
+                  if r not in enqueued_nodes:
+                      enqueued_nodes.add(r)
+                      hp(depth_heap, (-d, r))
+
+              # Main loop
+              while depth_heap:
+                  neg_depth, node = hpop(depth_heap)
+                  gss_node: GSS = values.pop(node)
+                  gss_id = id(gss_node)
+                  enqueued_nodes.remove(node)
+
+                  # End-node handling: just union the allowed LLM tokens
+                  if is_end(node):
+                      reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
+                      if reduced_acc:
+                          final_mask |= reduced_acc.llm_mask
+
+                  # Zombie traversal avoidance: if this node's edges can't possibly add
+                  # to the final mask given the current GSS mask, skip it.
+                  a_node = arena.get(node)
+                  node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
+                  if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask):
+                      continue
+
+                  # Traverse edges and propagate masks
+                  # Process only one edge per pop; resume where we left off
+                  spawned_any = False
+                  saved_cursor = edge_cursor.get(node)
+                  start_edge_idx = saved_cursor[0] if saved_cursor and saved_cursor[1] == gss_id else 0
+                  edges = a_node.children if a_node else []
+                  for edge_i in range(start_edge_idx, len(edges)):
+                      (pop, llm_bv_from_edge), dests = edges[edge_i]
+                      llm_bv = llm_bv_from_edge.difference(final_mask)
+                      if llm_bv.is_empty():
+                          continue
+
+                      popped_gss: GSS = gss_node.popn(pop)
+                      if popped_gss.is_empty():
+                          continue
+
+                      @_acc_memoize(use_value_cache=False)
+                      def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                          new_mask = acc.llm_mask.intersection(llm_bv)
+                          if new_mask.is_empty():
+                              return None
+                          return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
+
+                      pruned_gss = popped_gss.apply_and_prune(intersect_and_prune)
+
+                      if pruned_gss.is_empty():
+                          continue
+
+                      if pruned_gss.reduce_acc().is_empty():
+                          continue
+
+                      peeked = pruned_gss.peek()
+                      child_spawned = False
+                      for dest_idx, state_bv in dests:
+                          values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                          if not values_to_keep:
+                              continue
+
+                          child_gss = pruned_gss.isolate_many(values_to_keep)
+
+                          if child_gss.is_empty():
+                              continue
+
+                          if child_gss.reduce_acc().is_empty():
+                              continue
+
+                          d: NodeID = int(dest_idx)
+                          if d in values:
+                              values[d] = values[d].merge(child_gss)
+                          else:
+                              values[d] = child_gss
+                          if d not in enqueued_nodes:
+                              enqueued_nodes.add(d)
+                              hp(depth_heap, (-max_depth[d], d))
+                          child_spawned = True
+
+                      if child_spawned:
+                          spawned_any = True
+                          # Save progress and re-enqueue this node to process the next edge later.
+                          # Merge into any existing value (e.g., from self-loops) to avoid clobbering new contributions.
+                          merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
+                          values[node] = merged_for_requeue
+                          edge_cursor[node] = (edge_i + 1, id(merged_for_requeue))
+                          if node not in enqueued_nodes:
+                              enqueued_nodes.add(node)
+                              hp(depth_heap, (-max_depth[node], node))
+                          break
+
+                  # If we didn't spawn any child across remaining edges, this node is done
+                  if not spawned_any:
+                      edge_cursor.pop(node, None)
+
+              # Convert internal mask back to original IDs
+              original_indices = RangeSetOut.empty()
+              for i in final_mask.iter_indices():
+                  if i in self.internal_to_original_map:
+                      original_indices |= self.internal_to_original_map[i]
+              return original_indices
+          def get_mask2(self) -> LLMTokenSet:
+              """
+              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+
+              This version uses an "edge cursor" to process only one edge per node visit,
+              re-enqueuing the node to process subsequent edges later. This prioritizes
+              exploring deeper into the trie along what seems to be the most promising
+              path (as determined by the max_depth heuristic).
+              """
+              state_map: Dict[int, GSS] = self.state
+
+              all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
+              final_mask: LLMTokenSet = RangeSet.empty()
+
+              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask.
+              values: Dict[NodeID, GSS] = {}
+              depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
+              enqueued_nodes: Set[NodeID] = set()
               edge_cursor: Dict[NodeID, int] = {}  # Next edge index to process per node
 
               hp, hpop = heapq.heappush, heapq.heappop
@@ -1686,13 +1862,15 @@ local_system:
                       continue
 
                   # Traverse edges and propagate masks
-                  a_node = arena.get(node)
-                  edges = a_node.children if a_node else []
                   # Process only one edge per pop; resume where we left off
-                  start_edge_idx = edge_cursor.get(node, 0)
                   spawned_any = False
+                  start_edge_idx = 0
+                  edges = a_node.children if a_node else []
                   for edge_i in range(start_edge_idx, len(edges)):
-                      (pop, llm_bv), dests = edges[edge_i]
+                      (pop, llm_bv_from_edge), dests = edges[edge_i]
+                      llm_bv = llm_bv_from_edge.difference(final_mask)
+                      if llm_bv.is_empty():
+                          continue
 
                       popped_gss: GSS = gss_node.popn(pop)
                       if popped_gss.is_empty():
@@ -1738,154 +1916,9 @@ local_system:
                               hp(depth_heap, (-max_depth[d], d))
                           child_spawned = True
 
-                      if child_spawned:
-                          spawned_any = True
-                          # Save progress and re-enqueue this node to process the next edge later
-                          edge_cursor[node] = edge_i + 1
-                          values[node] = gss_node
-                          if node not in enqueued_nodes:
-                              enqueued_nodes.add(node)
-                              hp(depth_heap, (-max_depth[node], node))
-                          break
-
                   # If we didn't spawn any child across remaining edges, this node is done
                   if not spawned_any:
                       edge_cursor.pop(node, None)
-
-              # Convert internal mask back to original IDs
-              original_indices = RangeSetOut.empty()
-              for i in final_mask.iter_indices():
-                  if i in self.internal_to_original_map:
-                      original_indices |= self.internal_to_original_map[i]
-              return original_indices
-          def get_mask2(self) -> LLMTokenSet:
-              """
-              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-
-              This version processes all edges of a node when it is visited. It includes an
-              optimization to prune the token set of each edge against the `final_mask` of
-              tokens that have already been accepted by reaching an end node.
-              """
-              state_map: Dict[int, GSS] = self.state
-
-              all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
-              final_mask: LLMTokenSet = RangeSet.empty()
-
-              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
-              values: Dict[NodeID, GSS] = {}
-              depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
-              enqueued_nodes: Set[NodeID] = set()
-
-              hp, hpop = heapq.heappush, heapq.heappop
-              roots_map: Dict[int, NodeID] = self.roots_map
-              max_depth: Dict[NodeID, int] = self.max_depth
-              arena: Dict[NodeID, ArenaNode] = self.arena
-              is_end = self.is_end
-              pmc: Dict[int, Dict[int, LLMTokenSet]] = self.possible_matches_cache or {}
-              max_state: int = self.tokenizer_max_state
-
-              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-              @_acc_memoize(use_value_cache=False)
-              def initialize_acc(acc: PyAcc) -> PyAcc:
-                  # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                  disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
-                  disallowed_map = acc.terminals_union
-
-                  for tsid, disallowed_terminals in disallowed_map.items():
-                      if tsid > max_state or tsid not in pmc:
-                          continue
-                      terminals_to_llm = pmc[tsid]
-                      for terminal_id in disallowed_terminals.iter_indices():
-                          if terminal_id in terminals_to_llm:
-                              disallowed_llm_mask |= terminals_to_llm[terminal_id]
-
-                  allowed_mask = all_ones.difference(disallowed_llm_mask)
-
-                  return PyAcc(
-                      terminals_union={},  # consume
-                      llm_mask=allowed_mask,
-                  )
-
-              cache = {}
-              for sid, gss in state_map.items():
-                  r: NodeID = roots_map[int(sid)]
-                  gss_initialized: GSS = gss.apply(initialize_acc, cache)
-                  if r in values:
-                      values[r] = values[r].merge(gss_initialized)
-                  else:
-                      values[r] = gss_initialized
-
-                  d: int = max_depth[r]
-                  if r not in enqueued_nodes:
-                      enqueued_nodes.add(r)
-                      hp(depth_heap, (-d, r))
-
-              # Main loop
-              while depth_heap:
-                  neg_depth, node = hpop(depth_heap)
-                  gss_node: GSS = values.pop(node)
-                  enqueued_nodes.remove(node)
-
-                  # End-node handling: just union the allowed LLM tokens
-                  if is_end(node):
-                      reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                      if reduced_acc:
-                          final_mask |= reduced_acc.llm_mask
-
-                  # Zombie traversal avoidance
-                  a_node = arena.get(node)
-                  node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-                  if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask):
-                      continue
-
-                  # Traverse edges and propagate masks
-                  edges = a_node.children if a_node else []
-                  for (pop, llm_bv_from_edge), dests in edges:
-                      llm_bv = llm_bv_from_edge.difference(final_mask)
-                      if llm_bv.is_empty():
-                          continue
-
-                      popped_gss: GSS = gss_node.popn(pop)
-                      if popped_gss.is_empty():
-                          continue
-
-                      @_acc_memoize(use_value_cache=False)
-                      def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                          new_mask = acc.llm_mask.intersection(llm_bv)
-                          if new_mask.is_empty():
-                              return None
-                          return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
-
-                      pruned_gss = popped_gss.apply_and_prune(intersect_and_prune)
-
-                      if pruned_gss.is_empty():
-                          continue
-
-                      if pruned_gss.reduce_acc().is_empty():
-                          continue
-
-                      peeked = pruned_gss.peek()
-                      for dest_idx, state_bv in dests:
-                          values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-
-                          if not values_to_keep:
-                              continue
-
-                          child_gss = pruned_gss.isolate_many(values_to_keep)
-                          if child_gss.is_empty():
-                              continue
-
-                          if child_gss.reduce_acc().is_empty():
-                              continue
-
-                          d: NodeID = int(dest_idx)
-                          if d in values:
-                              values[d] = values[d].merge(child_gss)
-                          else:
-                              values[d] = child_gss
-                          if d not in enqueued_nodes:
-                              enqueued_nodes.add(d)
-                              hp(depth_heap, (-max_depth[d], d))
 
               # Convert internal mask back to original IDs
               original_indices = RangeSetOut.empty()
@@ -1908,7 +1941,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -2588,12 +2621,10 @@ messages:
               """
               Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
 
-              Changes for get_mask_only:
-              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-                the forbidden terminals -> forbidden LLM tokens and taking the complement.
-              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+              This version uses an "edge cursor" to process only one edge per node visit,
+              re-enqueuing the node to process subsequent edges later. This prioritizes
+              exploring deeper into the trie along what seems to be the most promising
+              path (as determined by the max_depth heuristic).
               """
               state_map: Dict[int, GSS] = self.state
 
@@ -2673,13 +2704,15 @@ messages:
                       continue
 
                   # Traverse edges and propagate masks
-                  a_node = arena.get(node)
-                  edges = a_node.children if a_node else []
                   # Process only one edge per pop; resume where we left off
-                  start_edge_idx = edge_cursor.get(node, 0)
                   spawned_any = False
+                  start_edge_idx = edge_cursor.get(node, 0)
+                  edges = a_node.children if a_node else []
                   for edge_i in range(start_edge_idx, len(edges)):
-                      (pop, llm_bv), dests = edges[edge_i]
+                      (pop, llm_bv_from_edge), dests = edges[edge_i]
+                      llm_bv = llm_bv_from_edge.difference(final_mask)
+                      if llm_bv.is_empty():
+                          continue
 
                       popped_gss: GSS = gss_node.popn(pop)
                       if popped_gss.is_empty():
@@ -2746,186 +2779,6 @@ messages:
                       original_indices |= self.internal_to_original_map[i]
               return original_indices
           def get_mask2(self) -> LLMTokenSet:
-              """
-              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-
-              Changes for get_mask_only:
-              - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-                the forbidden terminals -> forbidden LLM tokens and taking the complement.
-              - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-              - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-              - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
-              """
-              state_map: Dict[int, GSS] = self.state
-
-              all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
-              final_mask: LLMTokenSet = RangeSet.empty()
-
-              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
-              values: Dict[NodeID, GSS] = {}
-              depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
-              enqueued_nodes: Set[NodeID] = set()
-
-              hp, hpop = heapq.heappush, heapq.heappop
-              roots_map: Dict[int, NodeID] = self.roots_map
-              max_depth: Dict[NodeID, int] = self.max_depth
-              arena: Dict[NodeID, ArenaNode] = self.arena
-              is_end = self.is_end
-              pmc: Dict[int, Dict[int, LLMTokenSet]] = self.possible_matches_cache or {}
-              max_state: int = self.tokenizer_max_state
-
-              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-              @_acc_memoize(use_value_cache=False)
-              def initialize_acc(acc: PyAcc) -> PyAcc:
-                  # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                  disallowed_llm_mask = RangeSet.empty()
-                  disallowed_map = acc.terminals_union
-
-                  for tsid, disallowed_terminals in disallowed_map.items():
-                      if tsid > max_state or tsid not in pmc:
-                          continue
-                      terminals_to_llm = pmc[tsid]
-                      for terminal_id in disallowed_terminals.iter_indices():
-                          if terminal_id in terminals_to_llm:
-                              disallowed_llm_mask = disallowed_llm_mask.union(
-                                  terminals_to_llm[terminal_id]
-                              )
-
-                  allowed_mask = all_ones.difference(disallowed_llm_mask)
-
-                  return PyAcc(
-                      terminals_union={},  # consume
-                      llm_mask=allowed_mask,
-                  )
-
-              cache = {}
-              for sid, gss in state_map.items():
-                  r: NodeID = roots_map[int(sid)]
-                  gss_initialized: GSS = gss.apply(initialize_acc, cache)
-                  if r in values:
-                      values[r] = values[r].merge(gss_initialized)
-                  else:
-                      values[r] = gss_initialized
-
-                  d: int = max_depth[r]
-                  if r not in enqueued_nodes:
-                      enqueued_nodes.add(r)
-                      hp(depth_heap, (-d, r))
-
-              # Main loop
-              while depth_heap:
-                  neg_depth, node = hpop(depth_heap)
-                  gss_node: GSS = values.pop(node)
-                  enqueued_nodes.remove(node)
-
-                  # End-node handling: just union the allowed LLM tokens
-                  if is_end(node):
-                      reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                      if reduced_acc:
-                          final_mask |= reduced_acc.llm_mask
-
-                  # Zombie traversal avoidance
-                  a_node = arena.get(node)
-                  node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-                  if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask):
-                      continue
-
-                  # Traverse edges and propagate masks
-                  edges = a_node.children if a_node else []
-                  for (pop, llm_bv_from_edge), dests in edges:
-                      llm_bv = llm_bv_from_edge.difference(final_mask)
-                      if llm_bv.is_empty():
-                          continue
-
-                      popped_gss: GSS = gss_node.popn(pop)
-                      if popped_gss.is_empty():
-                          continue
-
-                      @_acc_memoize(use_value_cache=False)
-                      def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                          new_mask = acc.llm_mask.intersection(llm_bv)
-                          if new_mask.is_empty():
-                              return None
-                          return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
-
-                      pruned_gss = popped_gss.apply_and_prune(intersect_and_prune)
-
-                      if pruned_gss.is_empty():
-                          continue
-
-                      if pruned_gss.reduce_acc().is_empty():
-                          continue
-
-                      peeked = pruned_gss.peek()
-                      for dest_idx, state_bv in dests:
-                          values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-
-                          if not values_to_keep:
-                              continue
-
-                          child_gss = pruned_gss.isolate_many(values_to_keep)
-                          if child_gss.is_empty():
-                              continue
-
-                          if child_gss.reduce_acc().is_empty():
-                              continue
-
-                          d: NodeID = int(dest_idx)
-                          if d in values:
-                              values[d] = values[d].merge(child_gss)
-                          else:
-                              values[d] = child_gss
-                          if d not in enqueued_nodes:
-                              enqueued_nodes.add(d)
-                              hp(depth_heap, (-max_depth[d], d))
-
-              # Convert internal mask back to original IDs
-              original_indices = RangeSetOut.empty()
-              for i in final_mask.iter_indices():
-                  if i in self.internal_to_original_map:
-                      original_indices |= self.internal_to_original_map[i]
-              return original_indices
-
-          def finalize(self):
-              """Called at the end of a benchmark run to perform any final actions, like printing stats."""
-              print("\n--- Final Stats Report from Model ---")
-              Stats.get().report()
-
-      ```
-    metadata:
-      filename: python/aug25/models/precompute3_model_pure_python.py
-  - user: "Rewrite get_mask1 and get_mask2. I wanna see clearly where the differences
-      are. Try to rewrite them in a form that's as similar as possible, similar enough
-      that it's obvious what the actual fundamental differences between them are.
-      Important: Ensure they are functionally unchanged from what they are now."
-    metadata:
-  - user: |-
-      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
-                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
-                  - After the instructions, output the corresponding git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - Include lines like: `diff --git a/FILE b/FILE`
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
-    metadata:
-      kind: mode-guidance
-      mode: git-llm
-      phase: default
-  - assistant: |-
-      Of course. To make the differences between `get_mask1` and `get_mask2` clearer, I will refactor them to have a more similar structure while preserving their distinct logic. The main functional differences are that `get_mask1` uses an "edge cursor" to process one edge at a time and re-queue the node, while `get_mask2` processes all edges at once and includes an optimization to prune edge tokens against the final mask.
-
-      Here are the step-by-step instructions to apply the changes:
-
-      ### Step 1: Update `get_mask1`
-
-      In the file `python/aug25/models/precompute3_model_pure_python.py`, replace the entire `get_mask1` method with the following code. This change primarily updates the docstring to better explain its specific strategy.
-
-      ```python
-          def get_mask1(self) -> LLMTokenSet:
               """
               Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
 
@@ -3012,13 +2865,15 @@ messages:
                       continue
 
                   # Traverse edges and propagate masks
-                  a_node = arena.get(node)
-                  edges = a_node.children if a_node else []
                   # Process only one edge per pop; resume where we left off
-                  start_edge_idx = edge_cursor.get(node, 0)
                   spawned_any = False
+                  start_edge_idx = 0
+                  edges = a_node.children if a_node else []
                   for edge_i in range(start_edge_idx, len(edges)):
-                      (pop, llm_bv), dests = edges[edge_i]
+                      (pop, llm_bv_from_edge), dests = edges[edge_i]
+                      llm_bv = llm_bv_from_edge.difference(final_mask)
+                      if llm_bv.is_empty():
+                          continue
 
                       popped_gss: GSS = gss_node.popn(pop)
                       if popped_gss.is_empty():
@@ -3064,16 +2919,6 @@ messages:
                               hp(depth_heap, (-max_depth[d], d))
                           child_spawned = True
 
-                      if child_spawned:
-                          spawned_any = True
-                          # Save progress and re-enqueue this node to process the next edge later
-                          edge_cursor[node] = edge_i + 1
-                          values[node] = gss_node
-                          if node not in enqueued_nodes:
-                              enqueued_nodes.add(node)
-                              hp(depth_heap, (-max_depth[node], node))
-                          break
-
                   # If we didn't spawn any child across remaining edges, this node is done
                   if not spawned_any:
                       edge_cursor.pop(node, None)
@@ -3084,223 +2929,149 @@ messages:
                   if i in self.internal_to_original_map:
                       original_indices |= self.internal_to_original_map[i]
               return original_indices
+
+          def finalize(self):
+              """Called at the end of a benchmark run to perform any final actions, like printing stats."""
+              print("\n--- Final Stats Report from Model ---")
+              Stats.get().report()
+
       ```
-
-      ### Step 2: Update `get_mask2`
-
-      Next, replace the entire `get_mask2` method in the same file. This new version is structurally aligned with `get_mask1` and has a clearer docstring explaining its different strategy.
-
+    metadata:
+      filename: python/aug25/models/precompute3_model_pure_python.py
+  - user: |-
+      The only difference between get_mask1 and get_mask2 is the introduction of this
       ```python
-          def get_mask2(self) -> LLMTokenSet:
-              """
-              Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
+                  start_edge_idx = edge_cursor.get(node, 0)
 
-              This version processes all edges of a node when it is visited. It includes an
-              optimization to prune the token set of each edge against the `final_mask` of
-              tokens that have already been accepted by reaching an end node.
-              """
-              state_map: Dict[int, GSS] = self.state
+                  ...
 
-              all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
-              final_mask: LLMTokenSet = RangeSet.empty()
-
-              # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
-              values: Dict[NodeID, GSS] = {}
-              depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
-              enqueued_nodes: Set[NodeID] = set()
-
-              hp, hpop = heapq.heappush, heapq.heappop
-              roots_map: Dict[int, NodeID] = self.roots_map
-              max_depth: Dict[NodeID, int] = self.max_depth
-              arena: Dict[NodeID, ArenaNode] = self.arena
-              is_end = self.is_end
-              pmc: Dict[int, Dict[int, LLMTokenSet]] = self.possible_matches_cache or {}
-              max_state: int = self.tokenizer_max_state
-
-              # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-              @_acc_memoize(use_value_cache=False)
-              def initialize_acc(acc: PyAcc) -> PyAcc:
-                  # Compute allowed LLM tokens from disallowed terminals for this accumulator
-                  disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
-                  disallowed_map = acc.terminals_union
-
-                  for tsid, disallowed_terminals in disallowed_map.items():
-                      if tsid > max_state or tsid not in pmc:
-                          continue
-                      terminals_to_llm = pmc[tsid]
-                      for terminal_id in disallowed_terminals.iter_indices():
-                          if terminal_id in terminals_to_llm:
-                              disallowed_llm_mask |= terminals_to_llm[terminal_id]
-
-                  allowed_mask = all_ones.difference(disallowed_llm_mask)
-
-                  return PyAcc(
-                      terminals_union={},  # consume
-                      llm_mask=allowed_mask,
-                  )
-
-              cache = {}
-              for sid, gss in state_map.items():
-                  r: NodeID = roots_map[int(sid)]
-                  gss_initialized: GSS = gss.apply(initialize_acc, cache)
-                  if r in values:
-                      values[r] = values[r].merge(gss_initialized)
-                  else:
-                      values[r] = gss_initialized
-
-                  d: int = max_depth[r]
-                  if r not in enqueued_nodes:
-                      enqueued_nodes.add(r)
-                      hp(depth_heap, (-d, r))
-
-              # Main loop
-              while depth_heap:
-                  neg_depth, node = hpop(depth_heap)
-                  gss_node: GSS = values.pop(node)
-                  enqueued_nodes.remove(node)
-
-                  # End-node handling: just union the allowed LLM tokens
-                  if is_end(node):
-                      reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                      if reduced_acc:
-                          final_mask |= reduced_acc.llm_mask
-
-                  # Zombie traversal avoidance
-                  a_node = arena.get(node)
-                  node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-                  if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask):
-                      continue
-
-                  # Traverse edges and propagate masks
-                  edges = a_node.children if a_node else []
-                  for (pop, llm_bv_from_edge), dests in edges:
-                      llm_bv = llm_bv_from_edge.difference(final_mask)
-                      if llm_bv.is_empty():
-                          continue
-
-                      popped_gss: GSS = gss_node.popn(pop)
-                      if popped_gss.is_empty():
-                          continue
-
-                      @_acc_memoize(use_value_cache=False)
-                      def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                          new_mask = acc.llm_mask.intersection(llm_bv)
-                          if new_mask.is_empty():
-                              return None
-                          return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
-
-                      pruned_gss = popped_gss.apply_and_prune(intersect_and_prune)
-
-                      if pruned_gss.is_empty():
-                          continue
-
-                      if pruned_gss.reduce_acc().is_empty():
-                          continue
-
-                      peeked = pruned_gss.peek()
-                      for dest_idx, state_bv in dests:
-                          values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-
-                          if not values_to_keep:
-                              continue
-
-                          child_gss = pruned_gss.isolate_many(values_to_keep)
-                          if child_gss.is_empty():
-                              continue
-
-                          if child_gss.reduce_acc().is_empty():
-                              continue
-
-                          d: NodeID = int(dest_idx)
-                          if d in values:
-                              values[d] = values[d].merge(child_gss)
-                          else:
-                              values[d] = child_gss
-                          if d not in enqueued_nodes:
-                              enqueued_nodes.add(d)
-                              hp(depth_heap, (-max_depth[d], d))
-
-              # Convert internal mask back to original IDs
-              original_indices = RangeSetOut.empty()
-              for i in final_mask.iter_indices():
-                  if i in self.internal_to_original_map:
-                      original_indices |= self.internal_to_original_map[i]
-              return original_indices
+                      if child_spawned:
+                          spawned_any = True
+                          # Save progress and re-enqueue this node to process the next edge later
+                          edge_cursor[node] = edge_i + 1
+                          values[node] = gss_node
+                          if node not in enqueued_nodes:
+                              enqueued_nodes.add(node)
+                              hp(depth_heap, (-max_depth[node], node))
+                          break
       ```
+      in place of this
+      ```python
+                  start_edge_idx = 0
+      ```
+      I've tried to minimize the differences until they reveal which one is correct vs which one is wrong.
+      They use a different approach, of course. One of them tries to do some kind of incremental processing, the other doesn't I don't understand which one is correct though.
+      Oh wait yes I do. It's get_mask2. get_mask2 is correct. get_mask1 is wrong.
+      But I want to fix get_mask1, not ruin the approach. It's meant to be a faster implementation.
+      Figure out what's wrong and fix it.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Here’s how to fix get_mask1 while preserving the incremental “one edge per visit” approach and ensuring correctness:
 
-      ### Git Diff
+      Root cause
+      - get_mask1 stores a per-node edge cursor but does not invalidate it when the node’s GSS changes (e.g., new contributions are merged from other paths). That can cause edges that previously produced no children (with the older GSS) to never be re-checked even though they could produce children now, leading to a smaller final mask than get_mask2.
+      - Additionally, when re-enqueuing the current node, the code overwrites values[node] with the old gss_node, potentially clobbering new contributions (e.g., via self-loops) added earlier in the same iteration.
 
-      Here is the git diff for the changes described above. You can apply this patch directly.
+      Fix overview
+      - Track the GSS identity together with the edge cursor. If the GSS object identity at pop time differs from the one that advanced the cursor last time, reset start_edge_idx to 0 to re-check earlier edges.
+      - When re-enqueuing the node, merge into any existing values[node] instead of overwriting it, and store the cursor against the merged GSS’s identity to continue from the correct edge position next time.
+
+      Step-by-step edits
+      1) File: python/aug25/models/precompute3_model_pure_python.py
+         - In Model.get_mask1:
+           a. Change edge_cursor to store a tuple (next_edge_idx, gss_id) instead of just an int.
+           b. When popping a node from the heap, compute gss_id = id(gss_node) and use it to determine start_edge_idx:
+              - If there is a saved cursor and its stored gss_id matches the current gss_id, use the saved index.
+              - Otherwise, reset start_edge_idx to 0.
+           c. When re-enqueuing the node after spawning a child:
+              - Merge gss_node into any existing values[node] (if present) instead of overwriting.
+              - Store edge_cursor[node] as (edge_i + 1, id(merged_gss_for_node)) so the cursor is tied to the exact GSS being re-enqueued.
+
+      Concrete edit locations and code changes:
+
+      - Locate the declaration of edge_cursor within get_mask1 and change it to store (idx, gss_id).
+      - Inside the main loop of get_mask1, right after you pop the node and before computing start_edge_idx, add:
+        gss_id = id(gss_node)
+      - Replace the line that computes start_edge_idx:
+        start_edge_idx = edge_cursor.get(node, 0)
+        with id-aware logic:
+        saved_cursor = edge_cursor.get(node)
+        start_edge_idx = saved_cursor[0] if saved_cursor and saved_cursor[1] == gss_id else 0
+      - In the block where child_spawned is True (just before the break), replace:
+        values[node] = gss_node
+        edge_cursor[node] = edge_i + 1
+        with:
+        merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
+        values[node] = merged_for_requeue
+        edge_cursor[node] = (edge_i + 1, id(merged_for_requeue))
+
+      Git diff patch
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
-      index 9e0610f..4682025 100644
       --- a/python/aug25/models/precompute3_model_pure_python.py
       +++ b/python/aug25/models/precompute3_model_pure_python.py
-      @@ -698,15 +698,14 @@
-               return m1
-           def get_mask1(self) -> LLMTokenSet:
-               """
-               Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-       
-      -        Changes for get_mask_only:
-      -        - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-      -          the forbidden terminals -> forbidden LLM tokens and taking the complement.
-      -        - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-      -        - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-      -        - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
-      +        This version uses an "edge cursor" to process only one edge per node visit,
-      +        re-enqueuing the node to process subsequent edges later. This prioritizes
-      +        exploring deeper into the trie along what seems to be the most promising
-      +        path (as determined by the max_depth heuristic).
-               """
-               state_map: Dict[int, GSS] = self.state
-       
-      @@ -876,15 +875,14 @@
-           def get_mask2(self) -> LLMTokenSet:
-               """
-               Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-       
-      -        Changes for get_mask_only:
-      -        - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-      -          the forbidden terminals -> forbidden LLM tokens and taking the complement.
-      -        - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-      -        - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-      -        - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
-      +        This version processes all edges of a node when it is visited. It includes an
-      +        optimization to prune the token set of each edge against the `final_mask` of
-      +        tokens that have already been accepted by reaching an end node.
-               """
-               state_map: Dict[int, GSS] = self.state
-       
-               all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
-               final_mask: LLMTokenSet = RangeSet.empty()
-       
-               # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask
+      @@ -430,7 +430,7 @@ class Model(GraphProvider):
                values: Dict[NodeID, GSS] = {}
-      @@ -902,14 +900,12 @@
-               # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
-               @_acc_memoize(use_value_cache=False)
-               def initialize_acc(acc: PyAcc) -> PyAcc:
-                   # Compute allowed LLM tokens from disallowed terminals for this accumulator
-      -            disallowed_llm_mask = RangeSet.empty()
-      +            disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
-                   disallowed_map = acc.terminals_union
+               depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
+               enqueued_nodes: Set[NodeID] = set()
+      -        edge_cursor: Dict[NodeID, int] = {}  # Next edge index to process per node
+      +        edge_cursor: Dict[NodeID, Tuple[int, int]] = {}  # node -> (next_edge_idx, gss_id)
        
-                   for tsid, disallowed_terminals in disallowed_map.items():
-                       if tsid > max_state or tsid not in pmc:
-                           continue
-                       terminals_to_llm = pmc[tsid]
-                       for terminal_id in disallowed_terminals.iter_indices():
-                           if terminal_id in terminals_to_llm:
-      -                        disallowed_llm_mask = disallowed_llm_mask.union(
-      -                            terminals_to_llm[terminal_id]
-      -                        )
-      +                        disallowed_llm_mask |= terminals_to_llm[terminal_id]
+               hp, hpop = heapq.heappush, heapq.heappop
+               roots_map: Dict[int, NodeID] = self.roots_map
+      @@ -483,6 +483,7 @@ class Model(GraphProvider):
+               while depth_heap:
+                   neg_depth, node = hpop(depth_heap)
+                   gss_node: GSS = values.pop(node)
+      +            gss_id = id(gss_node)
+                   enqueued_nodes.remove(node)
        
-                   allowed_mask = all_ones.difference(disallowed_llm_mask)
+                   # End-node handling: just union the allowed LLM tokens
+      @@ -502,7 +503,9 @@ class Model(GraphProvider):
        
-
+                   # Traverse edges and propagate masks
+                   # Process only one edge per pop; resume where we left off
+      -            spawned_any = False
+      -            start_edge_idx = edge_cursor.get(node, 0)
+      +            spawned_any = False
+      +            saved_cursor = edge_cursor.get(node)
+      +            start_edge_idx = saved_cursor[0] if saved_cursor and saved_cursor[1] == gss_id else 0
+                   edges = a_node.children if a_node else []
+                   for edge_i in range(start_edge_idx, len(edges)):
+                       (pop, llm_bv_from_edge), dests = edges[edge_i]
+      @@ -544,10 +547,12 @@ class Model(GraphProvider):
+       
+                       if child_spawned:
+                           spawned_any = True
+      -                    # Save progress and re-enqueue this node to process the next edge later
+      -                    edge_cursor[node] = edge_i + 1
+      -                    values[node] = gss_node
+      +                    # Save progress and re-enqueue this node to process the next edge later.
+      +                    # Merge into any existing value (e.g., from self-loops) to avoid clobbering new contributions.
+      +                    merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
+      +                    values[node] = merged_for_requeue
+      +                    edge_cursor[node] = (edge_i + 1, id(merged_for_requeue))
+                           if node not in enqueued_nodes:
+                               enqueued_nodes.add(node)
+                               hp(depth_heap, (-max_depth[node], node))
+                           break
       ```
     metadata:
   - user: |
@@ -3312,7 +3083,8 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Restructure get_mask1 and get_mask2
-      for clearer strategy comparison"'
+  - user: 'Changes committed with message: "Fix: Correct incremental traversal in
+      get_mask1 by tying edge cursor to GSS identity and ensuring proper GSS merging
+      on re-enqueue"'
     metadata:
 ...

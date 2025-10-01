@@ -659,7 +659,7 @@ class Model(GraphProvider):
         values: Dict[NodeID, GSS] = {}
         depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
         enqueued_nodes: Set[NodeID] = set()
-        edge_cursor: Dict[NodeID, int] = {}  # Next edge index to process per node
+        edge_cursor: Dict[NodeID, Tuple[int, int]] = {}  # node -> (next_edge_idx, gss_id)
 
         hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
@@ -712,6 +712,7 @@ class Model(GraphProvider):
         while depth_heap:
             neg_depth, node = hpop(depth_heap)
             gss_node: GSS = values.pop(node)
+            gss_id = id(gss_node)
             enqueued_nodes.remove(node)
 
             # End-node handling: just union the allowed LLM tokens
@@ -730,7 +731,8 @@ class Model(GraphProvider):
             # Traverse edges and propagate masks
             # Process only one edge per pop; resume where we left off
             spawned_any = False
-            start_edge_idx = edge_cursor.get(node, 0)
+            saved_cursor = edge_cursor.get(node)
+            start_edge_idx = saved_cursor[0] if saved_cursor and saved_cursor[1] == gss_id else 0
             edges = a_node.children if a_node else []
             for edge_i in range(start_edge_idx, len(edges)):
                 (pop, llm_bv_from_edge), dests = edges[edge_i]
@@ -784,9 +786,11 @@ class Model(GraphProvider):
 
                 if child_spawned:
                     spawned_any = True
-                    # Save progress and re-enqueue this node to process the next edge later
-                    edge_cursor[node] = edge_i + 1
-                    values[node] = gss_node
+                    # Save progress and re-enqueue this node to process the next edge later.
+                    # Merge into any existing value (e.g., from self-loops) to avoid clobbering new contributions.
+                    merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
+                    values[node] = merged_for_requeue
+                    edge_cursor[node] = (edge_i + 1, id(merged_for_requeue))
                     if node not in enqueued_nodes:
                         enqueued_nodes.add(node)
                         hp(depth_heap, (-max_depth[node], node))
