@@ -106,25 +106,24 @@ pub fn dump_precompute_trie0_recursive(
         let is_last = i == num_children - 1;
         let connector = if is_last { "└──" } else { "├──" };
 
-        let (gtid_opt, disallow_opt) = edge_key;
-        let gtid_display = match gtid_opt {
-            Some(gtid) => {
+        let edge_key_display = match edge_key {
+            Some((gtid, disallow_opt)) => {
                 if let Some(name_map) = token_name_map {
-                    name_map.get_by_right(&gtid.0)
+                    let gtid_str = name_map.get_by_right(&gtid.0)
                         .map(|name| format!("'{}'", name))
-                        .unwrap_or_else(|| format!("ID:{}", gtid.0))
+                        .unwrap_or_else(|| format!("ID:{}", gtid.0));
+                    let disallow_str = if let Some(sid) = disallow_opt {
+                        format!(", disallow=(S{})", sid.0)
+                    } else {
+                        "".to_string()
+                    };
+                    format!("{}{}", gtid_str, disallow_str)
                 } else {
                     format!("ID:{}", gtid.0)
                 }
             },
             None => "ε".to_string(),
         };
-        let disallow_display = if let Some((sid, tid)) = disallow_opt {
-            format!(", disallow=(S{}, T{})", sid.0, tid.0)
-        } else {
-            "".to_string()
-        };
-        let edge_key_display = format!("{}{}", gtid_display, disallow_display);
 
         let tokens_display = format_bv_with_tokens(&edge_val_bv, original_internal_bimap, llm_token_map, 5);
 
