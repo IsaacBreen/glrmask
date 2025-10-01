@@ -941,6 +941,11 @@ class Model(GraphProvider):
                     if d not in enqueued_nodes:
                         enqueued_nodes.add(d)
                         hp(depth_heap, (-max_depth[d], d))
+                    child_spawned = True
+
+            # If we didn't spawn any child across remaining edges, this node is done
+            if not spawned_any:
+                edge_cursor.pop(node, None)
 
         # Convert internal mask back to original IDs
         original_indices = RangeSetOut.empty()
