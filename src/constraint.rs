@@ -3862,6 +3862,11 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // original ID
+        let mut self_clone = self.clone();
+        self_clone.commit_bytes(&self_clone.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id)
+            .unwrap_or_else(|| panic!("LLM token ID {:?} not found in LLM token map during commit.", llm_token_id))
+            .clone());
+
         // Convert to internal id; if not present or no precomputed entry, fall back.
         let internal_id = self.parent.original_id_to_internal(llm_token_id)
             .unwrap_or_else(|| panic!("LLM token ID {:?} not found in internal mapping during commit.", llm_token_id));
@@ -3991,6 +3996,8 @@ impl<'a> GrammarConstraintState<'a> {
         //     }
         //     false
         // });
+
+        assert!(*self == self_clone);
     }
 
     #[time_it]
