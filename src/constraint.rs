@@ -2251,7 +2251,6 @@ impl<'r> Precomputer0<'r> {
 
                         for src_node_wrapper in &precompute_nodes {
                             if next_pos == segment_bytes.len() {
-                                println!("At end of segment after matching terminal {:?} at pos {}. Inserting end node edge with LLM token {:?} from node {:?}.", terminal_id, next_pos, child_vocab_node.token_id(), src_node_wrapper.as_arc());
                                 // Exact end-of-segment terminal match: finishing LLM token here goes to tokenizer initial state.
                                 let llm_token_id = child_vocab_node.token_id();
                                 let mut edge_bv = HybridBitset::zeros();
@@ -2273,6 +2272,7 @@ impl<'r> Precomputer0<'r> {
                                     self.get_end_node(s0)
                                 };
                                 inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                                println!("At CLEAN end of segment after matching terminal {:?} at pos {}. Inserting end node edge with LLM token {:?} from node {:?} to node {:?}. disallowed_terminal_info: {:?}", terminal_id, next_pos, child_vocab_node.token_id(), src_node_wrapper, end_idx, disallowed_terminal_info);
                             }
 
                             let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
@@ -2312,6 +2312,7 @@ impl<'r> Precomputer0<'r> {
                             let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents0::internal()).unwrap();
                             let result_node_ptr = result_node.clone();
                             dest_nodes_in_queue.insert(result_node_ptr.clone());
+                            println!("At end of segment after matching terminal {:?} at pos {}. Inserting end node edge with LLM token {:?} from node {:?} to node {:?}.", terminal_id, next_pos, child_vocab_node.token_id(), src_node_wrapper, result_node_ptr);
                         }
                     }
 
