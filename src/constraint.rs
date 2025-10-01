@@ -2206,11 +2206,9 @@ impl<'r> Precomputer0<'r> {
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
     ) {
-        println!("DFS at vocab node: {:?}. Tokenizer state IDs: {:?}", vocab_node.prefix(), assoc_by_state.keys());
         self.pb.inc(1);
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            println!("Processing segment: {:?}", String::from_utf8_lossy(segment_bytes));
             let mut work_queue: BTreeMap<
                 usize,
                 BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
@@ -2272,7 +2270,6 @@ impl<'r> Precomputer0<'r> {
                                     self.get_end_node(s0)
                                 };
                                 inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
-                                println!("At CLEAN end of segment after matching terminal {:?} at pos {}. Inserting end node edge with LLM token {:?} from node {:?} to node {:?}. disallowed_terminal_info: {:?}", terminal_id, next_pos, child_vocab_node.token_id(), src_node_wrapper, end_idx, disallowed_terminal_info);
                             }
 
                             let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
@@ -2312,7 +2309,6 @@ impl<'r> Precomputer0<'r> {
                             let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents0::internal()).unwrap();
                             let result_node_ptr = result_node.clone();
                             dest_nodes_in_queue.insert(result_node_ptr.clone());
-                            println!("At end of segment after matching terminal {:?} at pos {}. Inserting end node edge with LLM token {:?} from node {:?} to node {:?}.", terminal_id, next_pos, child_vocab_node.token_id(), src_node_wrapper, result_node_ptr);
                         }
                     }
 
@@ -2340,9 +2336,7 @@ impl<'r> Precomputer0<'r> {
             }
 
             if !next_level_assoc.is_empty() {
-                println!("DFS: Recursing into child vocab node: {:?}", child_vocab_node.prefix());
                 self.dfs(child_vocab_node, next_level_assoc);
-                println!("DFS: Done recursing into child vocab node: {:?}", child_vocab_node.prefix());
             }
         }
     }
