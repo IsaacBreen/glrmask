@@ -889,6 +889,8 @@ class Model(GraphProvider):
                 continue
 
             # Traverse edges and propagate masks
+            # Process only one edge per pop; resume where we left off
+            spawned_any = False
             start_edge_idx = 0
             edges = a_node.children if a_node else []
             for edge_i in range(start_edge_idx, len(edges)):
