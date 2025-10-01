@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode1, PrecomputeNode1Index, PrecomputeNode2Index, Trie1GodWrapper, Trie2GodWrapper, PrecomputeNode2, PrecomputeNode3Index, Trie3GodWrapper};
+use crate::constraint::{GrammarConstraint, Precomputed, PrecomputeNode1, PrecomputeNode1Index, PrecomputeNode2Index, Trie1GodWrapper, Trie2GodWrapper, PrecomputeNode2, PrecomputeNode3Index, Trie3GodWrapper, PrecomputeNode0Index, Trie0GodWrapper};
 use crate::types::{TerminalID as GrammarTokenID};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
@@ -73,6 +73,90 @@ fn format_bv_with_tokens(
     let ellipsis = if bv.len() > limit { ", ..." } else { "" };
 
     format!("{} (e.g., [{}]{})", bv_neat_str, samples_str, ellipsis)
+}
+
+/// Helper function to recursively dump the structure of a PrecomputeNode0 Trie.
+pub fn dump_precompute_trie0_recursive(
+    node_arc: &PrecomputeNode0Index,
+    prefix: String,
+    visited: &mut HashSet<PrecomputeNode0Index>,
+    original_internal_bimap: Option<&BTreeMap<usize, usize>>,
+    token_name_map: Option<&BiBTreeMap<Terminal, usize>>,
+    llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+    trie0_god: &Trie0GodWrapper,
+) {
+    let children_to_visit;
+
+    {
+        let node = node_arc.read(trie0_god).expect("RwLock poisoned during dump");
+        // Collect children information while holding the lock
+        children_to_visit = node.children().iter().flat_map(|(edge_key, dest_map)| {
+            dest_map.iter().map(move |(child_wrapper, edge_val)| {
+                (
+                    edge_key.clone(),
+                    edge_val.clone(),
+                    child_wrapper.as_arc().clone(),
+                )
+            })
+        }).collect::<Vec<_>>();
+    }
+
+    let num_children = children_to_visit.len();
+    for (i, (edge_key, edge_val_bv, child_arc)) in children_to_visit.iter().enumerate() {
+        let is_last = i == num_children - 1;
+        let connector = if is_last { "└──" } else { "├──" };
+
+        let (gtid_opt, disallow_opt) = edge_key;
+        let gtid_display = match gtid_opt {
+            Some(gtid) => {
+                if let Some(name_map) = token_name_map {
+                    name_map.get_by_right(&gtid.0)
+                        .map(|name| format!("'{}'", name))
+                        .unwrap_or_else(|| format!("ID:{}", gtid.0))
+                } else {
+                    format!("ID:{}", gtid.0)
+                }
+            },
+            None => "ε".to_string(),
+        };
+        let disallow_display = if let Some((sid, tid)) = disallow_opt {
+            format!(", disallow=(S{}, T{})", sid.0, tid.0)
+        } else {
+            "".to_string()
+        };
+        let edge_key_display = format!("{}{}", gtid_display, disallow_display);
+
+        let tokens_display = format_bv_with_tokens(&edge_val_bv, original_internal_bimap, llm_token_map, 5);
+
+        let child_ptr;
+        let child_info;
+        let is_visited;
+        let is_end_node;
+        {
+            let child_node = child_arc.read(trie0_god).unwrap();
+            child_ptr = child_arc;
+            is_visited = visited.contains(&child_ptr);
+            is_end_node = child_node.value.end;
+            let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, original_internal_bimap, llm_token_map, 5);
+            child_info = format!("Node {} (MaxDepth: {}){} [Live: {}]", child_ptr, child_node.max_depth, if is_end_node { " [END]" } else { "" }, live_tokens_str);
+        }
+
+        if is_visited && !is_end_node {
+            println!("{}{} Edge {}: {} -> Ref to {}", prefix, connector, edge_key_display, tokens_display, child_info);
+        } else {
+            println!("{}{} Edge {}: {} -> {}", prefix, connector, edge_key_display, tokens_display, child_info);
+
+            if !is_visited {
+                visited.insert(*child_ptr);
+                let child_prefix = if is_last {
+                    format!("{}   ", prefix)
+                } else {
+                    format!("{}│  ", prefix)
+                };
+                dump_precompute_trie0_recursive(child_arc, child_prefix, visited, original_internal_bimap, token_name_map, llm_token_map, trie0_god);
+            }
+        }
+    }
 }
 
 /// Helper function to recursively dump the structure of a PrecomputeNode Trie.
@@ -159,9 +243,20 @@ pub fn dump_precompute_trie_recursive(
 
 impl GrammarConstraint { // This is in constraint_extra.rs
     /// Dumps the structure of the precomputed Trie map for visualization.
-    pub fn dump_precomputed(&self) {
+    pub fn dump_precomputed0(&self) {
+        GrammarConstraint::_dump_precomputed0(
+            &self.precomputed0,
+            &self.llm_vocab.original_to_internal_id_bimap,
+            &self.token_name_map,
+            &self.llm_vocab.llm_token_map,
+            &self.trie0_god,
+        );
+    }
+
+    /// Dumps the structure of the precomputed Trie map for visualization.
+    pub fn dump_precomputed1(&self) {
         GrammarConstraint::_dump_precomputed(
-            &self.precomputed,
+            &self.precomputed1,
             &self.llm_vocab.original_to_internal_id_bimap,
             &self.token_name_map,
             &self.llm_vocab.llm_token_map,
@@ -169,8 +264,43 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         );
     }
 
+    pub fn _dump_precomputed0(
+        precomputed0: &BTreeMap<TokenizerStateID, PrecomputeNode0Index>,
+        original_to_internal_id_bimap: &BTreeMap<usize, usize>,
+        token_name_map: &BiBTreeMap<Terminal, usize>,
+        llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
+        trie0_god: &Trie0GodWrapper,
+    ) {
+        println!("Dumping Precomputed Trie 0 Structure (showing original LLM Token IDs):");
+        println!("===================================");
+
+        let mut visited: HashSet<PrecomputeNode0Index> = HashSet::new();
+        for (tokenizer_state_id, root_node_trie) in precomputed0 {
+            println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
+
+            let root_ptr;
+            let root_info;
+            {
+                let root_node = root_node_trie.read(trie0_god).unwrap();
+                root_ptr = root_node_trie;
+                let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(original_to_internal_id_bimap), Some(llm_token_map), 5);
+                root_info = format!("Root Node {} (MaxDepth: {}){} [Live: {}]", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" }, live_tokens_str);
+            }
+            println!("{}", root_info);
+
+            if visited.contains(&root_ptr) {
+                println!("  (Root already visited)");
+            } else {
+                visited.insert(*root_ptr);
+                dump_precompute_trie0_recursive(root_node_trie, "".to_string(), &mut visited, Some(original_to_internal_id_bimap), Some(token_name_map), Some(llm_token_map), trie0_god);
+            }
+        }
+        println!("\n===================================");
+        println!("Dump Complete.");
+    }
+
     pub fn _dump_precomputed(
-        precomputed: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+        precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
         original_to_internal_id_bimap: &BTreeMap<usize, usize>,
         token_name_map: &BiBTreeMap<Terminal, usize>,
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
@@ -180,7 +310,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         println!("===================================");
 
         let mut visited: HashSet<PrecomputeNode1Index> = HashSet::new();
-        for (tokenizer_state_id, root_node_trie) in precomputed {
+        for (tokenizer_state_id, root_node_trie) in precomputed1 {
             println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
 
             let root_ptr;
@@ -1080,7 +1210,7 @@ mod tests {
     fn test_dump_precomputed_runs() {
         let constraint = create_minimal_constraint();
         println!("--- Starting dump_precomputed test output ---");
-        constraint.dump_precomputed(); // Just ensure it runs without panic
+        constraint.dump_precomputed1(); // Just ensure it runs without panic
         println!("--- Finished dump_precomputed test output ---");
     }
 
