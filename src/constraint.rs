@@ -2303,10 +2303,8 @@ impl<'r> Precomputer0<'r> {
                     }
 
                     if let Some(end_state_val) = exec_result.end_state {
-                        let possible_final_tokens = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_val));
                         for src_node_wrapper in &precompute_nodes {
                             let llm_token_id = child_vocab_node.token_id();
-                            if llm_token_id == usize::MAX { continue; }
                             let mut edge_bv = HybridBitset::zeros();
                             edge_bv.insert(llm_token_id);
                             let edge_key = (None, None);
