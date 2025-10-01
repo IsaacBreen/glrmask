@@ -508,6 +508,7 @@ fn test_aborted_tokenizer_restart_equivalence() {
         ]
     ];
     let tokenizer = tokenizer_expr.build();
+    println!("Tokenizer: {}", tokenizer);
 
     // Grammar: S -> HASH_OPT_A_T | HASH_OPT_A_T A_T
     // Terminals in grammar:

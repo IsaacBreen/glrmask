@@ -606,6 +606,12 @@ impl Display for DFA {
     }
 }
 
+impl Display for Regex {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.dfa)
+    }
+}
+
 impl NFAState {
     pub fn new() -> NFAState {
         NFAState {
