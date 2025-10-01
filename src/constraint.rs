@@ -485,7 +485,7 @@ pub struct GrammarConstraint {
     pub trie3_god: Trie3GodWrapper,
     pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
     // Stage-local vocabularies for internal<->original mappings
-    pub precompute_vocab: StageVocab,
+    pub precompute_vocab1: StageVocab,
     pub precompute2_vocab: StageVocab,
     pub precompute3_vocab: StageVocab,
 }
@@ -549,7 +549,7 @@ impl JSONConvertible for GrammarConstraint {
         // Stage vocabs
         obj.insert("state_map_by_llm".to_string(), self.state_map_by_llm.to_json());
         obj.insert("terminal_map_by_llm".to_string(), self.terminal_map_by_llm.to_json());
-        obj.insert("precompute_vocab".to_string(), self.precompute_vocab.to_json());
+        obj.insert("precompute_vocab".to_string(), self.precompute_vocab1.to_json());
         obj.insert("precompute2_vocab".to_string(), self.precompute2_vocab.to_json());
         obj.insert("precompute3_vocab".to_string(), self.precompute3_vocab.to_json());
         JSONNode::Object(obj)
@@ -650,7 +650,7 @@ impl JSONConvertible for GrammarConstraint {
                     post_commit_allow_check_mode,
                     state_map_by_llm,
                     terminal_map_by_llm,
-                    precompute_vocab,
+                    precompute_vocab1: precompute_vocab,
                     precompute2_vocab,
                     precompute3_vocab,
                 })
@@ -862,7 +862,7 @@ impl GrammarConstraint {
                 post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
                 state_map_by_llm,
                 terminal_map_by_llm,
-                precompute_vocab,
+                precompute_vocab1: precompute_vocab,
                 precompute2_vocab,
                 precompute3_vocab,
             };
@@ -969,7 +969,7 @@ impl GrammarConstraint {
             post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
             state_map_by_llm,
             terminal_map_by_llm,
-            precompute_vocab,
+            precompute_vocab1: precompute_vocab,
             precompute2_vocab,
             precompute3_vocab,
         };
@@ -1375,7 +1375,7 @@ impl GrammarConstraint {
 
     // Stage-aware conversion (for Trie1)
     pub fn internal_bv_to_original_precompute(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
-        self.internal_bv_to_original_with_map(internal_bv, &self.precompute_vocab.internal_to_original, self.precompute_vocab.internal_max_llm_token)
+        self.internal_bv_to_original_with_map(internal_bv, &self.precompute_vocab1.internal_to_original, self.precompute_vocab1.internal_max_llm_token)
     }
     // Stage-aware conversion (for Trie2)
     pub fn internal_bv_to_original_precompute2(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
