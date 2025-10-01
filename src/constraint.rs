@@ -987,6 +987,11 @@ impl GrammarConstraint {
         gc
     }
 
+    pub fn dump_precomputed3(&self) {
+        // Dummy implementation to satisfy Python bindings
+        println!("Dumping precomputed3 is not fully implemented in this version.");
+    }
+
     pub fn precompute0(
         tokenizer:        &Regex,
         parser:           Option<&GLRParser>,
