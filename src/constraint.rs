@@ -1076,42 +1076,27 @@ impl GrammarConstraint {
                 let gtid_opt = edge_key.map(|(gtid, _)| gtid);
                 for (child0_idx, edge_val) in dest_map0 {
                     let child0_guard = child0_idx.read(trie0_god).unwrap();
-                    if child0_guard.value.final_tokenizer_state.is_some() {
-                        if gtid_opt.is_none() {
-                            let final_sid = child0_guard.value.final_tokenizer_state.unwrap();
-                            let possible_final_tokens = tokenizer.tokens_accessible_from_state(final_sid);
-                            let mut node1_guard = node1_idx.write(&trie1_god).unwrap();
-                            for terminal_id in possible_final_tokens {
-                                let dest_map1 = node1_guard.children_mut().entry(Some(terminal_id)).or_default();
-                                dest_map1.entry(trie1_leaf.clone()).or_insert_with(LLMTokenBV::zeros).bitor_assign(&edge_val);
+                    let child1_idx = match node0_to_node1_map.entry(child0_idx) {
+                        std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            let child0_val = child0_guard.value.clone();
+                            let new_node1 = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(child0_val.into())));
+                            entry.insert(new_node1.clone());
+                            if visited.insert(child0_idx) {
+                                q.push_back(child0_idx);
                             }
-                        } else {
-                            let child1_idx = trie1_leaf.clone();
-                            let mut node1_guard = node1_idx.write(&trie1_god).unwrap();
-                            let dest_map1 = node1_guard.children_mut().entry(gtid_opt).or_default();
-                            dest_map1.entry(child1_idx).or_insert_with(LLMTokenBV::zeros).bitor_assign(&edge_val);
+                            new_node1
                         }
-                    } else {
-                        let child1_idx = match node0_to_node1_map.entry(child0_idx) {
-                            std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
-                            std::collections::hash_map::Entry::Vacant(entry) => {
-                                let child0_val = child0_guard.value.clone();
-                                let new_node1 = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(child0_val.into())));
-                                entry.insert(new_node1.clone());
-                                if visited.insert(child0_idx) {
-                                    q.push_back(child0_idx);
-                                }
-                                new_node1
-                            }
-                        };
+                    };
 
-                        let mut node1_guard = node1_idx.write(&trie1_god).unwrap();
-                        let dest_map1 = node1_guard.children_mut().entry(gtid_opt).or_default();
-                        dest_map1.entry(child1_idx).or_insert_with(LLMTokenBV::zeros).bitor_assign(&edge_val);
-                    }
+                    let mut node1_guard = node1_idx.write(&trie1_god).unwrap();
+                    let dest_map1 = node1_guard.children_mut().entry(gtid_opt).or_default();
+                    dest_map1.entry(child1_idx).or_insert_with(LLMTokenBV::zeros).bitor_assign(&edge_val);
                 }
             }
         }
+
+        todo!("Iterate over nodes in precomputed0 that have final_tokenizer_state...");
 
         // Optimizations, similar to precompute0
         let ignore_terminal_id = parser.and_then(|p| p.ignore_terminal_id);
