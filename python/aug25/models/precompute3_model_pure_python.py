@@ -661,7 +661,6 @@ class Model(GraphProvider):
         values: Dict[NodeID, GSS] = {}
         depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
         enqueued_nodes: Set[NodeID] = set()
-        edge_cursor: Dict[NodeID, int] = {}  # Next edge index to process per node
 
         hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
@@ -730,27 +729,21 @@ class Model(GraphProvider):
                 continue
 
             # Traverse edges and propagate masks
-            a_node = arena.get(node)
             edges = a_node.children if a_node else []
-            # Process only one edge per pop; resume where we left off
-            start_edge_idx = edge_cursor.get(node, 0)
-            spawned_any = False
-            for edge_i in range(start_edge_idx, len(edges)):
-                (pop, llm_bv), dests = edges[edge_i]
-
+            for (pop, llm_bv), dests in edges:
                 popped_gss: GSS = gss_node.popn(pop)
                 if popped_gss.is_empty():
                     continue
 
                 @_acc_memoize(use_value_cache=False)
                 def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                    # NOTE: get_mask1 uses the edge's llm_bv directly.
                     new_mask = acc.llm_mask.intersection(llm_bv)
                     if new_mask.is_empty():
                         return None
                     return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
 
                 pruned_gss = popped_gss.apply_and_prune(intersect_and_prune)
-
                 if pruned_gss.is_empty():
                     continue
 
@@ -758,21 +751,19 @@ class Model(GraphProvider):
                     continue
 
                 peeked = pruned_gss.peek()
-                child_spawned = False
                 for dest_idx, state_bv in dests:
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
                     if not values_to_keep:
                         continue
 
                     child_gss = pruned_gss.isolate_many(values_to_keep)
-
                     if child_gss.is_empty():
                         continue
 
                     if child_gss.reduce_acc().is_empty():
                         continue
 
-                    d: NodeID = int(dest_idx)
+                    d = int(dest_idx)
                     if d in values:
                         values[d] = values[d].merge(child_gss)
                     else:
@@ -780,21 +771,6 @@ class Model(GraphProvider):
                     if d not in enqueued_nodes:
                         enqueued_nodes.add(d)
                         hp(depth_heap, (-max_depth[d], d))
-                    child_spawned = True
-
-                if child_spawned:
-                    spawned_any = True
-                    # Save progress and re-enqueue this node to process the next edge later
-                    edge_cursor[node] = edge_i + 1
-                    values[node] = gss_node
-                    if node not in enqueued_nodes:
-                        enqueued_nodes.add(node)
-                        hp(depth_heap, (-max_depth[node], node))
-                    break
-
-            # If we didn't spawn any child across remaining edges, this node is done
-            if not spawned_any:
-                edge_cursor.pop(node, None)
 
         # Convert internal mask back to original IDs
         original_indices = RangeSetOut.empty()
@@ -844,9 +820,7 @@ class Model(GraphProvider):
                 terminals_to_llm = pmc[tsid]
                 for terminal_id in disallowed_terminals.iter_indices():
                     if terminal_id in terminals_to_llm:
-                        disallowed_llm_mask = disallowed_llm_mask.union(
-                            terminals_to_llm[terminal_id]
-                        )
+                        disallowed_llm_mask |= terminals_to_llm[terminal_id]
 
             allowed_mask = all_ones.difference(disallowed_llm_mask)
 
@@ -890,6 +864,7 @@ class Model(GraphProvider):
             # Traverse edges and propagate masks
             edges = a_node.children if a_node else []
             for (pop, llm_bv_from_edge), dests in edges:
+                # NOTE: get_mask2 prunes the edge's bitset with the final_mask.
                 llm_bv = llm_bv_from_edge.difference(final_mask)
                 if llm_bv.is_empty():
                     continue
@@ -906,7 +881,6 @@ class Model(GraphProvider):
                     return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
 
                 pruned_gss = popped_gss.apply_and_prune(intersect_and_prune)
-
                 if pruned_gss.is_empty():
                     continue
 
@@ -916,7 +890,6 @@ class Model(GraphProvider):
                 peeked = pruned_gss.peek()
                 for dest_idx, state_bv in dests:
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-
                     if not values_to_keep:
                         continue
 
@@ -927,7 +900,7 @@ class Model(GraphProvider):
                     if child_gss.reduce_acc().is_empty():
                         continue
 
-                    d: NodeID = int(dest_idx)
+                    d = int(dest_idx)
                     if d in values:
                         values[d] = values[d].merge(child_gss)
                     else:
