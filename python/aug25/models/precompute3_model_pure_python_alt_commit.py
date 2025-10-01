@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 import _sep1 as ffi
 from .precompute3_model_pure_python import (
-    Model,
+    Model as _Model,
     PyAcc,
     GSS,
     _acc_memoize,
@@ -35,7 +35,7 @@ class Precompute0Node:
 # --- The New Model ---
 
 @dataclass
-class Precompute0Model(Model):
+class Model(_Model):
     """
     A model that subclasses the base Model to provide an alternative `commit` implementation.
     This version uses the precomputed0 trie, which is specialized for single-token commits
@@ -48,7 +48,8 @@ class Precompute0Model(Model):
     state_map_by_llm: Dict[int, Dict[int, int]] = field(default_factory=dict)
 
     @staticmethod
-    def from_json_string(s: str) -> 'Precompute0Model':
+    def from_json_string(s: str) -> 'Model':
+        raise Exception
         """
         Constructs the model by first loading the base model and then parsing
         the additional data structures required for this alternative commit strategy.
@@ -111,7 +112,7 @@ class Precompute0Model(Model):
         state_map_by_llm = parse_dedup_map(data['state_map_by_llm'], parse_state_map_value)
 
         # Construct the final model using all fields from the base model plus the new ones
-        return Precompute0Model(
+        return Model(
             **base_model.__dict__,
             arena0=arena0,
             roots_map0=roots_map0,
@@ -183,12 +184,12 @@ class Precompute0Model(Model):
                 for dest_node_id, edge_bv in dest_map:
                     if not edge_bv.contains(internal_id):
                         continue
-                    
+
                     processed_gss = gss
                     if edge_key is not None:
                         gtid, disallow_opt = edge_key
                         processed_gss = self._process_token(gss, gtid)
-                    
+
                         if disallow_opt is not None and not processed_gss.is_empty():
                             end_state = disallow_opt
                             term_id = gtid
@@ -204,4 +205,4 @@ class Precompute0Model(Model):
         stats.stop('commit_precompute0')
 
 
-__all__ = ['Precompute0Model']
+__all__ = ['Model']
