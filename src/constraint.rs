@@ -1541,24 +1541,22 @@ impl GrammarConstraint {
         let mut new_children_map = BTreeMap::new();
         let mut children_changed = false;
 
-        let children = {
+        {
             let node_guard = node_arc.read(trie1_god).unwrap();
-            node_guard.children().clone()
-        };
-
-        for (edge_key, dest_map) in &children {
-            let mut new_dest_map = OrderedHashMap::new();
-            for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                let child_arc = node_ptr_wrapper.as_arc().clone();
-                let canonical_child_arc = Self::deduplicate_recursive_trie1(child_arc.clone(), canonical_nodes, visited, trie1_god);
-                if &child_arc != &canonical_child_arc {
-                    children_changed = true;
+            for (edge_key, dest_map) in node_guard.children() {
+                let mut new_dest_map = OrderedHashMap::new();
+                for (node_ptr_wrapper, edge_val) in dest_map.iter() {
+                    let child_arc = node_ptr_wrapper.as_arc().clone();
+                    let canonical_child_arc = Self::deduplicate_recursive_trie1(child_arc.clone(), canonical_nodes, visited, trie1_god);
+                    if &child_arc != &canonical_child_arc {
+                        children_changed = true;
+                    }
+                    let new_node_ptr_wrapper = canonical_child_arc;
+                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
                 }
-                let new_node_ptr_wrapper = canonical_child_arc;
-                new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
-            }
-            if !new_dest_map.is_empty() {
-                new_children_map.insert(edge_key.clone(), new_dest_map);
+                if !new_dest_map.is_empty() {
+                    new_children_map.insert(edge_key.clone(), new_dest_map);
+                }
             }
         }
 
@@ -2611,12 +2609,9 @@ impl<'r> Precomputer0<'r> {
         let mut new_children_map = BTreeMap::new();
         let mut children_changed = false;
 
-        let children = {
+        {
             let node_guard = node_arc.read(&self.trie0_god).unwrap();
-            node_guard.children().clone()
-        };
-
-        for (edge_key, dest_map) in &children {
+        for (edge_key, dest_map) in node_guard.children() {
             let mut new_dest_map = OrderedHashMap::new();
             for (node_ptr_wrapper, edge_val) in dest_map.iter() {
                 let child_arc = node_ptr_wrapper.as_arc().clone();
@@ -2629,10 +2624,11 @@ impl<'r> Precomputer0<'r> {
             }
             if !new_dest_map.is_empty() {
                 new_children_map.insert(edge_key.clone(), new_dest_map);
+                }
             }
         }
 
-        if children_changed {
+    if children_changed {
         let mut node_guard = node_arc.write(&self.trie0_god).unwrap();
         *node_guard.children_mut() = new_children_map;
         node_guard.recompute_max_depth(&self.trie0_god);
