@@ -136,7 +136,7 @@ pub fn dump_precompute_trie0_recursive(
             let child_node = child_arc.read(trie0_god).unwrap();
             child_ptr = child_arc;
             is_visited = visited.contains(&child_ptr);
-            is_end_node = child_node.value.end;
+            is_end_node = child_node.value.final_tokenizer_state.is_some();
             let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, original_internal_bimap, llm_token_map, 5);
             let end_str = if is_end_node {
                 if let Some(sid) = child_node.value.final_tokenizer_state {
@@ -293,7 +293,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
                 let root_node = root_node_trie.read(trie0_god).unwrap();
                 root_ptr = root_node_trie;
                 let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(original_to_internal_id_bimap), Some(llm_token_map), 5);
-                let end_str = if root_node.value.end {
+                let end_str = if root_node.value.final_tokenizer_state.is_some() {
                     if let Some(sid) = root_node.value.final_tokenizer_state {
                         format!(" [END -> S{}]", sid.0)
                     } else {

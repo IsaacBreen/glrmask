@@ -364,7 +364,6 @@ impl JSONConvertible for PrecomputedNodeContents {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PrecomputedNodeContents0 {
-    pub(crate) end: bool,
     pub(crate) live_tokens: LLMTokenBV,
     // If this is an end node in Trie0, which tokenizer state should the GLR state be placed under?
     // Always Some(_) for leaf nodes; None for non-leaf nodes.
@@ -374,7 +373,6 @@ pub struct PrecomputedNodeContents0 {
 impl PrecomputedNodeContents0 {
     pub(crate) fn root(internal_max_llm_token_id: usize) -> Self {
         Self {
-            end: false,
             live_tokens: LLMTokenBV::ones(internal_max_llm_token_id + 1),
             final_tokenizer_state: None,
         }
@@ -382,21 +380,20 @@ impl PrecomputedNodeContents0 {
 
     pub(crate) fn internal() -> Self {
         Self {
-            end: false,
             live_tokens: LLMTokenBV::zeros(),
             final_tokenizer_state: None,
         }
     }
 
     pub(crate) fn leaf(final_sid: TokenizerStateID) -> Self {
-        Self { end: true, live_tokens: LLMTokenBV::zeros(), final_tokenizer_state: Some(final_sid) }
+        Self { live_tokens: LLMTokenBV::zeros(), final_tokenizer_state: Some(final_sid) }
     }
 }
 
 impl JSONConvertible for PrecomputedNodeContents0 {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert("clean_end".to_string(), self.end.to_json());
+        obj.insert("clean_end".to_string(), self.final_tokenizer_state.is_some().to_json());
         obj.insert("live_tokens".to_string(), self.live_tokens.to_json());
         obj.insert("final_tokenizer_state".to_string(), self.final_tokenizer_state.to_json());
         JSONNode::Object(obj)
@@ -404,13 +401,11 @@ impl JSONConvertible for PrecomputedNodeContents0 {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents0".to_string())
-                                   .and_then(bool::from_json)?;
                 let live_tokens = obj.remove("live_tokens").ok_or_else(|| "Missing field live_tokens for PrecomputedNodeContents0".to_string())
                                        .and_then(LLMTokenBV::from_json)?;
                 let final_tokenizer_state = obj.remove("final_tokenizer_state").ok_or_else(|| "Missing field final_tokenizer_state for PrecomputedNodeContents0".to_string())
                                                .and_then(|n| Option::<TokenizerStateID>::from_json(n))?;
-                Ok(PrecomputedNodeContents0 { end, live_tokens, final_tokenizer_state })
+                Ok(PrecomputedNodeContents0 { live_tokens, final_tokenizer_state })
             }
             _ => Err("Expected JSONNode::Object for PrecomputedNodeContents0".to_string()),
         }
@@ -419,7 +414,7 @@ impl JSONConvertible for PrecomputedNodeContents0 {
 
 impl Into<PrecomputedNodeContents> for PrecomputedNodeContents0 {
     fn into(self) -> PrecomputedNodeContents {
-        PrecomputedNodeContents { end: self.end, live_tokens: self.live_tokens }
+        PrecomputedNodeContents { end: self.final_tokenizer_state.is_some(), live_tokens: self.live_tokens }
     }
 }
 
@@ -1064,7 +1059,7 @@ impl GrammarConstraint {
             for ((gtid_opt, _disallow_opt), dest_map0) in children0 {
                 for (child0_idx, edge_val) in dest_map0 {
                     let child0_guard = child0_idx.read(trie0_god).unwrap();
-                    if child0_guard.value.end {
+                    if child0_guard.value.final_tokenizer_state.is_some() {
                         if gtid_opt.is_none() {
                             let final_sid = child0_guard.value.final_tokenizer_state.unwrap();
                             let possible_final_tokens = tokenizer.tokens_accessible_from_state(final_sid);
@@ -1975,7 +1970,7 @@ impl<'r> Precomputer0<'r> {
 
             // A node is live if it's an end node itself. The tokens that end here are
             // on the edges pointing to this node.
-            if node_guard.value.end {
+            if node_guard.value.final_tokenizer_state.is_some() {
                 // This is the special "end node". It doesn't represent tokens itself,
                 // but it is the source of "liveness". The tokens are on the edges leading *to* it.
                 // When we calculate the live tokens for a parent, the edge BV leading to this
@@ -2291,13 +2286,13 @@ impl<'r> Precomputer0<'r> {
                             let next_tokenizer_state = self.tokenizer.initial_state_id();
                             let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
 
-                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| !w.read(&self.trie0_god).unwrap().value.end));
+                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| w.read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_none()));
 
                             let children_of_src: Vec<_> = src_node_wrapper.as_arc().read(&self.trie0_god).unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
                             let eligible_children = children_of_src.iter().map(|child_node_ptr| {
                                 child_node_ptr.as_arc().clone()
                             }).filter(|child_arc| {
-                                (child_arc.read(&self.trie0_god).unwrap().value.live_tokens.clone() & &edge_bv).is_empty() && !child_arc.read(&self.trie0_god).unwrap().value.end
+                                (child_arc.read(&self.trie0_god).unwrap().value.live_tokens.clone() & &edge_bv).is_empty() && child_arc.read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_none()
                             });
                             inserter = inserter.try_destinations_iter(eligible_children);
 
@@ -3464,7 +3459,7 @@ impl<'a> GrammarConstraintState<'a> {
             // process: if at end node, accumulate results to new_overall_state and stop; otherwise continue if any GLR state is alive.
             |node, glr_s: &mut GLRParserState<'a>| {
                 if !glr_s.is_ok() { return false; }
-                if node.value.end {
+                if node.value.final_tokenizer_state.is_some() {
                     // Use the final tokenizer state encoded by the end node.
                     let final_tid = node.value.final_tokenizer_state
                         .expect("Trie0 end node must carry a final_tokenizer_state");
