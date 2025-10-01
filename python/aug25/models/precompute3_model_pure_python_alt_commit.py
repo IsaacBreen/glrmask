@@ -991,9 +991,26 @@ class Precompute0Model(Model):
 
         terminal_map_by_llm = parse_dedup_map(data['terminal_map_by_llm'], parse_terminal_map_value)
         state_map_by_llm = parse_dedup_map(data['state_map_by_llm'], parse_state_map_value)
-
         return Precompute0Model(
-            **base_model.__dict__,
+            # Fields from Model
+            arena=base_model.arena,
+            roots_map=base_model.roots_map,
+            max_depth=base_model.max_depth,
+            parser_table=base_model.parser_table,
+            glr_parser=base_model.glr_parser,
+            reverse_state_map=base_model.reverse_state_map,
+            tokenizer=base_model.tokenizer,
+            tokenizer_initial_state=base_model.tokenizer_initial_state,
+            tokenizer_max_state=base_model.tokenizer_max_state,
+            possible_matches_cache=base_model.possible_matches_cache,
+            id_to_token=base_model.id_to_token,
+            internal_to_original_map=base_model.internal_to_original_map,
+            all_internal_llm_tokens_bitset=base_model.all_internal_llm_tokens_bitset,
+            all_terminals_bitset=base_model.all_terminals_bitset,
+            ignore_terminal_id=base_model.ignore_terminal_id,
+            original_to_internal_map=base_model.original_to_internal_map,
+            state=base_model.state,
+            # New fields for Precompute0Model
             arena0=arena0,
             roots_map0=roots_map0,
             terminal_map_by_llm=terminal_map_by_llm,
@@ -1049,24 +1066,20 @@ class Precompute0Model(Model):
                     continue
                 gss = merged_gss
             visited[node_id] = gss
-
             node = self.arena0[node_id]
             if node.value.final_tokenizer_state is not None:
                 new_overall_state_parts[node.value.final_tokenizer_state].append(gss)
                 continue
-
             for (gtid_opt, disallow_opt), dest_map in node.children:
                 for dest_node_id, edge_bv in dest_map:
                     if not edge_bv.contains(internal_id):
                         continue
-                    
                     processed_gss = gss
                     if gtid_opt is not None:
                         processed_gss = self._process_token(gss, gtid_opt)
-                    
                     if disallow_opt and not processed_gss.is_empty():
-                        processed_gss = self._disallow_terminal_in_state(processed_gss, disallow_opt[0], disallow_opt[1])
-
+                        end_state, term_id = disallow_opt
+                        processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, term_id)
                     if not processed_gss.is_empty():
                         q.append((dest_node_id, processed_gss))
 
