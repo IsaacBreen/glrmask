@@ -417,6 +417,11 @@ impl JSONConvertible for PrecomputedNodeContents0 {
     }
 }
 
+impl Into<PrecomputedNodeContents> for PrecomputedNodeContents0 {
+    fn into(self) -> PrecomputedNodeContents {
+        PrecomputedNodeContents { end: self.end, live_tokens: self.live_tokens }
+    }
+}
 
 
 
@@ -1036,7 +1041,7 @@ impl GrammarConstraint {
         // Create roots for trie1
         for (sid, root0_idx) in precomputed0 {
             let root0_val = root0_idx.read(trie0_god).unwrap().value.clone();
-            let root1_idx = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(root0_val)));
+            let root1_idx = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(root0_val.into())));
             precomputed1.insert(*sid, root1_idx.clone());
             node0_to_node1_map.insert(*root0_idx, root1_idx);
             if visited.insert(*root0_idx) {
@@ -1058,7 +1063,7 @@ impl GrammarConstraint {
                         std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
                         std::collections::hash_map::Entry::Vacant(entry) => {
                             let child0_val = child0_idx.read(trie0_god).unwrap().value.clone();
-                            let new_node1 = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(child0_val)));
+                            let new_node1 = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(child0_val.into())));
                             entry.insert(new_node1.clone());
                             if visited.insert(child0_idx) {
                                 q.push_back(child0_idx);
@@ -1487,7 +1492,7 @@ struct Precomputer0<'r> {
     // Map each precompute node to the set of LLM tokens that can pass through it.
     // tags:             RefCell<HashMap<PrecomputeNodeIndex, LLMTokenBV>>, // Removed
     // One end node per final tokenizer state.
-    end_nodes: BTreeMap<TokenizerStateID, PrecomputeNode0Index>,
+    end_nodes:        BTreeMap<TokenizerStateID, PrecomputeNode0Index>,
     trie0_god:        Trie0GodWrapper,
 }
 
@@ -1516,7 +1521,7 @@ impl<'r> Precomputer0<'r> {
         for sid in tokenizer.iter_states() {
             roots.insert(
                 sid,
-                PrecomputeNode0Index::new(trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents::root(internal_max_llm_token)))),
+                PrecomputeNode0Index::new(trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents0::root(internal_max_llm_token)))),
             );
         }
 
@@ -1532,6 +1537,10 @@ impl<'r> Precomputer0<'r> {
             pb.set_draw_target(ProgressDrawTarget::hidden());
         }
 
+        let end_nodes = tokenizer.iter_states()
+            .map(|tsid| (tsid, PrecomputeNode0Index::new(trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents0::leaf(tsid))))))
+            .collect();
+
         Self {
             tokenizer,
             parser,
@@ -1546,18 +1555,13 @@ impl<'r> Precomputer0<'r> {
             terminal_follow_map,
             ignore_terminal_id,
             // tags: RefCell::new(HashMap::new()), // Removed
-            end_nodes: BTreeMap::new(),
+            end_nodes,
             trie0_god,
         }
     }
 
-    fn get_end_node(&mut self, final_sid: TokenizerStateID) -> PrecomputeNode0Index {
-        if let Some(idx) = self.end_nodes.get(&final_sid) {
-            return idx.clone();
-        }
-        let idx = PrecomputeNode0Index::new(self.trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents0::leaf(final_sid))));
-        self.end_nodes.insert(final_sid, idx.clone());
-        idx
+    fn get_end_node(&self, final_sid: TokenizerStateID) -> PrecomputeNode0Index {
+        self.end_nodes[&final_sid].clone()
     }
 
     fn possible_matches(&self, vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
@@ -2038,7 +2042,7 @@ impl<'r> Precomputer0<'r> {
                     let dest_arc = arc_map.get(&dest_ptr).unwrap().clone();
 
                     // a. Create a new intermediate node `I`.
-                    let intermediate_node = PrecomputeNode0Index::new(self.trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents::internal())));
+                    let intermediate_node = PrecomputeNode0Index::new(self.trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents0::internal())));
 
                     // b. Add edge I --(gtid)--> D
                     let mut union_bv = LLMTokenBV::zeros();
@@ -2171,7 +2175,7 @@ impl<'r> Precomputer0<'r> {
     }
 
     fn dfs(
-        &mut self,
+        &self,
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
     ) {
@@ -3352,7 +3356,7 @@ impl<'a> GrammarConstraintState<'a> {
         let terminals_map_by_state = self.parent.terminal_map_by_llm.get(&internal_id)
             .unwrap_or_else(|| panic!("No terminal map found for internal LLM token ID {:?} during commit.", internal_id));
         let state_map = self.parent.state_map_by_llm.get(&internal_id)
-            .unwrap_or_else(|| DedupValueMap::<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>::new().get(&internal_id).cloned().unwrap_or_default());
+            .unwrap_or_else(|| panic!("No tokenizer state map found for internal LLM token ID {:?} during commit.", internal_id));
 
         if self.state.is_empty() {
             return;
