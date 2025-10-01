@@ -3245,23 +3245,13 @@ impl<'a> GrammarConstraintState<'a> {
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // original ID
         // Convert to internal id; if not present or no precomputed entry, fall back.
-        let Some(internal_id) = self.parent.original_id_to_internal(llm_token_id) else {
-            if let Some(bytes) = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id) {
-                self.commit_bytes(bytes);
-                return;
-            }
-            return;
-        };
+        let internal_id = self.parent.original_id_to_internal(llm_token_id)
+            .unwrap_or_else(|| panic!("LLM token ID {:?} not found in internal mapping during commit.", llm_token_id));
 
-        let (Some(terminals_map_by_state), Some(state_map)) = (
-            self.parent.terminal_map_by_llm.get(&internal_id),
-            self.parent.state_map_by_llm.get(&internal_id),
-        ) else {
-            if let Some(bytes) = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id) {
-                self.commit_bytes(bytes);
-            }
-            return;
-        };
+        let terminals_map_by_state = self.parent.terminal_map_by_llm.get(&internal_id)
+            .unwrap_or_else(|| panic!("No terminal map found for internal LLM token ID {:?} during commit.", internal_id));
+        let state_map = self.parent.state_map_by_llm.get(&internal_id)
+            .unwrap_or_else(|| panic!("No state map found for internal LLM token ID {:?} during commit.", internal_id));
 
         if self.state.is_empty() {
             return;
@@ -3290,23 +3280,14 @@ impl<'a> GrammarConstraintState<'a> {
         //   V == BTreeMap<TokenizerStateID, GLRParserState<'a>>
         let mut initial_values_for_map: Vec<(PrecomputeNode0Index, BTreeMap<TokenizerStateID, GLRParserState<'a>>)> = Vec::new();
         for (tokenizer_state_id, glr_state) in &self.state {
-            if let (Some(root_idx), Some(&final_tid)) = (
-                self.parent.precomputed0.get(tokenizer_state_id),
-                state_map.get(tokenizer_state_id),
-            ) {
-                let mut v = BTreeMap::new();
-                v.insert(final_tid, glr_state.clone());
-                initial_values_for_map.push((*root_idx, v));
-            }
-        }
+            let root_idx = self.parent.precomputed0.get(tokenizer_state_id)
+                .unwrap_or_else(|| panic!("No precomputed trie root for tokenizer state {:?} during commit.", tokenizer_state_id));
+            let &final_tid = state_map.get(tokenizer_state_id)
+                .unwrap_or_else(|| panic!("No final tokenizer state in state_map for tokenizer state {:?} and token {:?} during commit.", tokenizer_state_id, llm_token_id));
 
-        if initial_values_for_map.is_empty() {
-            // Fallback: if something went wrong with precomputation seeding, fallback to commit_bytes.
-            if let Some(bytes) = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id) {
-                self.commit_bytes(bytes);
-                return;
-            }
-            return;
+            let mut v = BTreeMap::new();
+            v.insert(final_tid, glr_state.clone());
+            initial_values_for_map.push((*root_idx, v));
         }
 
         let internal_id_val = internal_id.0;
