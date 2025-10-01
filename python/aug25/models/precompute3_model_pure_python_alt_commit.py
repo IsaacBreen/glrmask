@@ -46,6 +46,7 @@ class Model(_Model):
     roots_map0: Dict[int, NodeID] = field(default_factory=dict)
     terminal_map_by_llm: Dict[int, Dict[int, TerminalIdSet]] = field(default_factory=dict)
     state_map_by_llm: Dict[int, Dict[int, int]] = field(default_factory=dict)
+    original_to_internal_map: Dict[int, int] = field(default_factory=dict)
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -110,6 +111,11 @@ class Model(_Model):
         terminal_map_by_llm = parse_dedup_map(data['terminal_map_by_llm'], parse_terminal_map_value)
         state_map_by_llm = parse_dedup_map(data['state_map_by_llm'], parse_state_map_value)
 
+        original_to_internal_map = {}
+        for internal, original_bv in base_model.internal_to_original_map.items():
+            for original in original_bv.iter_indices():
+                original_to_internal_map[original] = internal
+
         # Construct the final model using all fields from the base model plus the new ones
         return Model(
             **base_model.__dict__,
@@ -117,6 +123,7 @@ class Model(_Model):
             roots_map0=roots_map0,
             terminal_map_by_llm=terminal_map_by_llm,
             state_map_by_llm=state_map_by_llm,
+            original_to_internal_map=original_to_internal_map
         )
 
     def commit(self, token_id: int):
