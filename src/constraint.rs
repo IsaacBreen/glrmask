@@ -3244,23 +3244,16 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // original ID
-        println!("\n--- ENTERING commit for token ID: {:?} ---", llm_token_id);
         // Convert to internal id; if not present or no precomputed entry, fall back.
         let internal_id = self.parent.original_id_to_internal(llm_token_id)
             .unwrap_or_else(|| panic!("LLM token ID {:?} not found in internal mapping during commit.", llm_token_id));
-        println!("  Internal ID: {:?}", internal_id);
 
         let terminals_map_by_state = self.parent.terminal_map_by_llm.get(&internal_id)
             .unwrap_or_else(|| panic!("No terminal map found for internal LLM token ID {:?} during commit.", internal_id));
         let state_map = self.parent.state_map_by_llm.get(&internal_id)
             .unwrap_or_else(|| panic!("No state map found for internal LLM token ID {:?} during commit.", internal_id));
 
-        println!("  Initial active tokenizer states: {:?}", self.state.keys().map(|s| s.0).collect::<Vec<_>>());
-        println!("  Precomputed state_map: {:?}", state_map);
-        println!("  Precomputed terminals_map: {:?}", terminals_map_by_state);
-
         if self.state.is_empty() {
-            println!("  State is empty before processing. Exiting.");
             return;
         }
 
@@ -3269,44 +3262,32 @@ impl<'a> GrammarConstraintState<'a> {
 
         // 2) Prune disallowed terminals using the per-token precomputed terminal sets.
         self.transform_gss_stacks(|stack, memo| prune_disallowed_terminals(stack, terminals_map_by_state, memo));
-        println!("  Active tokenizer states after prune_disallowed_terminals: {:?}", self.state.keys().map(|s| s.0).collect::<Vec<_>>());
 
-		// 3) Map allowed terminals to final tokenizer states (for this token).
-		let mut final_state_map = BTreeMap::new();
-		for (start_tid, _glr_state) in &self.state {
-			if let Some(&final_tid) = state_map.get(start_tid) {
-				final_state_map.insert(*start_tid, final_tid);
-			} else if terminals_map_by_state.get(start_tid).map_or(false, |bv| !bv.is_empty()) {
-				// If not in state_map, but can match terminals, assume tokenizer resets.
-				final_state_map.insert(*start_tid, self.parent.tokenizer.initial_state_id());
-			}
-		}
-		self.transform_gss_stacks(|stack, memo| map_allowed_terminals_tokenizer_states(stack, &final_state_map, memo));
+        // 3) Map allowed terminals to final tokenizer states (for this token).
+        self.transform_gss_stacks(|stack, memo| map_allowed_terminals_tokenizer_states(stack, state_map, memo));
 
-		// 4) Traverse the precomputed Trie 0 specialized to this token, stepping the GLR state.
-		//    We only follow edges whose LLMTokenBV contains this token's internal ID.
-		//    We also apply any per-edge "disallowed" terminal constraints as encoded in the edge key.
-		//
-		//    We aggregate results per final tokenizer state (as provided by state_map), merging GLR states.
-		if self.state.is_empty() {
-			println!("  State is empty after pruning/mapping. Exiting traversal.");
-			return;
-		}
+        // 4) Traverse the precomputed Trie 0 specialized to this token, stepping the GLR state.
+        //    We only follow edges whose LLMTokenBV contains this token's internal ID.
+        //    We also apply any per-edge "disallowed" terminal constraints as encoded in the edge key.
+        //
+        //    We aggregate results per final tokenizer state (as provided by state_map), merging GLR states.
+        if self.state.is_empty() {
+            return;
+        }
 
-		// Seed the traversal with one entry per active tokenizer state.
-		// Value type (V) carried through the traversal is a per-final-tokenizer-state map of GLR states:
-		//   V == BTreeMap<TokenizerStateID, GLRParserState<'a>>
-		let mut initial_values_for_map: Vec<(PrecomputeNode0Index, BTreeMap<TokenizerStateID, GLRParserState<'a>>)> = Vec::new();
-		for (tokenizer_state_id, glr_state) in &self.state {
-			if let Some(&final_tid) = final_state_map.get(tokenizer_state_id) {
-				let root_idx = self.parent.precomputed0.get(tokenizer_state_id)
-					.unwrap_or_else(|| panic!("No precomputed trie root for tokenizer state {:?} during commit.", tokenizer_state_id));
-				let mut v = BTreeMap::new();
-				v.insert(final_tid, glr_state.clone());
-				initial_values_for_map.push((*root_idx, v));
-			}
-		}
-        println!("  initial_values_for_map has {} entries.", initial_values_for_map.len());
+        // Seed the traversal with one entry per active tokenizer state.
+        // Value type (V) carried through the traversal is a per-final-tokenizer-state map of GLR states:
+        //   V == BTreeMap<TokenizerStateID, GLRParserState<'a>>
+        let mut initial_values_for_map: Vec<(PrecomputeNode0Index, BTreeMap<TokenizerStateID, GLRParserState<'a>>)> = Vec::new();
+        for (tokenizer_state_id, glr_state) in &self.state {
+            let root_idx = self.parent.precomputed0.get(tokenizer_state_id)
+                .unwrap_or_else(|| panic!("No precomputed trie root for tokenizer state {:?} during commit.", tokenizer_state_id));
+            if let Some(&final_tid) = state_map.get(tokenizer_state_id) {
+                let mut v = BTreeMap::new();
+                v.insert(final_tid, glr_state.clone());
+                initial_values_for_map.push((*root_idx, v));
+            }
+        }
 
         let internal_id_val = internal_id.0;
         let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
@@ -3402,13 +3383,11 @@ impl<'a> GrammarConstraintState<'a> {
 
         // Replace with the newly computed per-final-tokenizer-state GLR states.
         self.state = new_overall_state;
-        println!("  new_overall_state has keys: {:?}", self.state.keys().map(|s| s.0).collect::<Vec<_>>());
 
         // 5) Cleanup: reset llm tokens to ensure order invariance; fuse; filter dead states.
         self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
         self.map_gss_stacks(|stack, memo| fuse_predecessors_recursive(stack, 1, memo));
         self.state.retain(|_, glr| glr.is_ok());
-        println!("  State after cleanup: {:?}", self.state.keys().map(|s| s.0).collect::<Vec<_>>());
 
         // 6) Post-commit allowance check (same logic as commit_bytes).
         match self.parent.post_commit_allow_check_mode {
@@ -3453,20 +3432,15 @@ impl<'a> GrammarConstraintState<'a> {
                 });
             }
         }
-        println!("  State after post-commit check: {:?}", self.state.keys().map(|s| s.0).collect::<Vec<_>>());
-        println!("--- EXITING commit ---");
     }
 
     #[time_it]
     pub fn commit_bytes(&mut self, llm_token_bytes: &[u8]) { // llm_token_id is original
-        println!("\n--- ENTERING commit_bytes for bytes: {:?} ---", String::from_utf8_lossy(llm_token_bytes));
         if llm_token_bytes.is_empty() {
-            println!("  Empty bytes. Exiting.");
             return;
         }
 
         crate::debug!(3, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
-        println!("  Initial active tokenizer states: {:?}", self.state.keys().map(|s| s.0).collect::<Vec<_>>());
 
         // for (state_id, state) in &self.state {
         //     crate::debug!(3, "State {} before commit:", state_id.0);
@@ -3477,15 +3451,12 @@ impl<'a> GrammarConstraintState<'a> {
 
         // Handle allowed terminals
         let (state_map, terminals_map) = self.compute_commit_maps(llm_token_bytes);
-        println!("  Computed state_map: {:?}", state_map);
-        println!("  Computed terminals_map: {:?}", terminals_map);
 
         let gss_stats_before_pruning = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
         crate::debug!(5, "Terminals map: {:?}", terminals_map);
         self.transform_gss_stacks(|stack, memo| prune_disallowed_terminals(stack, &terminals_map, memo));
-        println!("  Active tokenizer states after prune_disallowed_terminals: {:?}", self.state.keys().map(|s| s.0).collect::<Vec<_>>());
         let gss_stats_after_pruning = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
@@ -3506,7 +3477,6 @@ impl<'a> GrammarConstraintState<'a> {
         processing_queue.insert(0, std::mem::take(&mut self.state));
 
         while let Some((offset, states_to_process)) = processing_queue.pop_first() {
-            println!("  Processing queue at offset {}: states {:?}", offset, states_to_process.keys().map(|s| s.0).collect::<Vec<_>>());
             crate::debug!(3, "Processing offset {} with states {:?}.", offset, states_to_process.keys().map(|k| k.0).collect::<Vec<_>>());
             for (tokenizer_s_id_at_offset, glr_s_at_offset) in states_to_process {
                 assert!(offset < llm_token_bytes.len());
@@ -3560,7 +3530,6 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         self.state = new_overall_state.clone();
-        println!("  new_overall_state has keys: {:?}", self.state.keys().map(|s| s.0).collect::<Vec<_>>());
         for glr_parser_state in self.state.values_mut() {
             // glr_parser_state.process_default_reductions();
         }
@@ -3621,8 +3590,6 @@ impl<'a> GrammarConstraintState<'a> {
                 });
             }
         }
-        println!("  State after post-commit check: {:?}", self.state.keys().map(|s| s.0).collect::<Vec<_>>());
-        println!("--- EXITING commit_bytes ---");
 
         // let mut roots: BTreeMap<TokenizerStateID, Arc<GSSNode>> = BTreeMap::new();
         // for (tokenizer_state_id, glr_state) in &self.state {
