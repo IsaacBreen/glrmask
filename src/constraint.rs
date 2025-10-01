@@ -1051,8 +1051,6 @@ impl GrammarConstraint {
         let mut q: VecDeque<PrecomputeNode0Index> = VecDeque::new();
         let mut visited: HashSet<PrecomputeNode0Index> = HashSet::new();
 
-        let trie1_leaf = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::leaf())));
-
         // Create roots for trie1
         for (sid, root0_idx) in precomputed0 {
             let root0_val = root0_idx.read(trie0_god).unwrap().value.clone();
