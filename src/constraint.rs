@@ -3263,122 +3263,81 @@ impl<'a> GrammarConstraintState<'a> {
             return;
         };
 
-        if self.state.is_empty() {
-            return;
-        }
+        if self.state.is_empty() { return; }
 
-        // 1) Reset LLM tokens on current stacks.
+        // 1. Preparation
         self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
-
-        // 2) Prune disallowed terminals using the per-token precomputed terminal sets.
         self.transform_gss_stacks(|stack, memo| prune_disallowed_terminals(stack, terminals_map_by_state, memo));
 
-        // 3) Map allowed terminals to final tokenizer states (for this token).
-        self.transform_gss_stacks(|stack, memo| map_allowed_terminals_tokenizer_states(stack, state_map, memo));
+        // 2. Traverse precomputed trie to simulate token consumption
+        let mut new_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
 
-        // 4) Walk the precompute0 trie to process the token
-        type DisallowedMap = BTreeMap<TokenizerStateID, TerminalBV>;
-        
-        let mut initial_values_for_map: Vec<(PrecomputeNode0Index, (GLRParserState<'a>, DisallowedMap, TokenizerStateID))> = Vec::new();
-        
-        for (&initial_tokenizer_state, glr_state) in &self.state {
-            if glr_state.active_state.stack.is_empty() {
-                continue;
+        let mut initial_values_for_map: Vec<(PrecomputeNode0Index, (GLRParserState<'a>, TokenizerStateID))> = Vec::new();
+        for (tokenizer_state_id, glr_state) in &self.state {
+            if let Some(root_idx) = self.parent.precomputed0.get(tokenizer_state_id) {
+                initial_values_for_map.push((root_idx.clone(), (glr_state.clone(), *tokenizer_state_id)));
             }
-            
-            let Some(root_arc) = self.parent.precomputed0.get(&initial_tokenizer_state) else {
-                continue;
-            };
-            
-            let glr_state = glr_state.clone();
-            let disallowed = DisallowedMap::new();
-            initial_values_for_map.push((root_arc.clone(), (glr_state, disallowed, initial_tokenizer_state)));
         }
-        
-        if initial_values_for_map.is_empty() {
-            self.state.clear();
-            return;
-        }
-        
-        let mut final_states: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
-        
-        Trie::special_map(
-            &self.parent.trie0_god,
-            initial_values_for_map,
-            // step function
-            |(glr_s, disallowed, initial_ts), edge_key, edge_bv, _child_node| {
-                // Check if our token is in the edge
-                if !edge_bv.contains(internal_id.0) {
-                    return None;
-                }
-                
-                let (grammar_token_opt, disallow_opt) = edge_key;
-                let mut new_disallowed = disallowed.clone();
-                
-                // Accumulate disallow directive
-                if let Some((ts, tid)) = disallow_opt {
-                    new_disallowed.entry(*ts).or_default().insert(tid.0);
-                }
-                
-                // Step parser if there's a grammar token
-                let new_glr_s = if let Some(tid) = grammar_token_opt {
-                    let mut cloned = glr_s.clone();
-                    cloned.step(*tid);
-                    if !cloned.is_ok() {
-                        return None;
+
+        if !initial_values_for_map.is_empty() {
+            Trie::special_map_grouped(
+                &self.parent.trie0_god,
+                initial_values_for_map,
+                // step
+                | (glr_s, initial_sid), edge_key, dest_map | {
+                    let (grammar_token_opt, disallowed_terminal_opt) = edge_key;
+
+                    // This path is only relevant if the edge's LLM token bitvector includes the token we're committing.
+                    if !dest_map.values().any(|bv| bv.contains(internal_id.0)) {
+                        return Vec::new();
                     }
-                    cloned
-                } else {
-                    glr_s.clone()
-                };
-                
-                Some((new_glr_s, new_disallowed, *initial_ts))
-            },
-            // merge function
-            |(glr1, dis1, ts1), (glr2, dis2, ts2)| {
-                assert_eq!(*ts1, ts2, "Tokenizer states should match when merging");
-                glr1.merge_with(glr2);
-                for (ts, tids) in dis2 {
-                    dis1.entry(ts).or_default().extend(&tids);
-                }
-            },
-            // process function
-            |node_data, (ref mut glr_s, disallowed, initial_ts)| {
-                if node_data.value.end {
-                    // Apply disallowed terminals
-                    if !disallowed.is_empty() {
-                        let mut disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
-                        for (ts, tids) in disallowed {
-                            disallowed_l2.insert_l2_bitset(ts.0, tids.clone());
+
+                    let mut next_glr_s = glr_s.clone();
+
+                    if let Some(gtid) = grammar_token_opt {
+                        next_glr_s.step(*gtid);
+                    }
+
+                    if let Some((disallowed_sid, disallowed_tid)) = disallowed_terminal_opt {
+                        let mut disallowed = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
+                        let mut bv = TerminalBV::zeros();
+                        bv.insert(disallowed_tid.0);
+                        disallowed.insert_l2_bitset(disallowed_sid.0, bv);
+                        disallow_terminals_and_prune_arc(&mut next_glr_s.active_state.stack, &disallowed, &mut HashMap::new());
+                    }
+
+                    if !next_glr_s.is_ok() { return Vec::new(); }
+
+                    dest_map.iter()
+                        .filter(|(_, edge_bv)| edge_bv.contains(internal_id.0))
+                        .map(|(dest_idx, _)| (dest_idx.clone(), (next_glr_s.clone(), *initial_sid)))
+                        .collect()
+                },
+                // merge
+                | (glr1, _sid1), (glr2, _sid2) | {
+                    glr1.merge_with(glr2);
+                },
+                // process
+                | node_data, (glr_s, initial_sid) | {
+                    if node_data.value.end {
+                        if let Some(final_sid) = state_map.get(initial_sid) {
+                            new_state.entry(*final_sid)
+                                .and_modify(|existing| existing.merge_with(glr_s.clone()))
+                                .or_insert_with(|| glr_s.clone());
                         }
-                        disallow_terminals_and_prune_arc(&mut glr_s.active_state.stack, &disallowed_l2, &mut HashMap::new());
                     }
-                    
-                    // Map tokenizer states
-                    map_allowed_terminals_tokenizer_states(&mut glr_s.active_state.stack, state_map, &mut HashMap::new());
-                    
-                    // Determine final tokenizer state(s)
-                    if let Some(&final_ts) = state_map.get(&initial_ts) {
-                        final_states.entry(final_ts)
-                            .and_modify(|existing| existing.merge_with(glr_s.clone()))
-                            .or_insert(glr_s.clone());
-                    }
-                    
-                    return false; // Stop at end nodes
+                    glr_s.is_ok()
                 }
-                true // Continue traversing
-            }
-        );
-        
-        // Update self.state
-        self.state = final_states;
+            );
+        }
 
-        // 5) Cleanup: reset llm tokens, fuse, filter dead states
+        self.state = new_state;
+
+        // 3. Cleanup and post-commit checks
         self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
         self.map_gss_stacks(|stack, memo| fuse_predecessors_recursive(stack, 1, memo));
         self.state.retain(|_, glr| glr.is_ok());
-        
-        // 6) Post-commit allowance check (same logic as commit_bytes).
+
         match self.parent.post_commit_allow_check_mode {
             TerminalAllowanceCheckMode::None => {}
             TerminalAllowanceCheckMode::ImmediateSets => {
