@@ -3912,39 +3912,43 @@ impl<'a> GrammarConstraintState<'a> {
              dest_map: &ordered_hash_map::OrderedHashMap<Trie2Index, LLMTokenBV>| {
                 let mut out = Vec::new();
 
+                // First, check if any destination is valid for this token.
+                let any_valid_dest = dest_map.iter().any(|(_, edge_bv)| edge_bv.contains(internal_id_val));
+                if !any_valid_dest {
+                    return out; // No need to process this edge.
+                }
+
+                // Process GLR state once for the edge key.
+                let mut processed_glr_s = glr_s0.clone();
+                if let Some((gtid, disallowed_opt)) = edge_key {
+                    // Step the GLR state on this grammar token (if any).
+                    processed_glr_s.process_token(*gtid);
+                    if !processed_glr_s.is_ok() {
+                        return out; // Processing failed, no paths from here.
+                    }
+
+                    // Apply "disallow" rule for immediate repetition at segment boundary if needed.
+                    if let Some(end_state) = disallowed_opt {
+                        let mut disallowed = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
+                        let mut tbv = TerminalBV::zeros();
+                        tbv.insert(gtid.0);
+                        disallowed.insert_l2_bitset(end_state.0, tbv);
+                        disallow_terminals_and_prune_arc(
+                            &mut processed_glr_s.active_state.stack,
+                            &disallowed,
+                            &mut HashMap::new(),
+                        );
+                        if !processed_glr_s.is_ok() {
+                            return out;
+                        }
+                    }
+                }
+
+                // Now distribute the processed state to all valid children.
                 for (child_idx, edge_bv) in dest_map.iter() {
-                    // Only propagate to children compatible with the chosen token.
-                    if !edge_bv.contains(internal_id_val) {
-                        continue;
+                    if edge_bv.contains(internal_id_val) {
+                        out.push((*child_idx, processed_glr_s.clone()));
                     }
-
-                    let mut glr_s = glr_s0.clone();
-
-                    if let Some((gtid, disallowed_opt)) = edge_key {
-                        // Step the GLR state on this grammar token (if any).
-                        glr_s.process_token(*gtid);
-                        if !glr_s.is_ok() {
-                            continue;
-                        }
-
-                        // Apply "disallow" rule for immediate repetition at segment boundary if needed.
-                        if let Some(end_state) = disallowed_opt {
-                            let mut disallowed = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
-                            let mut tbv = TerminalBV::zeros();
-                            tbv.insert(gtid.0);
-                            disallowed.insert_l2_bitset(end_state.0, tbv);
-                            disallow_terminals_and_prune_arc(
-                                &mut glr_s.active_state.stack,
-                                &disallowed,
-                                &mut HashMap::new(),
-                            );
-                            if !glr_s.is_ok() {
-                                continue;
-                            }
-                        }
-                    }
-
-                    out.push((*child_idx, glr_s));
                 }
 
                 out
