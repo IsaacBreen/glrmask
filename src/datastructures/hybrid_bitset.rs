@@ -207,6 +207,13 @@ impl HybridBitset {
         result
     }
 
+    /// Extends the bitset with the contents of an iterator over indices.
+    pub fn extend<I: IntoIterator<Item = usize>>(&mut self, iter: I) {
+        let mut new_inner = (*self.inner).clone();
+        new_inner.extend(iter);
+        self.inner = cache::intern_l1(new_inner);
+    }
+
     /// Removes all elements from the set.
     pub fn clear(&mut self) {
         self.inner = cache::intern_l1(RangeSetBlaze::new());
@@ -481,6 +488,12 @@ impl<'a> std::iter::ExactSizeIterator for BitsIter<'a> {}
 impl FromIterator<usize> for HybridBitset {
     fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
         Self::from_iter(iter)
+    }
+}
+
+impl Extend<usize> for HybridBitset {
+    fn extend<T: IntoIterator<Item = usize>>(&mut self, iter: T) {
+        self.extend(iter);
     }
 }
 
@@ -1329,5 +1342,25 @@ mod tests {
         let mut constrained_max = original_set.clone();
         constrained_max.constrain(usize::MAX);
         assert_eq!(constrained_max, original_set);
+    }
+
+    #[test]
+    fn test_extend() {
+        let mut set = HybridBitset::from_iter(vec![1, 5]);
+        let new_elements = vec![5, 10, 20];
+        set.extend(new_elements);
+
+        let expected: BTreeSet<usize> = vec![1, 5, 10, 20].into_iter().collect();
+        assert_eq!(set.iter_indices().collect::<BTreeSet<_>>(), expected);
+
+        let mut empty_set = HybridBitset::zeros();
+        empty_set.extend(vec![100, 200]);
+        let expected_empty: BTreeSet<usize> = vec![100, 200].into_iter().collect();
+        assert_eq!(empty_set.iter_indices().collect::<BTreeSet<_>>(), expected_empty);
+
+        let mut large_set = HybridBitset::from_iter(0..10);
+        large_set.extend(15..20);
+        let expected_large: BTreeSet<usize> = (0..10).chain(15..20).collect();
+        assert_eq!(large_set.iter_indices().collect::<BTreeSet<_>>(), expected_large);
     }
 }

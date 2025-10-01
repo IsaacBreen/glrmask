@@ -10427,139 +10427,108 @@ local_system:
               // 3) Map allowed terminals to final tokenizer states (for this token).
               self.transform_gss_stacks(|stack, memo| map_allowed_terminals_tokenizer_states(stack, state_map, memo));
 
-              // 4) Traverse the precomputed Trie 0 specialized to this token, stepping the GLR state.
-              //    We only follow edges whose LLMTokenBV contains this token's internal ID.
-              //    We also apply any per-edge "disallowed" terminal constraints as encoded in the edge key.
-              //
-              //    We aggregate results per final tokenizer state (as provided by state_map), merging GLR states.
-              if self.state.is_empty() {
-                  return;
-              }
-
-              // Seed the traversal with one entry per active tokenizer state.
-              // Value type (V) carried through the traversal is a per-final-tokenizer-state map of GLR states:
-              //   V == BTreeMap<TokenizerStateID, GLRParserState<'a>>
-              let mut initial_values_for_map: Vec<(PrecomputeNode0Index, BTreeMap<TokenizerStateID, GLRParserState<'a>>)> = Vec::new();
-              for (tokenizer_state_id, glr_state) in &self.state {
-                  if let (Some(root_idx), Some(&final_tid)) = (
-                      self.parent.precomputed0.get(tokenizer_state_id),
-                      state_map.get(tokenizer_state_id),
-                  ) {
-                      let mut v = BTreeMap::new();
-                      v.insert(final_tid, glr_state.clone());
-                      initial_values_for_map.push((*root_idx, v));
+              // 4) Walk the precompute0 trie to process the token
+              type DisallowedMap = BTreeMap<TokenizerStateID, TerminalBV>;
+              
+              let mut initial_values_for_map: Vec<(PrecomputeNode0Index, (GLRParserState<'a>, DisallowedMap, TokenizerStateID))> = Vec::new();
+              
+              for (&initial_tokenizer_state, glr_state) in &self.state {
+                  if glr_state.active_state.stack.is_empty() {
+                      continue;
                   }
+                  
+                  let Some(root_arc) = self.parent.precomputed0.get(&initial_tokenizer_state) else {
+                      continue;
+                  };
+                  
+                  let glr_state = glr_state.clone();
+                  let disallowed = DisallowedMap::new();
+                  initial_values_for_map.push((root_arc.clone(), (glr_state, disallowed, initial_tokenizer_state)));
               }
-
+              
               if initial_values_for_map.is_empty() {
-                  // Fallback: if something went wrong with precomputation seeding, fallback to commit_bytes.
-                  if let Some(bytes) = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id) {
-                      self.commit_bytes(bytes);
-                      return;
-                  }
+                  self.state.clear();
                   return;
               }
-
-              let internal_id_val = internal_id.0;
-              let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
-
-              Trie::special_map_grouped(
+              
+              let mut final_states: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
+              
+              Trie::special_map(
                   &self.parent.trie0_god,
                   initial_values_for_map,
-                  // step: for a given edge key, propagate only along children whose edge BV contains the token.
-                  |acc_map: &BTreeMap<TokenizerStateID, GLRParserState<'a>>,
-                   (gtid_opt, disallowed_opt): &(Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>),
-                   dest_map: &ordered_hash_map::OrderedHashMap<Trie2Index, LLMTokenBV>| {
-                      let mut out = Vec::new();
-
-                      for (child_idx, edge_bv) in dest_map.iter() {
-                          // Only propagate to children compatible with the chosen token.
-                          if !(edge_bv.is_all() || edge_bv.contains(internal_id_val)) {
-                              continue;
+                  // step function
+                  |(glr_s, disallowed, initial_ts), edge_key, edge_bv, _child_node| {
+                      // Check if our token is in the edge
+                      if !edge_bv.contains(internal_id.0) {
+                          return None;
+                      }
+                      
+                      let (grammar_token_opt, disallow_opt) = edge_key;
+                      let mut new_disallowed = disallowed.clone();
+                      
+                      // Accumulate disallow directive
+                      if let Some((ts, tid)) = disallow_opt {
+                          new_disallowed.entry(*ts).or_default().insert(tid.0);
+                      }
+                      
+                      // Step parser if there's a grammar token
+                      let new_glr_s = if let Some(tid) = grammar_token_opt {
+                          let mut cloned = glr_s.clone();
+                          cloned.step(*tid);
+                          if !cloned.is_ok() {
+                              return None;
                           }
-
-                          // Build the next aggregated value for this child.
-                          let mut child_v: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
-
-                          for (final_tid, glr_s0) in acc_map.iter() {
-                              let mut glr_s = glr_s0.clone();
-
-                              // Step the GLR state on this grammar token (if any).
-                              if let Some(gtid) = gtid_opt {
-                                  glr_s.process_token(*gtid);
-                                  if !glr_s.is_ok() {
-                                      continue;
-                                  }
+                          cloned
+                      } else {
+                          glr_s.clone()
+                      };
+                      
+                      Some((new_glr_s, new_disallowed, *initial_ts))
+                  },
+                  // merge function
+                  |(glr1, dis1, ts1), (glr2, dis2, ts2)| {
+                      assert_eq!(ts1, ts2, "Tokenizer states should match when merging");
+                      glr1.merge_with(glr2);
+                      for (ts, tids) in dis2 {
+                          dis1.entry(ts).or_default().extend(&tids);
+                      }
+                  },
+                  // process function
+                  |node_data, (mut glr_s, disallowed, initial_ts)| {
+                      if node_data.value.end {
+                          // Apply disallowed terminals
+                          if !disallowed.is_empty() {
+                              let mut disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
+                              for (ts, tids) in disallowed {
+                                  disallowed_l2.insert_l2_bitset(ts.0, tids);
                               }
-
-                              // Apply "disallow" rule for immediate repetition at segment boundary if needed.
-                              if let Some((end_state, term_id)) = disallowed_opt {
-                                  let mut disallowed = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
-                                  let mut tbv = TerminalBV::zeros();
-                                  tbv.insert(term_id.0);
-                                  disallowed.insert_l2_bitset(end_state.0, tbv);
-                                  disallow_terminals_and_prune_arc(
-                                      &mut glr_s.active_state.stack,
-                                      &disallowed,
-                                      &mut HashMap::new(),
-                                  );
-                                  if !glr_s.is_ok() {
-                                      continue;
-                                  }
-                              }
-
-                              // Merge into the child's accumulator per final tokenizer state.
-                              child_v
-                                  .entry(*final_tid)
-                                  .and_modify(|g| g.merge_with(glr_s.clone()))
+                              disallow_terminals_and_prune_arc(&mut glr_s.active_state.stack, &disallowed_l2, &mut HashMap::new());
+                          }
+                          
+                          // Map tokenizer states
+                          map_allowed_terminals_tokenizer_states(&mut glr_s.active_state.stack, state_map, &mut HashMap::new());
+                          
+                          // Determine final tokenizer state(s)
+                          if let Some(&final_ts) = state_map.get(&initial_ts) {
+                              final_states.entry(final_ts)
+                                  .and_modify(|existing| existing.merge_with(glr_s.clone()))
                                   .or_insert(glr_s);
                           }
-
-                          if !child_v.is_empty() {
-                              out.push((*child_idx, child_v));
-                          }
+                          
+                          return false; // Stop at end nodes
                       }
-
-                      out
-                  },
-                  // merge: merge per-final-tokenizer-state maps, merging GLR states per key.
-                  |dst: &mut BTreeMap<TokenizerStateID, GLRParserState<'a>>,
-                   src: BTreeMap<TokenizerStateID, GLRParserState<'a>>| {
-                      for (tid, glr_s) in src {
-                          dst.entry(tid)
-                              .and_modify(|g| g.merge_with(glr_s.clone()))
-                              .or_insert(glr_s);
-                      }
-                  },
-                  // process: if at end node, accumulate results to new_overall_state and stop; otherwise continue if any GLR state is alive.
-                  |node, v: &mut BTreeMap<TokenizerStateID, GLRParserState<'a>>| {
-                      // Drop dead GLR sub-states early to reduce fan-out.
-                      v.retain(|_, g| g.is_ok());
-                      if v.is_empty() {
-                          return false;
-                      }
-                      if node.value.end {
-                          for (tid, glr_s) in v.iter() {
-                              new_overall_state
-                                  .entry(*tid)
-                                  .and_modify(|g| g.merge_with(glr_s.clone()))
-                                  .or_insert(glr_s.clone());
-                          }
-                          false
-                      } else {
-                          true
-                      }
-                  },
+                      true // Continue traversing
+                  }
               );
+              
+              // Update self.state
+              self.state = final_states;
 
-              // Replace with the newly computed per-final-tokenizer-state GLR states.
-              self.state = new_overall_state;
-
-              // 5) Cleanup: reset llm tokens to ensure order invariance; fuse; filter dead states.
+              // 5) Cleanup: reset llm tokens, fuse, filter dead states
               self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
               self.map_gss_stacks(|stack, memo| fuse_predecessors_recursive(stack, 1, memo));
               self.state.retain(|_, glr| glr.is_ok());
-
+              
               // 6) Post-commit allowance check (same logic as commit_bytes).
               match self.parent.post_commit_allow_check_mode {
                   TerminalAllowanceCheckMode::None => {}
@@ -10808,7 +10777,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -16241,176 +16210,237 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here’s a focused plan and patch to finish the commit() implementation so it uses the precomputed Trie 0, traverses only the edges compatible with the selected LLM token, feeds terminals to the parser, and properly handles per-edge disallowed terminals. This completes the logic so commit() is functionally equivalent to commit_bytes, but uses precomputed data.
+      `````ad-attachment
+      collapse: closed
+      title: think
 
-      Step-by-step instructions
+      Let me analyze what needs to be done for the `commit` implementation.
 
-      1) File: src/constraint.rs
-      - Locate the function GrammarConstraintState::commit.
-      - Inside it, after steps 1–3 (reset_llm_tokens, prune_disallowed_terminals, and map_allowed_terminals_tokenizer_states), you will see a placeholder:
-        // 4) [Special map stuff, the main bit. REPLACE THIS.]
-        // TODO
+      Looking at the current `commit` method, it currently does:
+      1. Convert original token ID to internal ID
+      2. Get the terminal_map and state_map from the precomputed per-token maps
+      3. Reset LLM tokens on current stacks
+      4. Prune disallowed terminals using terminal sets
+      5. Map allowed terminals to final tokenizer states
+      6. TODO: The main bit with special map (currently empty)
+      7. Reset LLM tokens again, fuse, filter dead states
+      8. Post-commit allowance check
 
-      - Replace that placeholder with a special_map_grouped traversal over the precompute0 graph. This traversal:
-        - Seeds one initial value per active tokenizer state.
-        - Uses the state_map to attach each GLR state to its final tokenizer state for the whole token (so aggregated merge is per final target tokenizer state).
-        - Steps the GLR state with grammar tokens on edges whose LLMTokenBV contains the chosen internal token.
-        - Applies disallow_terminals_and_prune_arc for edges that carry a disallowed terminal (Option<(TokenizerStateID, TerminalID)>).
-        - On end nodes (node.value.end), merges results into a new_overall_state keyed by final tokenizer state.
-        - Prunes dead GLR states along the traversal.
+      The goal is to use the Precompute0 tree to walk through the LLM token and process it properly.
 
-      - Keep steps 5 and onwards (reset_llm_tokens, fuse_predecessors_recursive, post-commit allowance checks, etc.) unchanged.
+      Let me think about what we need to do:
 
-      Notes on the new logic:
-      - V passed through special_map_grouped is a BTreeMap<TokenizerStateID, GLRParserState<'a>>, i.e., it collects merged GLR sub-states keyed by the final tokenizer state (since multiple initial tokenizer states can reach the same trie node).
-      - The step closure filters destinations to children where edge BV contains the internal token. For each final tokenizer state in the map, it clones the GLR state, processes the grammar token (if present), applies disallow rule when applicable, and merges into that child’s V.
-      - The process closure writes end results into new_overall_state and stops traversal from end nodes, while pruning dead GLR states in-place to keep the frontier small.
+      1. We have a precompute0 tree for each tokenizer state
+      2. Each edge in the tree has:
+         - Key: `(Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>)` 
+         - Value: `LLMTokenBV` (which LLM tokens can take this edge)
+      3. We want to walk the tree following edges that allow our specific LLM token
+      4. As we traverse, we need to:
+         - Feed terminals to the parser (step with the terminal)
+         - Track disallowed terminals (the second part of the edge key)
+         - Update tokenizer states appropriately
 
-      That’s all needed to finish commit() to be functionally equivalent to commit_bytes using trie precomputation (precompute0), while leaving commit_bytes intact.
+      Let me think about the algorithm more carefully:
 
-      Git patches
+      For `commit_bytes`, we have a processing queue keyed by offset into the byte string. At each offset with various (tokenizer_state, glr_state) pairs, we:
+      - Execute the tokenizer from that offset
+      - For each match, clone the GLR state, step it with the terminal, and add to the queue at the new offset
+      - If we reach the end of the bytes, add to the final state
+
+      For `commit` using precompute0, we want to do something similar but using the trie:
+
+
+      I'll walk through the trie for each state, carefully processing the edges. Starting from the root node for each tokenizer state, I'll navigate through edges that match our current LLM token. 
+
+      The process involves:
+      - Identifying valid edges based on the internal token
+      - Stepping through grammar tokens when present
+      - Tracking and applying terminal disallowance rules
+      - Progressively moving to child nodes in the trie
+
+      This approach allows precise navigation and state transformation, ensuring we capture all possible parsing paths while maintaining strict grammar constraints.
+
+      The key mechanism involves a specialized traversal that:
+      - Checks edge compatibility with our token
+      - Manages parser state transitions
+      - Accumulates disallowance directives
+      - Handles tokenizer state resets
+
+      By carefully tracking each step's implications, we can systematically explore the parsing possibilities encoded in the precompute0 trie structure.
+
+      `````
+
+      # Step-by-Step Instructions
+
+      ## Finishing the `commit` implementation in `src/constraint.rs`
+
+      The `commit` method currently has a TODO comment for "the main bit with special map". We need to replace the placeholder with actual logic that walks the `PrecomputeNode0` trie to process the LLM token.
+
+      **The algorithm:**
+
+      1. **Prepare initial values for traversal**: For each active `(tokenizer_state, glr_state)` pair:
+         - Look up the precomputed trie root for that tokenizer state
+         - Reset LLM tokens on the GSS
+         - Prune disallowed terminals using the `terminals_map` (already fetched)
+         - Initialize an empty "disallowed map" to accumulate disallowed directives as we traverse
+         - Add `(trie_root, (glr_state, disallowed_map, initial_tokenizer_state))` to the initial values
+
+      2. **Walk the trie using `Trie::special_map`**:
+         - **Step function**: For each edge `(grammar_token_opt, disallow_opt)` with value `edge_bv`:
+           - Check if `edge_bv` contains our `internal_id`; if not, skip this edge
+           - If `disallow_opt` is `Some((ts, tid))`, add `tid` to the disallowed set for tokenizer state `ts`
+           - If `grammar_token_opt` is `Some(tid)`, clone the GLR state and step it with `tid`; if it fails, skip
+           - Return the new state: `(new_glr_s, updated_disallowed, initial_ts)`
+         
+         - **Merge function**: When two paths converge:
+           - Merge the two GLR states
+           - Merge the disallowed maps
+         
+         - **Process function**: When visiting a node:
+           - If it's an end node:
+             - Convert accumulated `disallowed` to a `HybridL2Bitset` and apply via `disallow_terminals_and_prune_arc`
+             - Call `map_allowed_terminals_tokenizer_states` with the `state_map` (already fetched)
+             - Look up the final tokenizer state: `state_map[initial_ts]`
+             - Add the GLR state to `final_states` under that final tokenizer state
+             - Return `false` to stop traversal at end nodes
+           - Otherwise return `true` to continue
+
+      3. **Update `self.state`** with `final_states`
+
+      4. **Cleanup** (same as `commit_bytes`):
+         - Reset LLM tokens again
+         - Fuse predecessors
+         - Retain only OK states
+         - Apply post-commit allowance check (same logic as `commit_bytes`)
+
+      **Key points:**
+      - The `initial_tokenizer_state` is carried through the traversal unchanged (it represents where we started)
+      - The `state_map` maps initial tokenizer states to final states after consuming the token
+      - The disallowed terminals are accumulated as we traverse and applied at the end
+      - We use `special_map` (not `special_map_grouped`) because we need to check each edge's `LLMTokenBV` individually
+
+      ---
+
+      # Git Diff
 
       ```diff
       diff --git a/src/constraint.rs b/src/constraint.rs
-      index a46c775..36dc0a2 100644
+      index 1111111..2222222 100644
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -2143,8 +2143,107 @@ impl<'a> GrammarConstraintState<'a> {
+      @@ -2344,15 +2344,105 @@ impl<'a> GrammarConstraintState<'a> {
                // 3) Map allowed terminals to final tokenizer states (for this token).
                self.transform_gss_stacks(|stack, memo| map_allowed_terminals_tokenizer_states(stack, state_map, memo));
        
       -        // 4) [Special map stuff, the main bit. REPLACE THIS.]
       -        // TODO
-      +        // 4) Traverse the precomputed Trie 0 specialized to this token, stepping the GLR state.
-      +        //    We only follow edges whose LLMTokenBV contains this token's internal ID.
-      +        //    We also apply any per-edge "disallowed" terminal constraints as encoded in the edge key.
-      +        //
-      +        //    We aggregate results per final tokenizer state (as provided by state_map), merging GLR states.
-      +        if self.state.is_empty() {
-      +            return;
-      +        }
-      +
-      +        // Seed the traversal with one entry per active tokenizer state.
-      +        // Value type (V) carried through the traversal is a per-final-tokenizer-state map of GLR states:
-      +        //   V == BTreeMap<TokenizerStateID, GLRParserState<'a>>
-      +        let mut initial_values_for_map: Vec<(PrecomputeNode0Index, BTreeMap<TokenizerStateID, GLRParserState<'a>>)> = Vec::new();
-      +        for (tokenizer_state_id, glr_state) in &self.state {
-      +            if let (Some(root_idx), Some(&final_tid)) = (
-      +                self.parent.precomputed0.get(tokenizer_state_id),
-      +                state_map.get(tokenizer_state_id),
-      +            ) {
-      +                let mut v = BTreeMap::new();
-      +                v.insert(final_tid, glr_state.clone());
-      +                initial_values_for_map.push((*root_idx, v));
+      +        // 4) Walk the precompute0 trie to process the token
+      +        type DisallowedMap = BTreeMap<TokenizerStateID, TerminalBV>;
+      +        
+      +        let mut initial_values_for_map: Vec<(PrecomputeNode0Index, (GLRParserState<'a>, DisallowedMap, TokenizerStateID))> = Vec::new();
+      +        
+      +        for (&initial_tokenizer_state, glr_state) in &self.state {
+      +            if glr_state.active_state.stack.is_empty() {
+      +                continue;
       +            }
+      +            
+      +            let Some(root_arc) = self.parent.precomputed0.get(&initial_tokenizer_state) else {
+      +                continue;
+      +            };
+      +            
+      +            let glr_state = glr_state.clone();
+      +            let disallowed = DisallowedMap::new();
+      +            initial_values_for_map.push((root_arc.clone(), (glr_state, disallowed, initial_tokenizer_state)));
       +        }
-      +
+      +        
       +        if initial_values_for_map.is_empty() {
-      +            // Fallback: if something went wrong with precomputation seeding, fallback to commit_bytes.
-      +            if let Some(bytes) = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id) {
-      +                self.commit_bytes(bytes);
-      +                return;
-      +            }
+      +            self.state.clear();
       +            return;
       +        }
-      +
-      +        let internal_id_val = internal_id.0;
-      +        let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
-      +
-      +        Trie::special_map_grouped(
+      +        
+      +        let mut final_states: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
+      +        
+      +        Trie::special_map(
       +            &self.parent.trie0_god,
       +            initial_values_for_map,
-      +            // step: for a given edge key, propagate only along children whose edge BV contains the token.
-      +            |acc_map: &BTreeMap<TokenizerStateID, GLRParserState<'a>>,
-      +             (gtid_opt, disallowed_opt): &(Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>),
-      +             dest_map: &ordered_hash_map::OrderedHashMap<Trie2Index, LLMTokenBV>| {
-      +                let mut out = Vec::new();
-      +
-      +                for (child_idx, edge_bv) in dest_map.iter() {
-      +                    // Only propagate to children compatible with the chosen token.
-      +                    if !(edge_bv.is_all() || edge_bv.contains(internal_id_val)) {
-      +                        continue;
+      +            // step function
+      +            |(glr_s, disallowed, initial_ts), edge_key, edge_bv, _child_node| {
+      +                // Check if our token is in the edge
+      +                if !edge_bv.contains(internal_id.0) {
+      +                    return None;
+      +                }
+      +                
+      +                let (grammar_token_opt, disallow_opt) = edge_key;
+      +                let mut new_disallowed = disallowed.clone();
+      +                
+      +                // Accumulate disallow directive
+      +                if let Some((ts, tid)) = disallow_opt {
+      +                    new_disallowed.entry(*ts).or_default().insert(tid.0);
+      +                }
+      +                
+      +                // Step parser if there's a grammar token
+      +                let new_glr_s = if let Some(tid) = grammar_token_opt {
+      +                    let mut cloned = glr_s.clone();
+      +                    cloned.step(*tid);
+      +                    if !cloned.is_ok() {
+      +                        return None;
       +                    }
-      +
-      +                    // Build the next aggregated value for this child.
-      +                    let mut child_v: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
-      +
-      +                    for (final_tid, glr_s0) in acc_map.iter() {
-      +                        let mut glr_s = glr_s0.clone();
-      +
-      +                        // Step the GLR state on this grammar token (if any).
-      +                        if let Some(gtid) = gtid_opt {
-      +                            glr_s.process_token(*gtid);
-      +                            if !glr_s.is_ok() {
-      +                                continue;
-      +                            }
+      +                    cloned
+      +                } else {
+      +                    glr_s.clone()
+      +                };
+      +                
+      +                Some((new_glr_s, new_disallowed, *initial_ts))
+      +            },
+      +            // merge function
+      +            |(glr1, dis1, ts1), (glr2, dis2, ts2)| {
+      +                assert_eq!(ts1, ts2, "Tokenizer states should match when merging");
+      +                glr1.merge_with(glr2);
+      +                for (ts, tids) in dis2 {
+      +                    dis1.entry(ts).or_default().extend(&tids);
+      +                }
+      +            },
+      +            // process function
+      +            |node_data, (mut glr_s, disallowed, initial_ts)| {
+      +                if node_data.value.end {
+      +                    // Apply disallowed terminals
+      +                    if !disallowed.is_empty() {
+      +                        let mut disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
+      +                        for (ts, tids) in disallowed {
+      +                            disallowed_l2.insert_l2_bitset(ts.0, tids);
       +                        }
-      +
-      +                        // Apply "disallow" rule for immediate repetition at segment boundary if needed.
-      +                        if let Some((end_state, term_id)) = disallowed_opt {
-      +                            let mut disallowed = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
-      +                            let mut tbv = TerminalBV::zeros();
-      +                            tbv.insert(term_id.0);
-      +                            disallowed.insert_l2_bitset(end_state.0, tbv);
-      +                            disallow_terminals_and_prune_arc(
-      +                                &mut glr_s.active_state.stack,
-      +                                &disallowed,
-      +                                &mut HashMap::new(),
-      +                            );
-      +                            if !glr_s.is_ok() {
-      +                                continue;
-      +                            }
-      +                        }
-      +
-      +                        // Merge into the child's accumulator per final tokenizer state.
-      +                        child_v
-      +                            .entry(*final_tid)
-      +                            .and_modify(|g| g.merge_with(glr_s.clone()))
+      +                        disallow_terminals_and_prune_arc(&mut glr_s.active_state.stack, &disallowed_l2, &mut HashMap::new());
+      +                    }
+      +                    
+      +                    // Map tokenizer states
+      +                    map_allowed_terminals_tokenizer_states(&mut glr_s.active_state.stack, state_map, &mut HashMap::new());
+      +                    
+      +                    // Determine final tokenizer state(s)
+      +                    if let Some(&final_ts) = state_map.get(&initial_ts) {
+      +                        final_states.entry(final_ts)
+      +                            .and_modify(|existing| existing.merge_with(glr_s.clone()))
       +                            .or_insert(glr_s);
       +                    }
-      +
-      +                    if !child_v.is_empty() {
-      +                        out.push((*child_idx, child_v));
-      +                    }
+      +                    
+      +                    return false; // Stop at end nodes
       +                }
-      +
-      +                out
-      +            },
-      +            // merge: merge per-final-tokenizer-state maps, merging GLR states per key.
-      +            |dst: &mut BTreeMap<TokenizerStateID, GLRParserState<'a>>,
-      +             src: BTreeMap<TokenizerStateID, GLRParserState<'a>>| {
-      +                for (tid, glr_s) in src {
-      +                    dst.entry(tid)
-      +                        .and_modify(|g| g.merge_with(glr_s.clone()))
-      +                        .or_insert(glr_s);
-      +                }
-      +            },
-      +            // process: if at end node, accumulate results to new_overall_state and stop; otherwise continue if any GLR state is alive.
-      +            |node, v: &mut BTreeMap<TokenizerStateID, GLRParserState<'a>>| {
-      +                // Drop dead GLR sub-states early to reduce fan-out.
-      +                v.retain(|_, g| g.is_ok());
-      +                if v.is_empty() {
-      +                    return false;
-      +                }
-      +                if node.value.end {
-      +                    for (tid, glr_s) in v.iter() {
-      +                        new_overall_state
-      +                            .entry(*tid)
-      +                            .and_modify(|g| g.merge_with(glr_s.clone()))
-      +                            .or_insert(glr_s.clone());
-      +                    }
-      +                    false
-      +                } else {
-      +                    true
-      +                }
-      +            },
+      +                true // Continue traversing
+      +            }
       +        );
-      +
-      +        // Replace with the newly computed per-final-tokenizer-state GLR states.
-      +        self.state = new_overall_state;
+      +        
+      +        // Update self.state
+      +        self.state = final_states;
        
-               // 5) Cleanup: reset llm tokens to ensure order invariance; fuse; filter dead states.
+      -        // 5) Cleanup: reset llm tokens to ensure order invariance; fuse; filter dead states.
+      +        // 5) Cleanup: reset llm tokens, fuse, filter dead states
                self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
+               self.map_gss_stacks(|stack, memo| fuse_predecessors_recursive(stack, 1, memo));
+               self.state.retain(|_, glr| glr.is_ok());
+      -
+      +        
+               // 6) Post-commit allowance check (same logic as commit_bytes).
+               match self.parent.post_commit_allow_check_mode {
+                   TerminalAllowanceCheckMode::None => {}
       ```
     metadata:
   - user: |
@@ -16422,7 +16452,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "feat(constraint): Implement LLM token
-      commit using precomputed Trie 0 traversal"'
+  - user: 'Changes committed with message: "Implement LLM token processing in commit
+      using PrecomputeNode0 trie walk via Trie::special_map"'
     metadata:
 ...
