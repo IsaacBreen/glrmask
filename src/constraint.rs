@@ -2402,6 +2402,28 @@ impl<'a> Display for GrammarConstraintState<'a> {
 }
 
 impl<'a> GrammarConstraintState<'a> {
+    fn transform_gss_stacks<M, F>(&mut self, mut f: F)
+    where
+        M: Default,
+        F: FnMut(&mut Arc<GSSNode>, &mut M),
+    {
+        let mut memo = M::default();
+        for s in self.state.values_mut() {
+            f(&mut s.active_state.stack, &mut memo);
+        }
+    }
+
+    fn map_gss_stacks<M, F>(&mut self, mut f: F)
+    where
+        M: Default,
+        F: FnMut(&mut Arc<GSSNode>, &mut M) -> Arc<GSSNode>,
+    {
+        let mut memo = M::default();
+        for s in self.state.values_mut() {
+            s.active_state.stack = f(&mut s.active_state.stack, &mut memo);
+        }
+    }
+
     pub fn compute_commit_maps(&self, llm_token_bytes: &[u8]) -> (BTreeMap<TokenizerStateID, TokenizerStateID>, BTreeMap<TokenizerStateID, TerminalBV>) {
         let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
         let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> = BTreeMap::new();
@@ -3246,28 +3268,13 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         // 1) Reset LLM tokens on current stacks.
-        {
-            let mut memo = HashMap::new();
-            for s in self.state.values_mut() {
-                reset_llm_tokens(&mut s.active_state.stack, &mut memo);
-            }
-        }
+        self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
 
         // 2) Prune disallowed terminals using the per-token precomputed terminal sets.
-        {
-            let mut memo = HashMap::new();
-            for s in self.state.values_mut() {
-                prune_disallowed_terminals(&mut s.active_state.stack, terminals_map_by_state, &mut memo);
-            }
-        }
+        self.transform_gss_stacks(|stack, memo| prune_disallowed_terminals(stack, terminals_map_by_state, memo));
 
         // 3) Map allowed terminals to final tokenizer states (for this token).
-        {
-            let mut memo = HashMap::new();
-            for s in self.state.values_mut() {
-                map_allowed_terminals_tokenizer_states(&mut s.active_state.stack, state_map, &mut memo);
-            }
-        }
+        self.transform_gss_stacks(|stack, memo| map_allowed_terminals_tokenizer_states(stack, state_map, memo));
 
         // 4) Move surviving GLR states under their final tokenizer states, dropping those without entries.
         let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
@@ -3282,18 +3289,8 @@ impl<'a> GrammarConstraintState<'a> {
         self.state = new_overall_state;
 
         // 5) Cleanup: reset llm tokens to ensure order invariance; fuse; filter dead states.
-        {
-            let mut memo = HashMap::new();
-            for s in self.state.values_mut() {
-                reset_llm_tokens(&mut s.active_state.stack, &mut memo);
-            }
-        }
-        {
-            let mut fuse_memo = HashMap::new();
-            for s in self.state.values_mut() {
-                s.active_state.stack = fuse_predecessors_recursive(&mut s.active_state.stack, 1, &mut fuse_memo);
-            }
-        }
+        self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
+        self.map_gss_stacks(|stack, memo| fuse_predecessors_recursive(stack, 1, memo));
         self.state.retain(|_, glr| glr.is_ok());
 
         // 6) Post-commit allowance check (same logic as commit_bytes).
@@ -3354,12 +3351,7 @@ impl<'a> GrammarConstraintState<'a> {
         //     state.log_gss("Before commit", TerminalID(0), false, false);
         // }
 
-        let mut gss_transformation_memo = HashMap::new();
-
-        for state in self.state.values_mut() {
-            reset_llm_tokens(&mut state.active_state.stack, &mut gss_transformation_memo);
-        }
-        gss_transformation_memo.clear();
+        self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
 
         // Handle allowed terminals
         let (state_map, terminals_map) = self.compute_commit_maps(llm_token_bytes);
@@ -3368,10 +3360,7 @@ impl<'a> GrammarConstraintState<'a> {
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
         crate::debug!(5, "Terminals map: {:?}", terminals_map);
-        for state in self.state.values_mut() {
-            prune_disallowed_terminals(&mut state.active_state.stack, &terminals_map, &mut gss_transformation_memo);
-        }
-        gss_transformation_memo.clear();
+        self.transform_gss_stacks(|stack, memo| prune_disallowed_terminals(stack, &terminals_map, memo));
         let gss_stats_after_pruning = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
@@ -3379,17 +3368,11 @@ impl<'a> GrammarConstraintState<'a> {
         if gss_stats_after_pruning != gss_stats_before_pruning {
             crate::debug!(4, "GSS stats after pruning disallowed terminals: {:#?}", gss_stats_after_pruning);
             crate::debug!(4, "GSS stats changed after pruning disallowed terminals.");
-            // if GSS_LOGGING_ENABLED {
-            //     self.print_gss();
-            // }
         } else {
             crate::debug!(4, "GSS stats did not change after pruning disallowed terminals.");
         }
 
-        for state in self.state.values_mut() {
-            map_allowed_terminals_tokenizer_states(&mut state.active_state.stack, &state_map, &mut gss_transformation_memo);
-        }
-        gss_transformation_memo.clear();
+        self.transform_gss_stacks(|stack, memo| map_allowed_terminals_tokenizer_states(stack, &state_map, memo));
         // println!("State after preparation: {}", self);
 
         let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
@@ -3456,18 +3439,11 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         // TODO: this shouldn't be necessary, but due to some order-dependent LLM token BV weirdness in GSS, it is necessary to ensure commit order invariance.
-        for state in self.state.values_mut() {
-            reset_llm_tokens(&mut state.active_state.stack, &mut gss_transformation_memo);
-        }
-        gss_transformation_memo.clear();
+        self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
 
         self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
 
-        let mut fuse_memo = HashMap::new();
-        for state in self.state.values_mut() {
-            state.active_state.stack = fuse_predecessors_recursive(&mut state.active_state.stack, 1, &mut fuse_memo);
-        }
-        fuse_memo.clear();
+        self.map_gss_stacks(|stack, memo| fuse_predecessors_recursive(stack, 1, memo));
 
         // Post-commit allowance check: ensure each surviving state allows at least one
         // token the tokenizer can produce from its current tokenizer state.
