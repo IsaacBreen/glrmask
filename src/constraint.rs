@@ -3316,6 +3316,7 @@ impl<'a> GrammarConstraintState<'a> {
                         // Step the GLR state on this grammar token (if any).
                         if let Some(gtid) = gtid_opt {
                             glr_s.process_token(*gtid);
+                            glr_s.process_default_reductions();
                             if !glr_s.is_ok() {
                                 continue;
                             }
