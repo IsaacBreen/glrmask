@@ -98,11 +98,12 @@ impl JSONConvertible for TerminalAllowanceCheckMode {
     }
 }
 
-pub type PrecomputeNode0 = Trie<(Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>), LLMTokenBV, PrecomputedNodeContents>;
+pub type PrecomputeNode0 = Trie<(Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>), LLMTokenBV, PrecomputedNodeContents0>;
 pub type PrecomputeNode1 = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
 pub type PrecomputeNode3 = Trie<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
 
+// Indices
 pub type PrecomputeNode0Index = Trie2Index;
 pub type PrecomputeNode1Index = Trie2Index;
 pub type PrecomputeNode2Index = Trie2Index;
@@ -360,6 +361,64 @@ impl JSONConvertible for PrecomputedNodeContents {
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PrecomputedNodeContents0 {
+    pub(crate) end: bool,
+    pub(crate) live_tokens: LLMTokenBV,
+    // If this is an end node in Trie0, which tokenizer state should the GLR state be placed under?
+    // Always Some(_) for leaf nodes; None for non-leaf nodes.
+    pub(crate) final_tokenizer_state: Option<TokenizerStateID>,
+}
+
+impl PrecomputedNodeContents0 {
+    pub(crate) fn root(internal_max_llm_token_id: usize) -> Self {
+        Self {
+            end: false,
+            live_tokens: LLMTokenBV::ones(internal_max_llm_token_id + 1),
+            final_tokenizer_state: None,
+        }
+    }
+
+    pub(crate) fn internal() -> Self {
+        Self {
+            end: false,
+            live_tokens: LLMTokenBV::zeros(),
+            final_tokenizer_state: None,
+        }
+    }
+
+    pub(crate) fn leaf(final_sid: TokenizerStateID) -> Self {
+        Self { end: true, live_tokens: LLMTokenBV::zeros(), final_tokenizer_state: Some(final_sid) }
+    }
+}
+
+impl JSONConvertible for PrecomputedNodeContents0 {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("clean_end".to_string(), self.end.to_json());
+        obj.insert("live_tokens".to_string(), self.live_tokens.to_json());
+        obj.insert("final_tokenizer_state".to_string(), self.final_tokenizer_state.to_json());
+        JSONNode::Object(obj)
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents0".to_string())
+                                   .and_then(bool::from_json)?;
+                let live_tokens = obj.remove("live_tokens").ok_or_else(|| "Missing field live_tokens for PrecomputedNodeContents0".to_string())
+                                       .and_then(LLMTokenBV::from_json)?;
+                let final_tokenizer_state = obj.remove("final_tokenizer_state").ok_or_else(|| "Missing field final_tokenizer_state for PrecomputedNodeContents0".to_string())
+                                               .and_then(|n| Option::<TokenizerStateID>::from_json(n))?;
+                Ok(PrecomputedNodeContents0 { end, live_tokens, final_tokenizer_state })
+            }
+            _ => Err("Expected JSONNode::Object for PrecomputedNodeContents0".to_string()),
+        }
+    }
+}
+
+
+
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintConfig {
@@ -1427,7 +1486,8 @@ struct Precomputer0<'r> {
     ignore_terminal_id: Option<TerminalID>,
     // Map each precompute node to the set of LLM tokens that can pass through it.
     // tags:             RefCell<HashMap<PrecomputeNodeIndex, LLMTokenBV>>, // Removed
-    end_node: PrecomputeNode0Index,
+    // One end node per final tokenizer state.
+    end_nodes: BTreeMap<TokenizerStateID, PrecomputeNode0Index>,
     trie0_god:        Trie0GodWrapper,
 }
 
@@ -1472,8 +1532,6 @@ impl<'r> Precomputer0<'r> {
             pb.set_draw_target(ProgressDrawTarget::hidden());
         }
 
-        let end_node = PrecomputeNode0Index::new(trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents::leaf())));
-
         Self {
             tokenizer,
             parser,
@@ -1488,9 +1546,18 @@ impl<'r> Precomputer0<'r> {
             terminal_follow_map,
             ignore_terminal_id,
             // tags: RefCell::new(HashMap::new()), // Removed
-            end_node,
+            end_nodes: BTreeMap::new(),
             trie0_god,
         }
+    }
+
+    fn get_end_node(&mut self, final_sid: TokenizerStateID) -> PrecomputeNode0Index {
+        if let Some(idx) = self.end_nodes.get(&final_sid) {
+            return idx.clone();
+        }
+        let idx = PrecomputeNode0Index::new(self.trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents0::leaf(final_sid))));
+        self.end_nodes.insert(final_sid, idx.clone());
+        idx
     }
 
     fn possible_matches(&self, vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
@@ -2104,7 +2171,7 @@ impl<'r> Precomputer0<'r> {
     }
 
     fn dfs(
-        &self,
+        &mut self,
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
     ) {
@@ -2113,8 +2180,8 @@ impl<'r> Precomputer0<'r> {
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let mut work_queue: BTreeMap<
                 usize,
-                BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode1Index>>,
-            > = BTreeMap::new(); // FIXME PrecomputeNode1Index
+                BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
+            > = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
 
             let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
@@ -2149,10 +2216,9 @@ impl<'r> Precomputer0<'r> {
                             }
                         }
 
-                        // TODO: could make this so much faster by moving loop down...
                         for src_node_wrapper in &precompute_nodes {
                             if next_pos == segment_bytes.len() {
-                                // TODO: should be some way of avoiding ignored terminal here.
+                                // Exact end-of-segment terminal match: finishing LLM token here goes to tokenizer initial state.
                                 let llm_token_id = child_vocab_node.token_id();
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
@@ -2164,15 +2230,15 @@ impl<'r> Precomputer0<'r> {
                                     edge_bv,
                                     |e, n| *e |= n,
                                     |node_value, edge_value| {
-                                        crate::debug!(7, "Before updating live tokens {:?} |= {:?}", node_value.live_tokens, edge_value);
                                         node_value.live_tokens |= edge_value;
-                                        crate::debug!(7, "After updating live tokens: {:?}", node_value.live_tokens);
                                     },
                                     |ev, t| *ev &= &t.live_tokens,
                                 );
-                                // Print the source node.
-                                // dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
-                                inserter.try_destination(self.end_node.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                                let end_idx = {
+                                    let s0 = self.tokenizer.initial_state_id();
+                                    self.get_end_node(s0)
+                                };
+                                inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
                             }
 
                             let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
@@ -2201,22 +2267,17 @@ impl<'r> Precomputer0<'r> {
 
                             inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| !w.read(&self.trie0_god).unwrap().value.end));
 
-                            if true {
-                                let children_of_src: Vec<_> = src_node_wrapper.as_arc().read(&self.trie0_god).unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
-                                // let tags = self.tags.borrow(); // Removed
-                                let eligible_children = children_of_src.iter().map(|child_node_ptr| {
-                                    child_node_ptr.as_arc().clone()
-                                }).filter(|child_arc| {
-                                    (child_arc.read(&self.trie0_god).unwrap().value.live_tokens.clone() & &edge_bv).is_empty() && !child_arc.read(&self.trie0_god).unwrap().value.end
-                                });
-                                inserter = inserter.try_destinations_iter(eligible_children);
-                                // drop(tags); // Removed
-                            }
+                            let children_of_src: Vec<_> = src_node_wrapper.as_arc().read(&self.trie0_god).unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
+                            let eligible_children = children_of_src.iter().map(|child_node_ptr| {
+                                child_node_ptr.as_arc().clone()
+                            }).filter(|child_arc| {
+                                (child_arc.read(&self.trie0_god).unwrap().value.live_tokens.clone() & &edge_bv).is_empty() && !child_arc.read(&self.trie0_god).unwrap().value.end
+                            });
+                            inserter = inserter.try_destinations_iter(eligible_children);
 
-                            let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents::internal()).unwrap();
+                            let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents0::internal()).unwrap();
                             let result_node_ptr = result_node.clone();
                             dest_nodes_in_queue.insert(result_node_ptr.clone());
-                            // *self.tags.borrow_mut().entry(result_node_ptr).or_insert_with(HybridBitset::zeros) |= &edge_bv; // Removed
                         }
                     }
 
@@ -2237,17 +2298,14 @@ impl<'r> Precomputer0<'r> {
                                     |node_value, edge_value| node_value.live_tokens |= edge_value,
                                     |ev, t| *ev &= &t.live_tokens,
                                 );
-                                // Print the source node.
-                                // dump_precompute_trie_recursive(src_node_wrapper, String::new(), &mut HashSet::new(), None);
-                                inserter.try_destination(self.end_node.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                                let end_idx = self.get_end_node(TokenizerStateID(end_state_val));
+                                inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
                             }
                         }
                         next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
                     }
                 }
             }
-
-
 
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc);
@@ -2378,7 +2436,7 @@ pub(crate) mod constraint_precompute3_utils {
     }
 }
 
-pub type Trie0GodWrapper = GodWrapper<(Option<TerminalID>, Option<(TokenizerStateID, TerminalID)>), HybridBitset, PrecomputedNodeContents>;
+pub type Trie0GodWrapper = GodWrapper<(Option<TerminalID>, Option<(TokenizerStateID, TerminalID)>), HybridBitset, PrecomputedNodeContents0>;
 pub type Trie0God = God<(Option<TerminalID>, Option<(TokenizerStateID, TerminalID)>), HybridBitset, PrecomputedNodeContents>;
 pub type Trie1GodWrapper = GodWrapper<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
 pub type Trie1God = God<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
@@ -3294,7 +3352,7 @@ impl<'a> GrammarConstraintState<'a> {
         let terminals_map_by_state = self.parent.terminal_map_by_llm.get(&internal_id)
             .unwrap_or_else(|| panic!("No terminal map found for internal LLM token ID {:?} during commit.", internal_id));
         let state_map = self.parent.state_map_by_llm.get(&internal_id)
-            .unwrap_or_else(|| panic!("No state map found for internal LLM token ID {:?} during commit.", internal_id));
+            .unwrap_or_else(|| DedupValueMap::<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>::new().get(&internal_id).cloned().unwrap_or_default());
 
         if self.state.is_empty() {
             return;
@@ -3306,30 +3364,20 @@ impl<'a> GrammarConstraintState<'a> {
         // 2) Prune disallowed terminals using the per-token precomputed terminal sets.
         self.transform_gss_stacks(|stack, memo| prune_disallowed_terminals(stack, terminals_map_by_state, memo));
 
-        // 3) Map allowed terminals to final tokenizer states (for this token).
-        self.transform_gss_stacks(|stack, memo| map_allowed_terminals_tokenizer_states(stack, state_map, memo));
-
-        // 4) Traverse the precomputed Trie 0 specialized to this token, stepping the GLR state.
+        // 3) Traverse the precomputed Trie 0 specialized to this token, stepping the GLR state.
         //    We only follow edges whose LLMTokenBV contains this token's internal ID.
         //    We also apply any per-edge "disallowed" terminal constraints as encoded in the edge key.
-        //
-        //    We aggregate results per final tokenizer state (as provided by state_map), merging GLR states.
         if self.state.is_empty() {
             return;
         }
 
         // Seed the traversal with one entry per active tokenizer state.
-        // Value type (V) carried through the traversal is a per-final-tokenizer-state map of GLR states:
-        //   V == BTreeMap<TokenizerStateID, GLRParserState<'a>>
-        let mut initial_values_for_map: Vec<(PrecomputeNode0Index, BTreeMap<TokenizerStateID, GLRParserState<'a>>)> = Vec::new();
+        // Carry the GLRParserState directly; we’ll assign final tokenizer state at end nodes.
+        let mut initial_values_for_map: Vec<(PrecomputeNode0Index, GLRParserState<'a>)> = Vec::new();
         for (tokenizer_state_id, glr_state) in &self.state {
             let root_idx = self.parent.precomputed0.get(tokenizer_state_id)
                 .unwrap_or_else(|| panic!("No precomputed trie root for tokenizer state {:?} during commit.", tokenizer_state_id));
-            if let Some(&final_tid) = state_map.get(tokenizer_state_id) {
-                let mut v = BTreeMap::new();
-                v.insert(final_tid, glr_state.clone());
-                initial_values_for_map.push((*root_idx, v));
-            }
+            initial_values_for_map.push((*root_idx, glr_state.clone()));
         }
 
         let internal_id_val = internal_id.0;
@@ -3339,7 +3387,7 @@ impl<'a> GrammarConstraintState<'a> {
             &self.parent.trie0_god,
             initial_values_for_map,
             // step: for a given edge key, propagate only along children whose edge BV contains the token.
-            |acc_map: &BTreeMap<TokenizerStateID, GLRParserState<'a>>,
+            |glr_s0: &GLRParserState<'a>,
              (gtid_opt, disallowed_opt): &(Option<GrammarTokenID>, Option<(TokenizerStateID, TerminalID)>),
              dest_map: &ordered_hash_map::OrderedHashMap<Trie2Index, LLMTokenBV>| {
                 let mut out = Vec::new();
@@ -3350,73 +3398,52 @@ impl<'a> GrammarConstraintState<'a> {
                         continue;
                     }
 
-                    // Build the next aggregated value for this child.
-                    let mut child_v: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
+                    let mut glr_s = glr_s0.clone();
 
-                    for (final_tid, glr_s0) in acc_map.iter() {
-                        let mut glr_s = glr_s0.clone();
-
-                        // Step the GLR state on this grammar token (if any).
-                        if let Some(gtid) = gtid_opt {
-                            glr_s.process_token(*gtid);
-                            if !glr_s.is_ok() {
-                                continue;
-                            }
+                    // Step the GLR state on this grammar token (if any).
+                    if let Some(gtid) = gtid_opt {
+                        glr_s.process_token(*gtid);
+                        if !glr_s.is_ok() {
+                            continue;
                         }
-
-                        // Apply "disallow" rule for immediate repetition at segment boundary if needed.
-                        if let Some((end_state, term_id)) = disallowed_opt {
-                            let mut disallowed = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
-                            let mut tbv = TerminalBV::zeros();
-                            tbv.insert(term_id.0);
-                            disallowed.insert_l2_bitset(end_state.0, tbv);
-                            disallow_terminals_and_prune_arc(
-                                &mut glr_s.active_state.stack,
-                                &disallowed,
-                                &mut HashMap::new(),
-                            );
-                            if !glr_s.is_ok() {
-                                continue;
-                            }
-                        }
-
-                        // Merge into the child's accumulator per final tokenizer state.
-                        child_v
-                            .entry(*final_tid)
-                            .and_modify(|g| g.merge_with(glr_s.clone()))
-                            .or_insert(glr_s);
                     }
 
-                    if !child_v.is_empty() {
-                        out.push((*child_idx, child_v));
+                    // Apply "disallow" rule for immediate repetition at segment boundary if needed.
+                    if let Some((end_state, term_id)) = disallowed_opt {
+                        let mut disallowed = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::new();
+                        let mut tbv = TerminalBV::zeros();
+                        tbv.insert(term_id.0);
+                        disallowed.insert_l2_bitset(end_state.0, tbv);
+                        disallow_terminals_and_prune_arc(
+                            &mut glr_s.active_state.stack,
+                            &disallowed,
+                            &mut HashMap::new(),
+                        );
+                        if !glr_s.is_ok() {
+                            continue;
+                        }
                     }
+
+                    out.push((*child_idx, glr_s));
                 }
 
                 out
             },
             // merge: merge per-final-tokenizer-state maps, merging GLR states per key.
-            |dst: &mut BTreeMap<TokenizerStateID, GLRParserState<'a>>,
-             src: BTreeMap<TokenizerStateID, GLRParserState<'a>>| {
-                for (tid, glr_s) in src {
-                    dst.entry(tid)
-                        .and_modify(|g| g.merge_with(glr_s.clone()))
-                        .or_insert(glr_s);
-                }
+            |dst: &mut GLRParserState<'a>, src: GLRParserState<'a>| {
+                dst.merge_with(src);
             },
             // process: if at end node, accumulate results to new_overall_state and stop; otherwise continue if any GLR state is alive.
-            |node, v: &mut BTreeMap<TokenizerStateID, GLRParserState<'a>>| {
-                // Drop dead GLR sub-states early to reduce fan-out.
-                v.retain(|_, g| g.is_ok());
-                if v.is_empty() {
-                    return false;
-                }
+            |node, glr_s: &mut GLRParserState<'a>| {
+                if !glr_s.is_ok() { return false; }
                 if node.value.end {
-                    for (tid, glr_s) in v.iter() {
-                        new_overall_state
-                            .entry(*tid)
-                            .and_modify(|g| g.merge_with(glr_s.clone()))
-                            .or_insert(glr_s.clone());
-                    }
+                    // Use the final tokenizer state encoded by the end node.
+                    let final_tid = node.value.final_tokenizer_state
+                        .expect("Trie0 end node must carry a final_tokenizer_state");
+                    new_overall_state
+                        .entry(final_tid)
+                        .and_modify(|g| g.merge_with(glr_s.clone()))
+                        .or_insert(glr_s.clone());
                     false
                 } else {
                     true
