@@ -990,11 +990,6 @@ impl GrammarConstraint {
         gc
     }
 
-    pub fn dump_precomputed3(&self) {
-        // Dummy implementation to satisfy Python bindings
-        println!("Dumping precomputed3 is not fully implemented in this version.");
-    }
-
     pub fn precompute0(
         tokenizer:        &Regex,
         parser:           Option<&GLRParser>,
@@ -1130,7 +1125,7 @@ impl GrammarConstraint {
 
         Self::factor_common_destinations_trie1(&precomputed1, &trie1_god);
         Self::merge_nodes_trie1(&mut precomputed1, &trie1_god);
-        Trie::gc(&trie1_god, &precomputed1.values().cloned().collect());
+        Trie::gc(&trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
 
         Trie::recompute_all_max_depths(&trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
         (precomputed1, trie1_god)
