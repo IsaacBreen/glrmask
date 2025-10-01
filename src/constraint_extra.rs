@@ -255,7 +255,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
     pub fn dump_precomputed0(&self) {
         GrammarConstraint::_dump_precomputed0(
             &self.precomputed0,
-            &self.llm_vocab.original_to_internal_id_bimap,
+            &self.precompute_vocab1.original_to_internal,
             &self.token_name_map,
             &self.llm_vocab.llm_token_map,
             &self.trie0_god,
