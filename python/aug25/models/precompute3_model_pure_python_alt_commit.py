@@ -53,7 +53,7 @@ class Model(_Model):
         Constructs the model by first loading the base model and then parsing
         the additional data structures required for this alternative commit strategy.
         """
-        base_model = Model.from_json_string(s)
+        base_model = _Model.from_json_string(s)
         data = json.loads(s)
         dumps = json.dumps
         bs_from_json = ffi.Bitset.from_json_string
