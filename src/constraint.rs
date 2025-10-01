@@ -3987,18 +3987,52 @@ impl<'a> GrammarConstraintState<'a> {
         self.map_gss_stacks(|stack, memo| fuse_predecessors_recursive(stack, 1, memo));
         self.state.retain(|_, glr| glr.is_ok());
 
-        // self.state.retain(|tokenizer_state_id, glr_state| {
-        //     let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-        //     if accessible.len() >= self.parent.parser.terminal_map.len() {
-        //         return true;
-        //     }
-        //     for tid in &accessible {
-        //         if glr_state.allows_terminal(*tid) {
-        //             return true;
-        //         }
-        //     }
-        //     false
-        // });
+        match self.parent.post_commit_allow_check_mode {
+            TerminalAllowanceCheckMode::None => {
+                // no-op
+            }
+            TerminalAllowanceCheckMode::ImmediateSets => {
+                self.state.retain(|tokenizer_state_id, glr_state| {
+                    // Fast auto-pass if tokenizer can produce all grammar terminals.
+                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
+                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                        return true;
+                    }
+
+                    let mut union = glr_state.immediate_shift_terminals();
+                    union.extend(glr_state.immediate_reduce_terminals());
+                    !union.is_disjoint(&accessible)
+                });
+            }
+            TerminalAllowanceCheckMode::ImmediateProbe => {
+                self.state.retain(|tokenizer_state_id, glr_state| {
+                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
+                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                        return true;
+                    }
+                    for tid in &accessible {
+                        if glr_state.has_immediate_action_for_terminal(*tid).unwrap_or(false) {
+                            return true;
+                        }
+                    }
+                    false
+                });
+            }
+            TerminalAllowanceCheckMode::StepProbe => {
+                self.state.retain(|tokenizer_state_id, glr_state| {
+                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
+                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                        return true;
+                    }
+                    for tid in &accessible {
+                        if glr_state.allows_terminal(*tid) {
+                            return true;
+                        }
+                    }
+                    false
+                });
+            }
+        }
 
         // assert!(*self == self_clone);
     }
@@ -4112,52 +4146,52 @@ impl<'a> GrammarConstraintState<'a> {
         // Post-commit allowance check: ensure each surviving state allows at least one
         // token the tokenizer can produce from its current tokenizer state.
         // Mode is controlled by self.parent.post_commit_allow_check_mode.
-        // match self.parent.post_commit_allow_check_mode {
-        //     TerminalAllowanceCheckMode::None => {
-        //         // no-op
-        //     }
-        //     TerminalAllowanceCheckMode::ImmediateSets => {
-        //         self.state.retain(|tokenizer_state_id, glr_state| {
-        //             // Fast auto-pass if tokenizer can produce all grammar terminals.
-        //             let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-        //             if accessible.len() >= self.parent.parser.terminal_map.len() {
-        //                 return true;
-        //             }
-        //
-        //             let mut union = glr_state.immediate_shift_terminals();
-        //             union.extend(glr_state.immediate_reduce_terminals());
-        //             !union.is_disjoint(&accessible)
-        //         });
-        //     }
-        //     TerminalAllowanceCheckMode::ImmediateProbe => {
-        //         self.state.retain(|tokenizer_state_id, glr_state| {
-        //             let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-        //             if accessible.len() >= self.parent.parser.terminal_map.len() {
-        //                 return true;
-        //             }
-        //             for tid in &accessible {
-        //                 if glr_state.has_immediate_action_for_terminal(*tid).unwrap_or(false) {
-        //                     return true;
-        //                 }
-        //             }
-        //             false
-        //         });
-        //     }
-        //     TerminalAllowanceCheckMode::StepProbe => {
-        //         self.state.retain(|tokenizer_state_id, glr_state| {
-        //             let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
-        //             if accessible.len() >= self.parent.parser.terminal_map.len() {
-        //                 return true;
-        //             }
-        //             for tid in &accessible {
-        //                 if glr_state.allows_terminal(*tid) {
-        //                     return true;
-        //                 }
-        //             }
-        //             false
-        //         });
-        //     }
-        // }
+        match self.parent.post_commit_allow_check_mode {
+            TerminalAllowanceCheckMode::None => {
+                // no-op
+            }
+            TerminalAllowanceCheckMode::ImmediateSets => {
+                self.state.retain(|tokenizer_state_id, glr_state| {
+                    // Fast auto-pass if tokenizer can produce all grammar terminals.
+                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
+                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                        return true;
+                    }
+
+                    let mut union = glr_state.immediate_shift_terminals();
+                    union.extend(glr_state.immediate_reduce_terminals());
+                    !union.is_disjoint(&accessible)
+                });
+            }
+            TerminalAllowanceCheckMode::ImmediateProbe => {
+                self.state.retain(|tokenizer_state_id, glr_state| {
+                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
+                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                        return true;
+                    }
+                    for tid in &accessible {
+                        if glr_state.has_immediate_action_for_terminal(*tid).unwrap_or(false) {
+                            return true;
+                        }
+                    }
+                    false
+                });
+            }
+            TerminalAllowanceCheckMode::StepProbe => {
+                self.state.retain(|tokenizer_state_id, glr_state| {
+                    let accessible = self.parent.tokenizer.tokens_accessible_from_state(*tokenizer_state_id);
+                    if accessible.len() >= self.parent.parser.terminal_map.len() {
+                        return true;
+                    }
+                    for tid in &accessible {
+                        if glr_state.allows_terminal(*tid) {
+                            return true;
+                        }
+                    }
+                    false
+                });
+            }
+        }
 
         // let mut roots: BTreeMap<TokenizerStateID, Arc<GSSNode>> = BTreeMap::new();
         // for (tokenizer_state_id, glr_state) in &self.state {
