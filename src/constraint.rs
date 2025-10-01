@@ -3923,7 +3923,6 @@ impl<'a> GrammarConstraintState<'a> {
                     if let Some((gtid, disallowed_opt)) = edge_key {
                         // Step the GLR state on this grammar token (if any).
                         glr_s.process_token(*gtid);
-                        glr_s.process_default_reductions();
                         if !glr_s.is_ok() {
                             continue;
                         }
@@ -4049,8 +4048,9 @@ impl<'a> GrammarConstraintState<'a> {
                 for match_info in &exec_result.matches {
                     let mut cloned_glr_s = glr_s_at_offset.clone();
 
-                    cloned_glr_s.process_token(TerminalID(match_info.id));
-                    cloned_glr_s.process_default_reductions();
+                    cloned_glr_s.step(TerminalID(match_info.id));
+                    // cloned_glr_s.do_phase3();
+
                     if cloned_glr_s.is_ok() {
                         let new_offset = offset + match_info.width;
                         // After a grammar token is consumed, the tokenizer resets for the next segment of the LLM token.
@@ -4089,6 +4089,10 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         self.state = new_overall_state.clone();
+        for glr_parser_state in self.state.values_mut() {
+            // glr_parser_state.process_default_reductions();
+        }
+
         // TODO: this shouldn't be necessary, but due to some order-dependent LLM token BV weirdness in GSS, it is necessary to ensure commit order invariance.
         self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
 
