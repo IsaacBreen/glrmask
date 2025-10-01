@@ -1109,7 +1109,7 @@ fn test_js_parser_isolated_and_minimized() -> Result<(), Box<dyn std::error::Err
 
     // 2. Load the full JS grammar.
     println!("--- Loading and Minimizing JS Grammar ---");
-    let grammar_path = "src/js_simplified0_5.ebnf";
+    let grammar_path = "src/js_simplified1.ebnf";
     let full_grammar_def = GrammarDefinition::from_ebnf_file(grammar_path)?;
     println!("Initial production count: {}", full_grammar_def.productions.len());
 

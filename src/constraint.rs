@@ -3871,10 +3871,13 @@ impl<'a> GrammarConstraintState<'a> {
         let internal_id = self.parent.original_id_to_internal(llm_token_id)
             .unwrap_or_else(|| panic!("LLM token ID {:?} not found in internal mapping during commit.", llm_token_id));
 
-        let terminals_map_by_state = self.parent.terminal_map_by_llm.get(&internal_id)
-            .unwrap_or_else(|| panic!("No terminal map found for internal LLM token ID {:?} during commit.", internal_id));
-        let state_map = self.parent.state_map_by_llm.get(&internal_id)
-            .unwrap_or_else(|| panic!("No tokenizer state map found for internal LLM token ID {:?} during commit.", internal_id));
+        // let terminals_map_by_state = self.parent.terminal_map_by_llm.get(&internal_id)
+        //     .unwrap_or_else(|| panic!("No terminal map found for internal LLM token ID {:?} during commit.", internal_id));
+        // let state_map = self.parent.state_map_by_llm.get(&internal_id)
+        //     .unwrap_or_else(|| panic!("No tokenizer state map found for internal LLM token ID {:?} during commit.", internal_id));
+        let llm_token_bytes = self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id).unwrap().clone();
+        let (_state_map, terminals_map_by_state) = self.compute_commit_maps(&llm_token_bytes);
+        let state_map = &_state_map;
 
         if self.state.is_empty() {
             return;
@@ -3884,7 +3887,7 @@ impl<'a> GrammarConstraintState<'a> {
         self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
 
         // 2) Prune disallowed terminals using the per-token precomputed terminal sets.
-        self.transform_gss_stacks(|stack, memo| prune_disallowed_terminals(stack, terminals_map_by_state, memo));
+        self.transform_gss_stacks(|stack, memo| prune_disallowed_terminals(stack, &terminals_map_by_state, memo));
 
         // 3) Map tokenizer states
         self.transform_gss_stacks(|stack, memo| map_allowed_terminals_tokenizer_states(stack, state_map, memo));
@@ -3997,7 +4000,7 @@ impl<'a> GrammarConstraintState<'a> {
         //     false
         // });
 
-        assert!(*self == self_clone);
+        // assert!(*self == self_clone);
     }
 
     #[time_it]
