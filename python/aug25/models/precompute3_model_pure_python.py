@@ -728,11 +728,11 @@ class Model(GraphProvider):
                 continue
 
             # Traverse edges and propagate masks
-            edges = a_node.children if a_node else []
             # Process only one edge per pop; resume where we left off
             start_edge_idx = edge_cursor.get(node, 0)
             spawned_any = False
-            for (pop, llm_bv_from_edge), dests in edges[start_edge_idx:]:
+            edges = a_node.children[start_edge_idx:] if a_node else []
+            for (pop, llm_bv_from_edge), dests in edges:
                 llm_bv = llm_bv_from_edge.difference(final_mask)
                 if llm_bv.is_empty():
 
