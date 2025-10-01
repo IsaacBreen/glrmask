@@ -536,6 +536,12 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
         obj.insert("max_original_llm_token_id".to_string(), self.llm_vocab.max_original_llm_token_id.to_json());
         obj.insert("original_to_internal_id_bimap".to_string(), self.llm_vocab.original_to_internal_id_bimap.to_json());
+		// Serialize internal_to_original_ as Vec<(usize, Vec<usize>)> to keep it compact
+		let mut ito: Vec<(usize, Vec<usize>)> = Vec::new();
+		for (k, bv) in &self.llm_vocab.internal_to_original_ {
+			ito.push((*k, bv.iter().collect::<Vec<_>>()));
+		}
+        obj.insert("internal_to_original_".to_string(), ito.to_json());
         obj.insert("internal_max_llm_token".to_string(), self.llm_vocab.internal_max_llm_token.to_json());
         obj.insert("possible_matches".to_string(), self.possible_matches.to_json());
         obj.insert("trie0_god".to_string(), self.trie0_god.to_json());
@@ -630,11 +636,21 @@ impl JSONConvertible for GrammarConstraint {
                     None => precompute_vocab.clone(),
 				};
 
-				// Build llm_vocab reverse map too
-				let mut global_ito: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
-				for (o, i) in &original_to_internal_id_bimap {
-					global_ito.entry(*i).or_default().insert(*o);
-				}
+				let global_ito = if let Some(node) = obj.remove("internal_to_original_") {
+                    let ito_vec: Vec<(usize, Vec<usize>)> = Vec::from_json(node)?;
+                    ito_vec
+                        .into_iter()
+                        .map(|(k, v)| (k, v.into_iter().collect()))
+                        .collect()
+                } else {
+                    // Fallback for older format
+                    let mut ito: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+                    for (o, i) in &original_to_internal_id_bimap {
+                        ito.entry(*i).or_default().insert(*o);
+                    }
+                    ito
+                };
+
                 Ok(GrammarConstraint {
                     tokenizer,
                     parser,
