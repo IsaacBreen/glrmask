@@ -3305,18 +3305,11 @@ impl<'a> GrammarConstraintState<'a> {
         for (tokenizer_state_id, glr_state) in &self.state {
             let root_idx = self.parent.precomputed0.get(tokenizer_state_id)
                 .unwrap_or_else(|| panic!("No precomputed trie root for tokenizer state {:?} during commit.", tokenizer_state_id));
-            // Seed traversal per active tokenizer start state. If the precomputed
-            // start->final tokenizer-state mapping is missing, do not drop this GLR state.
-            // Instead, put it under the tokenizer's initial state (segments reset after a token),
-            // mirroring the behavior in commit_bytes.
-            let mut v = BTreeMap::new();
             if let Some(&final_tid) = state_map.get(tokenizer_state_id) {
+                let mut v = BTreeMap::new();
                 v.insert(final_tid, glr_state.clone());
-            } else {
-                let fallback_final = self.parent.tokenizer.initial_state_id();
-                v.insert(fallback_final, glr_state.clone());
+                initial_values_for_map.push((*root_idx, v));
             }
-            initial_values_for_map.push((*root_idx, v));
         }
 
         let internal_id_val = internal_id.0;
