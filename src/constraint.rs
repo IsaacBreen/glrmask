@@ -1094,7 +1094,33 @@ impl GrammarConstraint {
             }
         }
 
-        todo!("Iterate over nodes in precomputed0 that have final_tokenizer_state...");
+        // Create a single leaf node for Trie1. All former end nodes will now point to this.
+        let trie1_leaf = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::leaf())));
+        let all_llm_tokens = LLMTokenBV::ones(internal_max_llm_token + 1);
+
+        // Find all nodes in precomputed0 that were end nodes and adapt them for precomputed1.
+        for (node0_idx, node1_idx) in &node0_to_node1_map {
+            let node0_guard = node0_idx.read(trie0_god).unwrap();
+            if let Some(final_tokenizer_state) = node0_guard.value.final_tokenizer_state {
+                // This was an end node in Trie0. In Trie1, it's no longer an end node itself.
+                // Instead, it will have outgoing edges for all possible subsequent terminals.
+                let mut node1_guard = node1_idx.write(&trie1_god).unwrap();
+
+                // It should have been marked as an end node during conversion.
+                assert!(node1_guard.value.end);
+                node1_guard.value.end = false;
+
+                // Get all terminals that the tokenizer can produce from this state.
+                let accessible_terminals = tokenizer.tokens_accessible_from_state(final_tokenizer_state);
+
+                for terminal_id in accessible_terminals {
+                    // Add an edge for this terminal to the common leaf node.
+                    // The edge value represents all possible LLM tokens, as we don't know which one will follow.
+                    let dest_map = node1_guard.children_mut().entry(Some(terminal_id)).or_default();
+                    dest_map.insert(trie1_leaf.clone(), all_llm_tokens.clone());
+                }
+            }
+        }
 
         // Optimizations, similar to precompute0
         let ignore_terminal_id = parser.and_then(|p| p.ignore_terminal_id);
