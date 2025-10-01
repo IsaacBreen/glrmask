@@ -485,6 +485,7 @@ pub struct GrammarConstraint {
     pub trie3_god: Trie3GodWrapper,
     pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
     // Stage-local vocabularies for internal<->original mappings
+    pub precompute0_vocab: StageVocab,
     pub precompute_vocab1: StageVocab,
     pub precompute2_vocab: StageVocab,
     pub precompute3_vocab: StageVocab,
@@ -549,6 +550,7 @@ impl JSONConvertible for GrammarConstraint {
         // Stage vocabs
         obj.insert("state_map_by_llm".to_string(), self.state_map_by_llm.to_json());
         obj.insert("terminal_map_by_llm".to_string(), self.terminal_map_by_llm.to_json());
+        obj.insert("precompute0_vocab".to_string(), self.precompute0_vocab.to_json());
         obj.insert("precompute_vocab".to_string(), self.precompute_vocab1.to_json());
         obj.insert("precompute2_vocab".to_string(), self.precompute2_vocab.to_json());
         obj.insert("precompute3_vocab".to_string(), self.precompute3_vocab.to_json());
@@ -604,20 +606,24 @@ impl JSONConvertible for GrammarConstraint {
                     None => DedupValueMap::new(),
                 };
                 // Stage vocabs (optional)
-                let precompute_vocab = match obj.remove("precompute_vocab") {
-					Some(n) => StageVocab::from_json(n)?,
-					None => {
-						// Synthesize from global mapping
-						let mut ito: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
-						for (orig, int_id) in &original_to_internal_id_bimap {
-							ito.entry(*int_id).or_default().insert(*orig);
-						}
+                let precompute0_vocab = match obj.remove("precompute0_vocab") {
+                    Some(n) => StageVocab::from_json(n)?,
+                    None => {
+                        // Synthesize from global mapping
+                        let mut ito: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+                        for (orig, int_id) in &original_to_internal_id_bimap {
+                            ito.entry(*int_id).or_default().insert(*orig);
+                        }
                         StageVocab {
                             original_to_internal: original_to_internal_id_bimap.clone(),
                             internal_to_original: ito.clone(),
                             internal_max_llm_token,
                         }
                     }
+                };
+                let precompute_vocab = match obj.remove("precompute_vocab") {
+					Some(n) => StageVocab::from_json(n)?,
+					None => precompute0_vocab.clone(),
                 };
                 let precompute2_vocab = match obj.remove("precompute2_vocab") {
                     Some(n) => StageVocab::from_json(n)?,
@@ -650,6 +656,7 @@ impl JSONConvertible for GrammarConstraint {
                     post_commit_allow_check_mode,
                     state_map_by_llm,
                     terminal_map_by_llm,
+                    precompute0_vocab,
                     precompute_vocab1: precompute_vocab,
                     precompute2_vocab,
                     precompute3_vocab,
@@ -836,11 +843,12 @@ impl GrammarConstraint {
         });
 
         // Initialize per-stage vocabularies (start identical to global)
-        let mut precompute_vocab = StageVocab {
+        let mut precompute0_vocab = StageVocab {
             original_to_internal: llm_vocab.original_to_internal_id_bimap.clone(),
             internal_to_original: internal_to_original_.clone(),
             internal_max_llm_token: internal_max_llm_token,
         };
+        let mut precompute_vocab = precompute0_vocab.clone();
         let mut precompute2_vocab = precompute_vocab.clone();
         let mut precompute3_vocab = precompute_vocab.clone();
 
@@ -862,6 +870,7 @@ impl GrammarConstraint {
                 post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
                 state_map_by_llm,
                 terminal_map_by_llm,
+                precompute0_vocab,
                 precompute_vocab1: precompute_vocab,
                 precompute2_vocab,
                 precompute3_vocab,
@@ -969,6 +978,7 @@ impl GrammarConstraint {
             post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
             state_map_by_llm,
             terminal_map_by_llm,
+            precompute0_vocab,
             precompute_vocab1: precompute_vocab,
             precompute2_vocab,
             precompute3_vocab,
