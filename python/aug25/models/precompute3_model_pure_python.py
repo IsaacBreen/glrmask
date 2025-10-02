@@ -284,6 +284,7 @@ class Model(GraphProvider):
         }
         # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
+        print(constraint.dump_precomputed3())
         tokenizer = constraint.tokenizer()
         tokenizer_max_state = tokenizer.max_state()
         glr_parser = constraint.glr_parser()
@@ -487,6 +488,7 @@ class Model(GraphProvider):
             visited_q_items.add(q_item_key)
 
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+            print(f"Offset {offset}, Tokenizer State {tokenizer_sid}, GSS Heads {len(gss.peek())}, Matches: {matches}, End State: {end_state}")
 
             for terminal_id, width in matches:
                 processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
@@ -500,6 +502,7 @@ class Model(GraphProvider):
                 if not processed_gss.is_empty():
                     new_offset = offset + width
                     next_tokenizer_sid = self.tokenizer_initial_state
+                    print(f"  Match terminal {terminal_id} (width {width}) -> New Offset {new_offset}, Next Tokenizer State {next_tokenizer_sid}, Processed GSS Heads {len(processed_gss.peek())}")
                     if new_offset == len(token_bytes):
                         new_states[next_tokenizer_sid].append(processed_gss)
                     else:
@@ -525,8 +528,6 @@ class Model(GraphProvider):
         # merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
         stats.stop('commit.fuse')
         # print(GSS.merge_many(merged_states.values()).stats())
-        # print(GSS.merge_many(merged_states.values()).to_graph_string(upper_only=True))
-
 
         stats.inc('commit.tokenizer_states_out', len(merged_states))
         self.state = merged_states
@@ -655,6 +656,9 @@ class Model(GraphProvider):
         - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
+        print("asdfasdf")
+        print(GSS.merge_many(self.state.values()).to_graph_string(upper_only=True))
+
         stats = Stats.get()
         stats.start('get_mask')
         state_map: Dict[int, GSS] = self.state
