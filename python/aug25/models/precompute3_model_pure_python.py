@@ -763,24 +763,25 @@ class Model(GraphProvider):
         stats.stop(f'{p}.total')
         return result
 
-    def _is_zombie_path(self, gss: GSS, path_token_union: LLMTokenSet, final_mask: LLMTokenSet, stat_context: str) -> bool:
+    def _is_zombie_path(self, gss: GSS, path_token_union: LLMTokenSet, pending_mask: LLMTokenSet, stat_context: str) -> bool:
         """
         Checks if a given traversal path is a "zombie" path, meaning it cannot
         contribute any new tokens to the final_mask.
+        pending_mask = all_ones - final_mask, so we can avoid constructing differences.
         """
         stats = Stats.get()
         p = f'get_mask.zombie_check.{stat_context}'
         stats.start(p)
 
-        # We only care about tokens that are not yet in the final mask.
-        potential_new_tokens = path_token_union.difference(final_mask)
-        if potential_new_tokens.is_empty():
+        # 1) If the path's LLM token union doesn't intersect with tokens we still need, it's a zombie.
+        if path_token_union.isdisjoint(pending_mask):
             stats.inc(f'{p}.skipped_no_potential')
             stats.stop(p)
             return True
 
+        # 2) If the GSS's accumulated LLM mask doesn't intersect with tokens we still need, it's a zombie.
         gss_mask_acc = gss.reduce_acc()
-        if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(potential_new_tokens):
+        if gss_mask_acc and gss_mask_acc.llm_mask.isdisjoint(pending_mask):
             stats.inc(f'{p}.skipped_no_overlap_disjoint')
             stats.stop(p)
             return True
@@ -793,7 +794,7 @@ class Model(GraphProvider):
         Reorder edges and their destination lists to favor reaching end nodes ASAP.
         Heuristic:
           - Inner dests: sort by max_depth[dest] descending
-          - Outer edges: sort by best dest depth (after inner sort) descending,
+          - Outer edges: prefer pop==0 edges first (cheap to traverse), then by best dest depth descending,
             then by pop asc as a tie-breaker.
         """
         stats = Stats.get()
@@ -805,11 +806,12 @@ class Model(GraphProvider):
             # Sort inner dests first (so the first dest has the highest depth)
             for _edge_key, dests in node.children:
                 dests.sort(key=lambda item: md.get(int(item[0]), 0), reverse=True)
-            # Sort edges by best dest depth desc, then pop asc
+            # Sort edges: pop==0 first, then by best dest depth desc, then pop asc
             def _edge_key(edge):
                 (pop, _llm_bv), dests = edge
                 best = md.get(int(dests[0][0]), 0) if dests else -1
-                return (-best, pop)
+                # pop==0 first -> False (0) sorts before True (1)
+                return (pop != 0, -best, pop)
             node.children.sort(key=_edge_key)
         stats.stop('optimize_traversal')
 
@@ -818,12 +820,11 @@ class Model(GraphProvider):
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
 
-        Changes for get_mask_only:
-        - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-          the forbidden terminals -> forbidden LLM tokens and taking the complement.
-        - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-        - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-        - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+        Key speed-ups vs previous version:
+        - Use pending_mask = all_tokens \ final_mask and only intersections (no heavy differences).
+        - Per-node edge filtering cache keyed by final_mask version to skip edges that cannot add tokens.
+        - Stronger edge ordering (pop==0 first) to reach end nodes sooner and trigger zombie pruning.
+        - Process more edges per visit adaptively to reduce heap churn.
         """
         # print(GSS.merge_many(self.state.values()).to_graph_string(upper_only=True))
         # print(GSS.merge_many(self.state.values()))
@@ -836,11 +837,19 @@ class Model(GraphProvider):
         all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
         final_mask: LLMTokenSet = RangeSet.empty()
 
+        # To avoid reconstructing differences repeatedly, track "pending" tokens.
+        final_mask_version = 0
+        pending_mask: LLMTokenSet = all_ones  # all tokens are still pending initially
+
+        # Edge filtering cache: node_id -> (version, [edge_indices_with_pending_overlap])
+        filtered_edges_cache: Dict[NodeID, Tuple[int, List[int]]] = {}
+
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask.
         values: Dict[NodeID, GSS] = {}
         depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
         enqueued_nodes: Set[NodeID] = set()
-        edge_cursor: Dict[NodeID, Tuple[int, int]] = {}  # node -> (next_edge_idx, gss_id)
+        # node -> (next_filtered_edge_idx, gss_id, version)
+        edge_cursor: Dict[NodeID, Tuple[int, int, int]] = {}
 
         hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
@@ -938,6 +947,31 @@ class Model(GraphProvider):
         def dequeue() -> Tuple[int, int]:
             neg_d, n = hpop(depth_heap)
             return -neg_d, n
+
+        def get_filtered_edges_indices(node_id: NodeID) -> List[int]:
+            """
+            Return indices of edges whose llm_bv intersects pending_mask (i.e., can still add tokens).
+            Cache per-node per final_mask_version to avoid repeated scans within the same version.
+            """
+            cached = filtered_edges_cache.get(node_id)
+            if cached is not None and cached[0] == final_mask_version:
+                stats.inc('get_mask.edge_filtering.cache_hits')
+                return cached[1]
+
+            a_node = arena.get(node_id)
+            edges = a_node.children if a_node else []
+            survivors: List[int] = []
+            # We avoid difference and only test intersection emptiness.
+            stats.start('get_mask.edge_filtering.compute')
+            for i, ((_pop, llm_bv), _dests) in enumerate(edges):
+                if not llm_bv.isdisjoint(pending_mask):
+                    survivors.append(i)
+            stats.stop('get_mask.edge_filtering.compute')
+            stats.inc('get_mask.edge_filtering.total_edges_scanned', len(edges))
+            stats.inc('get_mask.edge_filtering.survivors.sum', len(survivors))
+            filtered_edges_cache[node_id] = (final_mask_version, survivors)
+            return survivors
+
         stats.stop('get_mask.seeding')
 
         # Main loop
@@ -962,15 +996,23 @@ class Model(GraphProvider):
                 reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
                 stats.stop('get_mask.main_loop.end_node.reduce_acc')
                 if reduced_acc:
+                    # Only bump version if this end actually adds something new.
+                    added_any = not reduced_acc.llm_mask.isdisjoint(pending_mask)
                     stats.start('get_mask.main_loop.end_node.final_mask_union')
                     final_mask |= reduced_acc.llm_mask
                     stats.stop('get_mask.main_loop.end_node.final_mask_union')
+                    if added_any:
+                        final_mask_version += 1
+                        stats.inc('get_mask.final_mask.version_bump')
+                        # Pending shrinks as final grows.
+                        pending_mask = all_ones.difference(final_mask)
+                        # Note: filtered_edges_cache uses version numbers; no need to purge explicitly.
 
             # Zombie traversal avoidance: if this node's edges can't possibly add
             # to the final mask given the current GSS mask, skip it.
             a_node = arena.get(node)
             node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-            if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask, 'node'):
+            if self._is_zombie_path(gss_node, node_llm_bv_union, pending_mask, 'node'):
                 continue
 
             # Traverse edges and propagate masks
@@ -978,25 +1020,28 @@ class Model(GraphProvider):
             edges = a_node.children if a_node else []
             stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
             stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
-            
-            # Process multiple edges per visit to reduce heap operations
+
+            # Compute filtered edges for current pending set (version)
+            filtered_indices = get_filtered_edges_indices(node)
+
+            # Cursor: (next_filtered_edge_idx, gss_id, version)
             saved_cursor = edge_cursor.get(node)
-            start_edge_idx = saved_cursor[0] if saved_cursor and saved_cursor[1] == gss_id else 0
+            start_edge_fidx = 0
+            if saved_cursor is not None:
+                saved_idx, saved_gid, saved_ver = saved_cursor
+                if saved_gid == gss_id and saved_ver == final_mask_version:
+                    start_edge_fidx = saved_idx
+
             spawned_any = False
             edges_processed_count = 0
-            max_edges_per_visit = 10  # Process up to 10 edges before re-enqueueing
-            
-            for edge_i in range(start_edge_idx, len(edges)):
-                (pop, llm_bv), dests = edges[edge_i]
 
-                # Optimization: Skip edges that can't contribute new tokens
-                if not final_mask.is_empty():
-                    stats.start('get_mask.main_loop.edge.early_skip_check')
-                    potential_new = llm_bv.difference(final_mask)
-                    stats.stop('get_mask.main_loop.edge.early_skip_check')
-                    if potential_new.is_empty():
-                        stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
-                        continue
+            # Adaptive: process more per visit when the final_mask is small (to reach end nodes sooner)
+            # Base 10, but increase up to 64 while we still have many pending tokens.
+            max_edges_per_visit = 64 if not final_mask.is_empty() else 128
+
+            for fidx in range(start_edge_fidx, len(filtered_indices)):
+                edge_i = filtered_indices[fidx]
+                (pop, llm_bv), dests = edges[edge_i]
 
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
@@ -1037,6 +1082,7 @@ class Model(GraphProvider):
                     stats.inc('get_mask.traversal.dests_traversed')
 
                     stats.start('get_mask.main_loop.edge.peek_and_filter')
+                    # Avoid allocations by filtering the existing peeked list.
                     values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
                     stats.stop('get_mask.main_loop.edge.peek_and_filter')
                     if not values_to_keep:
@@ -1067,21 +1113,21 @@ class Model(GraphProvider):
 
                 if child_spawned:
                     spawned_any = True
-                
+
                 # Count edges processed (not just iterated)
                 edges_processed_count += 1
-                
+
                 # Check if we should re-enqueue for more edges
-                if edges_processed_count >= max_edges_per_visit and edge_i + 1 < len(edges):
+                if edges_processed_count >= max_edges_per_visit and fidx + 1 < len(filtered_indices):
                     # Save progress and re-enqueue this node to process remaining edges later
                     merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
                     values[node] = merged_for_requeue
-                    edge_cursor[node] = (edge_i + 1, id(merged_for_requeue))
+                    edge_cursor[node] = (fidx + 1, id(merged_for_requeue), final_mask_version)
                     enqueue(max_depth[node], node)
                     stats.inc('get_mask.traversal.node_requeued_for_more_edges')
                     break
             else:
-                # We've processed all remaining edges for this node
+                # We've processed all remaining filtered edges for this node
                 edge_cursor.pop(node, None)
 
         stats.stop('get_mask.main_loop')
