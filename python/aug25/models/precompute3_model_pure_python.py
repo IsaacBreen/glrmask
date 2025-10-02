@@ -811,20 +811,12 @@ class Model(GraphProvider):
                 best = md.get(int(dests[0][0]), 0) if dests else -1
                 return (-best, pop)
             node.children.sort(key=_edge_key)
+
     def get_mask(self) -> LLMTokenSet:
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-
-        Changes for get_mask_only:
-        - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-          the forbidden terminals -> forbidden LLM tokens and taking the complement.
-        - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-        - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-        - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
+        This implementation uses a Depth-First Search (DFS) traversal strategy.
         """
-        # print(GSS.merge_many(self.state.values()).to_graph_string(upper_only=True))
-        # print(GSS.merge_many(self.state.values()))
-
         stats = Stats.get()
         stats.start('get_mask')
         state_map: Dict[int, GSS] = self.state
@@ -833,13 +825,11 @@ class Model(GraphProvider):
         all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
         final_mask: LLMTokenSet = RangeSet.empty()
 
-        # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask.
+        # Worklist for DFS traversal. `values` stores merged GSSs for nodes.
         values: Dict[NodeID, GSS] = {}
-        depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
+        stack: List[NodeID] = []
         enqueued_nodes: Set[NodeID] = set()
-        edge_cursor: Dict[NodeID, Tuple[int, int]] = {}  # node -> (next_edge_idx, gss_id)
 
-        hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
         max_depth: Dict[NodeID, int] = self.max_depth
         arena: Dict[NodeID, ArenaNode] = self.arena
@@ -862,7 +852,7 @@ class Model(GraphProvider):
 
 
         stats.start('get_mask.seeding')
-        # Seed: Initialize llm_mask in each GSS, consume terminals_union, and enqueue roots.
+        # Seed: Initialize llm_mask in each GSS, consume terminals_union, and prepare root nodes.
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
             if False:  # placeholder to keep minimal diff context; decorator handles memoization
@@ -905,6 +895,7 @@ class Model(GraphProvider):
             )
             return result
 
+        root_gsses: Dict[NodeID, GSS] = {}
         cache = {}
         for sid, gss in state_map.items():
             stats.inc('get_mask.seeding.gss_loops')
@@ -914,41 +905,41 @@ class Model(GraphProvider):
             gss_initialized: GSS = gss.apply(initialize_acc, cache)
             stats.stop('get_mask.seeding.gss.apply')
 
-            if r in values:
+            if r in root_gsses:
                 stats.start('get_mask.seeding.gss.merge')
-                values[r] = values[r].merge(gss_initialized)
+                root_gsses[r] = root_gsses[r].merge(gss_initialized)
                 stats.stop('get_mask.seeding.gss.merge')
             else:
-                values[r] = gss_initialized
+                root_gsses[r] = gss_initialized
 
-            d: int = max_depth[r]
-            if r not in enqueued_nodes:
-                enqueued_nodes.add(r)
-                hp(depth_heap, (-d, r))
+        # Sort roots by max_depth (ascending) to have deeper paths at the top of the stack.
+        # This makes the traversal behave more like a classic recursive DFS.
+        sorted_roots = sorted(root_gsses.keys(), key=lambda r: max_depth.get(r, 0))
 
-        def enqueue(d: int, n: NodeID) -> None:
-            stats.inc('get_mask.traversal.enqueues')
-            if n not in enqueued_nodes:
-                enqueued_nodes.add(n)
-                hp(depth_heap, (-d, n))
-
-        def dequeue() -> Tuple[int, int]:
-            neg_d, n = hpop(depth_heap)
-            return -neg_d, n
+        for r in sorted_roots:
+            gss = root_gsses[r]
+            if not gss.is_empty():
+                values[r] = gss
+                if r not in enqueued_nodes:
+                    stack.append(r)
+                    enqueued_nodes.add(r)
         stats.stop('get_mask.seeding')
 
-        # Main loop
+        # Main DFS loop
         stats.start('get_mask.main_loop')
         max_depth_reached = 0
         visited_nodes = set()
-        while depth_heap:
-            depth, node = dequeue()
+        while stack:
+            node = stack.pop()
+            depth = max_depth.get(node, 0)
             max_depth_reached = max(max_depth_reached, depth)
-            stats.inc('get_mask.traversal.depth_heap.pops')
+            stats.inc('get_mask.traversal.stack.pops')
             stats.inc('get_mask.traversal.nodes_processed')
             visited_nodes.add(node)
+
+            if node not in values:
+                continue
             gss_node: GSS = values.pop(node)
-            gss_id = id(gss_node)
             enqueued_nodes.remove(node)
             stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
 
@@ -975,13 +966,8 @@ class Model(GraphProvider):
             edges = a_node.children if a_node else []
             stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
             stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
-            # Process only one edge per pop; resume where we left off
-            saved_cursor = edge_cursor.get(node)
-            start_edge_idx = saved_cursor[0] if saved_cursor and saved_cursor[1] == gss_id else 0
-            spawned_any = False
-            for edge_i in range(start_edge_idx, len(edges)):
-                (pop, llm_bv), dests = edges[edge_i]
 
+            for (pop, llm_bv), dests in edges:
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
                 stats.start('get_mask.main_loop.edge.popn')
@@ -1016,7 +1002,6 @@ class Model(GraphProvider):
                     continue
 
                 peeked = popped.peek()
-                child_spawned = False
                 for dest_idx, state_bv in dests:
                     stats.inc('get_mask.traversal.dests_traversed')
 
@@ -1046,22 +1031,12 @@ class Model(GraphProvider):
                         stats.stop('get_mask.main_loop.edge.gss_merge')
                     else:
                         values[d] = child_gss
-                    enqueue(max_depth[d], d)
-                    child_spawned = True
 
-                if child_spawned:
-                    spawned_any = True
-                    # Save progress and re-enqueue this node to process the next edge later
-                    # Merge into any existing value (e.g., from self-loops) to avoid clobbering new contributions.
-                    merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
-                    values[node] = merged_for_requeue
-                    edge_cursor[node] = (edge_i + 1, id(merged_for_requeue))
-                    enqueue(max_depth[node], node)
-                    break
+                    if d not in enqueued_nodes:
+                        stats.inc('get_mask.traversal.enqueues')
+                        stack.append(d)
+                        enqueued_nodes.add(d)
 
-            # If we didn't spawn any child across remaining edges, this node is done
-            if not spawned_any:
-                edge_cursor.pop(node, None)
         stats.stop('get_mask.main_loop')
         stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
         stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
@@ -1075,6 +1050,8 @@ class Model(GraphProvider):
         stats.stop('get_mask.final_conversion')
 
         stats.stop('get_mask')
+        Stats.get().report()
+        Stats.get().reset()
         return original_indices
 
     def finalize(self):
