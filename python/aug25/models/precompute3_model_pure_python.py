@@ -95,6 +95,7 @@ class DFAState:
     transitions: Dict[int, int] = field(default_factory=dict)
     finalizers: Set[int] = field(default_factory=set)
     possible_future_group_ids: Set[int] = field(default_factory=set)
+    group_id_to_u8set: Dict[int, TerminalIdSet] = field(default_factory=dict)
 
 @dataclass
 class PyTokenizer:
@@ -198,18 +199,7 @@ class PyTokenizer:
                     matches.setdefault(group_id, i + 1)
                 else:
                     matches[group_id] = i + 1
-            
-            # Check for early termination.
-            matched = set(matches.keys())
-            excluded = matched.intersection(self.non_greedy_finalizers)
-            possible_futures = self.states[current_state].possible_future_group_ids
-            if not (possible_futures - excluded):
-                done = True
-                break
         
-        if not done and not self.states[current_state].transitions:
-            done = True
-
         end_state = None if done else current_state
         
         result_matches = [(gid, width) for gid, width in matches.items() if width > 0]
@@ -422,17 +412,30 @@ class Model(GraphProvider):
         # Load tokenizer DFA from JSON
         dfa_data = data['tokenizer']['dfa']
         dfa_states = []
-        print("data['tokenizer']:")
-        print(data['tokenizer'])
         for state_data in dfa_data['states']:
-            # The transitions in JSON are a TrieMap serialization
-            transitions_data = state_data['transitions']['data']
-            # In Rust, TrieMap keys are u8, but JSON keys are strings.
-            transitions = {int(k): v for k, v in transitions_data.items()}
+            print(state_data)
+            transitions_json = state_data['transitions']
+            # The 'data' field of the TrieMap JSON contains string keys for byte values.
+            transitions = {int(k): v for k, v in transitions_json.get('data', {}).items()}
+
+            group_id_to_u8set_json = state_data.get('group_id_to_u8set', [])
+            group_id_to_u8set = {}
+            for group_id, u8set_ranges in group_id_to_u8set_json:
+                u8set_ranges2 = []
+                for r in u8set_ranges:
+                    if isinstance(r, list):
+                        u8set_ranges2.append(r)
+                    elif isinstance(r, int):
+                        u8set_ranges2.append([r, r])
+                    else:
+                        raise ValueError(f"Invalid range value: {r}")
+                group_id_to_u8set[group_id] = TerminalIdSet.from_ranges(u8set_ranges2)
+
             dfa_states.append(DFAState(
                 transitions=transitions,
                 finalizers=set(state_data['finalizers']),
-                possible_future_group_ids=set(state_data['possible_future_group_ids'])
+                possible_future_group_ids=set(state_data['possible_future_group_ids']),
+                group_id_to_u8set=group_id_to_u8set
             ))
 
         tokenizer = PyTokenizer(
