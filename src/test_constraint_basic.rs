@@ -1099,7 +1099,7 @@ fn test_precompute_x_eq() {
     let x_dests = root_node.get(&Some(x_tid)).expect("No edge for terminal 'X'");
     assert_eq!(x_dests.len(), 1, "Should be one destination for 'X' edge");
     let (x_dest_wrapper, x_edge_bv) = x_dests.iter().next().unwrap();
-    assert_eq!(*x_edge_bv, x_llm_id, "Edge for 'X' has wrong LLM token bitset");
+    assert_eq!(*x_edge_bv, x_llm_id.clone(), "Edge for 'X' has wrong LLM token bitset");
     let binding = x_dest_wrapper.as_arc().clone();
     let x_dest_node = binding.read(&constraint.trie1_god).unwrap();
     assert!(x_dest_node.value.end, "Destination for 'X' edge should be an end node");
@@ -1109,7 +1109,7 @@ fn test_precompute_x_eq() {
     let space_dests = root_node.get(&Some(space_tid)).expect("No edge for terminal 'SPACE'");
     assert_eq!(space_dests.len(), 1, "Should be one destination for 'SPACE' edge");
     let (space_dest_wrapper, space_edge_bv) = space_dests.iter().next().unwrap();
-    assert_eq!(*space_edge_bv, space_equals_llm_id, "Edge for 'SPACE' has wrong LLM token bitset");let binding = space_dest_wrapper.as_arc().clone();
+    assert_eq!(*space_edge_bv, space_equals_llm_id.clone(), "Edge for 'SPACE' has wrong LLM token bitset");let binding = space_dest_wrapper.as_arc().clone();
     let node_after_space = binding.read(&constraint.trie1_god).unwrap();
     assert!(!node_after_space.value.end, "Destination for 'SPACE' should not be an end node");
 
@@ -1118,7 +1118,7 @@ fn test_precompute_x_eq() {
     let (equals_edge_key, equals_dests) = node_after_space.children().iter().next().unwrap();
     assert_eq!(*equals_edge_key, Some(equals_tid), "Edge from intermediate node should be for 'EQUALS'");
     let (equals_dest_wrapper, equals_edge_bv) = equals_dests.iter().next().unwrap();
-    assert_eq!(*equals_edge_bv, space_equals_llm_id, "Edge for 'EQUALS' has wrong LLM token bitset");
+    assert_eq!(*equals_edge_bv, space_equals_llm_id.clone(), "Edge for 'EQUALS' has wrong LLM token bitset");
     let binding = equals_dest_wrapper.as_arc().clone();
     let equals_dest_node = binding.read(&constraint.trie1_god).unwrap();
     assert!(equals_dest_node.value.end, "Destination for 'EQUALS' edge should be an end node");
