@@ -1507,6 +1507,95 @@ fn test_constraint_expression_cycle() {
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
 }
 
+#[test]
+fn test_ignore_with_trailing_space() {
+    // Grammar:
+    // #![ignore(WS)]
+    // program ::= 'a';
+    // WS ::= ' ' ;
+    // LLM Vocab: "a", " ", "$"
+    // Input: "a "
+
+    // 1. Tokenizer
+    let tokenizer_expr = groups![
+        eat_u8(b'a'), // ID 0 -> A
+        eat_u8(b' '), // ID 1 -> WS
+        eat_u8(b'$'), // ID 2 -> EOF
+    ];
+    let tokenizer = tokenizer_expr.build();
+
+    // 2. LLM Token Map
+    let mut llm_token_map = LLMTokenMap::new();
+    let llm_a = LLMTokenID(0);
+    let llm_ws = LLMTokenID(1);
+    let llm_eof = LLMTokenID(2);
+    llm_token_map.insert(b"a".to_vec(), llm_a);
+    llm_token_map.insert(b" ".to_vec(), llm_ws);
+    llm_token_map.insert(b"$".to_vec(), llm_eof);
+
+    // 3. Productions
+    let productions = vec![
+        prod("program", vec![t("A")]),
+    ];
+
+    // 4. Grammar Token Map & Ignore ID
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    let term_a = regex_name("A");
+    let term_ws = regex_name("WS");
+    let term_eof = regex_name("EOF");
+    let tid_a = TerminalID(0);
+    let tid_ws = TerminalID(1);
+    let tid_eof = TerminalID(2);
+    grammar_token_map.insert(term_a.clone(), tid_a);
+    grammar_token_map.insert(term_ws.clone(), tid_ws);
+    grammar_token_map.insert(term_eof.clone(), tid_eof);
+
+    let ignore_terminal_id = Some(tid_ws);
+
+    // 5. Parser
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), ignore_terminal_id);
+    assert_eq!(parser.ignore_terminal_id, ignore_terminal_id);
+
+    // 6. Token Name Map
+    let mut token_name_map = BiBTreeMap::new();
+    token_name_map.insert(term_a, tid_a.0);
+    token_name_map.insert(term_ws, tid_ws.0);
+    token_name_map.insert(term_eof, tid_eof.0);
+
+    // 7. Constraint
+    let constraint = GrammarConstraint::new(
+        tokenizer,
+        parser,
+        llm_token_map,
+        token_name_map,
+        2, // max_original_llm_token_id
+    );
+
+    // 8. Test Execution
+    let mut state = constraint.init();
+
+    // Initial state: should allow 'a' and ' ' (since ' ' can be ignored at the start)
+    assert_eq!(state.get_mask(), HybridBitset::from_iter(vec![llm_a.0, llm_ws.0]));
+
+    // Commit 'a'
+    state.commit(llm_a);
+    // After 'a', the `program` rule is complete. The parser now expects EOF.
+    // Because WS is ignored, ' ' is also allowed.
+    assert_eq!(state.get_mask(), HybridBitset::from_iter(vec![llm_ws.0, llm_eof.0]));
+
+    // Commit ' '
+    state.commit(llm_ws);
+    // After 'a ', the state should be the same as after 'a', because the space is ignored.
+    // It still expects EOF, and can still ignore more whitespace.
+    assert_eq!(state.get_mask(), HybridBitset::from_iter(vec![llm_ws.0, llm_eof.0]));
+
+    // Commit '$' (EOF)
+    state.commit(llm_eof);
+    assert!(state.is_active());
+    // After 'a $', the parse is complete. The mask should now only allow more ignored tokens.
+    assert_eq!(state.get_mask(), HybridBitset::from_iter(vec![llm_ws.0]));
+}
+
 #[ignore]
 #[test]
 fn test_js_full_grammar_gss_explosion() -> Result<(), Box<dyn std::error::Error>> {
