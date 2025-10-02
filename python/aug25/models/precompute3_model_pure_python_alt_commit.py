@@ -137,9 +137,9 @@ class Model(_Model):
         Overrides the base `commit` method. This version uses the precomputed0 trie
         to update the GLR state without invoking the tokenizer.
         """
-        print("\n--- commit_precompute0 START ---")
-        print(f"Committing token ID: {token_id}")
-        print(f"Current state before commit: {self.state}")
+        # print("\n--- commit_precompute0 START ---")
+        # print(f"Committing token ID: {token_id}")
+        # print(f"Current state before commit: {self.state}")
         self_copy = self.copy()
         _Model.commit(self_copy, token_id)
 
@@ -154,7 +154,7 @@ class Model(_Model):
         # state_map = self.state_map_by_llm.get(internal_id, {})
 
         token_bytes = self.id_to_token[token_id]
-        print(f"Token bytes: {token_bytes}")
+        # print(f"Token bytes: {token_bytes}")
         terminals_map: Dict[int, TerminalIdSet] = {}
         state_map: Dict[int, int] = {}
         for tokenizer_sid in self.state.keys():
@@ -217,14 +217,14 @@ class Model(_Model):
                     processed_gss = gss
                     if edge_key is not None:
                         gtid, disallow_opt = edge_key
-                        print(f"Processing edge with gtid {gtid}, GSS {gss}")
+                        # print(f"Processing edge with gtid {gtid}, GSS {gss}")
                         processed_gss = self._process_token(gss, gtid)
-                        print(f"Processing edge with gtid {gtid}, disallow {disallow_opt}, resulting GSS: {processed_gss}")
+                        # print(f"Processing edge with gtid {gtid}, disallow {disallow_opt}, resulting GSS: {processed_gss}")
 
                         if disallow_opt is not None and not processed_gss.is_empty():
                             end_state = disallow_opt
                             term_id = gtid
-                            print(f"Disallowing terminal {term_id} in state {end_state}")
+                            # print(f"Disallowing terminal {term_id} in state {end_state}")
                             processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, term_id)
 
                     if not processed_gss.is_empty():

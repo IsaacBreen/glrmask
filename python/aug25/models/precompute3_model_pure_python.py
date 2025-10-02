@@ -284,7 +284,7 @@ class Model(GraphProvider):
         }
         # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
-        print(constraint.dump_precomputed0())
+        # print(constraint.dump_precomputed0())
         tokenizer = constraint.tokenizer()
         tokenizer_max_state = tokenizer.max_state()
         glr_parser = constraint.glr_parser()
@@ -489,18 +489,18 @@ class Model(GraphProvider):
             gss = work_map.pop((offset, tokenizer_sid))
 
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-            print(f"Ran tokenizer with bytes {token_bytes[offset:]} from state {tokenizer_sid} and got end state {end_state} and matches {matches}")
+            # print(f"Ran tokenizer with bytes {token_bytes[offset:]} from state {tokenizer_sid} and got end state {end_state} and matches {matches}")
 
             for terminal_id, width in matches:
-                print(f"Matched terminal {terminal_id} at offset {offset} with width {width} and tokenizer state {tokenizer_sid}. Got end state {end_state}. GSS before: {gss}")
+                # print(f"Matched terminal {terminal_id} at offset {offset} with width {width} and tokenizer state {tokenizer_sid}. Got end state {end_state}. GSS before: {gss}")
                 processed_gss = self._process_token(gss, terminal_id)
-                print(f"GSS after processing terminal {terminal_id}: {processed_gss}")
+                # print(f"GSS after processing terminal {terminal_id}: {processed_gss}")
                 # Immediate re-match disallow
                 if end_state is not None:
                     accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
-                    print(f"Accessible terminals from end state {end_state}: {accessible_terms}")
+                    # print(f"Accessible terminals from end state {end_state}: {accessible_terms}")
                     if terminal_id in accessible_terms:
-                        print(f"Disallowing immediate re-match of terminal {terminal_id} in state {end_state}")
+                        # print(f"Disallowing immediate re-match of terminal {terminal_id} in state {end_state}")
                         processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
 
                 if not processed_gss.is_empty():
