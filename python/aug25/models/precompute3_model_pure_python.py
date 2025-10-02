@@ -703,7 +703,6 @@ class Model(GraphProvider):
         if self.ignore_terminal_id is not None:
             if self.ignore_terminal_id == terminal_id:
                 stats.inc(f'{p}.ignored_terminal')
-                stats.stop(f'{p}.total')
                 return gss
 
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
@@ -830,13 +829,12 @@ class Model(GraphProvider):
         - Cache popn+masking per (node, pop) within a single pop cycle.
         - Early edge skip via union of dest state-sets and peeked states.
 
-        Additional performance improvements (this revision):
-        - Edge-level LLM precheck using GSS's aggregated mask to avoid pop/apply work when impossible.
-        - Precompute and cache (per edge, per final_mask version) the remaining LLM set (llm_bv - final_mask).
-        - For pop=0 edges, early skip using current heads without calling pop/apply.
-        - Persist popped+filtered results across re-enqueues for the same (node, edge, pop, gss_id, final_mask_version).
-          This smooths spikes where very large dest lists require multiple passes.
-        - Avoid redundant final_mask subtraction inside apply by intersecting with (llm_bv - final_mask) directly.
+        Additional optimizations to smooth spikes:
+        - Use isdisjoint checks instead of building temporary intersections when only emptiness is needed.
+        - Edge-level precheck: skip an edge if its llm_bv has no overlap with the node's remaining mask
+          (i.e., gss.reduce_acc().llm_mask minus final_mask), avoiding pop/apply work entirely.
+        - Early union-vs-peek skip uses isdisjoint to avoid intermediate set allocations.
+        - Compute intersection for a dest only for the first non-disjoint dest we spawn for that edge.
         """
         stats = Stats.get()
         stats.start('get_mask')
@@ -846,7 +844,13 @@ class Model(GraphProvider):
         all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
         final_mask: LLMTokenSet = RangeSet.empty()
         final_mask_version: int = 0  # used to invalidate per-edge memo when final_mask updates
-        allowed_remaining_mask: LLMTokenSet = all_ones  # complement(final_mask); recompute when version bumps
+
+        # Helper to avoid temporary allocations when only emptiness is needed.
+        def _rs_isdisjoint(a, b) -> bool:
+            # Some RangeSet implementations provide isdisjoint; fall back if missing.
+            if hasattr(a, "isdisjoint"):
+                return a.isdisjoint(b)
+            return a.intersection(b).is_empty()
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask.
         values: Dict[NodeID, GSS] = {}
@@ -854,14 +858,6 @@ class Model(GraphProvider):
         enqueued_nodes: Set[NodeID] = set()
         # node -> (edge_idx, dest_idx, gss_id_tag)
         edge_cursor: Dict[NodeID, Tuple[int, int, int]] = {}
-
-        # Per-edge state-union cache (node_id, edge_idx) -> RangeSetStates
-        edge_states_union_cache: Dict[Tuple[int, int], StateIDSet] = {}
-        # Per-edge remaining-llm cache: (node_id, edge_idx, final_mask_version) -> LLMTokenSet
-        edge_llm_remaining_cache: Dict[Tuple[int, int, int], LLMTokenSet] = {}
-        # Persistent popped cache across re-enqueues:
-        # node_id -> {(edge_idx, pop, gss_id_tag, final_mask_version): (popped_gss, peeked_list, peeked_rs)}
-        resume_pop_cache: Dict[int, Dict[Tuple[int, int, int, int], Tuple[GSS, List[int], StateIDSet]]] = {}
 
         hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
@@ -960,6 +956,13 @@ class Model(GraphProvider):
             return -neg_d, n
         stats.stop('get_mask.seeding')
 
+        # Local caches
+        # - union-of-dests state sets for edges (node_id, edge_idx) -> RangeSetStates
+        edge_states_union_cache: Dict[Tuple[int, int], StateIDSet] = {}
+        # - whether an edge's llm_bv has any overlap with the node's remaining llm mask
+        edge_remaining_nonempty_cache: Dict[Tuple[int, int, int, int], bool] = {}
+        # key: (node_id, edge_idx, final_mask_version, gss_id)
+
         # Main loop
         stats.start('get_mask.main_loop')
         max_depth_reached = 0
@@ -986,8 +989,6 @@ class Model(GraphProvider):
                     # Union and mark version bump to invalidate per-edge memo using final_mask
                     final_mask = final_mask.union(reduced_acc.llm_mask)
                     final_mask_version += 1
-                    # Refresh allowed_remaining_mask
-                    allowed_remaining_mask = all_ones.difference(final_mask) if not final_mask.is_empty() else all_ones
                     stats.stop('get_mask.main_loop.end_node.final_mask_union')
 
             # Zombie traversal avoidance: if this node's edges can't possibly add
@@ -995,21 +996,14 @@ class Model(GraphProvider):
             a_node = arena.get(node)
             node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
             if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask, 'node'):
-                # Clear any stale resume cache for this node
-                resume_pop_cache.pop(node, None)
                 continue
 
-            # Prepare aggregated mask for this node (for quick LLM precheck)
-            stats.start('get_mask.main_loop.node.reduce_acc')
-            agg_acc = gss_node.reduce_acc()
-            stats.stop('get_mask.main_loop.node.reduce_acc')
-            node_allowed_remain = allowed_remaining_mask if agg_acc is None else (
-                agg_acc.llm_mask if final_mask.is_empty() else agg_acc.llm_mask.intersection(allowed_remaining_mask)
-            )
-
-            # Precompute heads for pop=0 (so we can skip without pop/apply)
-            heads0_list: Optional[List[int]] = None
-            heads0_rs: Optional[StateIDSet] = None
+            # Compute the node's remaining mask once (gss.reduce_acc().llm_mask - final_mask).
+            # This is used to skip edges whose llm_bv has no overlap with what the current GSS can still contribute.
+            node_remaining_llm_mask: Optional[LLMTokenSet] = None
+            gss_mask_acc = gss_node.reduce_acc()
+            if gss_mask_acc:
+                node_remaining_llm_mask = gss_mask_acc.llm_mask.difference(final_mask)
 
             # Traverse edges and propagate masks
             a_node = arena.get(node)
@@ -1027,91 +1021,81 @@ class Model(GraphProvider):
                 start_dest_idx = 0
 
             spawned_any = False
+            # Cache popn results for this node pop cycle (by pop amount)
+            pop_cache: Dict[int, Tuple[Optional[GSS], Optional[List[int]], Optional[StateIDSet]]] = {}
+            # Each entry: pop -> (popped_gss, peeked_list, peeked_as_rangeset)
 
             for edge_i in range(start_edge_idx, len(edges)):
                 (pop, llm_bv), dests = edges[edge_i]
+
                 stats.inc('get_mask.traversal.edges_traversed')
 
-                # 1) Quick LLM precheck: if this edge can't add any remaining tokens for this node, skip.
-                stats.inc('get_mask.edge_precheck.llm.checked')
-                if final_mask.is_empty():
-                    llm_remaining = llm_bv
-                    stats.inc('get_mask.main_loop.edge.llm_remaining_cache.miss')
-                else:
-                    key_llm = (node, edge_i, final_mask_version)
-                    llm_remaining = edge_llm_remaining_cache.get(key_llm)
-                    if llm_remaining is None:
-                        stats.inc('get_mask.main_loop.edge.llm_remaining_cache.miss')
-                        llm_remaining = llm_bv.difference(final_mask)
-                        edge_llm_remaining_cache[key_llm] = llm_remaining
+                # Edge-level precheck vs node's remaining mask (stronger than final_mask-only).
+                # Skip if there is no possible contribution from this edge given the current GSS mask.
+                if node_remaining_llm_mask is not None:
+                    cache_key = (node, edge_i, final_mask_version, gss_id)
+                    cached_nonempty = edge_remaining_nonempty_cache.get(cache_key, None)
+                    if cached_nonempty is None:
+                        # True means we should keep (non-disjoint), False means we can skip
+                        keep_edge = not _rs_isdisjoint(llm_bv, node_remaining_llm_mask)
+                        edge_remaining_nonempty_cache[cache_key] = keep_edge
                     else:
-                        stats.inc('get_mask.main_loop.edge.llm_remaining_cache.hit')
-                if llm_remaining.is_empty():
-                    stats.inc('get_mask.edge_precheck.llm.skipped')
-                    start_dest_idx = 0
-                    continue
-                # Check disjointness (fast) instead of building intersection
-                if llm_remaining.isdisjoint(node_allowed_remain):
-                    stats.inc('get_mask.edge_precheck.llm.skipped')
-                    start_dest_idx = 0
-                    continue
-
-                # 2) For pop=0, quick skip using current heads and union-of-dests
-                if pop == 0:
-                    edge_key = (node, edge_i)
-                    union_states = edge_states_union_cache.get(edge_key)
-                    if union_states is None:
-                        tmp_union = None
-                        for _dest_idx, state_bv in dests:
-                            tmp_union = state_bv if tmp_union is None else tmp_union.union(state_bv)
-                        union_states = tmp_union if tmp_union is not None else RangeSetStates.from_indices([])
-                        edge_states_union_cache[edge_key] = union_states
-                    if heads0_rs is None:
-                        # Construct lazily
-                        heads0_list = gss_node.peek()
-                        heads0_rs = RangeSetStates.from_indices(heads0_list) if heads0_list else RangeSetStates.from_indices([])
-                    # If no overlap between current heads and this edge's dest states, skip edge entirely
-                    if union_states.intersection(heads0_rs).is_empty():
-                        stats.inc('get_mask.edge_precheck.pop0_state.skipped')
+                        keep_edge = cached_nonempty
+                    if not keep_edge:
+                        stats.inc('get_mask.main_loop.edge.skipped_by_node_remaining')
                         start_dest_idx = 0
                         continue
-
-                # 3) Obtain popped+masked (reused across re-enqueues for same (node,edge,pop,gss_id,final_mask_version))
-                node_cache = resume_pop_cache.get(node)
-                pop_key = (edge_i, pop, gss_id, final_mask_version)
-                if node_cache and pop_key in node_cache:
-                    popped, peeked_list, peeked_rs = node_cache[pop_key]
-                    stats.inc('get_mask.resume.popped_cache.hits')
                 else:
-                    stats.inc('get_mask.resume.popped_cache.misses')
+                    # Fall back to final_mask-only precheck (rare, conservative)
+                    if not final_mask.is_empty():
+                        not_final = all_ones.difference(final_mask)
+                        if _rs_isdisjoint(llm_bv, not_final):
+                            stats.inc('get_mask.main_loop.edge.skipped_by_final_only')
+                            start_dest_idx = 0
+                            continue
+
+                # popn + intersect-and-prune (with final_mask subtraction) per pop value (cache within this node pop)
+                if pop not in pop_cache or pop_cache[pop][0] is None:
+                    stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
                     stats.start('get_mask.main_loop.edge.popn')
                     popped: GSS = gss_node.popn(pop)
                     stats.stop('get_mask.main_loop.edge.popn')
 
                     if popped.is_empty():
                         stats.inc('get_mask.traversal.edge.popped_empty')
+                        pop_cache[pop] = (None, None, None)
+                        # This edge cannot produce children; resume at next edge
                         start_dest_idx = 0
                         continue
 
-                    # Intersect-and-prune with llm_remaining (already excludes final_mask)
-                    # Memoize by acc identity to avoid duplicate work across stacks
-                    id_memo: Dict[int, Optional[PyAcc]] = {}
+                    # Per-edge memo with final_mask_version in key to avoid stale cache
+                    id_memo: Dict[Tuple[int, int], Optional[PyAcc]] = {}
                     def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                        cached = id_memo.get(id(acc), None) if id(acc) in id_memo else None
-                        if id(acc) in id_memo:
+                        key = (id(acc), final_mask_version)
+                        cached = id_memo.get(key, None) if key in id_memo else None
+                        if key in id_memo:
                             return cached
                         p = 'get_mask.main_loop.edge.intersect_and_prune'
                         stats.inc(f'{p}.calls')
-                        # Intersect with remaining llm_bv
+                        # Intersect with llm_bv
                         stats.start(f'{p}.intersection')
-                        new_mask = acc.llm_mask.intersection(llm_remaining)
+                        new_mask = acc.llm_mask.intersection(llm_bv)
                         stats.stop(f'{p}.intersection')
                         if new_mask.is_empty():
                             stats.inc(f'{p}.pruned_accs')
-                            id_memo[id(acc)] = None
+                            id_memo[key] = None
                             return None
+                        # Subtract final_mask to avoid re-propagating already-known tokens
+                        if not final_mask.is_empty():
+                            # We intentionally do not record timing for difference to keep existing stats stable
+                            reduced_mask = new_mask.difference(final_mask)
+                            if reduced_mask.is_empty():
+                                stats.inc(f'{p}.pruned_accs')
+                                id_memo[key] = None
+                                return None
+                            new_mask = reduced_mask
                         result = PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
-                        id_memo[id(acc)] = result
+                        id_memo[key] = result
                         return result
 
                     stats.start('get_mask.main_loop.edge.apply_and_prune')
@@ -1120,35 +1104,41 @@ class Model(GraphProvider):
 
                     if popped.is_empty():
                         stats.inc('get_mask.traversal.edge.popped_pruned_empty')
+                        pop_cache[pop] = (None, None, None)
                         start_dest_idx = 0
                         continue
 
                     # Prepare peek info, both as list and RangeSetStates for fast set ops
                     peeked_list = popped.peek()
                     peeked_rs = RangeSetStates.from_indices(peeked_list) if peeked_list else RangeSetStates.from_indices([])
+                    pop_cache[pop] = (popped, peeked_list, peeked_rs)
+                else:
+                    popped, peeked_list, peeked_rs = pop_cache[pop]
+                    if popped is None:
+                        # Cached as impossible; resume at next edge
+                        start_dest_idx = 0
+                        continue
 
-                    # Store for resume
-                    if node_cache is None:
-                        node_cache = {}
-                        resume_pop_cache[node] = node_cache
-                    node_cache[pop_key] = (popped, peeked_list, peeked_rs)
-                    stats.inc('get_mask.resume.popped_cache.stores')
-
-                # 4) Early skip: if no peeked state belongs to any dest of this edge, skip edge entirely
+                # Early skip: if no peeked state belongs to any dest of this edge, skip edge entirely
+                # Cache union of dest state-sets for this edge
                 edge_key = (node, edge_i)
                 union_states = edge_states_union_cache.get(edge_key)
                 if union_states is None:
+                    # Build lazily
                     tmp_union = None
                     for _dest_idx, state_bv in dests:
                         tmp_union = state_bv if tmp_union is None else tmp_union.union(state_bv)
                     union_states = tmp_union if tmp_union is not None else RangeSetStates.from_indices([])
                     edge_states_union_cache[edge_key] = union_states
-                fast_inter_empty = union_states.intersection(peeked_rs).is_empty()
+
+                # If no overlap between current heads and this edge's dest states, skip
+                # Use isdisjoint to avoid allocating intersection sets
+                fast_inter_empty = _rs_isdisjoint(union_states, peeked_rs)
                 if fast_inter_empty:
                     start_dest_idx = 0
                     continue
 
-                # 5) Traverse dests; spawn at most a single child per pop cycle to push end discovery earlier
+                # Traverse dests; spawn at most a single child per pop cycle to push end discovery earlier
                 child_spawned = False
                 dests_len = len(dests)
                 dest_range = range(start_dest_idx if edge_i == start_edge_idx else 0, dests_len)
@@ -1156,16 +1146,18 @@ class Model(GraphProvider):
                     dest_idx, state_bv = dests[dest_j]
                     stats.inc('get_mask.traversal.dests_traversed')
 
-                    # Filter heads for this dest by scanning peeked_list (usually tiny) for membership
+                    # Check disjointness first (no allocation), compute intersection only when needed
                     stats.start('get_mask.main_loop.edge.peek_and_filter')
-                    # This avoids allocating a new RangeSetStates for the intersection
-                    indices = [sid for sid in peeked_list if state_bv.contains(sid)]
-                    has_any = bool(indices)
-                    stats.stop('get_mask.main_loop.edge.peek_and_filter')
-                    if not has_any:
+                    disjoint = _rs_isdisjoint(state_bv, peeked_rs)
+                    if disjoint:
+                        stats.stop('get_mask.main_loop.edge.peek_and_filter')
                         continue
 
                     # Build child GSS (fast-path if single sid)
+                    keep_rs = state_bv.intersection(peeked_rs)
+                    indices = list(keep_rs.iter_indices())
+                    stats.stop('get_mask.main_loop.edge.peek_and_filter')
+
                     stats.start('get_mask.main_loop.edge.isolate_many')
                     if len(indices) == 1:
                         child_gss = popped.isolate(indices[0])
@@ -1212,7 +1204,6 @@ class Model(GraphProvider):
             # If we didn't spawn any child across remaining edges, this node is done
             if not spawned_any:
                 edge_cursor.pop(node, None)
-                resume_pop_cache.pop(node, None)
         stats.stop('get_mask.main_loop')
         stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
         stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
