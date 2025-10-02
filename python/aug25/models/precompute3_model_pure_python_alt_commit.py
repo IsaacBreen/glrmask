@@ -216,7 +216,13 @@ class Model(_Model):
 
         stats.stop('commit_precompute0')
 
-        assert self.state == self_copy.state
+        if not self.state == self_copy.state:
+            print("State mismatch after commit:")
+            print("With _Model.commit:")
+            print(GSS.merge_many(self.state.values()))
+            print("With _Model.commit_precompute0:")
+            print(GSS.merge_many(self_copy.state.values()))
+            raise AssertionError("The state of the model after committing the token does not match the state before committing.")
 
 
 __all__ = ['Precompute0Model']
