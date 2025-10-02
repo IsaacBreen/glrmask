@@ -976,7 +976,6 @@ impl GrammarConstraint {
         );
 
         helper.run_dfs();
-        helper.optimize_precomputed_via_substring_parser();
         helper.replace_ignore_token_edges_with_none_edges();
         helper.simplify_none_edges(); // This can invalidate max_depth.
 
