@@ -2803,7 +2803,7 @@ impl<'r> Precomputer0<'r> {
                             // NOTE: It is likely wrong to just use disallowed_tokenizer_state_info as-is here.
                             //  The actual disallowed state can vary by LLM token. But we don't capture that here.
                             //  We're doing it in a way that's local to the segment. This is wrong.
-                            let edge_key = Some((terminal_id, disallowed_tokenizer_state_info));
+                            let edge_key = Some((terminal_id, None));
                             let mut inserter = EdgeInserter::new(
                                 &self.trie0_god,
                                 src_node_wrapper.as_arc().clone(),
