@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import collections
 from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import _sep1 as ffi
 from .precompute3_model_pure_python import (
@@ -127,16 +127,7 @@ class Model(_Model):
         )
 
     def copy(self):
-        return Model(
-            state=self.state,
-            arena=self.arena,
-            roots_map=self.roots_map,
-            arena0=self.arena0,
-            roots_map0=self.roots_map0,
-            terminal_map_by_llm=self.terminal_map_by_llm,
-            state_map_by_llm=self.state_map_by_llm,
-            original_to_internal_map=self.original_to_internal_map
-        )
+        return replace(self)
 
     def commit(self, token_id: int):
         """
