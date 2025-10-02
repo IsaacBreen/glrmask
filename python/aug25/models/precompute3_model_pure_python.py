@@ -90,6 +90,64 @@ except NameError:
     # If not running under kernprof, create a dummy decorator.
     def profile(func): return func
 
+@dataclass
+class DFAState:
+    transitions: Dict[int, int] = field(default_factory=dict)
+    finalizers: Set[int] = field(default_factory=set)
+    possible_future_group_ids: Set[int] = field(default_factory=set)
+
+@dataclass
+class PyTokenizer:
+    states: List[DFAState]
+    start_state: int
+    non_greedy_finalizers: Set[int]
+
+    def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
+        current_state = state_id
+        matches = {}
+        done = False
+
+        # Check for initial matches (epsilon)
+        initial_state_data = self.states[current_state]
+        for group_id in initial_state_data.finalizers:
+            if group_id in self.non_greedy_finalizers:
+                matches.setdefault(group_id, 0)
+            else:
+                matches[group_id] = 0
+
+        for i, byte in enumerate(text):
+            state_data = self.states[current_state]
+            next_state = state_data.transitions.get(byte)
+
+            if next_state is None:
+                done = True
+                break
+            
+            current_state = next_state
+            
+            # Update matches
+            next_state_data = self.states[current_state]
+            for group_id in next_state_data.finalizers:
+                if group_id in self.non_greedy_finalizers:
+                    matches.setdefault(group_id, i + 1)
+                else:
+                    matches[group_id] = i + 1
+        
+        end_state = None if done else current_state
+        
+        result_matches = [(gid, width) for gid, width in matches.items() if width > 0]
+        
+        return end_state, result_matches
+
+    def tokens_accessible_from_state(self, state_id: int) -> List[int]:
+        return list(self.states[state_id].possible_future_group_ids)
+
+    def initial_state_id(self) -> int:
+        return self.start_state
+
+    def max_state(self) -> int:
+        return len(self.states)
+
 # --- Accumulator memoization decorator ---
 def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
     """
@@ -217,7 +275,7 @@ class Model(GraphProvider):
     reverse_state_map: Dict[int, Set[int]]
 
     # Tokenizer-related fields
-    tokenizer: ffi.Regex
+    tokenizer: PyTokenizer
     tokenizer_initial_state: int
     tokenizer_max_state: int
     possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
@@ -283,13 +341,30 @@ class Model(GraphProvider):
             for uid, node_data in arena_dict.items()
         }
         # Load tokenizer and parser table from the full constraint JSON
-        constraint = ffi.GrammarConstraint.from_json_string(s)
-        # print(constraint.dump_precomputed0())
-        tokenizer = constraint.tokenizer()
+        # Load tokenizer DFA from JSON
+        dfa_data = data['tokenizer']['dfa']
+        dfa_states = []
+        for state_data in dfa_data['states']:
+            # The transitions in JSON are a list of [key, value] pairs
+            transitions = {t[0]: t[1] for t in state_data['transitions']}
+            dfa_states.append(DFAState(
+                transitions=transitions,
+                finalizers=set(state_data['finalizers']),
+                possible_future_group_ids=set(state_data['possible_future_group_ids'])
+            ))
+        
+        tokenizer = PyTokenizer(
+            states=dfa_states,
+            start_state=dfa_data['start_state'],
+            non_greedy_finalizers=set(dfa_data['non_greedy_finalizers'])
+        )
         tokenizer_max_state = tokenizer.max_state()
+        tokenizer_initial_state = tokenizer.initial_state_id()
+
+        # Load other things from FFI for now, as they are not part of this refactoring
+        constraint = ffi.GrammarConstraint.from_json_string(s)
         glr_parser = constraint.glr_parser()
         ignore_terminal_id = glr_parser.ignore_terminal_id
-        tokenizer_initial_state = tokenizer.initial_state_id()
 
         parser_data = data['parser']
         table_data = parser_data['stage_7_table']
@@ -505,7 +580,7 @@ class Model(GraphProvider):
 
                 if not processed_gss.is_empty():
                     new_offset = offset + width
-                    next_tokenizer_sid = self.tokenizer_initial_state
+                    next_tokenizer_sid = self.tokenizer.initial_state_id()
                     if new_offset == len(token_bytes):
                         new_states[next_tokenizer_sid].append(processed_gss)
                     else:
