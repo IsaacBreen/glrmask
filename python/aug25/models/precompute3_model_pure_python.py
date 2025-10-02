@@ -587,8 +587,8 @@ class Model(GraphProvider):
         for tokenizer_sid in self.state.keys():
             end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
             _end_state, _matches = self._tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-            assert end_state == _end_state, f"Tokenizer mismatch on end_state for state {tokenizer_sid}: {end_state} vs {_end_state}"
-            assert sorted(matches) == sorted(_matches), f"Tokenizer mismatch on matches for state {tokenizer_sid}: {matches} vs {_matches}"
+            assert end_state == _end_state, f"Tokenizer mismatch on end_state for state {tokenizer_sid}: {end_state} vs {_end_state}. Input: {token_bytes}"
+            assert sorted(matches) == sorted(_matches), f"Tokenizer mismatch on matches for state {tokenizer_sid}: {matches} vs {_matches}. Input: {token_bytes}"
             if end_state is not None:
                 state_map[tokenizer_sid] = end_state
             matched_terminals = [terminal_id for terminal_id, _ in matches]
@@ -639,8 +639,8 @@ class Model(GraphProvider):
 
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
             _end_state, _matches = self._tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-            assert end_state == _end_state, f"Tokenizer mismatch on end_state for state {tokenizer_sid} at offset {offset}: {end_state} vs {_end_state}"
-            assert sorted(matches) == sorted(_matches), f"Tokenizer mismatch on matches for state {tokenizer_sid} at offset {offset}: {matches} vs {_matches}"
+            assert end_state == _end_state, f"Tokenizer mismatch on end_state for state {tokenizer_sid} at offset {offset}: {end_state} vs {_end_state}. Input: {token_bytes[offset:]}"
+            assert sorted(matches) == sorted(_matches), f"Tokenizer mismatch on matches for state {tokenizer_sid} at offset {offset}: {matches} vs {_matches}. Input: {token_bytes[offset:]}"
             # print(f"Ran tokenizer with bytes {token_bytes[offset:]} from state {tokenizer_sid} and got end state {end_state} and matches {matches}")
 
             for terminal_id, width in matches:
