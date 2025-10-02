@@ -102,6 +102,72 @@ class PyTokenizer:
     start_state: int
     non_greedy_finalizers: Set[int]
 
+    def __repr__(self) -> str:
+        """Compact string representation of the tokenizer DFA."""
+        
+        def _format_transitions(transitions: Dict[int, int]) -> str:
+            if not transitions:
+                return ""
+            
+            # Group transitions by destination state
+            grouped_by_dest = collections.defaultdict(list)
+            for byte, dest in transitions.items():
+                grouped_by_dest[dest].append(byte)
+
+            parts = []
+            for dest, bytes_list in grouped_by_dest.items():
+                bytes_list.sort()
+                ranges = []
+                if not bytes_list:
+                    continue
+                
+                start = bytes_list[0]
+                end = bytes_list[0]
+                
+                for i in range(1, len(bytes_list)):
+                    if bytes_list[i] == end + 1:
+                        end = bytes_list[i]
+                    else:
+                        if start == end:
+                            ranges.append(str(start))
+                        else:
+                            ranges.append(f"{start}-{end}")
+                        start = bytes_list[i]
+                        end = bytes_list[i]
+                
+                if start == end:
+                    ranges.append(str(start))
+                else:
+                    ranges.append(f"{start}-{end}")
+                
+                parts.append(f"[{', '.join(ranges)}] -> {dest}")
+            
+            return "Transitions: " + "; ".join(parts)
+
+        lines = [
+            f"PyTokenizer(states={len(self.states)}, start={self.start_state}, non_greedy={self.non_greedy_finalizers})"
+        ]
+
+        for i, state in enumerate(self.states):
+            state_lines = [f"State {i}:"]
+            
+            trans_str = _format_transitions(state.transitions)
+            if trans_str:
+                state_lines.append(trans_str)
+            
+            if state.finalizers:
+                state_lines.append(f"Finalizers: {sorted(list(state.finalizers))}")
+            
+            if state.possible_future_group_ids:
+                state_lines.append(f"Future Groups: {sorted(list(state.possible_future_group_ids))}")
+            
+            if len(state_lines) > 1:
+                lines.append(textwrap.indent("\n".join(state_lines), "  "))
+            else:
+                lines.append(f"  State {i}: (No transitions, finalizers, or future groups)")
+
+        return "\n".join(lines)
+
     def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
         current_state = state_id
         matches = {}
@@ -353,12 +419,13 @@ class Model(GraphProvider):
                 finalizers=set(state_data['finalizers']),
                 possible_future_group_ids=set(state_data['possible_future_group_ids'])
             ))
-        
+
         tokenizer = PyTokenizer(
             states=dfa_states,
             start_state=dfa_data['start_state'],
             non_greedy_finalizers=set(dfa_data['non_greedy_finalizers'])
         )
+        print(f"Loaded PyTokenizer:\n{tokenizer}")
         tokenizer_max_state = tokenizer.max_state()
         tokenizer_initial_state = tokenizer.initial_state_id()
 
