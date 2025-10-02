@@ -150,8 +150,18 @@ class Model(_Model):
         if internal_id is None:
             raise ValueError(f"LLM token ID {token_id} not found in internal mapping.")
 
-        terminals_map = self.terminal_map_by_llm.get(internal_id, {})
-        state_map = self.state_map_by_llm.get(internal_id, {})
+        # terminals_map = self.terminal_map_by_llm.get(internal_id, {})
+        # state_map = self.state_map_by_llm.get(internal_id, {})
+
+        token_bytes = self.id_to_token[token_id]
+        terminals_map: Dict[int, TerminalIdSet] = {}
+        state_map: Dict[int, int] = {}
+        for tokenizer_sid in self.state.keys():
+            end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
+            if end_state is not None:
+                state_map[tokenizer_sid] = end_state
+            matched_terminals = [terminal_id for terminal_id, _ in matches]
+            terminals_map[tokenizer_sid] = RangeSet.from_indices(matched_terminals)
 
         # 1. Prepare GSS: Prune based on terminals matched by the token and map tokenizer states.
         @_acc_memoize()
