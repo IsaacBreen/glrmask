@@ -134,6 +134,8 @@ class Model(_Model):
         Overrides the base `commit` method. This version uses the precomputed0 trie
         to update the GLR state without invoking the tokenizer.
         """
+        print("\n--- commit_precompute0 START ---")
+        print(f"Committing token ID: {token_id}")
         self_copy = self.copy()
         _Model.commit(self_copy, token_id)
 
@@ -219,9 +221,9 @@ class Model(_Model):
         if not self.state == self_copy.state:
             print("State mismatch after commit:")
             print("With _Model.commit:")
-            print(GSS.merge_many(self.state.values()))
-            print("With _Model.commit_precompute0:")
             print(GSS.merge_many(self_copy.state.values()))
+            print("With Model.commit (ie precompute0):")
+            print(GSS.merge_many(self.state.values()))
             raise AssertionError("The state of the model after committing the token does not match the state before committing.")
 
 
