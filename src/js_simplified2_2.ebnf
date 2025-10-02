@@ -1,4 +1,3 @@
 #![ignore(IGNORE)]
-program ::= 'b' 'b'? ;
-IDENTIFIER ::= 'a' ;
+program ::= 'b'+ ;
 IGNORE ::= 'b' 'b'? ;
