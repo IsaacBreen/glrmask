@@ -287,12 +287,41 @@ class ArenaEdge:
     Accelerated edge representation:
       - dest_states_union allows skipping entire dest blocks if no head can match
       - llm_bv_not enables subset checks via isdisjoint (cheaper than difference)
+      - optional state_to_dest for grouping heads -> dests in O(#heads) when dest blocks are huge
     """
     pop: int
     llm_bv: LLMTokenSet
     dests: List[Tuple[NodeID, StateIDSet]] = field(default_factory=list)
     dest_states_union: StateIDSet = field(default_factory=RangeSetStates.empty)
-    llm_bv_not: Optional[LLMTokenSet] = None  # populated after all_ones is known
+    llm_bv_not: Optional[LLMTokenSet] = None
+    state_to_dest: Optional[Dict[int, List[int]]] = None  # built on demand for very large dest blocks
+
+    def ensure_index(self, dest_index_threshold: int = 512, max_states_per_index: int = 100_000) -> None:
+        """
+        Build a reverse index from parser state -> list(dest_j) for this edge.
+        Done on-demand when dest blocks are large and only once per edge.
+        To cap memory, bail out if we exceed max_states_per_index.
+        """
+        if self.state_to_dest is not None:
+            return
+        if len(self.dests) < dest_index_threshold:
+            return
+        # Build mapping
+        mapping: Dict[int, List[int]] = {}
+        total_assigned = 0
+        for j, (_dest_idx, state_bv) in enumerate(self.dests):
+            for sid in state_bv.iter_indices():
+                lst = mapping.get(sid)
+                if lst is None:
+                    mapping[sid] = [j]
+                else:
+                    lst.append(j)
+                total_assigned += 1
+                if total_assigned > max_states_per_index:
+                    # Too big; don't use an index here
+                    self.state_to_dest = {}  # marker meaning "don't index"
+                    return
+        self.state_to_dest = mapping
 
 
 @dataclass
@@ -300,6 +329,7 @@ class ArenaNode:
     children: List[ArenaEdge] = field(default_factory=list)
     llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
     clean_end: bool = False
+
 
 @dataclass(frozen=True, eq=False)
 class PyAcc:
@@ -336,10 +366,27 @@ class PyAcc:
     def is_empty(self):
         return self.llm_mask.is_empty()
 
+
+@dataclass
+class NodeCursor:
+    """
+    Resume traversal state for a node across re-queues.
+    Stores:
+      - next edge index
+      - next dest index within the current edge
+      - gss_id that the resume point applies to
+      - pop_cache to avoid redoing pop/reduce work on the next visit
+    """
+    edge_idx: int = 0
+    dest_idx: int = 0
+    gss_id: int = 0
+    pop_cache: Optional[Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]]] = None
+
+
 @dataclass
 class Model(GraphProvider):
     """
-    Precomputed trie model (third-generation), optimized for spike-free get_mask.
+    Precomputed trie model (third-generation), optimized for spike-free and faster get_mask.
     """
     stats = Stats.get()
     stats.add_group('get_mask')
@@ -412,7 +459,6 @@ class Model(GraphProvider):
                     state_bv_bitset = bs_from_json(dumps(state_bv_json))
                     state_bv: StateIDSet = RangeSetStates.from_ranges(state_bv_bitset.to_ranges())
                     new_dest_map.append((int(dest_idx), state_bv))
-                    # Union the states once per edge; this fuels a major pruning win later
                     dest_states_union = dest_states_union.union(state_bv) if hasattr(dest_states_union, 'union') else (dest_states_union | state_bv)
 
                 new_children.append(ArenaEdge(
@@ -421,6 +467,7 @@ class Model(GraphProvider):
                     dests=new_dest_map,
                     dest_states_union=dest_states_union,
                     llm_bv_not=None,  # filled later after all_ones is known
+                    state_to_dest=None,
                 ))
             node["children"] = new_children
             node["llm_bv_union"] = llm_bv_union
@@ -879,11 +926,11 @@ class Model(GraphProvider):
           is disjoint with the GSS's allowed tokens (before any pop/apply).
         - Cache popn results per (node visit, pop) and reuse their reduce_acc() and peek()
           to avoid repeated work across many edges that share the same pop.
-        - Fast path: subset check via llm_bv_not using isdisjoint instead of difference
-          to avoid allocations (popped_mask ⊆ llm_bv iff popped_mask ∩ llm_bv_not == ∅).
+        - Subset fast path using Edge.llm_bv_not and isdisjoint (no allocation) instead of difference.
         - New: union-of-dests fast reject. For pop==0 edges, if no current heads can reach
           any destination state (via dest_states_union), skip the entire dest block up front.
-          This drastically reduces per-edge dest scans and Python-loop overhead.
+        - Persist pop_cache across re-queues of the same node to avoid redoing pop/reduce work.
+        - Optional on-demand per-edge reverse indexing to group heads → dests in O(#heads) when dests are huge.
         - Avoid redundant reduce_acc() checks after isolate_many; relying on is_empty() suffices.
         - Use RangeSetStates operations (isdisjoint/intersection) where profitable when filtering dests.
         """
@@ -900,7 +947,7 @@ class Model(GraphProvider):
         values: Dict[NodeID, GSS] = {}
         depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
         enqueued_nodes: Set[NodeID] = set()
-        edge_cursor: Dict[NodeID, Tuple[int, int]] = {}  # node -> (next_edge_idx, gss_id)
+        edge_cursor: Dict[NodeID, NodeCursor] = {}  # node -> NodeCursor
 
         hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
@@ -1059,17 +1106,23 @@ class Model(GraphProvider):
 
             # Process multiple edges per visit to reduce heap operations while still enabling early end-node unions
             saved_cursor = edge_cursor.get(node)
-            start_edge_idx = saved_cursor[0] if saved_cursor and saved_cursor[1] == gss_id else 0
+            if saved_cursor and saved_cursor.gss_id == gss_id:
+                start_edge_idx = saved_cursor.edge_idx
+                start_dest_idx_for_first_edge = saved_cursor.dest_idx
+                pop_cache: Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]] = saved_cursor.pop_cache or {}
+            else:
+                start_edge_idx = 0
+                start_dest_idx_for_first_edge = 0
+                pop_cache = {}
+
             spawned_any = False
             edges_processed_count = 0
+            dests_processed_count = 0
 
-            # Adaptive budget: go small until we have any final_mask, then open up
-            # Small early budgets help reach end nodes sooner and trigger zombie pruning earlier.
+            # Adaptive budgets: go small until we have any final_mask, then open up.
+            # Also cap total dests per visit (spike smoother).
             max_edges_per_visit = 8 if final_mask.is_empty() else 16
-
-            # Cache for popn results keyed by pop value
-            # Each entry: pop -> (popped_gss, popped_reduced_acc, peek_list, peek_rs)
-            pop_cache: Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]] = {}
+            max_dests_per_visit = 2048 if final_mask.is_empty() else 4096
 
             # Local aliases for hot methods to reduce attribute lookups
             rs_isdisjoint = LLMTokenSet.isdisjoint
@@ -1129,7 +1182,7 @@ class Model(GraphProvider):
 
                     # Reduce popped acc once and cache
                     stats.start('get_mask.main_loop.edge.popped.reduce_acc')
-                    popped_acc = popped.reduce_acc()
+                    popped_acc = gss_reduced_acc if pop == 0 else popped.reduce_acc()
                     stats.stop('get_mask.main_loop.edge.popped.reduce_acc')
 
                     if not popped_acc or popped_acc.llm_mask.is_empty():
@@ -1143,6 +1196,11 @@ class Model(GraphProvider):
                     pop_cache[pop] = (popped, popped_acc, peeked, peek_rs)
 
                 # At this point, we have a non-empty popped GSS and a non-empty popped_acc
+                # Additional block pruning: if even after pop, heads can't reach any dests, skip
+                if edge.dest_states_union.isdisjoint(pop_cache[pop][3]):
+                    stats.inc('get_mask.main_loop.edge.dest_union_pruned_after_pop')
+                    continue
+
                 # Optimization D: subset fast-path using llm_bv_not and isdisjoint (no allocation)
                 need_apply = True
                 stats.start('get_mask.main_loop.edge.subset_fastpath.check')
@@ -1184,11 +1242,6 @@ class Model(GraphProvider):
                 popped_cached = pop_cache[pop]
                 _, _, peeked, peek_rs = popped_cached
 
-                # Additional block pruning: if even after pop, heads can't reach any dests, skip
-                if edge.dest_states_union.isdisjoint(peek_rs):
-                    stats.inc('get_mask.main_loop.edge.dest_union_pruned_after_pop')
-                    continue
-
                 # If there are no heads after pop, skip quickly
                 if not peeked:
                     stats.inc('get_mask.traversal.edge.popped_headless')
@@ -1196,69 +1249,153 @@ class Model(GraphProvider):
 
                 child_spawned = False
 
-                # Iterate dests; use set ops to skip quickly when possible
-                for dest_idx, state_bv in edge.dests:
-                    stats.inc('get_mask.traversal.dests_traversed')
+                # Choose grouping path on large dest blocks:
+                # Build per-edge reverse index on demand and group heads -> dests in O(#heads)
+                start_dest_idx = start_dest_idx_for_first_edge if edge_i == start_edge_idx else 0
+                use_indexer = False
+                if len(edge.dests) >= 512 and len(peeked) <= 64:
+                    edge.ensure_index()
+                    if edge.state_to_dest is not None:
+                        # state_to_dest == {} is a sentinel for "too big to index"; treat as unavailable
+                        use_indexer = len(edge.state_to_dest) > 0
 
-                    # Fast disjoint check against current heads
-                    if state_bv.isdisjoint(peek_rs):
-                        continue
-
-                    # If dest accepts all heads, we can reuse popped directly (no isolate_many)
-                    # Otherwise, filter heads down to the subset contained in state_bv.
-                    # We'll pick the cheaper path: for small peeked lists, scanning is cheap;
-                    # for larger ones, use set intersection.
-                    use_scan = len(peeked) <= 16
-                    if use_scan:
-                        stats.start('get_mask.main_loop.edge.peek_and_filter')
-                        values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-                        stats.stop('get_mask.main_loop.edge.peek_and_filter')
-                        if not values_to_keep:
+                if use_indexer and start_dest_idx == 0:
+                    grouped: Dict[int, List[int]] = {}
+                    m = edge.state_to_dest
+                    for sid in peeked:
+                        dest_list = m.get(sid) if m else None
+                        if not dest_list:
                             continue
+                        for dest_j in dest_list:
+                            # Guard for potential late resume on dests
+                            if dest_j < start_dest_idx:
+                                continue
+                            lst = grouped.get(dest_j)
+                            if lst is None:
+                                grouped[dest_j] = [sid]
+                            else:
+                                lst.append(sid)
+                    # Iterate grouped dests in ascending order for cache locality
+                    for dest_j in sorted(grouped.keys()):
+                        if dests_processed_count >= max_dests_per_visit:
+                            # Budget exhausted; save progress and re-enqueue this node
+                            merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
+                            values[node] = merged_for_requeue
+                            edge_cursor[node] = NodeCursor(edge_idx=edge_i, dest_idx=dest_j, gss_id=id(merged_for_requeue), pop_cache=pop_cache)
+                            enqueue(max_depth[node], node)
+                            stats.inc('get_mask.traversal.node_requeued_for_more_edges')
+                            edges_processed_count = max_edges_per_visit  # force outer break
+                            break
+
+                        dest_idx, _state_bv = edge.dests[dest_j]
+                        values_to_keep = grouped[dest_j]
                         if len(values_to_keep) == len(peeked):
                             child_gss = popped
                         else:
                             stats.start('get_mask.main_loop.edge.isolate_many')
                             child_gss = popped.isolate_many(values_to_keep)
                             stats.stop('get_mask.main_loop.edge.isolate_many')
-                    else:
-                        # Use set intersection for larger head sets
-                        stats.start('get_mask.main_loop.edge.peek_and_filter')
-                        keep_rs = peek_rs.intersection(state_bv)
-                        stats.stop('get_mask.main_loop.edge.peek_and_filter')
-                        if keep_rs.is_empty():
+                        if child_gss.is_empty():
+                            stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
                             continue
-                        # Convert back to list only when needed
-                        stats.start('get_mask.main_loop.edge.isolate_many')
-                        child_gss = popped.isolate_many(list(keep_rs.iter_indices()))
-                        stats.stop('get_mask.main_loop.edge.isolate_many')
+                        d: NodeID = int(dest_idx)
+                        if d in values:
+                            stats.inc('get_mask.traversal.edge.gss_merges')
+                            stats.start('get_mask.main_loop.edge.gss_merge')
+                            values[d] = values[d].merge(child_gss)
+                            stats.stop('get_mask.main_loop.edge.gss_merge')
+                        else:
+                            values[d] = child_gss
+                        enqueue(max_depth[d], d)
+                        child_spawned = True
+                        dests_processed_count += 1
 
-                    if child_gss.is_empty():
-                        stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
-                        continue
+                    if edges_processed_count >= max_edges_per_visit or dests_processed_count >= max_dests_per_visit:
+                        break
+                else:
+                    # Iterate dests; use set ops to skip quickly when possible
+                    for dest_j in range(start_dest_idx, len(edge.dests)):
+                        if dests_processed_count >= max_dests_per_visit:
+                            # Budget exhausted; save progress and re-enqueue this node
+                            merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
+                            values[node] = merged_for_requeue
+                            edge_cursor[node] = NodeCursor(edge_idx=edge_i, dest_idx=dest_j, gss_id=id(merged_for_requeue), pop_cache=pop_cache)
+                            enqueue(max_depth[node], node)
+                            stats.inc('get_mask.traversal.node_requeued_for_more_edges')
+                            # Break out of both dest and edge loops
+                            edges_processed_count = max_edges_per_visit  # force outer break
+                            break
 
-                    d: NodeID = int(dest_idx)
-                    if d in values:
-                        stats.inc('get_mask.traversal.edge.gss_merges')
-                        stats.start('get_mask.main_loop.edge.gss_merge')
-                        values[d] = values[d].merge(child_gss)
-                        stats.stop('get_mask.main_loop.edge.gss_merge')
-                    else:
-                        values[d] = child_gss
-                    enqueue(max_depth[d], d)
-                    child_spawned = True
+                        dest_idx, state_bv = edge.dests[dest_j]
+                        stats.inc('get_mask.traversal.dests_traversed')
+
+                        # Fast disjoint check against current heads
+                        if state_bv.isdisjoint(peek_rs):
+                            continue
+
+                        # If dest accepts all heads, we can reuse popped directly (no isolate_many)
+                        # Otherwise, filter heads down to the subset contained in state_bv.
+                        # We'll pick the cheaper path: for small peeked lists, scanning is cheap when dest_count is small;
+                        # otherwise use set intersection.
+                        # Dynamic rule: favor scan when dests are small; else use set ops even if heads are small.
+                        use_scan = (len(edge.dests) <= 128 and len(peeked) <= 16)
+                        if use_scan:
+                            stats.start('get_mask.main_loop.edge.peek_and_filter')
+                            values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
+                            stats.stop('get_mask.main_loop.edge.peek_and_filter')
+                            if not values_to_keep:
+                                continue
+                            if len(values_to_keep) == len(peeked):
+                                child_gss = popped
+                            else:
+                                stats.start('get_mask.main_loop.edge.isolate_many')
+                                child_gss = popped.isolate_many(values_to_keep)
+                                stats.stop('get_mask.main_loop.edge.isolate_many')
+                        else:
+                            # Use set intersection for larger head sets or large dest blocks
+                            stats.start('get_mask.main_loop.edge.peek_and_filter')
+                            keep_rs = peek_rs.intersection(state_bv)
+                            stats.stop('get_mask.main_loop.edge.peek_and_filter')
+                            if keep_rs.is_empty():
+                                continue
+                            # Convert back to list only when needed
+                            stats.start('get_mask.main_loop.edge.isolate_many')
+                            child_gss = popped.isolate_many(list(keep_rs.iter_indices()))
+                            stats.stop('get_mask.main_loop.edge.isolate_many')
+
+                        if child_gss.is_empty():
+                            stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
+                            continue
+
+                        d: NodeID = int(dest_idx)
+                        if d in values:
+                            stats.inc('get_mask.traversal.edge.gss_merges')
+                            stats.start('get_mask.main_loop.edge.gss_merge')
+                            values[d] = values[d].merge(child_gss)
+                            stats.stop('get_mask.main_loop.edge.gss_merge')
+                        else:
+                            values[d] = child_gss
+                        enqueue(max_depth[d], d)
+                        child_spawned = True
+                        dests_processed_count += 1
+
+                    if edges_processed_count >= max_edges_per_visit or dests_processed_count >= max_dests_per_visit:
+                        # already handled requeue above
+                        break
 
                 if child_spawned:
                     spawned_any = True
 
                 edges_processed_count += 1
+                # Reset start_dest_idx_for_first_edge after the first edge iteration
+                start_dest_idx_for_first_edge = 0
 
                 # Check if we should re-enqueue for more edges
                 if edges_processed_count >= max_edges_per_visit and edge_i + 1 < len(edges):
                     # Save progress and re-enqueue this node to process remaining edges later
                     merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
                     values[node] = merged_for_requeue
-                    edge_cursor[node] = (edge_i + 1, id(merged_for_requeue))
+                    edge_cursor[node] = NodeCursor(edge_idx=edge_i + 1, dest_idx=0, gss_id=id(merged_for_requeue), pop_cache=pop_cache)
                     enqueue(max_depth[node], node)
                     stats.inc('get_mask.traversal.node_requeued_for_more_edges')
                     break
@@ -1279,9 +1416,6 @@ class Model(GraphProvider):
         stats.stop('get_mask.final_conversion')
 
         stats.stop('get_mask')
-
-        stats.report()
-        stats.reset()
 
         return original_indices
 
