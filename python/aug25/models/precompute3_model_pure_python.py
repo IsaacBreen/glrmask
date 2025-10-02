@@ -31,11 +31,12 @@ from ..range_set.set_range_set import SetRangeSet as RangeSetOut
 # from ..range_set.ffi_range_set import FFIRangeSet as RangeSetOut
 # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetOut
 
+# Use FFIRangeSet for parser state bitsets to accelerate dest filtering
 # from ..common_interface import RangeSetStates
-from ..range_set.set_range_set import SetRangeSet as RangeSetStates
+# from ..range_set.set_range_set import SetRangeSet as RangeSetStates
 # from ..range_set.py_range_set import PyRangeSet as RangeSetStates
 # from ..range_set.bitset_range_set import BitsetRangeSet as RangeSetStates
-# from ..range_set.ffi_range_set import FFIRangeSet as RangeSetStates
+from ..range_set.ffi_range_set import FFIRangeSet as RangeSetStates
 # from ..range_set.roaring_range_set import RoaringRangeSet as RangeSetStates
 
 import _sep1 as ffi
@@ -347,6 +348,7 @@ class Model(GraphProvider):
     arena: Dict[NodeID, ArenaNode]
     roots_map: Dict[int, NodeID]
     max_depth: Dict[NodeID, int]
+    min_steps_to_end: Dict[NodeID, int]
 
     # Parser-related fields
     parser_table: ParserTable
@@ -402,33 +404,41 @@ class Model(GraphProvider):
                 # Convert to RangeSet for ffi-free operations in commit/get_mask
                 llm_bv: LLMTokenSet = RangeSet.from_ranges(llm_bv_bitset.to_ranges())
                 llm_bv_union |= llm_bv
-                new_dest_map_list: List[Tuple[int, StateIDSet]] = []
-                # Build dests_union and end-dests for this edge
+
+                # Group dest_map by dest_idx to massively shrink dest count
+                dests_accum: Dict[int, StateIDSet] = {}
                 dests_union: Optional[StateIDSet] = None
-                end_dests: List[Tuple[int, StateIDSet]] = []
+                end_dests: List[Tuple[NodeID, StateIDSet]] = []
                 has_end = False
+
                 for dest_idx, state_bv_json in dest_map:
                     state_bv_bitset = bs_from_json(dumps(state_bv_json))
                     state_bv: StateIDSet = RangeSetStates.from_ranges(state_bv_bitset.to_ranges())
                     dest_idx_int = int(dest_idx)
-                    new_dest_map_list.append((dest_idx_int, state_bv))
 
-                    # Build union (avoid mutating state_bv)
+                    existing = dests_accum.get(dest_idx_int)
+                    if existing is None:
+                        dests_accum[dest_idx_int] = state_bv
+                    else:
+                        dests_accum[dest_idx_int] = existing.union(state_bv)
+
+                # Build union and end_dests from grouped dests
+                for dest_idx_int, state_bv in dests_accum.items():
                     if dests_union is None:
-                        dests_union = state_bv  # don't mutate; replaced on next step
+                        dests_union = state_bv
                     else:
                         dests_union = dests_union.union(state_bv)
 
-                    # Has end?
                     node_data_for_dest = arena_dict.get(dest_idx_int, {})
                     if node_data_for_dest.get("value", {}).get("clean_end", False):
                         has_end = True
                         end_dests.append((dest_idx_int, state_bv))
 
-                # If union is None (no dests), make empty
                 if dests_union is None:
                     dests_union = RangeSetStates.from_ranges([])
 
+                # Final list for edge
+                new_dest_map_list: List[Tuple[int, StateIDSet]] = [(int(di), dv) for di, dv in dests_accum.items()]
                 edge_block = EdgeBlock(
                     dests=new_dest_map_list,
                     dests_union=dests_union,
@@ -447,6 +457,34 @@ class Model(GraphProvider):
             )
             for uid, node_data in arena_dict.items()
         }
+
+        # Compute min steps-to-end heuristic for better scheduling
+        def compute_min_steps_to_end(arena_map: Dict[NodeID, ArenaNode]) -> Dict[NodeID, int]:
+            reverse_adj: Dict[NodeID, Set[NodeID]] = collections.defaultdict(set)
+            end_nodes: List[NodeID] = []
+            for src, an in arena_map.items():
+                if an.clean_end:
+                    end_nodes.append(src)
+                for (_edge_key, edgeblock) in an.children:
+                    for dest_idx, _state_bv in edgeblock.dests:
+                        reverse_adj[int(dest_idx)].add(int(src))
+            INF = 1 << 30
+            dist: Dict[NodeID, int] = {n: INF for n in arena_map.keys()}
+            dq = collections.deque()
+            for n in end_nodes:
+                dist[n] = 0
+                dq.append(n)
+            while dq:
+                cur = dq.popleft()
+                nd = dist[cur] + 1
+                for pred in reverse_adj.get(cur, ()):
+                    if nd < dist[pred]:
+                        dist[pred] = nd
+                        dq.append(pred)
+            return dist
+
+        min_steps_to_end: Dict[NodeID, int] = compute_min_steps_to_end(arena)
+
         # Load tokenizer and parser table from the full constraint JSON
         # Load tokenizer DFA from JSON
         dfa_data = data['tokenizer']['dfa']
@@ -570,6 +608,7 @@ class Model(GraphProvider):
             arena=arena,
             roots_map=roots_map,
             max_depth=max_depth,
+            min_steps_to_end=min_steps_to_end,
             parser_table=parser_table,
             glr_parser=glr_parser,
             reverse_state_map=reverse_state_map,
@@ -860,6 +899,7 @@ class Model(GraphProvider):
                 return (has_end_flag, -best_depth, pop)
             node.children.sort(key=_edge_key)
         stats.stop('optimize_traversal')
+
     def get_mask(self) -> LLMTokenSet:
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
@@ -870,6 +910,10 @@ class Model(GraphProvider):
         - Fast "no-dests-possible" check via precomputed dests_union for each edge.
         - Bitset-based filtering of dests (intersection) instead of Python per-sid contains loops.
         - Process end-dests first and union into final_mask immediately (earlier zombie pruning).
+        - New: group duplicated dests by node at load time to shrink dest lists.
+        - New: prioritize nodes by min-steps-to-end to reach ends earlier (smoother max latency).
+        - New: isolate relevant heads for an edge before applying acc mask to avoid wasted work.
+        - New: use FFIRangeSet for parser state bitsets to accelerate isdisjoint/intersection.
         """
         stats = Stats.get()
         stats.start('get_mask')
@@ -881,13 +925,16 @@ class Model(GraphProvider):
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask.
         values: Dict[NodeID, GSS] = {}
-        depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
+        # Priority queue: (min_steps_to_end, -max_depth, seq, node_id)
+        prio_heap: List[Tuple[int, int, int, NodeID]] = []
         enqueued_nodes: Set[NodeID] = set()
         edge_cursor: Dict[NodeID, Tuple[int, int]] = {}  # node -> (next_edge_idx, gss_id)
+        enqueue_seq = 0
 
         hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
         max_depth: Dict[NodeID, int] = self.max_depth
+        min_steps_to_end: Dict[NodeID, int] = self.min_steps_to_end
         arena: Dict[NodeID, ArenaNode] = self.arena
         is_end = self.is_end
         pmc: Dict[int, Dict[int, LLMTokenSet]] = self.possible_matches_cache or {}
@@ -967,27 +1014,32 @@ class Model(GraphProvider):
                 values[r] = gss_initialized
 
             d: int = max_depth[r]
+            # Priority by min steps to end first, then deeper nodes
             if r not in enqueued_nodes:
                 enqueued_nodes.add(r)
-                hp(depth_heap, (-d, r))
+                enqueue_seq += 1
+                hp(prio_heap, (min_steps_to_end.get(r, 1 << 30), -d, enqueue_seq, r))
 
         def enqueue(d: int, n: NodeID) -> None:
             stats.inc('get_mask.traversal.enqueues')
             if n not in enqueued_nodes:
                 enqueued_nodes.add(n)
-                hp(depth_heap, (-d, n))
+                nonlocal enqueue_seq
+                enqueue_seq += 1
+                hp(prio_heap, (min_steps_to_end.get(n, 1 << 30), -d, enqueue_seq, n))
 
-        def dequeue() -> Tuple[int, int]:
-            neg_d, n = hpop(depth_heap)
-            return -neg_d, n
+        def dequeue() -> NodeID:
+            _prio = hpop(prio_heap)
+            return _prio[-1]
         stats.stop('get_mask.seeding')
 
         # Main loop
         stats.start('get_mask.main_loop')
         max_depth_reached = 0
         visited_nodes = set()
-        while depth_heap:
-            depth, node = dequeue()
+        while prio_heap:
+            node = dequeue()
+            depth = max_depth[node]
             max_depth_reached = max(max_depth_reached, depth)
             stats.inc('get_mask.traversal.depth_heap.pops')
             stats.inc('get_mask.traversal.nodes_processed')
@@ -1073,6 +1125,17 @@ class Model(GraphProvider):
                     stats.inc('get_mask.main_loop.edge.skipped_by_dests_union')
                     continue
 
+                # Isolate only those heads that can go to any dest for this edge BEFORE applying acc mask.
+                keep_any_bv = edgeblock.dests_union.intersection(peek_bv_pre)
+                if keep_any_bv.is_empty():
+                    # No relevant heads for this edge
+                    stats.inc('get_mask.main_loop.edge.skipped_by_dests_union')
+                    continue
+                values_to_keep_any = list(keep_any_bv.iter_indices())
+                stats.start('get_mask.main_loop.edge.isolate_many')
+                popped_relevant = popped.isolate_many(values_to_keep_any)
+                stats.stop('get_mask.main_loop.edge.isolate_many')
+
                 @_acc_memoize(stats_prefix='get_mask.main_loop.edge.intersect_and_prune', use_value_cache=False)
                 def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                     p = 'get_mask.main_loop.edge.intersect_and_prune'
@@ -1086,7 +1149,7 @@ class Model(GraphProvider):
                     return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
 
                 stats.start('get_mask.main_loop.edge.apply_and_prune')
-                popped_masked = popped.apply_and_prune(intersect_and_prune)
+                popped_masked = popped_relevant.apply_and_prune(intersect_and_prune)
                 stats.stop('get_mask.main_loop.edge.apply_and_prune')
 
                 if popped_masked.is_empty():
@@ -1099,44 +1162,38 @@ class Model(GraphProvider):
                     stats.inc('get_mask.traversal.edge.popped_reduced_empty')
                     continue
 
+                # Build masked peek set once
+                peeked_masked = popped_masked.peek()
+                if not peeked_masked:
+                    stats.inc('get_mask.traversal.edge.popped_reduced_empty')
+                    continue
+                peek_bv_masked = RangeSetStates.from_indices(peeked_masked)
+
                 # End-dest early contribution: union tokens immediately to grow final_mask
                 if edgeblock.has_end:
-                    # Build masked peek_bv once
-                    peeked_masked = popped_masked.peek()
-                    if peeked_masked:
-                        peek_bv = RangeSetStates.from_indices(peeked_masked)
-                        end_hit = False
-                        # Only check end dests for a hit
-                        for d_end, state_bv_end in edgeblock.end_dests:
-                            if not state_bv_end.isdisjoint(peek_bv):
-                                end_hit = True
-                                break
-                        if end_hit:
-                            stats.start('get_mask.main_loop.end_node.final_mask_union')
-                            final_mask |= reduced_after_intersect.llm_mask
-                            stats.stop('get_mask.main_loop.end_node.final_mask_union')
-                            # Update node_new_tokens to reflect new final_mask (enables more pruning within same node)
-                            node_new_tokens = node_mask.difference(final_mask)
-                    else:
-                        # No heads left after masking; skip the rest
-                        continue
+                    end_hit = False
+                    for d_end, state_bv_end in edgeblock.end_dests:
+                        if not state_bv_end.isdisjoint(peek_bv_masked):
+                            end_hit = True
+                            break
+                    if end_hit:
+                        stats.start('get_mask.main_loop.end_node.final_mask_union')
+                        final_mask |= reduced_after_intersect.llm_mask
+                        stats.stop('get_mask.main_loop.end_node.final_mask_union')
+                        # Update node_new_tokens to reflect new final_mask (enables more pruning within same node)
+                        node_new_tokens = node_mask.difference(final_mask)
 
                 # Now distribute to dests
-                peeked = popped_masked.peek()
-                if not peeked:
-                    continue
-                peek_bv = RangeSetStates.from_indices(peeked)
-
                 child_spawned = False
                 for dest_idx, state_bv in edgeblock.dests:
                     stats.inc('get_mask.traversal.dests_traversed')
 
                     # Fast disjoint skip
-                    if state_bv.isdisjoint(peek_bv):
+                    if state_bv.isdisjoint(peek_bv_masked):
                         continue
 
                     # Compute kept heads for this dest
-                    keep_bv = state_bv.intersection(peek_bv)
+                    keep_bv = state_bv.intersection(peek_bv_masked)
                     values_to_keep = list(keep_bv.iter_indices())
 
                     if not values_to_keep:
