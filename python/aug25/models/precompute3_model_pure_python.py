@@ -492,7 +492,7 @@ class Model(GraphProvider):
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
 
             for terminal_id, width in matches:
-                processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
+                processed_gss = self._process_token(gss, terminal_id)
                 # Immediate re-match disallow
                 if end_state is not None:
                     accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
@@ -539,6 +539,11 @@ class Model(GraphProvider):
         stats.start(f'{p}.total')
         stats.inc(f'{p}.calls')
         stats.inc(f'{p}.initial_heads', len(gss.peek()))
+
+        if self.ignore_terminal_id is not None:
+            if self.ignore_terminal_id == terminal_id:
+                stats.inc(f'{p}.ignored_terminal')
+                return gss
 
         heads_by_state: Dict[int, List[GSS]] = collections.defaultdict(list)
         for state_id in gss.peek():
