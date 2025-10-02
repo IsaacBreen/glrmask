@@ -568,7 +568,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // Option 3: Set to a few specific tokens
         gpt2_raw_vocab = vec![
             "a",
-            " ",
+            "b",
         ].iter().map(|s| s.to_string()).collect();
 
 
