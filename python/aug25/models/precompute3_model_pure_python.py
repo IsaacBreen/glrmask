@@ -105,11 +105,11 @@ class PyTokenizer:
 
     def __repr__(self) -> str:
         """Compact string representation of the tokenizer DFA."""
-        
+
         def _format_transitions(transitions: Dict[int, int]) -> str:
             if not transitions:
                 return ""
-            
+
             # Group transitions by destination state
             grouped_by_dest = collections.defaultdict(list)
             for byte, dest in transitions.items():
@@ -121,10 +121,10 @@ class PyTokenizer:
                 ranges = []
                 if not bytes_list:
                     continue
-                
+
                 start = bytes_list[0]
                 end = bytes_list[0]
-                
+
                 for i in range(1, len(bytes_list)):
                     if bytes_list[i] == end + 1:
                         end = bytes_list[i]
@@ -135,14 +135,14 @@ class PyTokenizer:
                             ranges.append(f"{start}-{end}")
                         start = bytes_list[i]
                         end = bytes_list[i]
-                
+
                 if start == end:
                     ranges.append(str(start))
                 else:
                     ranges.append(f"{start}-{end}")
-                
+
                 parts.append(f"[{', '.join(ranges)}] -> {dest}")
-            
+
             return "Transitions: " + "; ".join(parts)
 
         lines = [
@@ -151,17 +151,17 @@ class PyTokenizer:
 
         for i, state in enumerate(self.states):
             state_lines = [f"State {i}:"]
-            
+
             trans_str = _format_transitions(state.transitions)
             if trans_str:
                 state_lines.append(trans_str)
-            
+
             if state.finalizers:
                 state_lines.append(f"Finalizers: {sorted(list(state.finalizers))}")
-            
+
             if state.possible_future_group_ids:
                 state_lines.append(f"Future Groups: {sorted(list(state.possible_future_group_ids))}")
-            
+
             if len(state_lines) > 1:
                 lines.append(textwrap.indent("\n".join(state_lines), "  "))
             else:
@@ -189,9 +189,9 @@ class PyTokenizer:
             if next_state is None:
                 done = True
                 break
-            
+
             current_state = next_state
-            
+
             # Update matches
             next_state_data = self.states[current_state]
             for group_id in next_state_data.finalizers:
@@ -199,11 +199,11 @@ class PyTokenizer:
                     matches.setdefault(group_id, i + 1)
                 else:
                     matches[group_id] = i + 1
-        
+
         end_state = None if done else current_state
-        
+
         result_matches = [(gid, width) for gid, width in matches.items() if width > 0]
-        
+
         return end_state, result_matches
 
     def tokens_accessible_from_state(self, state_id: int) -> List[int]:
