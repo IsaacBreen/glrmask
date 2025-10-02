@@ -219,9 +219,7 @@ class Model(_Model):
                             q.append(dest_node_id)
                         else:
                             merged_gss = existing_gss.merge(processed_gss)
-                            if len(merged_gss.peek()) > len(existing_gss.peek()):
-                                node_gss_map[dest_node_id] = merged_gss
-                                q.append(dest_node_id)
+                            node_gss_map[dest_node_id] = merged_gss
 
         # 3. Finalize the new state.
         merged_states = {sid: GSS.merge_many(gss_list) for sid, gss_list in new_overall_state_parts.items() if gss_list}
