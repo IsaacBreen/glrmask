@@ -4034,7 +4034,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
         }
 
-        assert!(*self == self_clone);
+        assert_eq!(*self, self_clone);
     }
 
     #[time_it]
