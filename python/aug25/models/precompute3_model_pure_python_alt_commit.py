@@ -136,6 +136,7 @@ class Model(_Model):
         """
         print("\n--- commit_precompute0 START ---")
         print(f"Committing token ID: {token_id}")
+        print(f"Current state before commit: {self.state}")
         self_copy = self.copy()
         _Model.commit(self_copy, token_id)
 
