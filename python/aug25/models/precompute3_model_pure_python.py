@@ -288,7 +288,6 @@ class ArenaEdge:
       - dest_states_union allows skipping entire dest blocks if no head can match
       - llm_bv_not enables subset checks via isdisjoint (cheaper than difference)
       - optional state_to_dest for grouping heads -> dests in O(#heads) when dest blocks are huge
-      - has_end_dest precomputes whether any dest is an end node (used for end-hunting priority)
     """
     pop: int
     llm_bv: LLMTokenSet
@@ -296,7 +295,6 @@ class ArenaEdge:
     dest_states_union: StateIDSet = field(default_factory=RangeSetStates.empty)
     llm_bv_not: Optional[LLMTokenSet] = None
     state_to_dest: Optional[Dict[int, List[int]]] = None  # built on demand for very large dest blocks
-    has_end_dest: bool = False  # precomputed
 
     def ensure_index(self, dest_index_threshold: int = 512, max_states_per_index: int = 100_000) -> None:
         """
@@ -331,9 +329,6 @@ class ArenaNode:
     children: List[ArenaEdge] = field(default_factory=list)
     llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
     clean_end: bool = False
-    # Union of llm_bv for all edges with pop==0 that have any end destination.
-    # Used to prioritize nodes that can hit an end in one edge without popping.
-    pop0_end_llm_union: LLMTokenSet = field(default_factory=RangeSet.empty)
 
 
 @dataclass(frozen=True, eq=False)
@@ -473,7 +468,6 @@ class Model(GraphProvider):
                     dest_states_union=dest_states_union,
                     llm_bv_not=None,  # filled later after all_ones is known
                     state_to_dest=None,
-                    has_end_dest=False,
                 ))
             node["children"] = new_children
             node["llm_bv_union"] = llm_bv_union
@@ -483,7 +477,6 @@ class Model(GraphProvider):
                 children=node_data.get("children", []),
                 llm_bv_union=node_data.get("llm_bv_union", RangeSet.empty()),
                 clean_end=node_data.get("value", {}).get("clean_end", False),
-                pop0_end_llm_union=RangeSet.empty(),
             )
             for uid, node_data in arena_dict.items()
         }
@@ -625,9 +618,6 @@ class Model(GraphProvider):
             state=state,
         )
 
-        # End-awareness + per-node unions to target ends early
-        model._annotate_end_metadata()
-
         # Compute per-edge accelerators that depend on all_ones
         model._compute_edge_accelerators()
 
@@ -635,39 +625,6 @@ class Model(GraphProvider):
         model.optimize_traversal()
 
         return model
-
-    def _annotate_end_metadata(self) -> None:
-        """
-        For each edge, mark whether any of its dests is an end node.
-        For each node, precompute the union of llm_bv across pop==0 edges that touch an end.
-        Also reorders dests to put end nodes first (inner list).
-        """
-        stats = Stats.get()
-        stats.start('annotate_end_metadata')
-        md = self.max_depth
-        for node_id, node in self.arena.items():
-            pop0_end_union = RangeSet.empty()
-            for edge in node.children:
-                has_end = False
-                # Sort dests end-first then by max depth descending (we'll re-apply in optimize too)
-                def _dest_key(item):
-                    dest_idx = int(item[0])
-                    is_end = self.arena.get(dest_idx, ArenaNode()).clean_end
-                    best = md.get(dest_idx, 0)
-                    return (0 if is_end else 1, -best)
-                # Mark has_end and reorder
-                for dest_idx, _ in edge.dests:
-                    if self.arena.get(int(dest_idx), ArenaNode()).clean_end:
-                        has_end = True
-                        break
-                edge.has_end_dest = has_end
-                # pop0 end union
-                if has_end and edge.pop == 0:
-                    pop0_end_union = pop0_end_union.union(edge.llm_bv)
-                # Inner reordering to place end nodes first helps reach end ASAP
-                edge.dests.sort(key=_dest_key)
-            node.pop0_end_llm_union = pop0_end_union
-        stats.stop('annotate_end_metadata')
 
     def _compute_edge_accelerators(self) -> None:
         """
@@ -935,9 +892,9 @@ class Model(GraphProvider):
         """
         Reorder edges and their destination lists to favor reaching end nodes ASAP.
         Heuristic:
-          - Inner dests: end nodes first; then by max_depth[dest] descending
-          - Outer edges: edges that can hit an end immediately (has_end_dest True) first,
-            then by pop asc as a tie-breaker, then by best dest depth (after inner sort) descending.
+          - Inner dests: sort by max_depth[dest] descending
+          - Outer edges: sort by best dest depth (after inner sort) descending,
+            then by pop asc as a tie-breaker.
         """
         stats = Stats.get()
         stats.start('optimize_traversal')
@@ -945,21 +902,15 @@ class Model(GraphProvider):
         for node in self.arena.values():
             if not node.children:
                 continue
-            # Sort inner dests first (end-first, then highest depth)
+            # Sort inner dests first (so the first dest has the highest depth)
             for edge in node.children:
-                def _dest_key(item):
-                    dest_idx = int(item[0])
-                    is_end = self.arena.get(dest_idx, ArenaNode()).clean_end
-                    best = md.get(dest_idx, 0)
-                    return (0 if is_end else 1, -best)
-                edge.dests.sort(key=_dest_key)
-            # Sort edges:
+                edge.dests.sort(key=lambda item: md.get(int(item[0]), 0), reverse=True)
+            # Sort edges by best dest depth desc, then pop asc
             def _edge_key(edge: ArenaEdge):
                 pop = edge.pop
                 dests = edge.dests
                 best = md.get(int(dests[0][0]), 0) if dests else -1
-                # Prefer edges that have an end among dests, then by lower pop, then deeper best
-                return (0 if edge.has_end_dest else 1, pop, -best)
+                return (-best, pop)
             node.children.sort(key=_edge_key)
         stats.stop('optimize_traversal')
 
@@ -976,15 +927,12 @@ class Model(GraphProvider):
         - Cache popn results per (node visit, pop) and reuse their reduce_acc() and peek()
           to avoid repeated work across many edges that share the same pop.
         - Subset fast path using Edge.llm_bv_not and isdisjoint (no allocation) instead of difference.
-        - Union-of-dests fast reject. For pop==0 edges, if no current heads can reach
+        - New: union-of-dests fast reject. For pop==0 edges, if no current heads can reach
           any destination state (via dest_states_union), skip the entire dest block up front.
         - Persist pop_cache across re-queues of the same node to avoid redoing pop/reduce work.
         - Optional on-demand per-edge reverse indexing to group heads → dests in O(#heads) when dests are huge.
         - Avoid redundant reduce_acc() checks after isolate_many; relying on is_empty() suffices.
         - Use RangeSetStates operations (isdisjoint/intersection) where profitable when filtering dests.
-        - New: End-hunting priority queue. We prioritize nodes that can reach an end with pop==0
-          and that have the largest estimated overlap with remaining_mask. This greatly reduces
-          worst-case spikes by making final_mask populate as early as possible.
         """
         stats = Stats.get()
         stats.start('get_mask')
@@ -997,12 +945,9 @@ class Model(GraphProvider):
 
         # We carry only GSS per node; the per-path LLM mask lives inside PyAcc.llm_mask.
         values: Dict[NodeID, GSS] = {}
-        # Priority queue: (priority_tuple, seq_id, node_id)
-        # priority_tuple = (end_hint, -potential_size_est, -best_depth)
-        pq: List[Tuple[Tuple[int, int, int], int, NodeID]] = []
+        depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
         enqueued_nodes: Set[NodeID] = set()
         edge_cursor: Dict[NodeID, NodeCursor] = {}  # node -> NodeCursor
-        enqueue_seq = 0
 
         hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
@@ -1081,69 +1026,20 @@ class Model(GraphProvider):
             else:
                 values[r] = gss_initialized
 
-        # Helper to estimate cardinality cheaply (bounded)
-        def _bounded_count(rs: LLMTokenSet, limit: int = 1024) -> int:
-            c = 0
-            for start, end in rs.to_ranges():
-                c += (end - start + 1)
-                if c >= limit:
-                    return limit
-            return c
+            d: int = max_depth[r]
+            if r not in enqueued_nodes:
+                enqueued_nodes.add(r)
+                hp(depth_heap, (-d, r))
 
-        # Compute node priority using an allowed-mask hint when available
-        def _compute_priority(n: NodeID, mask_hint: Optional[LLMTokenSet]) -> Tuple[int, int, int]:
-            stats.start('get_mask.priority.compute')
-            a_node = arena.get(n)
-            if a_node is None:
-                stats.stop('get_mask.priority.compute')
-                return (1, 0, -max_depth.get(n, 0))
-
-            if mask_hint is None:
-                # Fallback: use reduced acc for this node (rare for seeds/requeues only)
-                stats.start('get_mask.priority.reduce_acc')
-                ra = values[n].reduce_acc()
-                stats.stop('get_mask.priority.reduce_acc')
-                allow = ra.llm_mask if ra else RangeSet.empty()
-            else:
-                allow = mask_hint
-
-            # Consider only remaining tokens
-            pot = allow.intersection(remaining_mask)
-
-            # End-hunting hint: can we hit an end in one step with pop==0?
-            end_hint_possible = not pot.isdisjoint(a_node.pop0_end_llm_union)
-            end_hint = 0 if end_hint_possible else 1
-            if end_hint_possible:
-                stats.inc('get_mask.priority.end_hint_hits')
-
-            # Potential size estimate within this subtrie (over-approx): pot ∩ node.llm_bv_union
-            pot2 = pot.intersection(a_node.llm_bv_union)
-            approx = _bounded_count(pot2, limit=1024)
-
-            # Depth bias tie-breaker: favor deeper search only when needed
-            depth_bias = -max_depth.get(n, 0)
-            stats.stop('get_mask.priority.compute')
-            return (end_hint, -approx, depth_bias)
-
-        def enqueue(n: NodeID, mask_hint: Optional[LLMTokenSet] = None) -> None:
-            nonlocal enqueue_seq
+        def enqueue(d: int, n: NodeID) -> None:
             stats.inc('get_mask.traversal.enqueues')
             if n not in enqueued_nodes:
-                pr = _compute_priority(n, mask_hint)
-                hp(pq, (pr, enqueue_seq, n))
-                enqueue_seq += 1
                 enqueued_nodes.add(n)
+                hp(depth_heap, (-d, n))
 
-        def dequeue() -> NodeID:
-            pr, seq, n = hpop(pq)
-            stats.inc('get_mask.traversal.depth_heap.pops')
-            return n
-
-        # Enqueue roots after initialization; priority computed lazily using reduce_acc
-        for sid in state_map.keys():
-            r = roots_map[int(sid)]
-            enqueue(r, None)
-
+        def dequeue() -> Tuple[int, int]:
+            neg_d, n = hpop(depth_heap)
+            return -neg_d, n
         stats.stop('get_mask.seeding')
 
         # Main loop
@@ -1157,9 +1053,10 @@ class Model(GraphProvider):
             # Recompute remaining_mask conservatively to avoid tracking diffs
             remaining_mask = all_ones.difference(final_mask)
 
-        while pq:
-            node = dequeue()
-            max_depth_reached = max(max_depth_reached, max_depth.get(node, 0))
+        while depth_heap:
+            depth, node = dequeue()
+            max_depth_reached = max(max_depth_reached, depth)
+            stats.inc('get_mask.traversal.depth_heap.pops')
             stats.inc('get_mask.traversal.nodes_processed')
             visited_nodes.add(node)
             gss_node: GSS = values.pop(node)
@@ -1230,6 +1127,7 @@ class Model(GraphProvider):
             # Local aliases for hot methods to reduce attribute lookups
             rs_isdisjoint = LLMTokenSet.isdisjoint
             rs_intersection = LLMTokenSet.intersection
+            rs_difference = LLMTokenSet.difference
             states_from_indices = RangeSetStates.from_indices
 
             # Peek heads for pop==0 edges once per node
@@ -1342,7 +1240,7 @@ class Model(GraphProvider):
 
                 # From here on, popped is filtered to this edge's llm_bv (or was already covered)
                 popped_cached = pop_cache[pop]
-                _, popped_acc, peeked, peek_rs = popped_cached
+                _, _, peeked, peek_rs = popped_cached
 
                 # If there are no heads after pop, skip quickly
                 if not peeked:
@@ -1384,9 +1282,7 @@ class Model(GraphProvider):
                             merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
                             values[node] = merged_for_requeue
                             edge_cursor[node] = NodeCursor(edge_idx=edge_i, dest_idx=dest_j, gss_id=id(merged_for_requeue), pop_cache=pop_cache)
-                            # Re-enqueue with updated priority/hint
-                            requeue_hint = gss_reduced_acc.llm_mask if gss_reduced_acc else None
-                            enqueue(node, requeue_hint)
+                            enqueue(max_depth[node], node)
                             stats.inc('get_mask.traversal.node_requeued_for_more_edges')
                             edges_processed_count = max_edges_per_visit  # force outer break
                             break
@@ -1410,9 +1306,7 @@ class Model(GraphProvider):
                             stats.stop('get_mask.main_loop.edge.gss_merge')
                         else:
                             values[d] = child_gss
-                        # Priority hint for child: estimated allowed = popped_acc.llm_mask ∩ llm_bv (upper bound)
-                        child_hint = popped_acc.llm_mask if (llm_bv_not is not None and popped_acc.llm_mask.isdisjoint(llm_bv_not)) else rs_intersection(popped_acc.llm_mask, llm_bv)
-                        enqueue(d, child_hint)
+                        enqueue(max_depth[d], d)
                         child_spawned = True
                         dests_processed_count += 1
 
@@ -1426,8 +1320,7 @@ class Model(GraphProvider):
                             merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
                             values[node] = merged_for_requeue
                             edge_cursor[node] = NodeCursor(edge_idx=edge_i, dest_idx=dest_j, gss_id=id(merged_for_requeue), pop_cache=pop_cache)
-                            requeue_hint = gss_reduced_acc.llm_mask if gss_reduced_acc else None
-                            enqueue(node, requeue_hint)
+                            enqueue(max_depth[node], node)
                             stats.inc('get_mask.traversal.node_requeued_for_more_edges')
                             # Break out of both dest and edge loops
                             edges_processed_count = max_edges_per_visit  # force outer break
@@ -1444,6 +1337,7 @@ class Model(GraphProvider):
                         # Otherwise, filter heads down to the subset contained in state_bv.
                         # We'll pick the cheaper path: for small peeked lists, scanning is cheap when dest_count is small;
                         # otherwise use set intersection.
+                        # Dynamic rule: favor scan when dests are small; else use set ops even if heads are small.
                         use_scan = (len(edge.dests) <= 128 and len(peeked) <= 16)
                         if use_scan:
                             stats.start('get_mask.main_loop.edge.peek_and_filter')
@@ -1481,9 +1375,7 @@ class Model(GraphProvider):
                             stats.stop('get_mask.main_loop.edge.gss_merge')
                         else:
                             values[d] = child_gss
-                        # Priority hint for child: estimated allowed = popped_acc.llm_mask ∩ llm_bv (upper bound)
-                        child_hint = popped_acc.llm_mask if (llm_bv_not is not None and popped_acc.llm_mask.isdisjoint(llm_bv_not)) else rs_intersection(popped_acc.llm_mask, llm_bv)
-                        enqueue(d, child_hint)
+                        enqueue(max_depth[d], d)
                         child_spawned = True
                         dests_processed_count += 1
 
@@ -1504,8 +1396,7 @@ class Model(GraphProvider):
                     merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
                     values[node] = merged_for_requeue
                     edge_cursor[node] = NodeCursor(edge_idx=edge_i + 1, dest_idx=0, gss_id=id(merged_for_requeue), pop_cache=pop_cache)
-                    requeue_hint = gss_reduced_acc.llm_mask if gss_reduced_acc else None
-                    enqueue(node, requeue_hint)
+                    enqueue(max_depth[node], node)
                     stats.inc('get_mask.traversal.node_requeued_for_more_edges')
                     break
             else:
@@ -1525,9 +1416,6 @@ class Model(GraphProvider):
         stats.stop('get_mask.final_conversion')
 
         stats.stop('get_mask')
-
-        stats.report()
-        stats.reset()
 
         return original_indices
 
