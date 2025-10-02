@@ -1660,25 +1660,25 @@ local_system:
 
               new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
               stats.start('commit.main_loop')
-              q = collections.deque()
-              for tokenizer_sid, gss in current_state_for_processing.items():
-                  q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
 
-              visited_q_items: set = set()
+              work_map: Dict[Tuple[int, int], GSS] = {}
+              q = collections.deque()
+
+              for tokenizer_sid, gss in current_state_for_processing.items():
+                  key = (0, tokenizer_sid)
+                  work_map[key] = gss
+              q.extend(work_map.keys())
 
               while q:
-                  offset, tokenizer_sid, gss = q.popleft()
-                  q_item_key = (offset, tokenizer_sid, id(gss))
-                  if q_item_key in visited_q_items:
-                      continue
-                  visited_q_items.add(q_item_key)
+                  offset, tokenizer_sid = q.popleft()
+                  gss = work_map.pop((offset, tokenizer_sid))
 
                   end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
 
                   for terminal_id, width in matches:
-                      print(f"Matched terminal {terminal_id} at offset {offset} with width {width}. GSS before: {gss}")
+                      # print(f"Matched terminal {terminal_id} at offset {offset} with width {width}. GSS before: {gss}")
                       processed_gss = self._process_token(gss, terminal_id)
-                      print(f"GSS after processing terminal {terminal_id}: {processed_gss}")
+                      # print(f"GSS after processing terminal {terminal_id}: {processed_gss}")
                       # Immediate re-match disallow
                       if end_state is not None:
                           accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
@@ -1691,7 +1691,13 @@ local_system:
                           if new_offset == len(token_bytes):
                               new_states[next_tokenizer_sid].append(processed_gss)
                           else:
-                              q.append((new_offset, next_tokenizer_sid, processed_gss))
+                              key = (new_offset, next_tokenizer_sid)
+                              existing_gss = work_map.get(key)
+                              if existing_gss is None:
+                                  work_map[key] = processed_gss
+                                  q.append(key)
+                              else:
+                                  work_map[key] = existing_gss.merge(processed_gss)
 
                   if end_state is not None:
                       new_states[end_state].append(gss)
@@ -2360,9 +2366,9 @@ local_system:
 
 
       __all__ = ['Precompute0Model']
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode:
+  prev_apply_mode: git-llm
 system:
   message: |-
     You are a helpful assistant.
@@ -3590,5 +3596,126 @@ messages:
   - user: The way `commit` in precompute3_model_pure_python.py manages its queue of
       nodes is wrong. Fix it. Use precompute3_model_pure_python_alt_commit.py as a
       reference.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - Include lines like: `diff --git a/FILE b/FILE`
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      Of course. The queue management in `precompute3_model_pure_python.py` is inefficient because it can re-process the same logical state multiple times. I'll correct it by implementing a state-merging approach inspired by the reference file, where GSS objects for the same state are merged before processing.
+
+      Here are the step-by-step instructions to fix the issue:
+
+      ### Step-by-step Instructions
+
+      1.  Open the file `python/aug25/models/precompute3_model_pure_python.py`.
+      2.  Navigate to the `commit` method.
+      3.  Find the main processing loop which begins after the line `stats.stop('commit.prune_and_map_gss')`.
+      4.  You will replace the logic for queueing and processing work items. The current implementation uses a simple queue and a `visited_q_items` set, which is incorrect.
+      5.  Replace the block of code from `new_states: ...` down to the end of the `while q:` loop with the new implementation below. This new logic uses a `work_map` dictionary to correctly merge GSSs for the same `(offset, tokenizer_sid)` state, ensuring that each state is processed only once with the combined GSS from all paths leading to it.
+      6.  As part of the change, I will also comment out two `print` statements inside the loop to avoid excessive console output.
+
+      The new logic will be:
+      -   A `work_map: Dict[Tuple[int, int], GSS]` will store the GSS for each unique `(offset, tokenizer_sid)` state.
+      -   A `deque` `q` will store the keys `(offset, tokenizer_sid)` that need to be processed.
+      -   The loop will pop a state from the queue, retrieve its merged GSS from the `work_map`, and process it.
+      -   When a new GSS is generated for a subsequent state, it will be merged into the `work_map`. If the state is new, it will be added to the queue.
+
+      This will make the `commit` method more correct and efficient.
+
+      ### Git Diff
+
+      Here is the git diff for the required changes.
+
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python.py b/python/aug25/models/precompute3_model_pure_python.py
+      index 4554625..27838d7 100644
+      --- a/python/aug25/models/precompute3_model_pure_python.py
+      +++ b/python/aug25/models/precompute3_model_pure_python.py
+      @@ -531,44 +531,43 @@
+       
+               new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
+               stats.start('commit.main_loop')
+      +
+      +        work_map: Dict[Tuple[int, int], GSS] = {}
+               q = collections.deque()
+      +
+               for tokenizer_sid, gss in current_state_for_processing.items():
+      -            q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
+      -
+      -        visited_q_items: set = set()
+      +            key = (0, tokenizer_sid)
+      +            work_map[key] = gss
+      +        q.extend(work_map.keys())
+       
+               while q:
+      -            offset, tokenizer_sid, gss = q.popleft()
+      -            q_item_key = (offset, tokenizer_sid, id(gss))
+      -            if q_item_key in visited_q_items:
+      -                continue
+      -            visited_q_items.add(q_item_key)
+      +            offset, tokenizer_sid = q.popleft()
+      +            gss = work_map.pop((offset, tokenizer_sid))
+       
+                   end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+       
+                   for terminal_id, width in matches:
+      -                print(f"Matched terminal {terminal_id} at offset {offset} with width {width}. GSS before: {gss}")
+      +                # print(f"Matched terminal {terminal_id} at offset {offset} with width {width}. GSS before: {gss}")
+                       processed_gss = self._process_token(gss, terminal_id)
+      -                print(f"GSS after processing terminal {terminal_id}: {processed_gss}")
+      +                # print(f"GSS after processing terminal {terminal_id}: {processed_gss}")
+                       # Immediate re-match disallow
+                       if end_state is not None:
+                           accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
+                           if terminal_id in accessible_terms:
+                               processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
+       
+                       if not processed_gss.is_empty():
+                           new_offset = offset + width
+                           next_tokenizer_sid = self.tokenizer_initial_state
+                           if new_offset == len(token_bytes):
+                               new_states[next_tokenizer_sid].append(processed_gss)
+                           else:
+      -                        q.append((new_offset, next_tokenizer_sid, processed_gss))
+      +                        key = (new_offset, next_tokenizer_sid)
+      +                        existing_gss = work_map.get(key)
+      +                        if existing_gss is None:
+      +                            work_map[key] = processed_gss
+      +                            q.append(key)
+      +                        else:
+      +                            work_map[key] = existing_gss.merge(processed_gss)
+       
+                   if end_state is not None:
+                       new_states[end_state].append(gss)
+               stats.stop('commit.main_loop')
+       
+               stats.start('commit.merge_states')
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python.py.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Correct GSS processing queue in commit
+      by using a work_map to merge states"'
     metadata:
 ...

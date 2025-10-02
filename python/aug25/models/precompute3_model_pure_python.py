@@ -474,25 +474,25 @@ class Model(GraphProvider):
 
         new_states: Dict[int, List[GSS]] = collections.defaultdict(list)
         stats.start('commit.main_loop')
-        q = collections.deque()
-        for tokenizer_sid, gss in current_state_for_processing.items():
-            q.append((0, tokenizer_sid, gss))  # offset, tokenizer_state, gss
 
-        visited_q_items: set = set()
+        work_map: Dict[Tuple[int, int], GSS] = {}
+        q = collections.deque()
+
+        for tokenizer_sid, gss in current_state_for_processing.items():
+            key = (0, tokenizer_sid)
+            work_map[key] = gss
+        q.extend(work_map.keys())
 
         while q:
-            offset, tokenizer_sid, gss = q.popleft()
-            q_item_key = (offset, tokenizer_sid, id(gss))
-            if q_item_key in visited_q_items:
-                continue
-            visited_q_items.add(q_item_key)
+            offset, tokenizer_sid = q.popleft()
+            gss = work_map.pop((offset, tokenizer_sid))
 
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
 
             for terminal_id, width in matches:
-                print(f"Matched terminal {terminal_id} at offset {offset} with width {width}. GSS before: {gss}")
+                # print(f"Matched terminal {terminal_id} at offset {offset} with width {width}. GSS before: {gss}")
                 processed_gss = self._process_token(gss, terminal_id)
-                print(f"GSS after processing terminal {terminal_id}: {processed_gss}")
+                # print(f"GSS after processing terminal {terminal_id}: {processed_gss}")
                 # Immediate re-match disallow
                 if end_state is not None:
                     accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
@@ -505,7 +505,13 @@ class Model(GraphProvider):
                     if new_offset == len(token_bytes):
                         new_states[next_tokenizer_sid].append(processed_gss)
                     else:
-                        q.append((new_offset, next_tokenizer_sid, processed_gss))
+                        key = (new_offset, next_tokenizer_sid)
+                        existing_gss = work_map.get(key)
+                        if existing_gss is None:
+                            work_map[key] = processed_gss
+                            q.append(key)
+                        else:
+                            work_map[key] = existing_gss.merge(processed_gss)
 
             if end_state is not None:
                 new_states[end_state].append(gss)
