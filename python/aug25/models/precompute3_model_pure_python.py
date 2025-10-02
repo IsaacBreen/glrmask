@@ -1210,8 +1210,8 @@ class Model(GraphProvider):
 
         stats.stop('get_mask')
 
-        stats.report()
-        stats.reset()
+        # stats.report()
+        # stats.reset()
 
         return original_indices
 
