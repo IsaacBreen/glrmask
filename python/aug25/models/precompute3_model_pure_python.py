@@ -565,7 +565,7 @@ class Model(GraphProvider):
                 continue
             action = row.actions.get(terminal_id)
             print("action:", action)
-            if not action is None:
+            if action is None:
                 continue
 
             def handle_shift(shift_to_state_id, gss_to_shift):
