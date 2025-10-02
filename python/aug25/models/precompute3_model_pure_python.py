@@ -95,7 +95,6 @@ class DFAState:
     transitions: Dict[int, int] = field(default_factory=dict)
     finalizers: Set[int] = field(default_factory=set)
     possible_future_group_ids: Set[int] = field(default_factory=set)
-    group_id_to_u8set: Dict[int, TerminalIdSet] = field(default_factory=dict)
 
 @dataclass
 class PyTokenizer:
@@ -412,30 +411,15 @@ class Model(GraphProvider):
         # Load tokenizer DFA from JSON
         dfa_data = data['tokenizer']['dfa']
         dfa_states = []
+        print("data['tokenizer']:")
+        print(data['tokenizer'])
         for state_data in dfa_data['states']:
-            print(state_data)
-            transitions_json = state_data['transitions']
-            # The 'data' field of the TrieMap JSON contains string keys for byte values.
-            transitions = {int(k): v for k, v in transitions_json.get('data', {}).items()}
-
-            group_id_to_u8set_json = state_data.get('group_id_to_u8set', [])
-            group_id_to_u8set = {}
-            for group_id, u8set_ranges in group_id_to_u8set_json:
-                u8set_ranges2 = []
-                for r in u8set_ranges:
-                    if isinstance(r, list):
-                        u8set_ranges2.append(r)
-                    elif isinstance(r, int):
-                        u8set_ranges2.append([r, r])
-                    else:
-                        raise ValueError(f"Invalid range value: {r}")
-                group_id_to_u8set[group_id] = TerminalIdSet.from_ranges(u8set_ranges2)
-
+            transitions_data = state_data['transitions']['data']
+            transitions = {int(k): v for k, v in transitions_data.items()}
             dfa_states.append(DFAState(
                 transitions=transitions,
                 finalizers=set(state_data['finalizers']),
-                possible_future_group_ids=set(state_data['possible_future_group_ids']),
-                group_id_to_u8set=group_id_to_u8set
+                possible_future_group_ids=set(state_data['possible_future_group_ids'])
             ))
 
         tokenizer = PyTokenizer(
