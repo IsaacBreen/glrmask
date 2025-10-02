@@ -5,9 +5,8 @@ program ::= statement_list? EOF;
 EOF ::= '<|EOF|>';
 
 // --- Lexical Grammar (Unchanged) ---
-IGNORE ::= ( WS | COMMENT )+ ;
+IGNORE ::= WS+ ;
 WS ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
-COMMENT ::= '//' ( [^\n\r] )* ; // Only single-line comments for simplicity
 
 // --- Statements (Simplified) ---
 statement_list ::= statement+ ;
@@ -33,23 +32,6 @@ parameter_list ::= IDENTIFIER ( ',' IDENTIFIER )* ;
 return_statement ::= 'return' expression? ';'? ;
 
 // --- Expressions (Heavily Simplified & Collapsed Precedence) ---
-expression ::= equality_expression ( '=' expression )? ; // Assignment is lowest precedence
-
-equality_expression ::= additive_expression ( ( '==' | '!=' | '<' | '>' ) additive_expression )* ;
-
-additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
-
-multiplicative_expression ::= unary_expression ( ( '*' | '/' ) unary_expression )* ;
-
-unary_expression ::= ( '!' | '-' ) unary_expression | call_expression ;
-
-call_expression ::= primary_expression ( '(' arguments? ')' | '.' IDENTIFIER )* ;
-arguments ::= ( expression ( ',' expression )* )? ;
-
-primary_expression ::=
-    'this'
-  | IDENTIFIER
-  | '(' expression ')'
-  ;
+expression ::= IDENTIFIER;
 
 IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
