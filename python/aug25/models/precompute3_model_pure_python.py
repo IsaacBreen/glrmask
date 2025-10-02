@@ -1053,8 +1053,7 @@ class Model(GraphProvider):
                             stats.inc('get_mask.main_loop.edge.skipped_by_final_only')
                             start_dest_idx = 0
                             continue
-
-                # popn + intersect-and-prune (with final_mask subtraction) per pop value (cache within this node pop)
+                # popn per pop value (cache within this node pop). Do NOT prune here; pruning is edge-specific.
                 if pop not in pop_cache or pop_cache[pop][0] is None:
                     stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
                     stats.start('get_mask.main_loop.edge.popn')
@@ -1067,48 +1066,7 @@ class Model(GraphProvider):
                         # This edge cannot produce children; resume at next edge
                         start_dest_idx = 0
                         continue
-
-                    # Per-edge memo with final_mask_version in key to avoid stale cache
-                    id_memo: Dict[Tuple[int, int], Optional[PyAcc]] = {}
-                    def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
-                        key = (id(acc), final_mask_version)
-                        cached = id_memo.get(key, None) if key in id_memo else None
-                        if key in id_memo:
-                            return cached
-                        p = 'get_mask.main_loop.edge.intersect_and_prune'
-                        stats.inc(f'{p}.calls')
-                        # Intersect with llm_bv
-                        stats.start(f'{p}.intersection')
-                        new_mask = acc.llm_mask.intersection(llm_bv)
-                        stats.stop(f'{p}.intersection')
-                        if new_mask.is_empty():
-                            stats.inc(f'{p}.pruned_accs')
-                            id_memo[key] = None
-                            return None
-                        # Subtract final_mask to avoid re-propagating already-known tokens
-                        if not final_mask.is_empty():
-                            # We intentionally do not record timing for difference to keep existing stats stable
-                            reduced_mask = new_mask.difference(final_mask)
-                            if reduced_mask.is_empty():
-                                stats.inc(f'{p}.pruned_accs')
-                                id_memo[key] = None
-                                return None
-                            new_mask = reduced_mask
-                        result = PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
-                        id_memo[key] = result
-                        return result
-
-                    stats.start('get_mask.main_loop.edge.apply_and_prune')
-                    popped = popped.apply_and_prune(intersect_and_prune)
-                    stats.stop('get_mask.main_loop.edge.apply_and_prune')
-
-                    if popped.is_empty():
-                        stats.inc('get_mask.traversal.edge.popped_pruned_empty')
-                        pop_cache[pop] = (None, None, None)
-                        start_dest_idx = 0
-                        continue
-
-                    # Prepare peek info, both as list and RangeSetStates for fast set ops
+                    # Prepare unfiltered peek info for fast set ops; pruning is done per-edge later.
                     peeked_list = popped.peek()
                     peeked_rs = RangeSetStates.from_indices(peeked_list) if peeked_list else RangeSetStates.from_indices([])
                     pop_cache[pop] = (popped, peeked_list, peeked_rs)
@@ -1138,6 +1096,50 @@ class Model(GraphProvider):
                     start_dest_idx = 0
                     continue
 
+                # Now perform edge-specific pruning by intersecting with this edge's llm_bv
+                # and subtracting already-known final_mask. This must NOT be cached across edges.
+                # Per-edge memo with final_mask_version in key to avoid stale cache
+                id_memo: Dict[Tuple[int, int], Optional[PyAcc]] = {}
+                def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
+                    key = (id(acc), final_mask_version)
+                    if key in id_memo:
+                        return id_memo[key]
+                    p = 'get_mask.main_loop.edge.intersect_and_prune'
+                    stats.inc(f'{p}.calls')
+                    # Intersect with llm_bv
+                    stats.start(f'{p}.intersection')
+                    new_mask = acc.llm_mask.intersection(llm_bv)
+                    stats.stop(f'{p}.intersection')
+                    if new_mask.is_empty():
+                        stats.inc(f'{p}.pruned_accs')
+                        id_memo[key] = None
+                        return None
+                    # Subtract final_mask to avoid re-propagating already-known tokens
+                    if not final_mask.is_empty():
+                        # We intentionally do not record timing for difference to keep existing stats stable
+                        reduced_mask = new_mask.difference(final_mask)
+                        if reduced_mask.is_empty():
+                            stats.inc(f'{p}.pruned_accs')
+                            id_memo[key] = None
+                            return None
+                        new_mask = reduced_mask
+                    result = PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
+                    id_memo[key] = result
+                    return result
+
+                stats.start('get_mask.main_loop.edge.apply_and_prune')
+                popped_filtered = popped.apply_and_prune(intersect_and_prune)
+                stats.stop('get_mask.main_loop.edge.apply_and_prune')
+
+                if popped_filtered.is_empty():
+                    stats.inc('get_mask.traversal.edge.popped_pruned_empty')
+                    start_dest_idx = 0
+                    continue
+
+                # Prepare filtered peek info, both as list and RangeSetStates for fast set ops
+                peeked_list = popped_filtered.peek()
+                peeked_rs = RangeSetStates.from_indices(peeked_list) if peeked_list else RangeSetStates.from_indices([])
+
                 # Traverse dests; spawn at most a single child per pop cycle to push end discovery earlier
                 child_spawned = False
                 dests_len = len(dests)
@@ -1160,9 +1162,9 @@ class Model(GraphProvider):
 
                     stats.start('get_mask.main_loop.edge.isolate_many')
                     if len(indices) == 1:
-                        child_gss = popped.isolate(indices[0])
+                        child_gss = popped_filtered.isolate(indices[0])
                     else:
-                        child_gss = popped.isolate_many(indices)
+                        child_gss = popped_filtered.isolate_many(indices)
                     stats.stop('get_mask.main_loop.edge.isolate_many')
 
                     if child_gss.is_empty():
