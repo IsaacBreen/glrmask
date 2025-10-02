@@ -2801,6 +2801,9 @@ impl<'r> Precomputer0<'r> {
 
                             if edge_bv.is_empty() { continue; }
 
+                            // NOTE: It is likely wrong to just use disallowed_tokenizer_state_info as-is here.
+                            //  The actual disallowed state can vary by LLM token. But we don't capture that here.
+                            //  We're doing it in a way that's local to the segment. This is wrong.
                             let edge_key = Some((terminal_id, disallowed_tokenizer_state_info));
                             let mut inserter = EdgeInserter::new(
                                 &self.trie0_god,
