@@ -811,24 +811,29 @@ class Model(GraphProvider):
                 best = md.get(int(dests[0][0]), 0) if dests else -1
                 return (-best, pop)
             node.children.sort(key=_edge_key)
-
     def get_mask(self) -> LLMTokenSet:
         """
-        Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
-        This implementation uses a Depth-First Search (DFS) traversal strategy.
+        Fully DFS traversal to compute the final LLM token mask.
+
+        Algorithm:
+        - Seed each active tokenizer state's GSS with allowed LLM token masks derived from disallowed terminals.
+        - Perform an explicit-stack DFS over trie nodes:
+            * At each node, union reduced llm_mask into final_mask if it's an end node.
+            * Use a visited map keyed by (node_id, tuple(sorted(GSS heads))) -> explored_mask to avoid re-exploring
+              the same structural GSS for tokens already explored at that node. Only unexplored tokens are propagated.
+            * On edges, pop GSS frames (popn), intersect per-acc llm_mask with the edge's llm_bv, prune empties,
+              filter by destination state bitsets, and push resulting child GSS onto the DFS stack.
+            * Use the zombie-path check to avoid traversing branches that cannot contribute new tokens.
+        - Convert internal token IDs in final_mask to original IDs at the end.
         """
         stats = Stats.get()
         stats.start('get_mask')
+
         state_map: Dict[int, GSS] = self.state
         stats.inc('get_mask.initial_tokenizer_states', len(state_map))
 
         all_ones: LLMTokenSet = self.all_internal_llm_tokens_bitset
         final_mask: LLMTokenSet = RangeSet.empty()
-
-        # Worklist for DFS traversal. `values` stores merged GSSs for nodes.
-        values: Dict[NodeID, GSS] = {}
-        stack: List[NodeID] = []
-        enqueued_nodes: Set[NodeID] = set()
 
         roots_map: Dict[int, NodeID] = self.roots_map
         max_depth: Dict[NodeID, int] = self.max_depth
@@ -841,7 +846,6 @@ class Model(GraphProvider):
         stats.start('get_mask.initial_stats')
         all_initial_accs = set()
         for gss in state_map.values():
-            # We assume gss.get_all_accs() exists for stats gathering.
             accs = getattr(gss, 'get_all_accs', lambda: [])()
             all_initial_accs.update(accs)
             stats.inc('get_mask.initial.gss_heads.sum', len(gss.peek()))
@@ -850,19 +854,15 @@ class Model(GraphProvider):
             stats.inc('get_mask.initial.terminals_union_size.sum', len(acc.terminals_union))
         stats.stop('get_mask.initial_stats')
 
-
+        # --- Seeding: initialize llm_mask from disallowed terminals ---
         stats.start('get_mask.seeding')
-        # Seed: Initialize llm_mask in each GSS, consume terminals_union, and prepare root nodes.
+
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
-            if False:  # placeholder to keep minimal diff context; decorator handles memoization
-                if cached_acc is not None:
-                    return cached_acc
-
             p = 'get_mask.seeding.initialize_acc'
             stats.inc(f'{p}.calls')
             stats.start(f'{p}.total')
-            # Compute allowed LLM tokens from disallowed terminals for this accumulator
+
             disallowed_llm_mask: LLMTokenSet = RangeSet.empty()
             disallowed_map = acc.terminals_union
             stats.inc(f'{p}.disallowed_map_size.sum', len(disallowed_map))
@@ -881,7 +881,7 @@ class Model(GraphProvider):
                     stats.inc(f'{p}.disallowed_terminals_inner_loops')
                     if terminal_id in terminals_to_llm:
                         stats.start(f'{p}.union')
-                        disallowed_llm_mask |= terminals_to_llm[terminal_id]
+                        disallowed_llm_mask = disallowed_llm_mask.union(terminals_to_llm[terminal_id])
                         stats.stop(f'{p}.union')
 
             stats.start(f'{p}.difference')
@@ -889,14 +889,13 @@ class Model(GraphProvider):
             stats.stop(f'{p}.difference')
 
             stats.stop(f'{p}.total')
-            result = PyAcc(
-                terminals_union={},  # consume
+            return PyAcc(
+                terminals_union={},  # consume terminals_union
                 llm_mask=allowed_mask,
             )
-            return result
 
-        root_gsses: Dict[NodeID, GSS] = {}
         cache = {}
+        root_gss_map: Dict[NodeID, GSS] = {}
         for sid, gss in state_map.items():
             stats.inc('get_mask.seeding.gss_loops')
             r: NodeID = roots_map[int(sid)]
@@ -905,64 +904,83 @@ class Model(GraphProvider):
             gss_initialized: GSS = gss.apply(initialize_acc, cache)
             stats.stop('get_mask.seeding.gss.apply')
 
-            if r in root_gsses:
+            if r in root_gss_map:
                 stats.start('get_mask.seeding.gss.merge')
-                root_gsses[r] = root_gsses[r].merge(gss_initialized)
+                root_gss_map[r] = root_gss_map[r].merge(gss_initialized)
                 stats.stop('get_mask.seeding.gss.merge')
             else:
-                root_gsses[r] = gss_initialized
-
-        # Sort roots by max_depth (ascending) to have deeper paths at the top of the stack.
-        # This makes the traversal behave more like a classic recursive DFS.
-        sorted_roots = sorted(root_gsses.keys(), key=lambda r: max_depth.get(r, 0))
-
-        for r in sorted_roots:
-            gss = root_gsses[r]
-            if not gss.is_empty():
-                values[r] = gss
-                if r not in enqueued_nodes:
-                    stack.append(r)
-                    enqueued_nodes.add(r)
+                root_gss_map[r] = gss_initialized
         stats.stop('get_mask.seeding')
 
-        # Main DFS loop
+        # --- DFS traversal ---
         stats.start('get_mask.main_loop')
+        stack: List[Tuple[NodeID, GSS]] = [(node_id, gss) for node_id, gss in root_gss_map.items()]
+        visited_nodes: Set[NodeID] = set()
         max_depth_reached = 0
-        visited_nodes = set()
+
+        # Visited map: (node_id, heads_tuple) -> explored_mask
+        visited: Dict[Tuple[NodeID, Tuple[int, ...]], LLMTokenSet] = {}
+
+        def make_restrict_mutator(extra_mask: LLMTokenSet):
+            @_acc_memoize(use_value_cache=False)
+            def restrict(acc: PyAcc) -> Optional[PyAcc]:
+                new_mask = acc.llm_mask.intersection(extra_mask)
+                if new_mask.is_empty():
+                    return None
+                return PyAcc(terminals_union=acc.terminals_union, llm_mask=new_mask)
+            return restrict
+
         while stack:
-            node = stack.pop()
-            depth = max_depth.get(node, 0)
-            max_depth_reached = max(max_depth_reached, depth)
-            stats.inc('get_mask.traversal.stack.pops')
-            stats.inc('get_mask.traversal.nodes_processed')
-            visited_nodes.add(node)
+            node, gss_node = stack.pop()
 
-            if node not in values:
+            if gss_node.is_empty():
                 continue
-            gss_node: GSS = values.pop(node)
-            enqueued_nodes.remove(node)
-            stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
 
-            # End-node handling: just union the allowed LLM tokens
+            visited_nodes.add(node)
+            depth_here = max_depth.get(node, 0)
+            if depth_here > max_depth_reached:
+                max_depth_reached = depth_here
+
+            stats.inc('get_mask.traversal.nodes_processed')
+
+            # Compute current mask summary and dedup using visited
+            reduced_acc = gss_node.reduce_acc()
+            if reduced_acc.is_empty():
+                continue
+            current_mask = reduced_acc.llm_mask
+
+            heads_tuple = tuple(sorted(gss_node.peek()))
+            vkey = (node, heads_tuple)
+            explored_mask = visited.get(vkey, RangeSet.empty())
+
+            # Only propagate tokens not yet explored for this (node, heads)
+            extra_mask = current_mask.difference(explored_mask)
+            if extra_mask.is_empty():
+                continue
+
+            # Update visited before exploring to prevent cycles
+            visited[vkey] = explored_mask.union(current_mask)
+
+            # Restrict current GSS to the yet-unexplored portion of mask
+            restrict_fn = make_restrict_mutator(extra_mask)
+            gss_restricted = gss_node.apply_and_prune(restrict_fn)
+            if gss_restricted.is_empty():
+                continue
+
+            # If this is an end node, accumulate tokens
             if is_end(node):
                 stats.inc('get_mask.traversal.end_nodes')
-                stats.start('get_mask.main_loop.end_node.reduce_acc')
-                reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
-                stats.stop('get_mask.main_loop.end_node.reduce_acc')
-                if reduced_acc:
-                    stats.start('get_mask.main_loop.end_node.final_mask_union')
-                    final_mask |= reduced_acc.llm_mask
-                    stats.stop('get_mask.main_loop.end_node.final_mask_union')
+                end_acc = gss_restricted.reduce_acc()
+                if not end_acc.is_empty():
+                    final_mask = final_mask.union(end_acc.llm_mask)
 
-            # Zombie traversal avoidance: if this node's edges can't possibly add
-            # to the final mask given the current GSS mask, skip it.
+            # Zombie-path check against union of outgoing edge masks
             a_node = arena.get(node)
             node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-            if self._is_zombie_path(gss_node, node_llm_bv_union, final_mask, 'node'):
+            if self._is_zombie_path(gss_restricted, node_llm_bv_union, final_mask, 'node'):
                 continue
 
-            # Traverse edges and propagate masks
-            a_node = arena.get(node)
+            # Traverse edges in DFS order
             edges = a_node.children if a_node else []
             stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
             stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
@@ -970,8 +988,9 @@ class Model(GraphProvider):
             for (pop, llm_bv), dests in edges:
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
+
                 stats.start('get_mask.main_loop.edge.popn')
-                popped: GSS = gss_node.popn(pop)
+                popped: GSS = gss_restricted.popn(pop)
                 stats.stop('get_mask.main_loop.edge.popn')
                 if popped.is_empty():
                     stats.inc('get_mask.traversal.edge.popped_empty')
@@ -1002,6 +1021,7 @@ class Model(GraphProvider):
                     continue
 
                 peeked = popped.peek()
+
                 for dest_idx, state_bv in dests:
                     stats.inc('get_mask.traversal.dests_traversed')
 
@@ -1024,25 +1044,14 @@ class Model(GraphProvider):
                         continue
 
                     d: NodeID = int(dest_idx)
-                    if d in values:
-                        stats.inc('get_mask.traversal.edge.gss_merges')
-                        stats.start('get_mask.main_loop.edge.gss_merge')
-                        values[d] = values[d].merge(child_gss)
-                        stats.stop('get_mask.main_loop.edge.gss_merge')
-                    else:
-                        values[d] = child_gss
-
-                    if d not in enqueued_nodes:
-                        stats.inc('get_mask.traversal.enqueues')
-                        stack.append(d)
-                        enqueued_nodes.add(d)
+                    stack.append((d, child_gss))
 
         stats.stop('get_mask.main_loop')
         stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
         stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
 
-        stats.start('get_mask.final_conversion')
         # Convert internal mask back to original IDs
+        stats.start('get_mask.final_conversion')
         original_indices = RangeSetOut.empty()
         for i in final_mask.iter_indices():
             if i in self.internal_to_original_map:
