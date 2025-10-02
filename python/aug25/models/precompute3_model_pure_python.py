@@ -411,6 +411,8 @@ class Model(GraphProvider):
         # Load tokenizer DFA from JSON
         dfa_data = data['tokenizer']['dfa']
         dfa_states = []
+        print("data['tokenizer']:")
+        print(data['tokenizer'])
         for state_data in dfa_data['states']:
             # The transitions in JSON are a list of [key, value] pairs
             transitions = {t[0]: t[1] for t in state_data['transitions']}
