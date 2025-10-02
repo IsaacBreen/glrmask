@@ -454,10 +454,10 @@ impl Default for GrammarConstraintConfig {
             optimize_trie2_gc: true,
             skip_precomputation: false,
             optimize_trie3_constrain_bitvecs: true,
-            optimize_trie1_merge_equivalent_llm_tokens: false,
-            optimize_trie1_reorder_llm_tokens: false,
-            optimize_trie3_merge_equivalent_llm_tokens: false,
-            optimize_trie3_reorder_llm_tokens: false,
+            optimize_trie1_merge_equivalent_llm_tokens: true,
+            optimize_trie1_reorder_llm_tokens: true,
+            optimize_trie3_merge_equivalent_llm_tokens: true,
+            optimize_trie3_reorder_llm_tokens: true,
         }
     }
 }
