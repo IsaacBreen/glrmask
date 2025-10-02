@@ -1,4 +1,5 @@
-#![ignore(WS)]
-program ::= 'a'? 'EOF';
-WS ::= W+ ;
-W ::=  'b'+ ;
+#![ignore(IGNORE)]
+program ::= IDENTIFIER+ EOF ;
+EOF ::= '<|EOF|>' ;
+IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
+IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
