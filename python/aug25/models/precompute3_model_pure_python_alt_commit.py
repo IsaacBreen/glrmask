@@ -111,10 +111,13 @@ class Model(_Model):
         terminal_map_by_llm = parse_dedup_map(data['terminal_map_by_llm'], parse_terminal_map_value)
         state_map_by_llm = parse_dedup_map(data['state_map_by_llm'], parse_state_map_value)
 
+        # This model's commit logic is based on precompute0, so we must use its vocab.
+        vocab0 = data['precompute0_vocab']
+        internal_to_original_map0_raw = dict(vocab0['internal_to_original'])
         original_to_internal_map = {}
-        for internal, original_bv in base_model.internal_to_original_map.items():
-            for original in original_bv.iter_indices():
-                original_to_internal_map[original] = internal
+        for internal, original_list in internal_to_original_map0_raw.items():
+            for original in original_list:
+                original_to_internal_map[original] = int(internal)
 
         # Construct the final model using all fields from the base model plus the new ones
         return Model(

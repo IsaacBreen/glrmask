@@ -265,7 +265,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
     pub fn dump_precomputed1(&self) {
         GrammarConstraint::_dump_precomputed(
             &self.precomputed1,
-            &self.llm_vocab.original_to_internal_id_bimap,
+            &self.precompute_vocab1.original_to_internal,
             &self.token_name_map,
             &self.llm_vocab.llm_token_map,
             &self.trie1_god,
@@ -355,7 +355,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
     pub fn dump_precomputed2(&self) {
         GrammarConstraint::_dump_precomputed2(
             &self.precomputed2,
-            &self.llm_vocab.original_to_internal_id_bimap,
+            &self.precompute2_vocab.original_to_internal,
             &self.llm_vocab.llm_token_map,
             &self.trie2_god,
         );
@@ -401,7 +401,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
     pub fn dump_precomputed3(&self) {
         GrammarConstraint::_dump_precomputed3(
             &self.precomputed3,
-            &self.llm_vocab.original_to_internal_id_bimap,
+            &self.precompute3_vocab.original_to_internal,
             &self.llm_vocab.llm_token_map,
             &self.trie3_god,
         );
