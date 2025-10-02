@@ -489,6 +489,10 @@ impl PyGrammarConstraint {
         Ok(top.to_json_string())
     }
 
+    fn dump_precomputed0(&self) {
+        self.inner.dump_precomputed0();
+    }
+
     fn dump_precomputed3(&self) {
         self.inner.dump_precomputed3();
     }
