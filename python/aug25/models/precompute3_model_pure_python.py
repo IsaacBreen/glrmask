@@ -430,7 +430,7 @@ class Model(GraphProvider):
         for state_data in dfa_data['states']:
             # The transitions in JSON are a list of [key, value] pairs
             # Cast both key and value to ints to mirror Rust's u8->usize mapping
-            transitions = {int(t[0]): int(t[1]) for t in state_data['transitions']}
+            transitions = {ord(t[0]): ord(t[1]) for t in state_data['transitions']}
             dfa_states.append(DFAState(
                 transitions=transitions,
                 finalizers=set(int(x) for x in state_data['finalizers']),
