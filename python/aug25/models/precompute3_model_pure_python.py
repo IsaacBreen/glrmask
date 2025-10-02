@@ -496,7 +496,9 @@ class Model(GraphProvider):
                 # Immediate re-match disallow
                 if end_state is not None:
                     accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
+                    print(f"Accessible terminals from end state {end_state}: {accessible_terms}")
                     if terminal_id in accessible_terms:
+                        print(f"Disallowing immediate re-match of terminal {terminal_id} in state {end_state}")
                         processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
 
                 if not processed_gss.is_empty():

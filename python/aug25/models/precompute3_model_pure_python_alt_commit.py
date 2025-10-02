@@ -223,6 +223,7 @@ class Model(_Model):
                         if disallow_opt is not None and not processed_gss.is_empty():
                             end_state = disallow_opt
                             term_id = gtid
+                            print(f"Disallowing terminal {term_id} in state {end_state}")
                             processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, term_id)
 
                     if not processed_gss.is_empty():
