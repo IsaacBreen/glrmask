@@ -108,40 +108,40 @@ class PyTokenizer:
         def _format_transitions(transitions: Dict[int, int]) -> str:
             if not transitions:
                 return ""
-
+            
             # Group transitions by destination state
             grouped_by_dest = collections.defaultdict(list)
             for byte, dest in transitions.items():
                 grouped_by_dest[dest].append(byte)
 
             parts = []
-            for dest, bytes_list in sorted(grouped_by_dest.items()):
+            for dest, bytes_list in grouped_by_dest.items():
                 bytes_list.sort()
                 ranges = []
                 if not bytes_list:
                     continue
-
+                
                 start = bytes_list[0]
                 end = bytes_list[0]
-
+                
                 for i in range(1, len(bytes_list)):
                     if bytes_list[i] == end + 1:
                         end = bytes_list[i]
                     else:
                         if start == end:
-                            ranges.append(repr(bytes([start])))
+                            ranges.append(str(start))
                         else:
-                            ranges.append(f"{repr(bytes([start]))}..{repr(bytes([end]))}")
+                            ranges.append(f"{start}-{end}")
                         start = bytes_list[i]
                         end = bytes_list[i]
-
+                
                 if start == end:
-                    ranges.append(repr(bytes([start])))
+                    ranges.append(str(start))
                 else:
-                    ranges.append(f"{repr(bytes([start]))}..{repr(bytes([end]))}")
-
-                parts.append(f"on {', '.join(ranges)} -> state {dest}")
-
+                    ranges.append(f"{start}-{end}")
+                
+                parts.append(f"[{', '.join(ranges)}] -> {dest}")
+            
             return "Transitions: " + "; ".join(parts)
 
         lines = [
@@ -171,6 +171,7 @@ class PyTokenizer:
     def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
         current_state = state_id
         matches = {}
+        done = False
 
         # Check for initial matches (epsilon)
         initial_state_data = self.states[current_state]
@@ -179,16 +180,6 @@ class PyTokenizer:
                 matches.setdefault(group_id, 0)
             else:
                 matches[group_id] = 0
-
-        # If the start state has no transitions, it can't consume any input.
-        if not initial_state_data.transitions:
-            # If there's input, we fail to consume it.
-            # If there's no input, we successfully did nothing.
-            end_state = None if text else current_state
-            result_matches = [(gid, width) for gid, width in matches.items() if width > 0]
-            return end_state, result_matches
-
-        done = False
 
         for i, byte in enumerate(text):
             state_data = self.states[current_state]
@@ -207,21 +198,6 @@ class PyTokenizer:
                     matches.setdefault(group_id, i + 1)
                 else:
                     matches[group_id] = i + 1
-
-            # Early termination logic from Rust
-            matched = set(matches.keys())
-            excluded = matched.intersection(self.non_greedy_finalizers)
-            possible_futures = self.states[current_state].possible_future_group_ids
-            # `not set` is True for empty set
-            should_terminate = not (possible_futures - excluded)
-
-            if should_terminate:
-                done = True
-                break
-        
-        # if loop finished, check if final state is terminal (has no outgoing transitions)
-        if not done and not self.states[current_state].transitions:
-            done = True
         
         end_state = None if done else current_state
         
