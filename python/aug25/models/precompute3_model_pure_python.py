@@ -293,6 +293,7 @@ class Model(GraphProvider):
 
         parser_data = data['parser']
         table_data = parser_data['stage_7_table']
+        print(table_data)
         start_state_id = parser_data['start_state_id']
         py_table: Dict[int, Row] = {}
         for state_id_str, row_data in table_data:
@@ -345,10 +346,6 @@ class Model(GraphProvider):
             all_terminals.add(ignore_terminal_id)
         all_terminals_bitset = RangeSet.from_indices(list(all_terminals))
 
-        initial_acc = PyAcc(terminals_union={}, llm_mask=RangeSet.empty())
-        initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
-        state = {tokenizer_initial_state: initial_gss}
-
         id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
         # Convert possible_matches_cache to RangeSet
         pmc_ffi: Dict[int, Dict[int, ffi.Bitset]] = constraint.possible_matches()
@@ -367,6 +364,10 @@ class Model(GraphProvider):
         }
         internal_max = vocab['internal_max_llm_token']
         all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, internal_max)])
+
+        initial_acc = PyAcc(terminals_union={}, llm_mask=all_internal_llm_tokens_bitset)
+        initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
+        state = {tokenizer_initial_state: initial_gss}
 
         model = Model(
             arena=arena,
@@ -491,8 +492,9 @@ class Model(GraphProvider):
             print(f"Offset {offset}, Tokenizer State {tokenizer_sid}, GSS Heads {len(gss.peek())}, Matches: {matches}, End State: {end_state}")
 
             for terminal_id, width in matches:
+                print(gss)
                 processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
-
+                print(processed_gss)
                 # Immediate re-match disallow
                 if end_state is not None:
                     accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
@@ -547,6 +549,8 @@ class Model(GraphProvider):
 
         shifted_gsses: List[GSS] = []
         reduces_handled = 0
+        print(self.parser_table)
+        print(terminal_id)
 
         while heads_by_state:
             stats.inc(f'{p}.loop_iterations')
@@ -554,10 +558,13 @@ class Model(GraphProvider):
             stats.start(f'{p}.merge_many.heads')
             state_gss = GSS.merge_many(state_gsss)
             stats.stop(f'{p}.merge_many.heads')
+            print(state_id)
             row = self.parser_table.table.get(state_id)
+            print(row)
             if not row:
                 continue
             action = row.actions.get(terminal_id)
+            print("action:", action)
             if not action:
                 continue
 
@@ -657,7 +664,8 @@ class Model(GraphProvider):
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
         print("asdfasdf")
-        print(GSS.merge_many(self.state.values()).to_graph_string(upper_only=True))
+        # print(GSS.merge_many(self.state.values()).to_graph_string(upper_only=True))
+        print(GSS.merge_many(self.state.values()))
 
         stats = Stats.get()
         stats.start('get_mask')
