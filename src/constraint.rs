@@ -2745,7 +2745,6 @@ impl<'r> Precomputer0<'r> {
 
                 for (tokenizer_state_id, precompute_nodes) in states_at_pos {
                     let exec_result = self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
-                    println!("Ran tokenizer exec from state {} on segment {:?} (pos {}): {:?}", tokenizer_state_id.0, String::from_utf8_lossy(&segment_bytes[pos..]), pos, exec_result);
 
                     let possible_matches_at_end = if let Some(end_state_val) = exec_result.end_state {
                         self.possible_matches(child_vocab_node, TokenizerStateID(end_state_val))
