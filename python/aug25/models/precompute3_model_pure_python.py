@@ -488,9 +488,10 @@ class Model(GraphProvider):
             gss = work_map.pop((offset, tokenizer_sid))
 
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+            print(f"Ran tokenizer with bytes {token_bytes[offset:]} from state {tokenizer_sid} and got end state {end_state} and matches {matches}")
 
             for terminal_id, width in matches:
-                print(f"Matched terminal {terminal_id} at offset {offset} with width {width}. GSS before: {gss}")
+                print(f"Matched terminal {terminal_id} at offset {offset} with width {width} and tokenizer state {tokenizer_sid}. Got end state {end_state}. GSS before: {gss}")
                 processed_gss = self._process_token(gss, terminal_id)
                 print(f"GSS after processing terminal {terminal_id}: {processed_gss}")
                 # Immediate re-match disallow
