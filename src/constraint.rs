@@ -454,10 +454,10 @@ impl Default for GrammarConstraintConfig {
             optimize_trie2_gc: true,
             skip_precomputation: false,
             optimize_trie3_constrain_bitvecs: true,
-            optimize_trie1_merge_equivalent_llm_tokens: true,
-            optimize_trie1_reorder_llm_tokens: true,
-            optimize_trie3_merge_equivalent_llm_tokens: true,
-            optimize_trie3_reorder_llm_tokens: true,
+            optimize_trie1_merge_equivalent_llm_tokens: false,
+            optimize_trie1_reorder_llm_tokens: false,
+            optimize_trie3_merge_equivalent_llm_tokens: false,
+            optimize_trie3_reorder_llm_tokens: false,
         }
     }
 }
@@ -698,12 +698,12 @@ impl GrammarConstraint {
         original_llm_token_map: &LLMTokenMap,
     ) -> BTreeMap<usize, usize>
     {
-        // // TODO: delete this
-        // let mut original_to_internal_id_bimap = BTreeMap::new();
-        // for (_, id) in original_llm_token_map.iter() {
-        //     original_to_internal_id_bimap.insert(id.0, id.0);
-        // }
-        // return original_to_internal_id_bimap;
+        // TODO: delete this
+        let mut original_to_internal_id_bimap = BTreeMap::new();
+        for (_, id) in original_llm_token_map.iter() {
+            original_to_internal_id_bimap.insert(id.0, id.0);
+        }
+        return original_to_internal_id_bimap;
 
         let mut sorted_tokens_with_original_ids: Vec<(Vec<u8>, LLMTokenID)> = original_llm_token_map
             .iter()
