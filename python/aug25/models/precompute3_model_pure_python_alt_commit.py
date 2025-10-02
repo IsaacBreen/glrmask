@@ -154,6 +154,7 @@ class Model(_Model):
         # state_map = self.state_map_by_llm.get(internal_id, {})
 
         token_bytes = self.id_to_token[token_id]
+        print(f"Token bytes: {token_bytes}")
         terminals_map: Dict[int, TerminalIdSet] = {}
         state_map: Dict[int, int] = {}
         for tokenizer_sid in self.state.keys():
