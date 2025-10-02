@@ -565,7 +565,7 @@ class Model(GraphProvider):
                 continue
             action = row.actions.get(terminal_id)
             print("action:", action)
-            if not action:
+            if not action is None:
                 continue
 
             def handle_shift(shift_to_state_id, gss_to_shift):
@@ -600,7 +600,9 @@ class Model(GraphProvider):
                 raise TypeError(f"Unknown action type: {type(action)}")
 
         stats.start(f'{p}.merge_many.final')
+        print(shifted_gsses)
         result = GSS.merge_many(shifted_gsses)
+        print(result)
         stats.stop(f'{p}.merge_many.final')
         stats.inc(f'{p}.final_heads', len(result.peek()))
         stats.stop(f'{p}.total')
