@@ -126,11 +126,26 @@ class Model(_Model):
             original_to_internal_map=original_to_internal_map
         )
 
+    def copy(self):
+        return Model(
+            state=self.state,
+            arena=self.arena,
+            roots_map=self.roots_map,
+            arena0=self.arena0,
+            roots_map0=self.roots_map0,
+            terminal_map_by_llm=self.terminal_map_by_llm,
+            state_map_by_llm=self.state_map_by_llm,
+            original_to_internal_map=self.original_to_internal_map
+        )
+
     def commit(self, token_id: int):
         """
         Overrides the base `commit` method. This version uses the precomputed0 trie
         to update the GLR state without invoking the tokenizer.
         """
+        self_copy = self.copy()
+        _Model.commit(self_copy, token_id)
+
         stats = Stats.get()
         stats.start('commit_precompute0')
 
@@ -209,6 +224,8 @@ class Model(_Model):
         self.state = {sid: gss for sid, gss in merged_states.items() if not gss.is_empty()}
 
         stats.stop('commit_precompute0')
+
+        assert self.state == self_copy.state
 
 
 __all__ = ['Precompute0Model']
