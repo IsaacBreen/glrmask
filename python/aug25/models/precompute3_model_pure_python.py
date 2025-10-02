@@ -276,6 +276,7 @@ class Model(GraphProvider):
 
     # Tokenizer-related fields
     tokenizer: PyTokenizer
+    _tokenizer: ffi.Tokenizer
     tokenizer_initial_state: int
     tokenizer_max_state: int
     possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
@@ -366,6 +367,8 @@ class Model(GraphProvider):
         glr_parser = constraint.glr_parser()
         ignore_terminal_id = glr_parser.ignore_terminal_id
 
+        _tokenizer = constraint.tokenizer()
+
         parser_data = data['parser']
         table_data = parser_data['stage_7_table']
         # print(table_data)
@@ -452,6 +455,7 @@ class Model(GraphProvider):
             glr_parser=glr_parser,
             reverse_state_map=reverse_state_map,
             tokenizer=tokenizer,
+            _tokenizer=_tokenizer,
             tokenizer_initial_state=tokenizer_initial_state,
             tokenizer_max_state=tokenizer_max_state,
             possible_matches_cache=possible_matches_cache,
@@ -515,6 +519,9 @@ class Model(GraphProvider):
         state_map: Dict[int, int] = {}
         for tokenizer_sid in self.state.keys():
             end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
+            _end_state, _matches = self._tokenizer.execute_from_state(token_bytes, tokenizer_sid)
+            assert end_state == _end_state, f"Tokenizer mismatch on end_state for state {tokenizer_sid}: {end_state} vs {_end_state}"
+            assert sorted(matches) == sorted(_matches), f"Tokenizer mismatch on matches for state {tokenizer_sid}: {matches} vs {_matches}"
             if end_state is not None:
                 state_map[tokenizer_sid] = end_state
             matched_terminals = [terminal_id for terminal_id, _ in matches]
@@ -564,6 +571,9 @@ class Model(GraphProvider):
             gss = work_map.pop((offset, tokenizer_sid))
 
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+            _end_state, _matches = self._tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
+            assert end_state == _end_state, f"Tokenizer mismatch on end_state for state {tokenizer_sid} at offset {offset}: {end_state} vs {_end_state}"
+            assert sorted(matches) == sorted(_matches), f"Tokenizer mismatch on matches for state {tokenizer_sid} at offset {offset}: {matches} vs {_matches}"
             # print(f"Ran tokenizer with bytes {token_bytes[offset:]} from state {tokenizer_sid} and got end state {end_state} and matches {matches}")
 
             for terminal_id, width in matches:
@@ -573,6 +583,7 @@ class Model(GraphProvider):
                 # Immediate re-match disallow
                 if end_state is not None:
                     accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
+                    _accessible_terms = set(self._tokenizer.tokens_accessible_from_state(end_state))
                     # print(f"Accessible terminals from end state {end_state}: {accessible_terms}")
                     if terminal_id in accessible_terms:
                         # print(f"Disallowing immediate re-match of terminal {terminal_id} in state {end_state}")
