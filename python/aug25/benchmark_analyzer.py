@@ -6,10 +6,6 @@ import sys
 import warnings
 
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from matplotlib.colors import to_rgba
-import colorsys
 
 
 # Suppress noisy FutureWarning from seaborn/pandas
@@ -183,6 +179,12 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
     print(f"\nBaseline: {baseline_name}")
     print("✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch")
     sys.stdout.flush()
+
+    # --- Defer slow imports until after summary is printed ---
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from matplotlib.colors import to_rgba
+    import colorsys
 
     # --- Generate Plots ---
     output_dir.mkdir(parents=True, exist_ok=True)
