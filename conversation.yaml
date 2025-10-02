@@ -112,11 +112,11 @@ local_system:
 
           def __repr__(self) -> str:
               """Compact string representation of the tokenizer DFA."""
-              
+
               def _format_transitions(transitions: Dict[int, int]) -> str:
                   if not transitions:
                       return ""
-                  
+
                   # Group transitions by destination state
                   grouped_by_dest = collections.defaultdict(list)
                   for byte, dest in transitions.items():
@@ -128,10 +128,10 @@ local_system:
                       ranges = []
                       if not bytes_list:
                           continue
-                      
+
                       start = bytes_list[0]
                       end = bytes_list[0]
-                      
+
                       for i in range(1, len(bytes_list)):
                           if bytes_list[i] == end + 1:
                               end = bytes_list[i]
@@ -142,14 +142,14 @@ local_system:
                                   ranges.append(f"{start}-{end}")
                               start = bytes_list[i]
                               end = bytes_list[i]
-                      
+
                       if start == end:
                           ranges.append(str(start))
                       else:
                           ranges.append(f"{start}-{end}")
-                      
+
                       parts.append(f"[{', '.join(ranges)}] -> {dest}")
-                  
+
                   return "Transitions: " + "; ".join(parts)
 
               lines = [
@@ -158,17 +158,17 @@ local_system:
 
               for i, state in enumerate(self.states):
                   state_lines = [f"State {i}:"]
-                  
+
                   trans_str = _format_transitions(state.transitions)
                   if trans_str:
                       state_lines.append(trans_str)
-                  
+
                   if state.finalizers:
                       state_lines.append(f"Finalizers: {sorted(list(state.finalizers))}")
-                  
+
                   if state.possible_future_group_ids:
                       state_lines.append(f"Future Groups: {sorted(list(state.possible_future_group_ids))}")
-                  
+
                   if len(state_lines) > 1:
                       lines.append(textwrap.indent("\n".join(state_lines), "  "))
                   else:
@@ -196,9 +196,9 @@ local_system:
                   if next_state is None:
                       done = True
                       break
-                  
+
                   current_state = next_state
-                  
+
                   # Update matches
                   next_state_data = self.states[current_state]
                   for group_id in next_state_data.finalizers:
@@ -206,11 +206,11 @@ local_system:
                           matches.setdefault(group_id, i + 1)
                       else:
                           matches[group_id] = i + 1
-              
+
               end_state = None if done else current_state
-              
+
               result_matches = [(gid, width) for gid, width in matches.items() if width > 0]
-              
+
               return end_state, result_matches
 
           def tokens_accessible_from_state(self, state_id: int) -> List[int]:
@@ -350,7 +350,6 @@ local_system:
 
           # Tokenizer-related fields
           tokenizer: PyTokenizer
-          _tokenizer: ffi.Tokenizer
           tokenizer_initial_state: int
           tokenizer_max_state: int
           possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
@@ -457,11 +456,8 @@ local_system:
               glr_parser = constraint.glr_parser()
               ignore_terminal_id = glr_parser.ignore_terminal_id
 
-              _tokenizer = constraint.tokenizer()
-
               parser_data = data['parser']
               table_data = parser_data['stage_7_table']
-              # print(table_data)
               start_state_id = parser_data['start_state_id']
               py_table: Dict[int, Row] = {}
               for state_id_str, row_data in table_data:
@@ -545,7 +541,6 @@ local_system:
                   glr_parser=glr_parser,
                   reverse_state_map=reverse_state_map,
                   tokenizer=tokenizer,
-                  _tokenizer=_tokenizer,
                   tokenizer_initial_state=tokenizer_initial_state,
                   tokenizer_max_state=tokenizer_max_state,
                   possible_matches_cache=possible_matches_cache,
@@ -609,9 +604,6 @@ local_system:
               state_map: Dict[int, int] = {}
               for tokenizer_sid in self.state.keys():
                   end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  _end_state, _matches = self._tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  assert end_state == _end_state, f"Tokenizer mismatch on end_state for state {tokenizer_sid}: {end_state} vs {_end_state}. Input: {token_bytes}"
-                  assert sorted(matches) == sorted(_matches), f"Tokenizer mismatch on matches for state {tokenizer_sid}: {matches} vs {_matches}. Input: {token_bytes}"
                   if end_state is not None:
                       state_map[tokenizer_sid] = end_state
                   matched_terminals = [terminal_id for terminal_id, _ in matches]
@@ -619,7 +611,6 @@ local_system:
 
               stats.stop('commit.build_tokenizer_maps')
               # Prune and map per-state GSS in a single pass
-              temp_states: Dict[int, GSS] = {}
               stats.start('commit.prune_and_map_gss')
               @_acc_memoize()
               def mutator(acc: PyAcc) -> Optional[PyAcc]:
@@ -661,22 +652,13 @@ local_system:
                   gss = work_map.pop((offset, tokenizer_sid))
 
                   end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-                  _end_state, _matches = self._tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-                  assert end_state == _end_state, f"Tokenizer mismatch on end_state for state {tokenizer_sid} at offset {offset}: {end_state} vs {_end_state}. Input: {token_bytes[offset:]}"
-                  assert sorted(matches) == sorted(_matches), f"Tokenizer mismatch on matches for state {tokenizer_sid} at offset {offset}: {matches} vs {_matches}. Input: {token_bytes[offset:]}"
-                  # print(f"Ran tokenizer with bytes {token_bytes[offset:]} from state {tokenizer_sid} and got end state {end_state} and matches {matches}")
 
                   for terminal_id, width in matches:
-                      # print(f"Matched terminal {terminal_id} at offset {offset} with width {width} and tokenizer state {tokenizer_sid}. Got end state {end_state}. GSS before: {gss}")
                       processed_gss = self._process_token(gss, terminal_id)
-                      # print(f"GSS after processing terminal {terminal_id}: {processed_gss}")
                       # Immediate re-match disallow
                       if end_state is not None:
                           accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
-                          _accessible_terms = set(self._tokenizer.tokens_accessible_from_state(end_state))
-                          # print(f"Accessible terminals from end state {end_state}: {accessible_terms}")
                           if terminal_id in accessible_terms:
-                              # print(f"Disallowing immediate re-match of terminal {terminal_id} in state {end_state}")
                               processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
 
                       if not processed_gss.is_empty():
@@ -712,7 +694,6 @@ local_system:
               # memo = {}
               # merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
               stats.stop('commit.fuse')
-              # print(GSS.merge_many(merged_states.values()).stats())
 
               stats.inc('commit.tokenizer_states_out', len(merged_states))
               self.state = merged_states
@@ -1216,11 +1197,11 @@ local_system:
 
           def __repr__(self) -> str:
               """Compact string representation of the tokenizer DFA."""
-              
+
               def _format_transitions(transitions: Dict[int, int]) -> str:
                   if not transitions:
                       return ""
-                  
+
                   # Group transitions by destination state
                   grouped_by_dest = collections.defaultdict(list)
                   for byte, dest in transitions.items():
@@ -1232,10 +1213,10 @@ local_system:
                       ranges = []
                       if not bytes_list:
                           continue
-                      
+
                       start = bytes_list[0]
                       end = bytes_list[0]
-                      
+
                       for i in range(1, len(bytes_list)):
                           if bytes_list[i] == end + 1:
                               end = bytes_list[i]
@@ -1246,14 +1227,14 @@ local_system:
                                   ranges.append(f"{start}-{end}")
                               start = bytes_list[i]
                               end = bytes_list[i]
-                      
+
                       if start == end:
                           ranges.append(str(start))
                       else:
                           ranges.append(f"{start}-{end}")
-                      
+
                       parts.append(f"[{', '.join(ranges)}] -> {dest}")
-                  
+
                   return "Transitions: " + "; ".join(parts)
 
               lines = [
@@ -1262,17 +1243,17 @@ local_system:
 
               for i, state in enumerate(self.states):
                   state_lines = [f"State {i}:"]
-                  
+
                   trans_str = _format_transitions(state.transitions)
                   if trans_str:
                       state_lines.append(trans_str)
-                  
+
                   if state.finalizers:
                       state_lines.append(f"Finalizers: {sorted(list(state.finalizers))}")
-                  
+
                   if state.possible_future_group_ids:
                       state_lines.append(f"Future Groups: {sorted(list(state.possible_future_group_ids))}")
-                  
+
                   if len(state_lines) > 1:
                       lines.append(textwrap.indent("\n".join(state_lines), "  "))
                   else:
@@ -1300,9 +1281,9 @@ local_system:
                   if next_state is None:
                       done = True
                       break
-                  
+
                   current_state = next_state
-                  
+
                   # Update matches
                   next_state_data = self.states[current_state]
                   for group_id in next_state_data.finalizers:
@@ -1310,11 +1291,11 @@ local_system:
                           matches.setdefault(group_id, i + 1)
                       else:
                           matches[group_id] = i + 1
-              
+
               end_state = None if done else current_state
-              
+
               result_matches = [(gid, width) for gid, width in matches.items() if width > 0]
-              
+
               return end_state, result_matches
 
           def tokens_accessible_from_state(self, state_id: int) -> List[int]:
@@ -1793,6 +1774,10 @@ local_system:
               stats.stop('commit.merge_states')
 
               stats.start('commit.fuse')
+              # memo = {}
+              # merged_states = {tsid: gss.fuse("to_interface", memo) for tsid, gss in merged_states.items()}
+              # memo = {}
+              # merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
               stats.stop('commit.fuse')
 
               stats.inc('commit.tokenizer_states_out', len(merged_states))
@@ -1929,6 +1914,9 @@ local_system:
               - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
               - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
               """
+              # print(GSS.merge_many(self.state.values()).to_graph_string(upper_only=True))
+              # print(GSS.merge_many(self.state.values()))
+
               stats = Stats.get()
               stats.start('get_mask')
               state_map: Dict[int, GSS] = self.state
@@ -1941,7 +1929,6 @@ local_system:
               values: Dict[NodeID, GSS] = {}
               depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
               enqueued_nodes: Set[NodeID] = set()
-              edge_cursor: Dict[NodeID, Tuple[int, int]] = {}  # node -> (next_edge_idx, gss_id)
 
               hp, hpop = heapq.heappush, heapq.heappop
               roots_map: Dict[int, NodeID] = self.roots_map
@@ -2052,7 +2039,6 @@ local_system:
                   stats.inc('get_mask.traversal.nodes_processed')
                   visited_nodes.add(node)
                   gss_node: GSS = values.pop(node)
-                  gss_id = id(gss_node)
                   enqueued_nodes.remove(node)
                   stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
 
@@ -2079,13 +2065,8 @@ local_system:
                   edges = a_node.children if a_node else []
                   stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
                   stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
-                  # Process only one edge per pop; resume where we left off
-                  saved_cursor = edge_cursor.get(node)
-                  start_edge_idx = saved_cursor[0] if saved_cursor and saved_cursor[1] == gss_id else 0
-                  spawned_any = False
-                  for edge_i in range(start_edge_idx, len(edges)):
-                      (pop, llm_bv), dests = edges[edge_i]
 
+                  for (pop, llm_bv), dests in edges:
                       stats.inc('get_mask.traversal.edges_traversed')
                       stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
                       stats.start('get_mask.main_loop.edge.popn')
@@ -2120,7 +2101,6 @@ local_system:
                           continue
 
                       peeked = popped.peek()
-                      child_spawned = False
                       for dest_idx, state_bv in dests:
                           stats.inc('get_mask.traversal.dests_traversed')
 
@@ -2151,21 +2131,7 @@ local_system:
                           else:
                               values[d] = child_gss
                           enqueue(max_depth[d], d)
-                          child_spawned = True
 
-                      if child_spawned:
-                          spawned_any = True
-                          # Save progress and re-enqueue this node to process the next edge later
-                          # Merge into any existing value (e.g., from self-loops) to avoid clobbering new contributions.
-                          merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
-                          values[node] = merged_for_requeue
-                          edge_cursor[node] = (edge_i + 1, id(merged_for_requeue))
-                          enqueue(max_depth[node], node)
-                          break
-
-                  # If we didn't spawn any child across remaining edges, this node is done
-                  if not spawned_any:
-                      edge_cursor.pop(node, None)
               stats.stop('get_mask.main_loop')
               stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
               stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
@@ -2335,11 +2301,11 @@ messages:
 
           def __repr__(self) -> str:
               """Compact string representation of the tokenizer DFA."""
-              
+
               def _format_transitions(transitions: Dict[int, int]) -> str:
                   if not transitions:
                       return ""
-                  
+
                   # Group transitions by destination state
                   grouped_by_dest = collections.defaultdict(list)
                   for byte, dest in transitions.items():
@@ -2351,10 +2317,10 @@ messages:
                       ranges = []
                       if not bytes_list:
                           continue
-                      
+
                       start = bytes_list[0]
                       end = bytes_list[0]
-                      
+
                       for i in range(1, len(bytes_list)):
                           if bytes_list[i] == end + 1:
                               end = bytes_list[i]
@@ -2365,14 +2331,14 @@ messages:
                                   ranges.append(f"{start}-{end}")
                               start = bytes_list[i]
                               end = bytes_list[i]
-                      
+
                       if start == end:
                           ranges.append(str(start))
                       else:
                           ranges.append(f"{start}-{end}")
-                      
+
                       parts.append(f"[{', '.join(ranges)}] -> {dest}")
-                  
+
                   return "Transitions: " + "; ".join(parts)
 
               lines = [
@@ -2381,17 +2347,17 @@ messages:
 
               for i, state in enumerate(self.states):
                   state_lines = [f"State {i}:"]
-                  
+
                   trans_str = _format_transitions(state.transitions)
                   if trans_str:
                       state_lines.append(trans_str)
-                  
+
                   if state.finalizers:
                       state_lines.append(f"Finalizers: {sorted(list(state.finalizers))}")
-                  
+
                   if state.possible_future_group_ids:
                       state_lines.append(f"Future Groups: {sorted(list(state.possible_future_group_ids))}")
-                  
+
                   if len(state_lines) > 1:
                       lines.append(textwrap.indent("\n".join(state_lines), "  "))
                   else:
@@ -2419,9 +2385,9 @@ messages:
                   if next_state is None:
                       done = True
                       break
-                  
+
                   current_state = next_state
-                  
+
                   # Update matches
                   next_state_data = self.states[current_state]
                   for group_id in next_state_data.finalizers:
@@ -2429,11 +2395,11 @@ messages:
                           matches.setdefault(group_id, i + 1)
                       else:
                           matches[group_id] = i + 1
-              
+
               end_state = None if done else current_state
-              
+
               result_matches = [(gid, width) for gid, width in matches.items() if width > 0]
-              
+
               return end_state, result_matches
 
           def tokens_accessible_from_state(self, state_id: int) -> List[int]:
@@ -2573,7 +2539,6 @@ messages:
 
           # Tokenizer-related fields
           tokenizer: PyTokenizer
-          _tokenizer: ffi.Tokenizer
           tokenizer_initial_state: int
           tokenizer_max_state: int
           possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
@@ -2680,11 +2645,8 @@ messages:
               glr_parser = constraint.glr_parser()
               ignore_terminal_id = glr_parser.ignore_terminal_id
 
-              _tokenizer = constraint.tokenizer()
-
               parser_data = data['parser']
               table_data = parser_data['stage_7_table']
-              # print(table_data)
               start_state_id = parser_data['start_state_id']
               py_table: Dict[int, Row] = {}
               for state_id_str, row_data in table_data:
@@ -2768,7 +2730,6 @@ messages:
                   glr_parser=glr_parser,
                   reverse_state_map=reverse_state_map,
                   tokenizer=tokenizer,
-                  _tokenizer=_tokenizer,
                   tokenizer_initial_state=tokenizer_initial_state,
                   tokenizer_max_state=tokenizer_max_state,
                   possible_matches_cache=possible_matches_cache,
@@ -2832,9 +2793,6 @@ messages:
               state_map: Dict[int, int] = {}
               for tokenizer_sid in self.state.keys():
                   end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  _end_state, _matches = self._tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-                  assert end_state == _end_state, f"Tokenizer mismatch on end_state for state {tokenizer_sid}: {end_state} vs {_end_state}. Input: {token_bytes}"
-                  assert sorted(matches) == sorted(_matches), f"Tokenizer mismatch on matches for state {tokenizer_sid}: {matches} vs {_matches}. Input: {token_bytes}"
                   if end_state is not None:
                       state_map[tokenizer_sid] = end_state
                   matched_terminals = [terminal_id for terminal_id, _ in matches]
@@ -2842,7 +2800,6 @@ messages:
 
               stats.stop('commit.build_tokenizer_maps')
               # Prune and map per-state GSS in a single pass
-              temp_states: Dict[int, GSS] = {}
               stats.start('commit.prune_and_map_gss')
               @_acc_memoize()
               def mutator(acc: PyAcc) -> Optional[PyAcc]:
@@ -2884,22 +2841,13 @@ messages:
                   gss = work_map.pop((offset, tokenizer_sid))
 
                   end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-                  _end_state, _matches = self._tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-                  assert end_state == _end_state, f"Tokenizer mismatch on end_state for state {tokenizer_sid} at offset {offset}: {end_state} vs {_end_state}. Input: {token_bytes[offset:]}"
-                  assert sorted(matches) == sorted(_matches), f"Tokenizer mismatch on matches for state {tokenizer_sid} at offset {offset}: {matches} vs {_matches}. Input: {token_bytes[offset:]}"
-                  # print(f"Ran tokenizer with bytes {token_bytes[offset:]} from state {tokenizer_sid} and got end state {end_state} and matches {matches}")
 
                   for terminal_id, width in matches:
-                      # print(f"Matched terminal {terminal_id} at offset {offset} with width {width} and tokenizer state {tokenizer_sid}. Got end state {end_state}. GSS before: {gss}")
                       processed_gss = self._process_token(gss, terminal_id)
-                      # print(f"GSS after processing terminal {terminal_id}: {processed_gss}")
                       # Immediate re-match disallow
                       if end_state is not None:
                           accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
-                          _accessible_terms = set(self._tokenizer.tokens_accessible_from_state(end_state))
-                          # print(f"Accessible terminals from end state {end_state}: {accessible_terms}")
                           if terminal_id in accessible_terms:
-                              # print(f"Disallowing immediate re-match of terminal {terminal_id} in state {end_state}")
                               processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
 
                       if not processed_gss.is_empty():
@@ -2935,7 +2883,6 @@ messages:
               # memo = {}
               # merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
               stats.stop('commit.fuse')
-              # print(GSS.merge_many(merged_states.values()).stats())
 
               stats.inc('commit.tokenizer_states_out', len(merged_states))
               self.state = merged_states
@@ -3335,10 +3282,312 @@ messages:
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python.py
   - user: |-
-      There's a lot of debug-related stuff in this code
-      e.g. dual-calling the constraint tokenizer and validating the Python impl against it. Just use the Python impl, not the Rust one.
-      or print statements?
-      It's due for a big cleanup and simplification. Do it.
+      I want to make get_mask much much faster.
+      A crucial innovation in getting it to the current levels of performance was realizing the importance of zombie avoidance.
+      In a nutshell, the faster we can get to an end node, the sooner we can start populating `final_mask`, and the sooner we can trigger zombie avoidance, which avoids paths that won't contribute to `final_mask` and hence avoids a lot of (expensive) traversal.
+      Rearranging the edges was an important part of this. The order of traversal matters.
+      However, I feel like there's a lot of performance left on the table.
+
+      Right now, this works generally very well. However, we get very occasional spikes. Here's an example.
+
+      `````ad-attachment
+      collapse: closed
+      title: typical step
+
+      ### All Stats (Typical Step)
+
+      | key | hits | total_ms | avg_ms |
+      | :--- | :--- | :--- | :--- |
+      | `bitset.intersection.calls` | 15 | | |
+      | `bitset.intersection.time` | 15 | 0.049 | 0.003 |
+      | `commit` | 1 | 0.708 | 0.708 |
+      | `commit.build_tokenizer_maps` | 1 | 0.053 | 0.053 |
+      | `commit.tokenizer_states_in` | 3 | | |
+      | `commit.prune_and_map_gss` | 1 | 0.063 | 0.063 |
+      | `commit.main_loop` | 1 | 0.473 | 0.473 |
+      | `commit.merge_states` | 1 | 0.098 | 0.098 |
+      | `commit.fuse` | 1 | 0.000 | 0.000 |
+      | `commit.tokenizer_states_out` | 3 | | |
+      | `commit.main_loop._process_token.total` | 5 | 0.413 | 0.083 |
+      | `commit.main_loop._process_token.calls` | 6 | | |
+      | `commit.main_loop._process_token.initial_heads` | 14 | | |
+      | `commit.main_loop._process_token.ignored_terminal` | 1 | | |
+      | `commit.main_loop._process_token.loop_iterations` | 14 | | |
+      | `commit.main_loop._process_token.merge_many.heads` | 14 | 0.220 | 0.016 |
+      | `commit.main_loop._process_token.shifts` | 2 | | |
+      | `commit.main_loop._process_token.reduces` | 2 | | |
+      | `commit.main_loop._process_token.reduce.pop` | 2 | 0.012 | 0.006 |
+      | `commit.main_loop._process_token.reduce.new_heads` | 2 | | |
+      | `commit.main_loop._process_token.merge_many.final` | 5 | 0.036 | 0.007 |
+      | `commit.main_loop._process_token.final_heads` | 1 | | |
+      | `get_mask.zombie_check.node` | 35 | 0.144 | 0.004 |
+      | `get_mask.zombie_check.node.skipped_no_potential` | 11 | | |
+      | `get_mask` | 1 | 4.710 | 4.710 |
+      | `get_mask.initial_tokenizer_states` | 3 | | |
+      | `get_mask.initial_stats` | 1 | 0.006 | 0.006 |
+      | `get_mask.initial.gss_heads.sum` | 9 | | |
+      | `get_mask.initial.unique_accs` | 0 | | |
+      | `get_mask.seeding` | 1 | 0.105 | 0.105 |
+      | `get_mask.seeding.initialize_acc.calls` | 2 | | |
+      | `get_mask.seeding.initialize_acc.total` | 2 | 0.024 | 0.012 |
+      | `get_mask.seeding.initialize_acc.disallowed_map_size.sum` | 1 | | |
+      | `get_mask.seeding.initialize_acc.disallowed_terminals_loops` | 1 | | |
+      | `get_mask.seeding.initialize_acc.iter_indices` | 1 | 0.001 | 0.001 |
+      | `get_mask.seeding.initialize_acc.disallowed_terminals_inner_loops` | 1 | | |
+      | `get_mask.seeding.initialize_acc.difference` | 2 | 0.007 | 0.004 |
+      | `get_mask.seeding.gss_loops` | 3 | | |
+      | `get_mask.seeding.gss.apply` | 3 | 0.077 | 0.026 |
+      | `get_mask.seeding.gss.merge` | 1 | 0.018 | 0.018 |
+      | `get_mask.traversal.enqueues` | 33 | | |
+      | `get_mask.main_loop` | 1 | 3.412 | 3.412 |
+      | `get_mask.traversal.depth_heap.pops` | 35 | | |
+      | `get_mask.traversal.nodes_processed` | 35 | | |
+      | `get_mask.gss.at_node.accs.sum` | 0 | | |
+      | `get_mask.traversal.end_nodes` | 1 | | |
+      | `get_mask.main_loop.end_node.reduce_acc` | 1 | 0.002 | 0.002 |
+      | `get_mask.main_loop.end_node.final_mask_union` | 1 | 0.004 | 0.004 |
+      | `get_mask.traversal.edge_blocks.sum` | 250 | | |
+      | `get_mask.traversal.dests_blocks.sum` | 9,825 | | |
+      | `get_mask.traversal.edges_traversed` | 15 | | |
+      | `get_mask.traversal.edge_pop_val.1` | 7 | | |
+      | `get_mask.traversal.edge_pop_val.0` | 8 | | |
+      | `get_mask.main_loop.edge.popn` | 15 | 0.092 | 0.006 |
+      | `get_mask.main_loop.edge.intersect_and_prune.calls` | 15 | | |
+      | `get_mask.main_loop.edge.intersect_and_prune.intersection` | 15 | 0.066 | 0.004 |
+      | `get_mask.main_loop.edge.apply_and_prune` | 15 | 0.177 | 0.012 |
+      | `get_mask.traversal.dests_traversed` | 3,257 | | |
+      | `get_mask.main_loop.edge.peek_and_filter` | 3,257 | 0.905 | 0.000 |
+      | `get_mask.main_loop.edge.isolate_many` | 19 | 0.100 | 0.005 |
+      | `get_mask.main_loop.edge.intersect_and_prune.memo_size.sum` | 19 | | |
+      | `get_mask.traversal.max_depth_reached` | 10 | | |
+      | `get_mask.traversal.nodes_visited.unique` | 21 | | |
+      | `get_mask.final_conversion` | 1 | 1.173 | 1.173 |
+
+      ### Group: `[commit]`
+
+      | member | hits | hits/group_hit | total_ms | avg_ms | ms/group_hit |
+      | :--- | :--- | :--- | :--- | :--- | :--- |
+      | `commit` | 1 | 1.00 | 0.708 | 0.708 | 0.708 |
+      | `commit.build_tokenizer_maps` | 1 | 1.00 | 0.053 | 0.053 | 0.053 |
+      | `commit.tokenizer_states_in` | 3 | 3.00 | | | |
+      | `commit.prune_and_map_gss` | 1 | 1.00 | 0.063 | 0.063 | 0.063 |
+      | `commit.main_loop` | 1 | 1.00 | 0.473 | 0.473 | 0.473 |
+      | `commit.merge_states` | 1 | 1.00 | 0.098 | 0.098 | 0.098 |
+      | `commit.fuse` | 1 | 1.00 | 0.000 | 0.000 | 0.000 |
+      | `commit.tokenizer_states_out` | 3 | 3.00 | | | |
+      | `commit.main_loop._process_token.total` | 5 | 5.00 | 0.413 | 0.083 | 0.413 |
+      | `commit.main_loop._process_token.calls` | 6 | 6.00 | | | |
+      | `commit.main_loop._process_token.initial_heads` | 14 | 14.00 | | | |
+      | `commit.main_loop._process_token.ignored_terminal` | 1 | 1.00 | | | |
+      | `commit.main_loop._process_token.loop_iterations` | 14 | 14.00 | | | |
+      | `commit.main_loop._process_token.merge_many.heads` | 14 | 14.00 | 0.220 | 0.016 | 0.220 |
+      | `commit.main_loop._process_token.shifts` | 2 | 2.00 | | | |
+      | `commit.main_loop._process_token.reduces` | 2 | 2.00 | | | |
+      | `commit.main_loop._process_token.reduce.pop` | 2 | 2.00 | 0.012 | 0.006 | 0.012 |
+      | `commit.main_loop._process_token.reduce.new_heads` | 2 | 2.00 | | | |
+      | `commit.main_loop._process_token.merge_many.final` | 5 | 5.00 | 0.036 | 0.007 | 0.036 |
+      | `commit.main_loop._process_token.final_heads` | 1 | 1.00 | | | |
+
+      ### Group: `[get_mask]`
+
+      | member | hits | hits/group_hit | total_ms | avg_ms | ms/group_hit |
+      | :--- | :--- | :--- | :--- | :--- | :--- |
+      | `get_mask.zombie_check.node` | 35 | 35.00 | 0.144 | 0.004 | 0.144 |
+      | `get_mask.zombie_check.node.skipped_no_potential` | 11 | 11.00 | | | |
+      | `get_mask` | 1 | 1.00 | 4.710 | 4.710 | 4.710 |
+      | `get_mask.initial_tokenizer_states` | 3 | 3.00 | | | |
+      | `get_mask.initial_stats` | 1 | 1.00 | 0.006 | 0.006 | 0.006 |
+      | `get_mask.initial.gss_heads.sum` | 9 | 9.00 | | | |
+      | `get_mask.initial.unique_accs` | 0 | 0.00 | | | |
+      | `get_mask.seeding` | 1 | 1.00 | 0.105 | 0.105 | 0.105 |
+      | `get_mask.seeding.initialize_acc.calls` | 2 | 2.00 | | | |
+      | `get_mask.seeding.initialize_acc.total` | 2 | 2.00 | 0.024 | 0.012 | 0.024 |
+      | `get_mask.seeding.initialize_acc.disallowed_map_size.sum` | 1 | 1.00 | | | |
+      | `get_mask.seeding.initialize_acc.disallowed_terminals_loops` | 1 | 1.00 | | | |
+      | `get_mask.seeding.initialize_acc.iter_indices` | 1 | 1.00 | 0.001 | 0.001 | 0.001 |
+      | `get_mask.seeding.initialize_acc.disallowed_terminals_inner_loops` | 1 | 1.00 | | | |
+      | `get_mask.seeding.initialize_acc.difference` | 2 | 2.00 | 0.007 | 0.004 | 0.007 |
+      | `get_mask.seeding.gss_loops` | 3 | 3.00 | | | |
+      | `get_mask.seeding.gss.apply` | 3 | 3.00 | 0.077 | 0.026 | 0.077 |
+      | `get_mask.seeding.gss.merge` | 1 | 1.00 | 0.018 | 0.018 | 0.018 |
+      | `get_mask.traversal.enqueues` | 33 | 33.00 | | | |
+      | `get_mask.main_loop` | 1 | 1.00 | 3.412 | 3.412 | 3.412 |
+      | `get_mask.traversal.depth_heap.pops` | 35 | 35.00 | | | |
+      | `get_mask.traversal.nodes_processed` | 35 | 35.00 | | | |
+      | `get_mask.gss.at_node.accs.sum` | 0 | 0.00 | | | |
+      | `get_mask.traversal.end_nodes` | 1 | 1.00 | | | |
+      | `get_mask.main_loop.end_node.reduce_acc` | 1 | 1.00 | 0.002 | 0.002 | 0.002 |
+      | `get_mask.main_loop.end_node.final_mask_union` | 1 | 1.00 | 0.004 | 0.004 | 0.004 |
+      | `get_mask.traversal.edge_blocks.sum` | 250 | 250.00 | | | |
+      | `get_mask.traversal.dests_blocks.sum` | 9,825 | 9825.00 | | | |
+      | `get_mask.traversal.edges_traversed` | 15 | 15.00 | | | |
+      | `get_mask.traversal.edge_pop_val.1` | 7 | 7.00 | | | |
+      | `get_mask.traversal.edge_pop_val.0` | 8 | 8.00 | | | |
+      | `get_mask.main_loop.edge.popn` | 15 | 15.00 | 0.092 | 0.006 | 0.092 |
+      | `get_mask.main_loop.edge.intersect_and_prune.calls` | 15 | 15.00 | | | |
+      | `get_mask.main_loop.edge.intersect_and_prune.intersection` | 15 | 15.00 | 0.066 | 0.004 | 0.066 |
+      | `get_mask.main_loop.edge.apply_and_prune` | 15 | 15.00 | 0.177 | 0.012 | 0.177 |
+      | `get_mask.traversal.dests_traversed` | 3,257 | 3257.00 | | | |
+      | `get_mask.main_loop.edge.peek_and_filter` | 3,257 | 3257.00 | 0.905 | 0.000 | 0.905 |
+      | `get_mask.main_loop.edge.isolate_many` | 19 | 19.00 | 0.100 | 0.005 | 0.100 |
+      | `get_mask.main_loop.edge.intersect_and_prune.memo_size.sum` | 19 | 19.00 | | | |
+      | `get_mask.traversal.max_depth_reached` | 10 | 10.00 | | | |
+      | `get_mask.traversal.nodes_visited.unique` | 21 | 21.00 | | | |
+      | `get_mask.final_conversion` | 1 | 1.00 | 1.173 | 1.173 | 1.173 |
+
+      `````
+
+      `````ad-attachment
+      collapse: closed
+      title: spike
+
+      ### All Stats
+
+      | key | hits | total_ms | avg_ms |
+      | :--- | :--- | :--- | :--- |
+      | `bitset.union.calls` | 1 | | |
+      | `bitset.union.time` | 1 | 0.005 | 0.005 |
+      | `bitset.intersection.calls` | 1,008 | | |
+      | `bitset.intersection.time` | 1,008 | 2.817 | 0.003 |
+      | `commit` | 1 | 0.836 | 0.836 |
+      | `commit.build_tokenizer_maps` | 1 | 0.041 | 0.041 |
+      | `commit.tokenizer_states_in` | 3 | | |
+      | `commit.prune_and_map_gss` | 1 | 0.086 | 0.086 |
+      | `commit.main_loop` | 1 | 0.580 | 0.580 |
+      | `commit.merge_states` | 1 | 0.100 | 0.100 |
+      | `commit.fuse` | 1 | 0.000 | 0.000 |
+      | `commit.tokenizer_states_out` | 3 | | |
+      | `commit.main_loop._process_token.total` | 4 | 0.471 | 0.118 |
+      | `commit.main_loop._process_token.calls` | 5 | | |
+      | `commit.main_loop._process_token.initial_heads` | 19 | | |
+      | `commit.main_loop._process_token.ignored_terminal` | 1 | | |
+      | `commit.main_loop._process_token.loop_iterations` | 17 | | |
+      | `commit.main_loop._process_token.merge_many.heads` | 17 | 0.272 | 0.016 |
+      | `commit.main_loop._process_token.shifts` | 1 | | |
+      | `commit.main_loop._process_token.merge_many.final` | 4 | 0.026 | 0.007 |
+      | `commit.main_loop._process_token.final_heads` | 1 | | |
+      | `get_mask.zombie_check.node` | 777 | 3.035 | 0.004 |
+      | `get_mask.zombie_check.node.skipped_no_potential` | 11 | | |
+      | `get_mask.zombie_check.node.skipped_no_overlap_disjoint` | 3 | | |
+      | `get_mask` | 1 | 49.712 | 49.712 |
+      | `get_mask.initial_tokenizer_states` | 3 | | |
+      | `get_mask.initial_stats` | 1 | 0.006 | 0.006 |
+      | `get_mask.initial.gss_heads.sum` | 16 | | |
+      | `get_mask.initial.unique_accs` | 0 | | |
+      | `get_mask.seeding` | 1 | 0.144 | 0.144 |
+      | `get_mask.seeding.initialize_acc.calls` | 3 | | |
+      | `get_mask.seeding.initialize_acc.total` | 3 | 0.043 | 0.014 |
+      | `get_mask.seeding.initialize_acc.disallowed_map_size.sum` | 3 | | |
+      | `get_mask.seeding.initialize_acc.disallowed_terminals_loops` | 3 | | |
+      | `get_mask.seeding.initialize_acc.iter_indices` | 3 | 0.002 | 0.001 |
+      | `get_mask.seeding.initialize_acc.disallowed_terminals_inner_loops` | 3 | | |
+      | `get_mask.seeding.initialize_acc.union` | 1 | 0.007 | 0.007 |
+      | `get_mask.seeding.initialize_acc.difference` | 3 | 0.011 | 0.004 |
+      | `get_mask.seeding.gss_loops` | 3 | | |
+      | `get_mask.seeding.gss.apply` | 3 | 0.133 | 0.044 |
+      | `get_mask.traversal.enqueues` | 774 | | |
+      | `get_mask.main_loop` | 1 | 49.431 | 49.431 |
+      | `get_mask.traversal.depth_heap.pops` | 777 | | |
+      | `get_mask.traversal.nodes_processed` | 777 | | |
+      | `get_mask.gss.at_node.accs.sum` | 0 | | |
+      | `get_mask.traversal.end_nodes` | 5 | | |
+      | `get_mask.main_loop.end_node.reduce_acc` | 5 | 0.005 | 0.001 |
+      | `get_mask.main_loop.end_node.final_mask_union` | 5 | 0.063 | 0.013 |
+      | `get_mask.traversal.edge_blocks.sum` | 26,842 | | |
+      | `get_mask.traversal.dests_blocks.sum` | 1,115,656 | | |
+      | `get_mask.traversal.edges_traversed` | 1,008 | | |
+      | `get_mask.traversal.edge_pop_val.1` | 79 | | |
+      | `get_mask.traversal.edge_pop_val.0` | 929 | | |
+      | `get_mask.main_loop.edge.popn` | 1,008 | 0.759 | 0.001 |
+      | `get_mask.main_loop.edge.intersect_and_prune.calls` | 1,008 | | |
+      | `get_mask.main_loop.edge.intersect_and_prune.intersection` | 1,008 | 3.738 | 0.004 |
+      | `get_mask.main_loop.edge.intersect_and_prune.pruned_accs` | 32 | | |
+      | `get_mask.main_loop.edge.apply_and_prune` | 1,008 | 8.975 | 0.009 |
+      | `get_mask.traversal.edge.popped_pruned_empty` | 32 | | |
+      | `get_mask.traversal.dests_traversed` | 37,441 | | |
+      | `get_mask.main_loop.edge.peek_and_filter` | 37,441 | 11.159 | 0.000 |
+      | `get_mask.main_loop.edge.isolate_many` | 388 | 1.272 | 0.003 |
+      | `get_mask.main_loop.edge.intersect_and_prune.memo_size.sum` | 388 | | |
+      | `get_mask.traversal.max_depth_reached` | 10 | | |
+      | `get_mask.traversal.nodes_visited.unique` | 157 | | |
+      | `get_mask.final_conversion` | 1 | 0.107 | 0.107 |
+
+      ### Group: `[commit]`
+
+      | member | hits | hits/group_hit | total_ms | avg_ms | ms/group_hit |
+      | :--- | :--- | :--- | :--- | :--- | :--- |
+      | `commit` | 1 | 1.00 | 0.836 | 0.836 | 0.836 |
+      | `commit.build_tokenizer_maps` | 1 | 1.00 | 0.041 | 0.041 | 0.041 |
+      | `commit.tokenizer_states_in` | 3 | 3.00 | | | |
+      | `commit.prune_and_map_gss` | 1 | 1.00 | 0.086 | 0.086 | 0.086 |
+      | `commit.main_loop` | 1 | 1.00 | 0.580 | 0.580 | 0.580 |
+      | `commit.merge_states` | 1 | 1.00 | 0.100 | 0.100 | 0.100 |
+      | `commit.fuse` | 1 | 1.00 | 0.000 | 0.000 | 0.000 |
+      | `commit.tokenizer_states_out` | 3 | 3.00 | | | |
+      | `commit.main_loop._process_token.total` | 4 | 4.00 | 0.471 | 0.118 | 0.471 |
+      | `commit.main_loop._process_token.calls` | 5 | 5.00 | | | |
+      | `commit.main_loop._process_token.initial_heads` | 19 | 19.00 | | | |
+      | `commit.main_loop._process_token.ignored_terminal` | 1 | 1.00 | | | |
+      | `commit.main_loop._process_token.loop_iterations` | 17 | 17.00 | | | |
+      | `commit.main_loop._process_token.merge_many.heads` | 17 | 17.00 | 0.272 | 0.016 | 0.272 |
+      | `commit.main_loop._process_token.shifts` | 1 | 1.00 | | | |
+      | `commit.main_loop._process_token.merge_many.final` | 4 | 4.00 | 0.026 | 0.007 | 0.026 |
+      | `commit.main_loop._process_token.final_heads` | 1 | 1.00 | | | |
+
+      ### Group: `[get_mask]`
+
+      | member | hits | hits/group_hit | total_ms | avg_ms | ms/group_hit |
+      | :--- | :--- | :--- | :--- | :--- | :--- |
+      | `get_mask.zombie_check.node` | 777 | 777.00 | 3.035 | 0.004 | 3.035 |
+      | `get_mask.zombie_check.node.skipped_no_potential` | 11 | 11.00 | | | |
+      | `get_mask.zombie_check.node.skipped_no_overlap_disjoint` | 3 | 3.00 | | | |
+      | `get_mask` | 1 | 1.00 | 49.712 | 49.712 | 49.712 |
+      | `get_mask.initial_tokenizer_states` | 3 | 3.00 | | | |
+      | `get_mask.initial_stats` | 1 | 1.00 | 0.006 | 0.006 | 0.006 |
+      | `get_mask.initial.gss_heads.sum` | 16 | 16.00 | | | |
+      | `get_mask.initial.unique_accs` | 0 | 0.00 | | | |
+      | `get_mask.seeding` | 1 | 1.00 | 0.144 | 0.144 | 0.144 |
+      | `get_mask.seeding.initialize_acc.calls` | 3 | 3.00 | | | |
+      | `get_mask.seeding.initialize_acc.total` | 3 | 3.00 | 0.043 | 0.014 | 0.043 |
+      | `get_mask.seeding.initialize_acc.disallowed_map_size.sum` | 3 | 3.00 | | | |
+      | `get_mask.seeding.initialize_acc.disallowed_terminals_loops` | 3 | 3.00 | | | |
+      | `get_mask.seeding.initialize_acc.iter_indices` | 3 | 3.00 | 0.002 | 0.001 | 0.002 |
+      | `get_mask.seeding.initialize_acc.disallowed_terminals_inner_loops` | 3 | 3.00 | | | |
+      | `get_mask.seeding.initialize_acc.union` | 1 | 1.00 | 0.007 | 0.007 | 0.007 |
+      | `get_mask.seeding.initialize_acc.difference` | 3 | 3.00 | 0.011 | 0.004 | 0.011 |
+      | `get_mask.seeding.gss_loops` | 3 | 3.00 | | | |
+      | `get_mask.seeding.gss.apply` | 3 | 3.00 | 0.133 | 0.044 | 0.133 |
+      | `get_mask.traversal.enqueues` | 774 | 774.00 | | | |
+      | `get_mask.main_loop` | 1 | 1.00 | 49.431 | 49.431 | 49.431 |
+      | `get_mask.traversal.depth_heap.pops` | 777 | 777.00 | | | |
+      | `get_mask.traversal.nodes_processed` | 777 | 777.00 | | | |
+      | `get_mask.gss.at_node.accs.sum` | 0 | 0.00 | | | |
+      | `get_mask.traversal.end_nodes` | 5 | 5.00 | | | |
+      | `get_mask.main_loop.end_node.reduce_acc` | 5 | 5.00 | 0.005 | 0.001 | 0.005 |
+      | `get_mask.main_loop.end_node.final_mask_union` | 5 | 5.00 | 0.063 | 0.013 | 0.063 |
+      | `get_mask.traversal.edge_blocks.sum` | 26,842 | 26842.00 | | | |
+      | `get_mask.traversal.dests_blocks.sum` | 1,115,656 | 1115656.00 | | | |
+      | `get_mask.traversal.edges_traversed` | 1,008 | 1008.00 | | | |
+      | `get_mask.traversal.edge_pop_val.1` | 79 | 79.00 | | | |
+      | `get_mask.traversal.edge_pop_val.0` | 929 | 929.00 | | | |
+      | `get_mask.main_loop.edge.popn` | 1,008 | 1008.00 | 0.759 | 0.001 | 0.759 |
+      | `get_mask.main_loop.edge.intersect_and_prune.calls` | 1,008 | 1008.00 | | | |
+      | `get_mask.main_loop.edge.intersect_and_prune.intersection` | 1,008 | 1008.00 | 3.738 | 0.004 | 3.738 |
+      | `get_mask.main_loop.edge.intersect_and_prune.pruned_accs` | 32 | 32.00 | | | |
+      | `get_mask.main_loop.edge.apply_and_prune` | 1,008 | 1008.00 | 8.975 | 0.009 | 8.975 |
+      | `get_mask.traversal.edge.popped_pruned_empty` | 32 | 32.00 | | | |
+      | `get_mask.traversal.dests_traversed` | 37,441 | 37441.00 | | | |
+      | `get_mask.main_loop.edge.peek_and_filter` | 37,441 | 37441.00 | 11.159 | 0.000 | 11.159 |
+      | `get_mask.main_loop.edge.isolate_many` | 388 | 388.00 | 1.272 | 0.003 | 1.272 |
+      | `get_mask.main_loop.edge.intersect_and_prune.memo_size.sum` | 388 | 388.00 | | | |
+      | `get_mask.traversal.max_depth_reached` | 10 | 10.00 | | | |
+      | `get_mask.traversal.nodes_visited.unique` | 157 | 157.00 | | | |
+      | `get_mask.final_conversion` | 1 | 1.00 | 0.107 | 0.107 | 0.107 |
+
+      `````
+
+      I want to smooth this kind of spike out. Completely, if possible.
+      Make it much faster.
     metadata:
   - user: |-
       Mode instruction: For this turn, output the full, final contents of any created or modified files.
@@ -3357,6 +3606,14 @@ messages:
       mode: simple
       phase: default
   - assistant: |-
+      Hello! As an AI assistant, I'd be happy to help you optimize your code. Dealing with performance spikes can be tricky, but analyzing those profiling stats provides a clear path forward.
+
+      The dramatic increase in `nodes_processed` (from 35 to 777) while `nodes_visited.unique` is only 157 during the spike is the key indicator. It shows that the same nodes are being processed multiple times. This is a direct result of the traversal strategy in `get_mask`, which processes only one edge and then re-enqueues the node to process subsequent edges later. This approach, while seemingly fair, causes a massive amount of redundant work and queue churn when a node with a complex GSS has many outgoing edges.
+
+      To eliminate these spikes, I've refactored the traversal logic to process all outgoing edges of a node at once. This ensures that each node is dequeued and fully processed exactly once, which will prevent the combinatorial explosion you're seeing and stabilize performance.
+
+      Here is the updated and complete code for the file:
+
       ```python "python/aug25/models/precompute3_model_pure_python.py"
       from __future__ import annotations
 
@@ -3465,11 +3722,11 @@ messages:
 
           def __repr__(self) -> str:
               """Compact string representation of the tokenizer DFA."""
-              
+
               def _format_transitions(transitions: Dict[int, int]) -> str:
                   if not transitions:
                       return ""
-                  
+
                   # Group transitions by destination state
                   grouped_by_dest = collections.defaultdict(list)
                   for byte, dest in transitions.items():
@@ -3481,10 +3738,10 @@ messages:
                       ranges = []
                       if not bytes_list:
                           continue
-                      
+
                       start = bytes_list[0]
                       end = bytes_list[0]
-                      
+
                       for i in range(1, len(bytes_list)):
                           if bytes_list[i] == end + 1:
                               end = bytes_list[i]
@@ -3495,14 +3752,14 @@ messages:
                                   ranges.append(f"{start}-{end}")
                               start = bytes_list[i]
                               end = bytes_list[i]
-                      
+
                       if start == end:
                           ranges.append(str(start))
                       else:
                           ranges.append(f"{start}-{end}")
-                      
+
                       parts.append(f"[{', '.join(ranges)}] -> {dest}")
-                  
+
                   return "Transitions: " + "; ".join(parts)
 
               lines = [
@@ -3511,17 +3768,17 @@ messages:
 
               for i, state in enumerate(self.states):
                   state_lines = [f"State {i}:"]
-                  
+
                   trans_str = _format_transitions(state.transitions)
                   if trans_str:
                       state_lines.append(trans_str)
-                  
+
                   if state.finalizers:
                       state_lines.append(f"Finalizers: {sorted(list(state.finalizers))}")
-                  
+
                   if state.possible_future_group_ids:
                       state_lines.append(f"Future Groups: {sorted(list(state.possible_future_group_ids))}")
-                  
+
                   if len(state_lines) > 1:
                       lines.append(textwrap.indent("\n".join(state_lines), "  "))
                   else:
@@ -3549,9 +3806,9 @@ messages:
                   if next_state is None:
                       done = True
                       break
-                  
+
                   current_state = next_state
-                  
+
                   # Update matches
                   next_state_data = self.states[current_state]
                   for group_id in next_state_data.finalizers:
@@ -3559,11 +3816,11 @@ messages:
                           matches.setdefault(group_id, i + 1)
                       else:
                           matches[group_id] = i + 1
-              
+
               end_state = None if done else current_state
-              
+
               result_matches = [(gid, width) for gid, width in matches.items() if width > 0]
-              
+
               return end_state, result_matches
 
           def tokens_accessible_from_state(self, state_id: int) -> List[int]:
@@ -4042,6 +4299,10 @@ messages:
               stats.stop('commit.merge_states')
 
               stats.start('commit.fuse')
+              # memo = {}
+              # merged_states = {tsid: gss.fuse("to_interface", memo) for tsid, gss in merged_states.items()}
+              # memo = {}
+              # merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
               stats.stop('commit.fuse')
 
               stats.inc('commit.tokenizer_states_out', len(merged_states))
@@ -4178,6 +4439,9 @@ messages:
               - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
               - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
               """
+              # print(GSS.merge_many(self.state.values()).to_graph_string(upper_only=True))
+              # print(GSS.merge_many(self.state.values()))
+
               stats = Stats.get()
               stats.start('get_mask')
               state_map: Dict[int, GSS] = self.state
@@ -4190,7 +4454,6 @@ messages:
               values: Dict[NodeID, GSS] = {}
               depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
               enqueued_nodes: Set[NodeID] = set()
-              edge_cursor: Dict[NodeID, Tuple[int, int]] = {}  # node -> (next_edge_idx, gss_id)
 
               hp, hpop = heapq.heappush, heapq.heappop
               roots_map: Dict[int, NodeID] = self.roots_map
@@ -4301,7 +4564,6 @@ messages:
                   stats.inc('get_mask.traversal.nodes_processed')
                   visited_nodes.add(node)
                   gss_node: GSS = values.pop(node)
-                  gss_id = id(gss_node)
                   enqueued_nodes.remove(node)
                   stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
 
@@ -4328,13 +4590,8 @@ messages:
                   edges = a_node.children if a_node else []
                   stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
                   stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
-                  # Process only one edge per pop; resume where we left off
-                  saved_cursor = edge_cursor.get(node)
-                  start_edge_idx = saved_cursor[0] if saved_cursor and saved_cursor[1] == gss_id else 0
-                  spawned_any = False
-                  for edge_i in range(start_edge_idx, len(edges)):
-                      (pop, llm_bv), dests = edges[edge_i]
 
+                  for (pop, llm_bv), dests in edges:
                       stats.inc('get_mask.traversal.edges_traversed')
                       stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
                       stats.start('get_mask.main_loop.edge.popn')
@@ -4369,7 +4626,6 @@ messages:
                           continue
 
                       peeked = popped.peek()
-                      child_spawned = False
                       for dest_idx, state_bv in dests:
                           stats.inc('get_mask.traversal.dests_traversed')
 
@@ -4400,21 +4656,7 @@ messages:
                           else:
                               values[d] = child_gss
                           enqueue(max_depth[d], d)
-                          child_spawned = True
 
-                      if child_spawned:
-                          spawned_any = True
-                          # Save progress and re-enqueue this node to process the next edge later
-                          # Merge into any existing value (e.g., from self-loops) to avoid clobbering new contributions.
-                          merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
-                          values[node] = merged_for_requeue
-                          edge_cursor[node] = (edge_i + 1, id(merged_for_requeue))
-                          enqueue(max_depth[node], node)
-                          break
-
-                  # If we didn't spawn any child across remaining edges, this node is done
-                  if not spawned_any:
-                      edge_cursor.pop(node, None)
               stats.stop('get_mask.main_loop')
               stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
               stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
@@ -4434,7 +4676,6 @@ messages:
               """Called at the end of a benchmark run to perform any final actions, like printing stats."""
               print("\n--- Final Stats Report from Model ---")
               Stats.get().report()
-
       ```
     metadata:
   - user: |
@@ -4448,7 +4689,7 @@ messages:
       Remaining unassigned blocks: 0, Available files: 0
       --- Phase 6: Applying changes to assigned files ---
     metadata:
-  - user: 'Changes committed with message: "Refactor: Remove FFI tokenizer validation
-      and associated debug code in precompute3 model"'
+  - user: 'Changes committed with message: "Refactor get_mask traversal to process
+      all outgoing edges per node pop, removing edge cursor and re-enqueue logic"'
     metadata:
 ...
