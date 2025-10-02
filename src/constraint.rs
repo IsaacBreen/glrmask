@@ -3894,6 +3894,9 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) { // original ID
+        // return self.commit_bytes(&self.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id).unwrap().clone());
+
+        // NOTE: The precompute0 trie is likely incorrect, and it's likely the below is incorrect as well.
         let mut self_clone = self.clone();
         self_clone.commit_bytes(&self_clone.parent.llm_vocab.llm_token_map.get_by_right(&llm_token_id)
             .unwrap_or_else(|| panic!("LLM token ID {:?} not found in LLM token map during commit.", llm_token_id))
