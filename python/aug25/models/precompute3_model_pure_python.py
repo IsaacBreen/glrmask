@@ -198,7 +198,18 @@ class PyTokenizer:
                     matches.setdefault(group_id, i + 1)
                 else:
                     matches[group_id] = i + 1
+            
+            # Check for early termination.
+            matched = set(matches.keys())
+            excluded = matched.intersection(self.non_greedy_finalizers)
+            possible_futures = self.states[current_state].possible_future_group_ids
+            if not (possible_futures - excluded):
+                done = True
+                break
         
+        if not done and not self.states[current_state].transitions:
+            done = True
+
         end_state = None if done else current_state
         
         result_matches = [(gid, width) for gid, width in matches.items() if width > 0]
@@ -414,7 +425,9 @@ class Model(GraphProvider):
         print("data['tokenizer']:")
         print(data['tokenizer'])
         for state_data in dfa_data['states']:
+            # The transitions in JSON are a TrieMap serialization
             transitions_data = state_data['transitions']['data']
+            # In Rust, TrieMap keys are u8, but JSON keys are strings.
             transitions = {int(k): v for k, v in transitions_data.items()}
             dfa_states.append(DFAState(
                 transitions=transitions,
