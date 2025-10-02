@@ -284,7 +284,7 @@ class Model(GraphProvider):
         }
         # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
-        # print(constraint.dump_precomputed0())
+        print(constraint.dump_precomputed0())
         # print(constraint.dump_precomputed3())
         tokenizer = constraint.tokenizer()
         tokenizer_max_state = tokenizer.max_state()
