@@ -202,7 +202,9 @@ class Model(_Model):
                     processed_gss = gss
                     if edge_key is not None:
                         gtid, disallow_opt = edge_key
+                        print(f"Processing edge with gtid {gtid}, GSS {gss}")
                         processed_gss = self._process_token(gss, gtid)
+                        print(f"Processing edge with gtid {gtid}, disallow {disallow_opt}, resulting GSS: {processed_gss}")
 
                         if disallow_opt is not None and not processed_gss.is_empty():
                             end_state = disallow_opt
