@@ -532,7 +532,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n--- Applying manual vocabulary modifications ---");
 
         // Filter 1: Keep only tokens with length <= x
-        let x = 2;
+        let x = 0;
         gpt2_raw_vocab.retain(|s| {
             let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
             processed.as_bytes().len() <= x
@@ -566,12 +566,11 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // gpt2_raw_vocab.retain(|s| { s.len() == 1 || s.contains('-') });
 
         // Option 3: Set to a few specific tokens
-        // gpt2_raw_vocab = vec![
-        //     "a",
-        //     "const",
-        //     " ",
-        //     "\n",
-        // ].iter().map(|s| s.to_string()).collect();
+        gpt2_raw_vocab = vec![
+            "let",
+            " ",
+            "a",
+        ].iter().map(|s| s.to_string()).collect();
 
 
         println!("  - Set to a specific small set of tokens: {} tokens.", gpt2_raw_vocab.len());
