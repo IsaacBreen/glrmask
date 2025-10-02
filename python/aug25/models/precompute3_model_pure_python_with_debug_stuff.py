@@ -413,6 +413,7 @@ class Model(GraphProvider):
         dfa_data = data['tokenizer']['dfa']
         dfa_states = []
         for state_data in dfa_data['states']:
+            print(state_data)
             transitions_json = state_data['transitions']
             # The 'data' field of the TrieMap JSON contains string keys for byte values.
             transitions = {int(k): v for k, v in transitions_json.get('data', {}).items()}
@@ -442,6 +443,7 @@ class Model(GraphProvider):
             start_state=dfa_data['start_state'],
             non_greedy_finalizers=set(dfa_data['non_greedy_finalizers'])
         )
+        print(f"Loaded PyTokenizer:\n{tokenizer}")
         tokenizer_max_state = tokenizer.max_state()
         tokenizer_initial_state = tokenizer.initial_state_id()
 
