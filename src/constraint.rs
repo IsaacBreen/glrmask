@@ -1819,18 +1819,59 @@ impl GrammarConstraint {
         )
     }
 
+    // Stage-aware conversion (for Trie0)
+    pub fn internal_bv_to_original_precompute0(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
+        self.internal_bv_to_original_with_map(internal_bv, &self.precompute0_vocab.internal_to_original, self.precompute0_vocab.internal_max_llm_token)
+    }
+    pub fn original_bv_to_internal_precompute0(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
+        self.original_bv_to_internal_with_map(original_bv, &self.precompute0_vocab.original_to_internal, self.precompute0_vocab.original_to_internal.len())
+    }
     // Stage-aware conversion (for Trie1)
-    pub fn internal_bv_to_original_precompute(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
+    pub fn internal_bv_to_original_precompute1(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
         self.internal_bv_to_original_with_map(internal_bv, &self.precompute_vocab1.internal_to_original, self.precompute_vocab1.internal_max_llm_token)
+    }
+    pub fn original_bv_to_internal_precompute1(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
+        self.original_bv_to_internal_with_map(original_bv, &self.precompute_vocab1.original_to_internal, self.precompute_vocab1.original_to_internal.len())
     }
     // Stage-aware conversion (for Trie2)
     pub fn internal_bv_to_original_precompute2(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
         self.internal_bv_to_original_with_map(internal_bv, &self.precompute2_vocab.internal_to_original, self.precompute2_vocab.internal_max_llm_token)
     }
+    pub fn original_bv_to_internal_precompute2(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
+        self.original_bv_to_internal_with_map(original_bv, &self.precompute2_vocab.original_to_internal, self.precompute2_vocab.original_to_internal.len())
+    }
     // Stage-aware conversion (for Trie3)
     pub fn internal_bv_to_original_precompute3(&self, internal_bv: &LLMTokenBV) -> LLMTokenBV {
 		self.internal_bv_to_original_with_map(internal_bv, &self.precompute3_vocab.internal_to_original, self.precompute3_vocab.internal_max_llm_token)
 	}
+    pub fn original_bv_to_internal_precompute3(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
+        self.original_bv_to_internal_with_map(original_bv, &self.precompute3_vocab.original_to_internal, self.precompute3_vocab.original_to_internal.len())
+    }
+
+    pub fn internal_to_original_precompute0(&self, original_id: LLMTokenID) -> Option<&HybridBitset> {
+        self.precompute0_vocab.internal_to_original.get(&original_id.0)
+    }
+    pub fn original_to_internal_precompute0(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
+        self.precompute0_vocab.original_to_internal.get(&internal_id.0).map(|&orig_val| LLMTokenID(orig_val))
+    }
+    pub fn internal_to_original_precompute1(&self, original_id: LLMTokenID) -> Option<&HybridBitset> {
+        self.precompute_vocab1.internal_to_original.get(&original_id.0)
+    }
+    pub fn original_to_internal_precompute1(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
+        self.precompute_vocab1.original_to_internal.get(&internal_id.0).map(|&orig_val| LLMTokenID(orig_val))
+    }
+    pub fn internal_to_original_precompute2(&self, original_id: LLMTokenID) -> Option<&HybridBitset> {
+        self.precompute2_vocab.internal_to_original.get(&original_id.0)
+    }
+    pub fn original_to_internal_precompute2(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
+        self.precompute2_vocab.original_to_internal.get(&internal_id.0).map(|&orig_val| LLMTokenID(orig_val))
+    }
+    pub fn internal_to_original_precompute3(&self, original_id: LLMTokenID) -> Option<&HybridBitset> {
+        self.precompute3_vocab.internal_to_original.get(&original_id.0)
+    }
+    pub fn original_to_internal_precompute3(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
+        self.precompute3_vocab.original_to_internal.get(&internal_id.0).map(|&orig_val| LLMTokenID(orig_val))
+    }
 
 	fn internal_bv_to_original_with_map(
 		&self,
@@ -1853,6 +1894,28 @@ impl GrammarConstraint {
 		}
 		original_bv
 	}
+
+    fn original_bv_to_internal_with_map(
+        &self,
+        original_bv: &LLMTokenBV,
+        original_to_internal: &BTreeMap<usize, usize>,
+        _original_max_llm_token: usize,
+    ) -> LLMTokenBV {
+        let mut internal_bv = HybridBitset::zeros();
+        if original_bv.is_all() {
+            // Fast path for "all tokens"
+            for &internal_id in original_to_internal.values() {
+                internal_bv.insert(internal_id);
+            }
+        } else {
+            for i in original_bv.iter() {
+                if let Some(&internal_id) = original_to_internal.get(&i) {
+                    internal_bv.insert(internal_id);
+                }
+            }
+        }
+        internal_bv
+    }
 
     fn compute_possible_matches_for_vocab_node(
         tokenizer: &Regex,
@@ -3042,7 +3105,7 @@ impl<'a> GrammarConstraintState<'a> {
                 .collect();
             println!("{}", self.parent.parser.gss_forest_to_dot( // TODO: fix this
                 &roots_with_labels,
-                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                Some(&self.parent.precompute_vocab1.original_to_internal),
                 Some(&self.parent.llm_vocab.llm_token_map),
             ));
             println!("\n\n--- End GSS Graphviz ---");
@@ -3089,7 +3152,7 @@ impl<'a> GrammarConstraintState<'a> {
         if initial_values_for_map.is_empty() {
              // This can happen if all GLR states had empty GSS stacks or no corresponding precomputed tries.
              crate::debug!(2, "No valid initial states for get_mask's special_map traversal.");
-             return self.parent.internal_bv_to_original_precompute(&final_mask_internal.into_inner());
+             return self.parent.internal_bv_to_original_precompute1(&final_mask_internal.into_inner());
         }
 
         let t1 = std::time::Instant::now();
@@ -3352,7 +3415,7 @@ impl<'a> GrammarConstraintState<'a> {
             print!("{}", print_gss_forest(&roots, &self.parent.parser.terminal_map, &config).0);
         }
 
-        let final_mask_mapped = self.parent.internal_bv_to_original_precompute(&final_mask_internal.into_inner());
+        let final_mask_mapped = self.parent.internal_bv_to_original_precompute1(&final_mask_internal.into_inner());
 
         let t_end = std::time::Instant::now();
         if env::var("RUST_LOG_MASK_TIMING").is_ok() {
@@ -3389,7 +3452,7 @@ impl<'a> GrammarConstraintState<'a> {
                 .collect();
             println!("{}", self.parent.parser.gss_forest_to_dot( // TODO: fix this
                 &roots_with_labels,
-                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                Some(&self.parent.precompute_vocab1.original_to_internal),
                 Some(&self.parent.llm_vocab.llm_token_map),
             ));
             println!("\n\n--- End GSS Graphviz ---");
@@ -3663,7 +3726,7 @@ impl<'a> GrammarConstraintState<'a> {
                 .collect();
             println!("{}", self.parent.parser.gss_forest_to_dot( // TODO: fix this
                 &roots_with_labels,
-                Some(&self.parent.llm_vocab.original_to_internal_id_bimap),
+                Some(&self.parent.precompute_vocab1.original_to_internal),
                 Some(&self.parent.llm_vocab.llm_token_map),
             ));
             println!("\n\n--- End GSS Graphviz ---");

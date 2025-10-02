@@ -133,7 +133,7 @@ fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn E
     );
     assert_optimized_equivalent(
         &gc.precomputed2,
-        &gc.llm_vocab.original_to_internal_id_bimap,
+        &gc.precompute_vocab1.original_to_internal,
         &gc.llm_vocab.llm_token_map,
         gc.trie2_god.clone(),
     );
@@ -235,7 +235,7 @@ fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn s
         // This path is problematic as the cached version is likely optimized.
         // We'll proceed assuming it's unoptimized for now, but FORCE_RECOMPUTE=true is recommended.
         let gc_for_vocab = GrammarConstraint::from_compiled_grammar(compiled_grammar.clone(), llm_token_map.clone(), LLMTokenID(0), max_original_llm_token_id_val);
-        llm_vocab = gc_for_vocab.llm_vocab;
+        llm_vocab = gc_for_vocab.precompute_vocab1;
         println!("Successfully loaded Precomputed2 from cache.");
     } else {
         println!("\nConstructing GrammarConstraint with optimizations OFF (will generate Precomputed2)...");
@@ -262,7 +262,7 @@ fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn s
         println!("GrammarConstraint constructed successfully.");
         original_precomputed2 = grammar_constraint.precomputed2;
         original_god = grammar_constraint.trie2_god;
-        llm_vocab = grammar_constraint.llm_vocab;
+        llm_vocab = grammar_constraint.precompute_vocab1;
 
         if SAVE_TO_CACHE {
             println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
@@ -277,7 +277,7 @@ fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn s
     // 4. Assert that the optimized result is equivalent to the baseline.
     assert_optimized_equivalent(
         &original_precomputed2,
-        &llm_vocab.original_to_internal_id_bimap,
+        &llm_vocab.original_to_internal,
         &llm_token_map,
         original_god,
     );
