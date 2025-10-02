@@ -174,21 +174,21 @@ class Model(_Model):
 
         # 2. Traverse the precompute0 trie with the prepared GSS.
         q = collections.deque()
+        node_gss_map: Dict[NodeID, GSS] = {}
+
         for tokenizer_sid, gss in current_state.items():
             root_node_id = self.roots_map0[tokenizer_sid]
-            q.append((root_node_id, gss))
+            if root_node_id in node_gss_map:
+                node_gss_map[root_node_id] = node_gss_map[root_node_id].merge(gss)
+            else:
+                node_gss_map[root_node_id] = gss
+        q.extend(node_gss_map.keys())
 
         new_overall_state_parts = collections.defaultdict(list)
-        visited: Dict[NodeID, GSS] = {}
 
         while q:
-            node_id, gss = q.popleft()
-            if node_id in visited:
-                merged_gss = gss.merge(visited[node_id])
-                if len(merged_gss.peek()) == len(visited[node_id].peek()):
-                    continue
-                gss = merged_gss
-            visited[node_id] = gss
+            node_id = q.popleft()
+            gss = node_gss_map[node_id]
 
             node = self.arena0[node_id]
             if node.value.final_tokenizer_state is not None:
@@ -213,7 +213,15 @@ class Model(_Model):
                             processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, term_id)
 
                     if not processed_gss.is_empty():
-                        q.append((dest_node_id, processed_gss))
+                        existing_gss = node_gss_map.get(dest_node_id)
+                        if existing_gss is None:
+                            node_gss_map[dest_node_id] = processed_gss
+                            q.append(dest_node_id)
+                        else:
+                            merged_gss = existing_gss.merge(processed_gss)
+                            if len(merged_gss.peek()) > len(existing_gss.peek()):
+                                node_gss_map[dest_node_id] = merged_gss
+                                q.append(dest_node_id)
 
         # 3. Finalize the new state.
         merged_states = {sid: GSS.merge_many(gss_list) for sid, gss_list in new_overall_state_parts.items() if gss_list}
