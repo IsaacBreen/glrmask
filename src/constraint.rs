@@ -523,6 +523,7 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("precomputed2".to_string(), self.precomputed2.to_json());
         obj.insert("precomputed3".to_string(), self.precomputed3.to_json());
         obj.insert("llm_token_map".to_string(), self.llm_vocab.llm_token_map.to_json());
+        obj.insert("max_original_llm_token_id".to_string(), self.llm_vocab.max_original_llm_token_id.to_json());
         obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
         obj.insert("possible_matches".to_string(), self.possible_matches.to_json());
         obj.insert("trie0_god".to_string(), self.trie0_god.to_json());
@@ -558,6 +559,9 @@ impl JSONConvertible for GrammarConstraint {
 
                 let llm_token_map = obj.remove("llm_token_map").ok_or_else(|| "Missing field llm_token_map".to_string())
                                        .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
+                let max_original_llm_token_id = obj.remove("max_original_llm_token_id")
+                    .ok_or_else(|| "Missing field max_original_llm_token_id".to_string())
+                    .and_then(usize::from_json)?;
                 let token_name_map = obj.remove("token_name_map").ok_or_else(|| "Missing field token_name_map".to_string())
                                         .and_then(|n| BiBTreeMap::<Terminal, usize>::from_json(n))?;
                 let possible_matches = obj.remove("possible_matches").ok_or_else(|| "Missing field possible_matches".to_string())
@@ -606,7 +610,7 @@ impl JSONConvertible for GrammarConstraint {
                     precomputed1,
                     precomputed2,
                     precomputed3,
-                    llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id: 0 }), // TODO: fix this
+                    llm_vocab: Arc::new(LLMVocab { llm_token_map, max_original_llm_token_id }),
                     token_name_map,
                     possible_matches,
                     trie0_god,
@@ -1724,6 +1728,23 @@ impl GrammarConstraint {
 
         (precomputed3, trie3_god)
     }
+
+    pub fn all_internal_llm_tokens_bitset_precompute0(&self) -> LLMTokenBV {
+        LLMTokenBV::ones(self.precompute0_vocab.internal_max_llm_token + 1)
+    }
+
+    pub fn all_internal_llm_tokens_bitset_precompute1(&self) -> LLMTokenBV {
+        LLMTokenBV::ones(self.precompute_vocab1.internal_max_llm_token + 1)
+    }
+
+    pub fn all_internal_llm_tokens_bitset_precompute2(&self) -> LLMTokenBV {
+        LLMTokenBV::ones(self.precompute2_vocab.internal_max_llm_token + 1)
+    }
+
+    pub fn all_internal_llm_tokens_bitset_precompute3(&self) -> LLMTokenBV {
+        LLMTokenBV::ones(self.precompute3_vocab.internal_max_llm_token + 1)
+    }
+
 
     /// Build per-token (internal id) mapping from initial tokenizer state to final tokenizer state
     /// after consuming the entire token. Computed by traversing the vocab prefix tree.

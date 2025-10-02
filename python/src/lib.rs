@@ -505,32 +505,52 @@ impl PyGrammarConstraint {
         Ok(dict.into())
     }
 
-    fn original_to_internal_map(&self) -> PyResult<std::collections::BTreeMap<usize, usize>> {
-        let mut m = std::collections::BTreeMap::new();
-        for (orig, intl) in self.inner.llm_vocab.original_to_internal_id_bimap.iter() {
-            m.insert(*orig, *intl);
+    fn original_to_internal_map_precompute0(&self) -> PyResult<BTreeMap<usize, usize>> {
+        Ok(self.inner.precompute0_vocab.original_to_internal.clone())
+    }
+
+    fn internal_to_original_map_precompute0(&self) -> PyResult<BTreeMap<usize, Vec<usize>>> {
+        let mut m = BTreeMap::new();
+        for (k, v) in &self.inner.precompute0_vocab.internal_to_original {
+            m.insert(*k, v.iter().collect());
         }
         Ok(m)
     }
 
-    fn internal_to_original_map(&self) -> PyResult<std::collections::BTreeMap<usize, usize>> {
-        let mut m = std::collections::BTreeMap::new();
-        for (orig, intl) in self.inner.llm_vocab.original_to_internal_id_bimap.iter() {
-            m.insert(*intl, *orig);
+    fn original_to_internal_map_precompute3(&self) -> PyResult<BTreeMap<usize, usize>> {
+        Ok(self.inner.precompute3_vocab.original_to_internal.clone())
+    }
+
+    fn internal_to_original_map_precompute3(&self) -> PyResult<BTreeMap<usize, Vec<usize>>> {
+        let mut m = BTreeMap::new();
+        for (k, v) in &self.inner.precompute3_vocab.internal_to_original {
+            m.insert(*k, v.iter().collect());
         }
         Ok(m)
     }
 
-    fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-        PyHybridBitset::from(self.inner.internal_bv_to_original(&bv.inner))
+    fn internal_bv_to_original_precompute0(&self, bv: &PyHybridBitset) -> PyHybridBitset {
+        PyHybridBitset::from(self.inner.internal_bv_to_original_precompute0(&bv.inner))
     }
 
-    fn original_bv_to_internal(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-        PyHybridBitset::from(self.inner.original_bv_to_internal(&bv.inner))
+    fn original_bv_to_internal_precompute0(&self, bv: &PyHybridBitset) -> PyHybridBitset {
+        PyHybridBitset::from(self.inner.original_bv_to_internal_precompute0(&bv.inner))
     }
 
-    fn all_internal_llm_tokens_bitset(&self) -> PyHybridBitset {
-        PyHybridBitset { inner: self.inner.all_internal_llm_tokens_bitset() }
+    fn internal_bv_to_original_precompute3(&self, bv: &PyHybridBitset) -> PyHybridBitset {
+        PyHybridBitset::from(self.inner.internal_bv_to_original_precompute3(&bv.inner))
+    }
+
+    fn original_bv_to_internal_precompute3(&self, bv: &PyHybridBitset) -> PyHybridBitset {
+        PyHybridBitset::from(self.inner.original_bv_to_internal_precompute3(&bv.inner))
+    }
+
+    fn all_internal_llm_tokens_bitset_precompute0(&self) -> PyHybridBitset {
+        PyHybridBitset { inner: self.inner.all_internal_llm_tokens_bitset_precompute0() }
+    }
+
+    fn all_internal_llm_tokens_bitset_precompute3(&self) -> PyHybridBitset {
+        PyHybridBitset { inner: self.inner.all_internal_llm_tokens_bitset_precompute3() }
     }
 
     fn tokenizer(&self) -> PyRegex {
@@ -1086,8 +1106,12 @@ impl PyGrammarConstraintState {
         Ok(())
     }
 
-    fn internal_bv_to_original(&self, bv: &PyHybridBitset) -> PyHybridBitset {
-        self.inner.borrow_constraint().internal_bv_to_original(bv)
+    fn internal_bv_to_original_precompute0(&self, bv: &PyHybridBitset) -> PyHybridBitset {
+        self.inner.borrow_constraint().internal_bv_to_original_precompute0(bv)
+    }
+
+    fn internal_bv_to_original_precompute3(&self, bv: &PyHybridBitset) -> PyHybridBitset {
+        self.inner.borrow_constraint().internal_bv_to_original_precompute3(bv)
     }
 }
 
