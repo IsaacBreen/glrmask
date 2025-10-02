@@ -454,10 +454,10 @@ impl Default for GrammarConstraintConfig {
             optimize_trie2_gc: true,
             skip_precomputation: false,
             optimize_trie3_constrain_bitvecs: true,
-            optimize_trie1_merge_equivalent_llm_tokens: true,
-            optimize_trie1_reorder_llm_tokens: true,
-            optimize_trie3_merge_equivalent_llm_tokens: true,
-            optimize_trie3_reorder_llm_tokens: true,
+            optimize_trie1_merge_equivalent_llm_tokens: false,
+            optimize_trie1_reorder_llm_tokens: false,
+            optimize_trie3_merge_equivalent_llm_tokens: false,
+            optimize_trie3_reorder_llm_tokens: false,
         }
     }
 }
@@ -1011,22 +1011,22 @@ impl GrammarConstraint {
         );
 
         helper.run_dfs();
-        // helper.optimize_precomputed_via_substring_parser();
-        helper.replace_ignore_token_edges_with_none_edges();
-        helper.simplify_none_edges(); // This can invalidate max_depth.
-
-        // Recompute all max_depth values after major graph surgery.
-        Trie::recompute_all_max_depths(&helper.trie0_god, &helper.roots.values().cloned().collect::<Vec<_>>());
-
-        helper.prune_dead_paths();
-        helper.prune_on_no_terminal_follow();
-        helper.prune_dead_paths();
-        // New: prune using substring parser in "everything state" mode
-        // helper.prune_with_substring_everything_state();
-        helper.prune_dead_paths(); // Clean up after GLR-based pruning
-        helper.factor_common_destinations();
-        helper.merge_nodes();
-        // helper.merge_nodes_basic();
+        // // helper.optimize_precomputed_via_substring_parser();
+        // helper.replace_ignore_token_edges_with_none_edges();
+        // helper.simplify_none_edges(); // This can invalidate max_depth.
+        //
+        // // Recompute all max_depth values after major graph surgery.
+        // Trie::recompute_all_max_depths(&helper.trie0_god, &helper.roots.values().cloned().collect::<Vec<_>>());
+        //
+        // helper.prune_dead_paths();
+        // helper.prune_on_no_terminal_follow();
+        // helper.prune_dead_paths();
+        // // New: prune using substring parser in "everything state" mode
+        // // helper.prune_with_substring_everything_state();
+        // helper.prune_dead_paths(); // Clean up after GLR-based pruning
+        // helper.factor_common_destinations();
+        // helper.merge_nodes();
+        // // helper.merge_nodes_basic();
         helper.gc();
         Trie::recompute_all_max_depths(&helper.trie0_god, &helper.roots.values().cloned().collect::<Vec<_>>());
         helper.finish(token_name_map, possible_matches, internal_max_llm_token)
