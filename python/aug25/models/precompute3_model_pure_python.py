@@ -288,6 +288,7 @@ class ArenaEdge:
       - dest_states_union allows skipping entire dest blocks if no head can match
       - llm_bv_not enables subset checks via isdisjoint (cheaper than difference)
       - optional state_to_dest for grouping heads -> dests in O(#heads) when dest blocks are huge
+      - dest_subtree_union is the union of subtree masks for all destination nodes (for deeper token-pruning)
     """
     pop: int
     llm_bv: LLMTokenSet
@@ -295,8 +296,10 @@ class ArenaEdge:
     dest_states_union: StateIDSet = field(default_factory=RangeSetStates.empty)
     llm_bv_not: Optional[LLMTokenSet] = None
     state_to_dest: Optional[Dict[int, List[int]]] = None  # built on demand for very large dest blocks
+    dest_subtree_union: LLMTokenSet = field(default_factory=RangeSet.empty)
+    dest_has_end: bool = False
 
-    def ensure_index(self, dest_index_threshold: int = 512, max_states_per_index: int = 100_000) -> None:
+    def ensure_index(self, dest_index_threshold: int = 256, max_states_per_index: int = 100_000) -> None:
         """
         Build a reverse index from parser state -> list(dest_j) for this edge.
         Done on-demand when dest blocks are large and only once per edge.
@@ -329,6 +332,8 @@ class ArenaNode:
     children: List[ArenaEdge] = field(default_factory=list)
     llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
     clean_end: bool = False
+    subtree_llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)  # union over entire subtree for token pruning
+    has_end_in_subtree: bool = False  # whether any end is reachable in the subtree (including this node)
 
 
 @dataclass(frozen=True, eq=False)
@@ -380,7 +385,7 @@ class NodeCursor:
     edge_idx: int = 0
     dest_idx: int = 0
     gss_id: int = 0
-    pop_cache: Optional[Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]]] = None
+    pop_cache: Optional[Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet, LLMTokenSet]]] = None
 
 
 @dataclass
@@ -468,6 +473,8 @@ class Model(GraphProvider):
                     dest_states_union=dest_states_union,
                     llm_bv_not=None,  # filled later after all_ones is known
                     state_to_dest=None,
+                    dest_subtree_union=RangeSet.empty(),
+                    dest_has_end=False,
                 ))
             node["children"] = new_children
             node["llm_bv_union"] = llm_bv_union
@@ -477,6 +484,8 @@ class Model(GraphProvider):
                 children=node_data.get("children", []),
                 llm_bv_union=node_data.get("llm_bv_union", RangeSet.empty()),
                 clean_end=node_data.get("value", {}).get("clean_end", False),
+                subtree_llm_bv_union=RangeSet.empty(),
+                has_end_in_subtree=False,
             )
             for uid, node_data in arena_dict.items()
         }
@@ -618,7 +627,9 @@ class Model(GraphProvider):
             state=state,
         )
 
-        # Compute per-edge accelerators that depend on all_ones
+        # Compute subtree summaries (descendant token unions and end reachability)
+        model._compute_subtree_summaries()
+        # Compute per-edge accelerators that depend on all_ones and subtree unions
         model._compute_edge_accelerators()
 
         # Reorder edges/dests to prioritize reaching end nodes quickly
@@ -626,17 +637,92 @@ class Model(GraphProvider):
 
         return model
 
+    def _compute_subtree_summaries(self) -> None:
+        """
+        For each node, compute:
+          - subtree_llm_bv_union: union of llm_bv across the entire subtree rooted at node
+          - has_end_in_subtree: whether any end node is reachable in the subtree (including node)
+        This enables stronger pruning in get_mask by checking deeper potential token contributions.
+        """
+        stats = Stats.get()
+        stats.start('accelerators.compute_subtree_summaries')
+
+        arena = self.arena
+        max_depth = self.max_depth
+
+        # Build adjacency (node -> set(child_nodes)) and indegree for topological sort
+        children_map: Dict[NodeID, Set[NodeID]] = {nid: set() for nid in arena.keys()}
+        indegree: Dict[NodeID, int] = {nid: 0 for nid in arena.keys()}
+
+        for nid, node in arena.items():
+            for edge in node.children:
+                for dest_idx, _ in edge.dests:
+                    children_map[nid].add(int(dest_idx))
+
+        # incoming edge count
+        for nid, children in children_map.items():
+            for c in children:
+                indegree[c] = indegree.get(c, 0) + 1
+
+        # Topological order (parents before children)
+        q = collections.deque([nid for nid, deg in indegree.items() if deg == 0])
+        topo: List[NodeID] = []
+        visited = set()
+        while q:
+            n = q.popleft()
+            topo.append(n)
+            visited.add(n)
+            for c in children_map.get(n, ()):
+                indegree[c] -= 1
+                if indegree[c] == 0:
+                    q.append(c)
+
+        if len(topo) != len(arena):
+            # Graph might not be a strict DAG; fall back to processing nodes ordered by max_depth
+            topo = sorted(arena.keys(), key=lambda nid: max_depth.get(nid, 0))
+
+        # Process in reverse topological order (children first)
+        for nid in reversed(topo):
+            node = arena[nid]
+            # Start from this node's own outgoing edge union
+            subtree_union = node.llm_bv_union
+            end_flag = node.clean_end
+            # Merge children's subtree unions
+            for edge in node.children:
+                for dest_idx, _ in edge.dests:
+                    child_node = arena[int(dest_idx)]
+                    if not child_node.subtree_llm_bv_union.is_empty():
+                        subtree_union = subtree_union.union(child_node.subtree_llm_bv_union)
+                    if child_node.has_end_in_subtree:
+                        end_flag = True
+            node.subtree_llm_bv_union = subtree_union
+            node.has_end_in_subtree = end_flag
+
+        stats.stop('accelerators.compute_subtree_summaries')
+
     def _compute_edge_accelerators(self) -> None:
         """
         Populate llm_bv_not for all edges so we can use fast subset checks via isdisjoint.
+        Also precompute dest_subtree_union and dest_has_end for each edge for stronger pruning.
         """
         stats = Stats.get()
         stats.start('accelerators.compute_edge_complements')
         all_ones = self.all_internal_llm_tokens_bitset
-        for node in self.arena.values():
+        for node_id, node in self.arena.items():
             for edge in node.children:
                 if edge.llm_bv_not is None:
                     edge.llm_bv_not = all_ones.difference(edge.llm_bv)
+                # Precompute union across destination subtrees to cut entire edges when impossible
+                dest_union = RangeSet.empty()
+                dest_has_end = False
+                for dest_idx, _ in edge.dests:
+                    dnode = self.arena[int(dest_idx)]
+                    if not dnode.subtree_llm_bv_union.is_empty():
+                        dest_union = dest_union.union(dnode.subtree_llm_bv_union)
+                    if dnode.has_end_in_subtree:
+                        dest_has_end = True
+                edge.dest_subtree_union = dest_union
+                edge.dest_has_end = dest_has_end
         stats.stop('accelerators.compute_edge_complements')
 
     @profile
@@ -933,6 +1019,10 @@ class Model(GraphProvider):
         - Optional on-demand per-edge reverse indexing to group heads → dests in O(#heads) when dests are huge.
         - Avoid redundant reduce_acc() checks after isolate_many; relying on is_empty() suffices.
         - Use RangeSetStates operations (isdisjoint/intersection) where profitable when filtering dests.
+        - NEW: subtree_llm_bv_union and edge.dest_subtree_union pruning to cut hopeless branches
+               that cannot yield any new tokens given remaining_mask and current GSS masks.
+        - NEW: avoid popn(0) by reusing current GSS directly.
+        - NEW: adaptive budgets to smooth spikes when the frontier grows large or final_mask is empty.
         """
         stats = Stats.get()
         stats.start('get_mask')
@@ -1053,6 +1143,26 @@ class Model(GraphProvider):
             # Recompute remaining_mask conservatively to avoid tracking diffs
             remaining_mask = all_ones.difference(final_mask)
 
+        # Adaptive budgets based on pressure and whether we have any final tokens yet
+        def _compute_budgets():
+            # Frontier size pressure
+            pressure = len(depth_heap) + len(values)
+            # When we don't yet have any final tokens, we use smaller budgets to reach an end quickly
+            if final_mask.is_empty():
+                if pressure > 256:
+                    return 2, 512
+                elif pressure > 64:
+                    return 3, 768
+                else:
+                    return 4, 1024
+            # Once we have some final mask, we can open up a bit
+            if pressure > 256:
+                return 8, 2048
+            elif pressure > 64:
+                return 12, 3072
+            else:
+                return 16, 4096
+
         while depth_heap:
             depth, node = dequeue()
             max_depth_reached = max(max_depth_reached, depth)
@@ -1064,11 +1174,32 @@ class Model(GraphProvider):
             enqueued_nodes.remove(node)
             stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
 
+            # Early-out if nothing remains
+            if remaining_mask.is_empty():
+                break
+
             # Precompute reduced mask once for this node
             stats.start('get_mask.main_loop.node.reduce_acc')
             gss_reduced_acc: Optional[PyAcc] = gss_node.reduce_acc()
             stats.stop('get_mask.main_loop.node.reduce_acc')
             gss_llm_mask = gss_reduced_acc.llm_mask if gss_reduced_acc else RangeSet.empty()
+
+            # Node-level deep zombie pruning using subtree union
+            a_node = arena.get(node)
+            node_subtree_union: LLMTokenSet = a_node.subtree_llm_bv_union if a_node else RangeSet.empty()
+
+            # If no potential new tokens exist in the entire subtree under this node, skip
+            if node_subtree_union.isdisjoint(remaining_mask):
+                Stats.get().inc('get_mask.zombie_check.node.subtree_skipped_no_potential')
+                continue
+            # If the current GSS mask has no overlap with potential subtree tokens, skip
+            if gss_reduced_acc:
+                gss_remaining = gss_llm_mask.intersection(remaining_mask)
+                if gss_remaining.isdisjoint(node_subtree_union):
+                    Stats.get().inc('get_mask.zombie_check.node.subtree_skipped_no_overlap_disjoint')
+                    continue
+            else:
+                gss_remaining = RangeSet.empty()
 
             # End-node handling: union the allowed LLM tokens directly
             if is_end(node):
@@ -1082,22 +1213,8 @@ class Model(GraphProvider):
                     # If final mask changed, recompute remaining mask
                     if final_mask is not before_final:
                         _update_remaining_mask()
-
-            # Zombie traversal avoidance: if this node's edges can't possibly add
-            # to the final mask given the current GSS mask, skip it.
-            a_node = arena.get(node)
-            node_llm_bv_union: LLMTokenSet = a_node.llm_bv_union if a_node else RangeSet.empty()
-            # Fast check using remaining_mask before more expensive checks
-            # This mirrors _is_zombie_path but is tuned to avoid allocations
-            if node_llm_bv_union.isdisjoint(remaining_mask):
-                # No potential new tokens at this node at all
-                Stats.get().inc('get_mask.zombie_check.node.skipped_no_potential')
-                continue
-            # If the GSS mask has no overlap with potential new tokens, skip
-            potential_new = node_llm_bv_union.intersection(remaining_mask)
-            if gss_reduced_acc and gss_llm_mask.isdisjoint(potential_new):
-                Stats.get().inc('get_mask.zombie_check.node.skipped_no_overlap_disjoint')
-                continue
+                        if remaining_mask.is_empty():
+                            break
 
             # Traverse edges and propagate masks
             edges: List[ArenaEdge] = a_node.children if a_node else []
@@ -1109,7 +1226,7 @@ class Model(GraphProvider):
             if saved_cursor and saved_cursor.gss_id == gss_id:
                 start_edge_idx = saved_cursor.edge_idx
                 start_dest_idx_for_first_edge = saved_cursor.dest_idx
-                pop_cache: Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]] = saved_cursor.pop_cache or {}
+                pop_cache: Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet, LLMTokenSet]] = saved_cursor.pop_cache or {}
             else:
                 start_edge_idx = 0
                 start_dest_idx_for_first_edge = 0
@@ -1119,15 +1236,12 @@ class Model(GraphProvider):
             edges_processed_count = 0
             dests_processed_count = 0
 
-            # Adaptive budgets: go small until we have any final_mask, then open up.
-            # Also cap total dests per visit (spike smoother).
-            max_edges_per_visit = 8 if final_mask.is_empty() else 16
-            max_dests_per_visit = 2048 if final_mask.is_empty() else 4096
+            # Adaptive budgets
+            max_edges_per_visit, max_dests_per_visit = _compute_budgets()
 
             # Local aliases for hot methods to reduce attribute lookups
             rs_isdisjoint = LLMTokenSet.isdisjoint
             rs_intersection = LLMTokenSet.intersection
-            rs_difference = LLMTokenSet.difference
             states_from_indices = RangeSetStates.from_indices
 
             # Peek heads for pop==0 edges once per node
@@ -1139,7 +1253,7 @@ class Model(GraphProvider):
                 pop = edge.pop
                 llm_bv = edge.llm_bv
 
-                # Optimization A: Skip edges that can't contribute new tokens at all
+                # Optimization A1: Fast reject using remaining_mask
                 stats.start('get_mask.main_loop.edge.early_skip_check')
                 if rs_isdisjoint(llm_bv, remaining_mask):
                     stats.stop('get_mask.main_loop.edge.early_skip_check')
@@ -1147,11 +1261,24 @@ class Model(GraphProvider):
                     continue
                 stats.stop('get_mask.main_loop.edge.early_skip_check')
 
-                # Optimization B: Pre-skip edges that don't intersect the current node GSS's allowed tokens.
-                # Use isdisjoint (cheaper than computing an intersection object)
-                if llm_bv.isdisjoint(gss_llm_mask):
-                    stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
+                # Optimization A2: Fast reject using future tokens of this edge's dest subtrees vs remaining
+                if edge.dest_subtree_union.is_empty() or edge.dest_has_end is False:
+                    # If no ends reachable beneath this edge, skip
+                    stats.inc('get_mask.main_loop.edge.subtree_no_end_pruned')
                     continue
+                if edge.dest_subtree_union.isdisjoint(remaining_mask):
+                    stats.inc('get_mask.main_loop.edge.dest_future_union_remaining_pruned')
+                    continue
+
+                # Optimization B: Pre-skip edges that don't intersect the current node GSS's allowed tokens or future subtree union.
+                if gss_reduced_acc:
+                    if llm_bv.isdisjoint(gss_llm_mask):
+                        stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
+                        continue
+                    # If even the future subtree under this edge has no overlap with the GSS_remaining, skip
+                    if not gss_remaining.is_empty() and gss_remaining.isdisjoint(edge.dest_subtree_union):
+                        stats.inc('get_mask.main_loop.edge.pre_gss_future_subtree_disjoint_skips')
+                        continue
 
                 # Optimization C: For pop==0, reject entire dest block if none of the current heads can reach it.
                 if pop == 0:
@@ -1165,19 +1292,21 @@ class Model(GraphProvider):
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
 
-                # Get or compute popn results
+                # Get or compute popn results (avoid popn(0))
                 if pop in pop_cache:
-                    popped, popped_acc, peeked, peek_rs = pop_cache[pop]
+                    popped, popped_acc, peeked, peek_rs, popped_remaining = pop_cache[pop]
                     stats.inc('get_mask.main_loop.edge.pop_cache_hits')
                 else:
-                    # Pop stacks
-                    stats.start('get_mask.main_loop.edge.popn')
-                    popped: GSS = gss_node.popn(pop)
-                    stats.stop('get_mask.main_loop.edge.popn')
+                    if pop == 0:
+                        popped = gss_node
+                    else:
+                        stats.start('get_mask.main_loop.edge.popn')
+                        popped: GSS = gss_node.popn(pop)
+                        stats.stop('get_mask.main_loop.edge.popn')
 
                     if popped.is_empty():
                         stats.inc('get_mask.traversal.edge.popped_empty')
-                        pop_cache[pop] = (popped, None, [], RangeSetStates.empty())
+                        pop_cache[pop] = (popped, None, [], RangeSetStates.empty(), RangeSet.empty())
                         continue
 
                     # Reduce popped acc once and cache
@@ -1187,18 +1316,36 @@ class Model(GraphProvider):
 
                     if not popped_acc or popped_acc.llm_mask.is_empty():
                         stats.inc('get_mask.traversal.edge.popped_reduced_empty')
-                        pop_cache[pop] = (GSS.empty(), None, [], RangeSetStates.empty())
+                        pop_cache[pop] = (GSS.empty(), None, [], RangeSetStates.empty(), RangeSet.empty())
                         continue
 
                     # Cache peek (heads) and also a RangeSetStates version for fast set ops
                     peeked = popped.peek()
                     peek_rs = states_from_indices(peeked)
-                    pop_cache[pop] = (popped, popped_acc, peeked, peek_rs)
+                    # Precompute popped_remaining = popped_acc.llm_mask ∩ remaining_mask
+                    popped_remaining = popped_acc.llm_mask.intersection(remaining_mask)
+                    if popped_remaining.is_empty():
+                        stats.inc('get_mask.traversal.edge.popped_remaining_empty')
+                        pop_cache[pop] = (GSS.empty(), None, [], RangeSetStates.empty(), RangeSet.empty())
+                        continue
+
+                    pop_cache[pop] = (popped, popped_acc, peeked, peek_rs, popped_remaining)
 
                 # At this point, we have a non-empty popped GSS and a non-empty popped_acc
                 # Additional block pruning: if even after pop, heads can't reach any dests, skip
                 if edge.dest_states_union.isdisjoint(pop_cache[pop][3]):
                     stats.inc('get_mask.main_loop.edge.dest_union_pruned_after_pop')
+                    continue
+
+                # Early prune using remaining tokens after pop and edge mask
+                popped_remaining = pop_cache[pop][4]
+                if popped_remaining.isdisjoint(llm_bv):
+                    stats.inc('get_mask.main_loop.edge.popped_remaining_disjoint_llm_bv')
+                    continue
+
+                # Also prune if future tokens under this edge do not overlap popped_remaining
+                if edge.dest_subtree_union.isdisjoint(popped_remaining):
+                    stats.inc('get_mask.main_loop.edge.dest_future_union_popped_remaining_pruned')
                     continue
 
                 # Optimization D: subset fast-path using llm_bv_not and isdisjoint (no allocation)
@@ -1209,7 +1356,7 @@ class Model(GraphProvider):
                     stats.inc('get_mask.main_loop.edge.popped_mask_subset_fastpath')
                     need_apply = False
                 else:
-                    # If popped mask and edge mask are disjoint, skip entirely
+                    # If popped mask and edge mask are disjoint, or no remaining, skip entirely
                     if popped_acc.llm_mask.isdisjoint(llm_bv):
                         stats.stop('get_mask.main_loop.edge.subset_fastpath.check')
                         stats.inc('get_mask.traversal.edge.popped_reduced_empty')
@@ -1240,7 +1387,7 @@ class Model(GraphProvider):
 
                 # From here on, popped is filtered to this edge's llm_bv (or was already covered)
                 popped_cached = pop_cache[pop]
-                _, _, peeked, peek_rs = popped_cached
+                _, _, peeked, peek_rs, popped_remaining = popped_cached
 
                 # If there are no heads after pop, skip quickly
                 if not peeked:
@@ -1253,8 +1400,8 @@ class Model(GraphProvider):
                 # Build per-edge reverse index on demand and group heads -> dests in O(#heads)
                 start_dest_idx = start_dest_idx_for_first_edge if edge_i == start_edge_idx else 0
                 use_indexer = False
-                if len(edge.dests) >= 512 and len(peeked) <= 64:
-                    edge.ensure_index()
+                if len(edge.dests) >= 128:
+                    edge.ensure_index()  # indexer threshold is lower now (256) and persistent
                     if edge.state_to_dest is not None:
                         # state_to_dest == {} is a sentinel for "too big to index"; treat as unavailable
                         use_indexer = len(edge.state_to_dest) > 0
@@ -1288,6 +1435,12 @@ class Model(GraphProvider):
                             break
 
                         dest_idx, _state_bv = edge.dests[dest_j]
+                        # New: prune by child subtree and popped_remaining
+                        child_node = arena[int(dest_idx)]
+                        if child_node.subtree_llm_bv_union.isdisjoint(popped_remaining):
+                            stats.inc('get_mask.main_loop.edge.child_subtree_pruned')
+                            continue
+
                         values_to_keep = grouped[dest_j]
                         if len(values_to_keep) == len(peeked):
                             child_gss = popped
@@ -1331,6 +1484,12 @@ class Model(GraphProvider):
 
                         # Fast disjoint check against current heads
                         if state_bv.isdisjoint(peek_rs):
+                            continue
+
+                        # New: prune by child subtree and popped_remaining
+                        child_node = arena[int(dest_idx)]
+                        if child_node.subtree_llm_bv_union.isdisjoint(popped_remaining):
+                            stats.inc('get_mask.main_loop.edge.child_subtree_pruned')
                             continue
 
                         # If dest accepts all heads, we can reuse popped directly (no isolate_many)
@@ -1416,6 +1575,9 @@ class Model(GraphProvider):
         stats.stop('get_mask.final_conversion')
 
         stats.stop('get_mask')
+
+        stats.report()
+        stats.reset()
 
         return original_indices
 
