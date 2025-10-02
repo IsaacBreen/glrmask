@@ -1031,16 +1031,23 @@ class Model(GraphProvider):
                     stats.inc('get_mask.traversal.edge.popped_reduced_empty')
                     continue
 
-                peeked = popped.peek()
+                stats.start('get_mask.main_loop.edge.peek_to_rangeset')
+                peeked_set = RangeSetStates.from_indices(popped.peek())
+                stats.stop('get_mask.main_loop.edge.peek_to_rangeset')
+
                 child_spawned = False
                 for dest_idx, state_bv in dests:
                     stats.inc('get_mask.traversal.dests_traversed')
 
-                    stats.start('get_mask.main_loop.edge.peek_and_filter')
-                    values_to_keep = [sid for sid in peeked if state_bv.contains(sid)]
-                    stats.stop('get_mask.main_loop.edge.peek_and_filter')
-                    if not values_to_keep:
+                    stats.start('get_mask.main_loop.edge.peek_intersect')
+                    intersection = peeked_set.intersection(state_bv)
+                    stats.stop('get_mask.main_loop.edge.peek_intersect')
+                    if intersection.is_empty():
                         continue
+
+                    stats.start('get_mask.main_loop.edge.intersection_to_list')
+                    values_to_keep = list(intersection.iter_indices())
+                    stats.stop('get_mask.main_loop.edge.intersection_to_list')
 
                     stats.start('get_mask.main_loop.edge.isolate_many')
                     child_gss = popped.isolate_many(values_to_keep)
