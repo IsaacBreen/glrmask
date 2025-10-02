@@ -490,9 +490,9 @@ class Model(GraphProvider):
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
 
             for terminal_id, width in matches:
-                # print(f"Matched terminal {terminal_id} at offset {offset} with width {width}. GSS before: {gss}")
+                print(f"Matched terminal {terminal_id} at offset {offset} with width {width}. GSS before: {gss}")
                 processed_gss = self._process_token(gss, terminal_id)
-                # print(f"GSS after processing terminal {terminal_id}: {processed_gss}")
+                print(f"GSS after processing terminal {terminal_id}: {processed_gss}")
                 # Immediate re-match disallow
                 if end_state is not None:
                     accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
