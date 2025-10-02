@@ -566,10 +566,10 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // gpt2_raw_vocab.retain(|s| { s.len() == 1 || s.contains('-') });
 
         // Option 3: Set to a few specific tokens
-        // gpt2_raw_vocab = vec![
-        //     "a",
-        //     "b",
-        // ].iter().map(|s| s.to_string()).collect();
+        gpt2_raw_vocab = vec![
+            "a",
+            "b",
+        ].iter().map(|s| s.to_string()).collect();
 
 
         println!("  - Set to a specific small set of tokens: {} tokens.", gpt2_raw_vocab.len());

@@ -1,5 +1,4 @@
 #![ignore(IGNORE)]
-program ::= IDENTIFIER+ EOF ;
-EOF ::= '<|EOF|>' ;
-IGNORE ::= '//' 'b'? ;
+program ::= IDENTIFIER+ ;
+IGNORE ::= 'b' 'b'? ;
 IDENTIFIER ::= 'a' ;
