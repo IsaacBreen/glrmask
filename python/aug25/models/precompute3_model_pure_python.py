@@ -343,7 +343,6 @@ class Model(GraphProvider):
 
     # Tokenizer-related fields
     tokenizer: PyTokenizer
-    _tokenizer: ffi.Tokenizer
     tokenizer_initial_state: int
     tokenizer_max_state: int
     possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
@@ -450,11 +449,8 @@ class Model(GraphProvider):
         glr_parser = constraint.glr_parser()
         ignore_terminal_id = glr_parser.ignore_terminal_id
 
-        _tokenizer = constraint.tokenizer()
-
         parser_data = data['parser']
         table_data = parser_data['stage_7_table']
-        # print(table_data)
         start_state_id = parser_data['start_state_id']
         py_table: Dict[int, Row] = {}
         for state_id_str, row_data in table_data:
@@ -538,7 +534,6 @@ class Model(GraphProvider):
             glr_parser=glr_parser,
             reverse_state_map=reverse_state_map,
             tokenizer=tokenizer,
-            _tokenizer=_tokenizer,
             tokenizer_initial_state=tokenizer_initial_state,
             tokenizer_max_state=tokenizer_max_state,
             possible_matches_cache=possible_matches_cache,
@@ -602,9 +597,6 @@ class Model(GraphProvider):
         state_map: Dict[int, int] = {}
         for tokenizer_sid in self.state.keys():
             end_state, matches = self.tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-            _end_state, _matches = self._tokenizer.execute_from_state(token_bytes, tokenizer_sid)
-            assert end_state == _end_state, f"Tokenizer mismatch on end_state for state {tokenizer_sid}: {end_state} vs {_end_state}. Input: {token_bytes}"
-            assert sorted(matches) == sorted(_matches), f"Tokenizer mismatch on matches for state {tokenizer_sid}: {matches} vs {_matches}. Input: {token_bytes}"
             if end_state is not None:
                 state_map[tokenizer_sid] = end_state
             matched_terminals = [terminal_id for terminal_id, _ in matches]
@@ -612,7 +604,6 @@ class Model(GraphProvider):
 
         stats.stop('commit.build_tokenizer_maps')
         # Prune and map per-state GSS in a single pass
-        temp_states: Dict[int, GSS] = {}
         stats.start('commit.prune_and_map_gss')
         @_acc_memoize()
         def mutator(acc: PyAcc) -> Optional[PyAcc]:
@@ -654,22 +645,13 @@ class Model(GraphProvider):
             gss = work_map.pop((offset, tokenizer_sid))
 
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-            _end_state, _matches = self._tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-            assert end_state == _end_state, f"Tokenizer mismatch on end_state for state {tokenizer_sid} at offset {offset}: {end_state} vs {_end_state}. Input: {token_bytes[offset:]}"
-            assert sorted(matches) == sorted(_matches), f"Tokenizer mismatch on matches for state {tokenizer_sid} at offset {offset}: {matches} vs {_matches}. Input: {token_bytes[offset:]}"
-            # print(f"Ran tokenizer with bytes {token_bytes[offset:]} from state {tokenizer_sid} and got end state {end_state} and matches {matches}")
 
             for terminal_id, width in matches:
-                # print(f"Matched terminal {terminal_id} at offset {offset} with width {width} and tokenizer state {tokenizer_sid}. Got end state {end_state}. GSS before: {gss}")
                 processed_gss = self._process_token(gss, terminal_id)
-                # print(f"GSS after processing terminal {terminal_id}: {processed_gss}")
                 # Immediate re-match disallow
                 if end_state is not None:
                     accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
-                    _accessible_terms = set(self._tokenizer.tokens_accessible_from_state(end_state))
-                    # print(f"Accessible terminals from end state {end_state}: {accessible_terms}")
                     if terminal_id in accessible_terms:
-                        # print(f"Disallowing immediate re-match of terminal {terminal_id} in state {end_state}")
                         processed_gss = self._disallow_terminal_in_state(processed_gss, end_state, terminal_id)
 
                 if not processed_gss.is_empty():
@@ -700,12 +682,7 @@ class Model(GraphProvider):
         stats.stop('commit.merge_states')
 
         stats.start('commit.fuse')
-        # memo = {}
-        # merged_states = {tsid: gss.fuse("to_interface", memo) for tsid, gss in merged_states.items()}
-        # memo = {}
-        # merged_states = {tsid: gss.fuse(1, memo) for tsid, gss in merged_states.items()}
         stats.stop('commit.fuse')
-        # print(GSS.merge_many(merged_states.values()).stats())
 
         stats.inc('commit.tokenizer_states_out', len(merged_states))
         self.state = merged_states
@@ -841,9 +818,6 @@ class Model(GraphProvider):
         - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
-        # print(GSS.merge_many(self.state.values()).to_graph_string(upper_only=True))
-        # print(GSS.merge_many(self.state.values()))
-
         stats = Stats.get()
         stats.start('get_mask')
         state_map: Dict[int, GSS] = self.state
