@@ -284,7 +284,7 @@ class Model(GraphProvider):
         }
         # Load tokenizer and parser table from the full constraint JSON
         constraint = ffi.GrammarConstraint.from_json_string(s)
-        print(constraint.dump_precomputed3())
+        # print(constraint.dump_precomputed3())
         tokenizer = constraint.tokenizer()
         tokenizer_max_state = tokenizer.max_state()
         glr_parser = constraint.glr_parser()
@@ -293,7 +293,7 @@ class Model(GraphProvider):
 
         parser_data = data['parser']
         table_data = parser_data['stage_7_table']
-        print(table_data)
+        # print(table_data)
         start_state_id = parser_data['start_state_id']
         py_table: Dict[int, Row] = {}
         for state_id_str, row_data in table_data:
@@ -489,12 +489,9 @@ class Model(GraphProvider):
             visited_q_items.add(q_item_key)
 
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
-            print(f"Offset {offset}, Tokenizer State {tokenizer_sid}, GSS Heads {len(gss.peek())}, Matches: {matches}, End State: {end_state}")
 
             for terminal_id, width in matches:
-                print(gss)
                 processed_gss = gss if terminal_id == self.ignore_terminal_id else self._process_token(gss, terminal_id)
-                print(processed_gss)
                 # Immediate re-match disallow
                 if end_state is not None:
                     accessible_terms = set(self.tokenizer.tokens_accessible_from_state(end_state))
@@ -504,7 +501,6 @@ class Model(GraphProvider):
                 if not processed_gss.is_empty():
                     new_offset = offset + width
                     next_tokenizer_sid = self.tokenizer_initial_state
-                    print(f"  Match terminal {terminal_id} (width {width}) -> New Offset {new_offset}, Next Tokenizer State {next_tokenizer_sid}, Processed GSS Heads {len(processed_gss.peek())}")
                     if new_offset == len(token_bytes):
                         new_states[next_tokenizer_sid].append(processed_gss)
                     else:
@@ -549,8 +545,6 @@ class Model(GraphProvider):
 
         shifted_gsses: List[GSS] = []
         reduces_handled = 0
-        print(self.parser_table)
-        print(terminal_id)
 
         while heads_by_state:
             stats.inc(f'{p}.loop_iterations')
@@ -558,13 +552,10 @@ class Model(GraphProvider):
             stats.start(f'{p}.merge_many.heads')
             state_gss = GSS.merge_many(state_gsss)
             stats.stop(f'{p}.merge_many.heads')
-            print(state_id)
             row = self.parser_table.table.get(state_id)
-            print(row)
             if not row:
                 continue
             action = row.actions.get(terminal_id)
-            print("action:", action)
             if action is None:
                 continue
 
@@ -600,9 +591,7 @@ class Model(GraphProvider):
                 raise TypeError(f"Unknown action type: {type(action)}")
 
         stats.start(f'{p}.merge_many.final')
-        print(shifted_gsses)
         result = GSS.merge_many(shifted_gsses)
-        print(result)
         stats.stop(f'{p}.merge_many.final')
         stats.inc(f'{p}.final_heads', len(result.peek()))
         stats.stop(f'{p}.total')
@@ -667,9 +656,8 @@ class Model(GraphProvider):
         - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
         - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
         """
-        print("asdfasdf")
         # print(GSS.merge_many(self.state.values()).to_graph_string(upper_only=True))
-        print(GSS.merge_many(self.state.values()))
+        # print(GSS.merge_many(self.state.values()))
 
         stats = Stats.get()
         stats.start('get_mask')
