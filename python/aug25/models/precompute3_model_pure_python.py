@@ -183,13 +183,14 @@ class PyTokenizer:
 
         for i, byte in enumerate(text):
             state_data = self.states[current_state]
-            next_state = state_data.transitions.get(byte)
+            # Ensure byte is used as an integer key into transitions
+            next_state = state_data.transitions.get(int(byte))
 
             if next_state is None:
                 done = True
                 break
             
-            current_state = next_state
+            current_state = int(next_state)
             
             # Update matches
             next_state_data = self.states[current_state]
@@ -198,7 +199,22 @@ class PyTokenizer:
                     matches.setdefault(group_id, i + 1)
                 else:
                     matches[group_id] = i + 1
+            
+            # Early termination: replicate Rust's RegexState "should_terminate" logic.
+            # If there are no future group IDs except those already matched as non-greedy, stop.
+            matched_groups = set(matches.keys())
+            excluded = matched_groups.intersection(self.non_greedy_finalizers)
+            # Only groups not yet matched as non-greedy can be accepted in the future
+            future = set(next_state_data.possible_future_group_ids) - excluded
+            if not future:
+                done = True
+                break
         
+        # Rust semantics: if we reach end-of-input without "done", then:
+        # end_state is None if current state has no outgoing transitions, else current state.
+        if not done:
+            if not self.states[current_state].transitions:
+                done = True
         end_state = None if done else current_state
         
         result_matches = [(gid, width) for gid, width in matches.items() if width > 0]
@@ -413,17 +429,18 @@ class Model(GraphProvider):
         dfa_states = []
         for state_data in dfa_data['states']:
             # The transitions in JSON are a list of [key, value] pairs
-            transitions = {t[0]: t[1] for t in state_data['transitions']}
+            # Cast both key and value to ints to mirror Rust's u8->usize mapping
+            transitions = {int(t[0]): int(t[1]) for t in state_data['transitions']}
             dfa_states.append(DFAState(
                 transitions=transitions,
-                finalizers=set(state_data['finalizers']),
-                possible_future_group_ids=set(state_data['possible_future_group_ids'])
+                finalizers=set(int(x) for x in state_data['finalizers']),
+                possible_future_group_ids=set(int(x) for x in state_data['possible_future_group_ids'])
             ))
 
         tokenizer = PyTokenizer(
             states=dfa_states,
             start_state=dfa_data['start_state'],
-            non_greedy_finalizers=set(dfa_data['non_greedy_finalizers'])
+            non_greedy_finalizers=set(int(x) for x in dfa_data['non_greedy_finalizers'])
         )
         print(f"Loaded PyTokenizer:\n{tokenizer}")
         tokenizer_max_state = tokenizer.max_state()
