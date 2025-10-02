@@ -198,6 +198,21 @@ class PyTokenizer:
                     matches.setdefault(group_id, i + 1)
                 else:
                     matches[group_id] = i + 1
+
+            # Early termination logic from Rust
+            matched = set(matches.keys())
+            excluded = matched.intersection(self.non_greedy_finalizers)
+            possible_futures = self.states[current_state].possible_future_group_ids
+            # `not set` is True for empty set
+            should_terminate = not (possible_futures - excluded)
+
+            if should_terminate:
+                done = True
+                break
+        
+        # if loop finished, check if final state is terminal (has no outgoing transitions)
+        if not done and not self.states[current_state].transitions:
+            done = True
         
         end_state = None if done else current_state
         
