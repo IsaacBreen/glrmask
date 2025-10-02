@@ -620,7 +620,7 @@ fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map:
         let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
 
         for (terminal, action) in &row.shifts_and_reduces {
-            let terminal_id = *terminal_map.get_by_left(terminal).unwrap();
+            let terminal_id = *terminal_map.get_by_left(terminal).expect_else(|| format!("Terminal {} not found in terminal map", terminal));
 
             // 1. Get the potential shift action.
             let maybe_shift: Option<StateID> = action.shift.as_ref().map(|shift_item_set| {
@@ -1215,6 +1215,6 @@ pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerm
     }
     non_terminal_map
 }
-use crate::glr::parser::{GLRParser, ActionFn};
+use crate::glr::parser::{GLRParser, ActionFn, ExpectElse};
 use crate::profiler::{print_summary, print_summary_flat};
 
