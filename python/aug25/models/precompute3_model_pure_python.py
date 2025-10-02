@@ -815,19 +815,14 @@ class Model(GraphProvider):
         """
         Compute the final LLM token mask by traversing the precomputed trie with the current GSS.
 
-        Changes for get_mask_only:
-        - Initialize a per-accumulator LLM mask (PyAcc.llm_mask) BEFORE traversal by computing
-          the forbidden terminals -> forbidden LLM tokens and taking the complement.
-        - Consume terminals_union (set to HybridL2Bitset.all()) after initialization.
-        - As we traverse edges, intersect llm_mask with the edge's LLM bitset using apply.
-        - At end nodes, simply reduce acc over the GSS and union the llm_mask into the final.
-
-        Performance improvements:
-        - Subtract currently known final_mask from per-edge accumulator masks (aggressive zombie avoidance).
-        - Resume within an edge (dest index) and spawn at most one child per pop to reach deep nodes sooner.
-        - Replace Python loops in peek/filter with set-based intersections (C-accelerated).
-        - Cache popn+masking per (node, pop) within a single pop cycle.
-        - Early edge skip via union of dest state-sets and peeked states.
+        This version uses a standard best-first search traversal. Once a node is
+        popped from the priority queue, all its children are generated and enqueued.
+        This avoids pathological cases from the previous "spawn-one-and-re-enqueue"
+        strategy, where the search could get stuck exploring a deep but fruitless
+        branch of the graph, leading to performance spikes. By processing all of a
+        node's children at once, the search can move to other promising areas of
+        the graph more readily, finding an end-node faster and enabling zombie
+        avoidance sooner.
         """
         stats = Stats.get()
         stats.start('get_mask')
@@ -842,8 +837,6 @@ class Model(GraphProvider):
         values: Dict[NodeID, GSS] = {}
         depth_heap: List[Tuple[int, NodeID]] = []  # Stores (-depth, node_id)
         enqueued_nodes: Set[NodeID] = set()
-        # node -> (edge_idx, dest_idx, gss_id_tag)
-        edge_cursor: Dict[NodeID, Tuple[int, int, int]] = {}
 
         hp, hpop = heapq.heappush, heapq.heappop
         roots_map: Dict[int, NodeID] = self.roots_map
@@ -956,7 +949,6 @@ class Model(GraphProvider):
             stats.inc('get_mask.traversal.nodes_processed')
             visited_nodes.add(node)
             gss_node: GSS = values.pop(node)
-            gss_id = id(gss_node)
             enqueued_nodes.remove(node)
             stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
 
@@ -981,32 +973,19 @@ class Model(GraphProvider):
                 continue
 
             # Traverse edges and propagate masks
-            a_node = arena.get(node)
             edges = a_node.children if a_node else []
             stats.inc('get_mask.traversal.edge_blocks.sum', len(edges))
             stats.inc('get_mask.traversal.dests_blocks.sum', sum(len(dests) for _, dests in edges))
 
-            # Resume where we left off: both edge index and dest index
-            saved_cursor = edge_cursor.get(node)
-            if saved_cursor and saved_cursor[2] == gss_id:
-                start_edge_idx = saved_cursor[0]
-                start_dest_idx = saved_cursor[1]
-            else:
-                start_edge_idx = 0
-                start_dest_idx = 0
-
-            spawned_any = False
             # Cache popn results for this node pop cycle (by pop amount)
             pop_cache: Dict[int, Tuple[Optional[GSS], Optional[List[int]], Optional[StateIDSet]]] = {}
             # Each entry: pop -> (popped_gss, peeked_list, peeked_as_rangeset)
 
-            for edge_i in range(start_edge_idx, len(edges)):
-                (pop, llm_bv), dests = edges[edge_i]
-
+            for edge_i, ((pop, llm_bv), dests) in enumerate(edges):
                 stats.inc('get_mask.traversal.edges_traversed')
 
                 # popn + intersect-and-prune (with final_mask subtraction) per pop value (cache within this node pop)
-                if pop not in pop_cache or pop_cache[pop][0] is None:
+                if pop not in pop_cache:
                     stats.inc(f'get_mask.traversal.edge_pop_val.{pop}')
                     stats.start('get_mask.main_loop.edge.popn')
                     popped: GSS = gss_node.popn(pop)
@@ -1015,17 +994,14 @@ class Model(GraphProvider):
                     if popped.is_empty():
                         stats.inc('get_mask.traversal.edge.popped_empty')
                         pop_cache[pop] = (None, None, None)
-                        # This edge cannot produce children; resume at next edge
-                        start_dest_idx = 0
                         continue
 
                     # Per-edge memo with final_mask_version in key to avoid stale cache
                     id_memo: Dict[Tuple[int, int], Optional[PyAcc]] = {}
                     def intersect_and_prune(acc: PyAcc) -> Optional[PyAcc]:
                         key = (id(acc), final_mask_version)
-                        cached = id_memo.get(key, None) if key in id_memo else None
                         if key in id_memo:
-                            return cached
+                            return id_memo[key]
                         p = 'get_mask.main_loop.edge.intersect_and_prune'
                         stats.inc(f'{p}.calls')
                         # Intersect with llm_bv
@@ -1038,7 +1014,6 @@ class Model(GraphProvider):
                             return None
                         # Subtract final_mask to avoid re-propagating already-known tokens
                         if not final_mask.is_empty():
-                            # We intentionally do not record timing for difference to keep existing stats stable
                             reduced_mask = new_mask.difference(final_mask)
                             if reduced_mask.is_empty():
                                 stats.inc(f'{p}.pruned_accs')
@@ -1056,19 +1031,16 @@ class Model(GraphProvider):
                     if popped.is_empty():
                         stats.inc('get_mask.traversal.edge.popped_pruned_empty')
                         pop_cache[pop] = (None, None, None)
-                        start_dest_idx = 0
                         continue
 
                     # Prepare peek info, both as list and RangeSetStates for fast set ops
                     peeked_list = popped.peek()
                     peeked_rs = RangeSetStates.from_indices(peeked_list) if peeked_list else RangeSetStates.from_indices([])
                     pop_cache[pop] = (popped, peeked_list, peeked_rs)
-                else:
-                    popped, peeked_list, peeked_rs = pop_cache[pop]
-                    if popped is None:
-                        # Cached as impossible; resume at next edge
-                        start_dest_idx = 0
-                        continue
+
+                popped, peeked_list, peeked_rs = pop_cache[pop]
+                if popped is None:
+                    continue
 
                 # Early skip: if no peeked state belongs to any dest of this edge, skip edge entirely
                 # Cache union of dest state-sets for this edge
@@ -1082,30 +1054,21 @@ class Model(GraphProvider):
                     union_states = tmp_union if tmp_union is not None else RangeSetStates.from_indices([])
                     edge_states_union_cache[edge_key] = union_states
 
-                # If no overlap between current heads and this edge's dest states, skip
-                # Use set intersection which runs in C for SetRangeSet
-                fast_inter_empty = union_states.intersection(peeked_rs).is_empty()
-                if fast_inter_empty:
-                    start_dest_idx = 0
+                if union_states.intersection(peeked_rs).is_empty():
                     continue
 
-                # Traverse dests; spawn at most a single child per pop cycle to push end discovery earlier
-                child_spawned = False
-                dests_len = len(dests)
-                dest_range = range(start_dest_idx if edge_i == start_edge_idx else 0, dests_len)
-                for dest_j in dest_range:
-                    dest_idx, state_bv = dests[dest_j]
+                for dest_idx, state_bv in dests:
                     stats.inc('get_mask.traversal.dests_traversed')
 
                     # Filter heads for this dest using set intersection (C fast-path)
                     stats.start('get_mask.main_loop.edge.peek_and_filter')
                     keep_rs = state_bv.intersection(peeked_rs)
-                    has_any = not keep_rs.is_empty()
-                    stats.stop('get_mask.main_loop.edge.peek_and_filter')
-                    if not has_any:
+                    if keep_rs.is_empty():
+                        stats.stop('get_mask.main_loop.edge.peek_and_filter')
                         continue
+                    stats.stop('get_mask.main_loop.edge.peek_and_filter')
 
-                    # Build child GSS (fast-path if single sid)
+                    # Build child GSS
                     indices = list(keep_rs.iter_indices())
                     stats.start('get_mask.main_loop.edge.isolate_many')
                     if len(indices) == 1:
@@ -1116,7 +1079,6 @@ class Model(GraphProvider):
 
                     if child_gss.is_empty():
                         stats.inc('get_mask.traversal.edge.child_gss_pruned_empty')
-                        # continue searching other dests
                         continue
 
                     d: NodeID = int(dest_idx)
@@ -1128,31 +1090,7 @@ class Model(GraphProvider):
                     else:
                         values[d] = child_gss
                     enqueue(max_depth[d], d)
-                    child_spawned = True
 
-                    # Save progress and re-enqueue this node to process the next dest (or next edge) later
-                    merged_for_requeue = values[node].merge(gss_node) if node in values else gss_node
-                    values[node] = merged_for_requeue
-                    next_edge_i = edge_i
-                    next_dest_j = dest_j + 1
-                    if next_dest_j >= dests_len:
-                        next_edge_i = edge_i + 1
-                        next_dest_j = 0
-                    edge_cursor[node] = (next_edge_i, next_dest_j, id(merged_for_requeue))
-                    enqueue(max_depth[node], node)
-                    spawned_any = True
-                    break  # spawn only one child per pop
-
-                # If we have spawned one child for this edge, stop processing further edges now.
-                if child_spawned:
-                    break
-
-                # Reset dest start index if we move to next edge
-                start_dest_idx = 0
-
-            # If we didn't spawn any child across remaining edges, this node is done
-            if not spawned_any:
-                edge_cursor.pop(node, None)
         stats.stop('get_mask.main_loop')
         stats.inc('get_mask.traversal.max_depth_reached', max_depth_reached)
         stats.inc('get_mask.traversal.nodes_visited.unique', len(visited_nodes))
