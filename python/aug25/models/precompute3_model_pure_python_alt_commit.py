@@ -46,7 +46,7 @@ class Model(_Model):
     roots_map0: Dict[int, NodeID] = field(default_factory=dict)
     terminal_map_by_llm: Dict[int, Dict[int, TerminalIdSet]] = field(default_factory=dict)
     state_map_by_llm: Dict[int, Dict[int, int]] = field(default_factory=dict)
-    original_to_internal_map: Dict[int, int] = field(default_factory=dict)
+    original_to_internal_map0: Dict[int, int] = field(default_factory=dict)
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -114,10 +114,10 @@ class Model(_Model):
         # This model's commit logic is based on precompute0, so we must use its vocab.
         vocab0 = data['precompute0_vocab']
         internal_to_original_map0_raw = dict(vocab0['internal_to_original'])
-        original_to_internal_map = {}
+        original_to_internal_map0 = {}
         for internal, original_list in internal_to_original_map0_raw.items():
             for original in original_list:
-                original_to_internal_map[original] = int(internal)
+                original_to_internal_map0[original] = int(internal)
 
         # Construct the final model using all fields from the base model plus the new ones
         return Model(
@@ -126,7 +126,7 @@ class Model(_Model):
             roots_map0=roots_map0,
             terminal_map_by_llm=terminal_map_by_llm,
             state_map_by_llm=state_map_by_llm,
-            original_to_internal_map=original_to_internal_map
+            original_to_internal_map0=original_to_internal_map0
         )
 
     def copy(self):
@@ -146,7 +146,7 @@ class Model(_Model):
         stats = Stats.get()
         stats.start('commit_precompute0')
 
-        internal_id = self.original_to_internal_map.get(token_id)
+        internal_id = self.original_to_internal_map0.get(token_id)
         if internal_id is None:
             raise ValueError(f"LLM token ID {token_id} not found in internal mapping.")
 
