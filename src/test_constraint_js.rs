@@ -514,7 +514,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Load and compile the JavaScript grammar.
     // let grammar_path = "src/js_simplified_minimal_if_stmt_ambiguity_linear_time.ebnf";
-    let grammar_path = "src/js_simplified2_2.ebnf";
+    let grammar_path = "src/js_simplified2.ebnf";
     let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
     println!("Compiling GrammarDefinition into CompiledGrammar...");
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
@@ -532,7 +532,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n--- Applying manual vocabulary modifications ---");
 
         // Filter 1: Keep only tokens with length <= x
-        let x = 0;
+        let x = 1;
         gpt2_raw_vocab.retain(|s| {
             let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
             processed.as_bytes().len() <= x
@@ -566,10 +566,10 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // gpt2_raw_vocab.retain(|s| { s.len() == 1 || s.contains('-') });
 
         // Option 3: Set to a few specific tokens
-        gpt2_raw_vocab = vec![
-            "a",
-            "b",
-        ].iter().map(|s| s.to_string()).collect();
+        // gpt2_raw_vocab = vec![
+        //     "a",
+        //     "b",
+        // ].iter().map(|s| s.to_string()).collect();
 
 
         println!("  - Set to a specific small set of tokens: {} tokens.", gpt2_raw_vocab.len());
