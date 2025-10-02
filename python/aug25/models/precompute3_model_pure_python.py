@@ -596,6 +596,8 @@ class Model(GraphProvider):
                 for length, nts in action.reduces.items():
                     for nt_id, pids in nts.items():
                         handle_reduce(Reduce(nt_id, length, pids), state_gss)
+            else:
+                raise TypeError(f"Unknown action type: {type(action)}")
 
         stats.start(f'{p}.merge_many.final')
         result = GSS.merge_many(shifted_gsses)
