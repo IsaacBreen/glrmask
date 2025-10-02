@@ -1086,6 +1086,9 @@ fn merge_compatible_states(
 #[time_it]
 pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
     assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
+    crate::debug!(2, "Validating initial grammar");
+    validate(productions).expect("Initial grammar validation failed");
+
     let original_productions = productions.to_vec();
     let start_production_id = 0;
 
@@ -1124,9 +1127,6 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
             next_non_terminal_id += 1;
         }
     }
-
-    crate::debug!(2, "Validating");
-    validate(&productions).expect("Validation error");
 
     crate::debug!(2, "Stage 1");
     let stage_1_table = stage_1(&productions);

@@ -175,16 +175,68 @@ pub fn check_for_left_nullable_left_recursion(productions: &[Production]) -> Vec
     errors
 }
 
+/// Computes the set of productive non-terminals (those that can derive a terminal string).
+fn compute_productive_non_terminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
+    let mut productive_nts = BTreeSet::new();
+    let mut changed = true;
+
+    while changed {
+        changed = false;
+        for prod in productions {
+            if productive_nts.contains(&prod.lhs) {
+                continue;
+            }
+
+            // A rule's RHS is productive if all its symbols are productive.
+            // Terminals are inherently productive. Non-terminals are productive if they are in our set.
+            let rhs_is_productive = prod.rhs.iter().all(|symbol| match symbol {
+                Symbol::Terminal(_) => true,
+                Symbol::NonTerminal(nt) => productive_nts.contains(nt),
+            });
+
+            if rhs_is_productive {
+                if productive_nts.insert(prod.lhs.clone()) {
+                    changed = true;
+                }
+            }
+        }
+    }
+    productive_nts
+}
+
+/// Checks for non-terminals that cannot derive any terminal string.
+pub fn check_for_non_productive_non_terminals(productions: &[Production]) -> Vec<String> {
+    // Collect all non-terminals defined on the LHS. If a non-terminal is only used on the RHS,
+    // `check_for_undefined_non_terminals` will have already caught it.
+    let all_nonterminals: BTreeSet<NonTerminal> = productions.iter().map(|p| p.lhs.clone()).collect();
+    let productive_nts = compute_productive_non_terminals(productions);
+
+    let non_productive_nts: BTreeSet<_> = all_nonterminals.difference(&productive_nts).collect();
+
+    if !non_productive_nts.is_empty() {
+        let mut non_productive_strings: Vec<_> = non_productive_nts.into_iter().map(|nt| nt.0.clone()).collect();
+        non_productive_strings.sort(); // For deterministic error messages
+        vec![format!(
+            "Non-terminal(s) are non-productive (cannot derive a terminal string): {:?}",
+            non_productive_strings
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Validates the grammar for common issues, collecting all errors.
 ///
 /// Checks for:
 /// 1. Undefined non-terminals.
-/// 2. Length-1 recursion (direct or indirect).
-/// 3. Left-nullable left recursion.
+/// 2. Non-productive non-terminals.
+/// 3. Length-1 recursion (direct or indirect).
+/// 4. Left-nullable left recursion.
 pub fn validate(productions: &[Production]) -> Result<(), String> {
     let mut errors = Vec::new();
 
     errors.extend(check_for_undefined_non_terminals(productions));
+    errors.extend(check_for_non_productive_non_terminals(productions));
     errors.extend(check_for_length_1_recursion(productions));
     errors.extend(check_for_left_nullable_left_recursion(productions));
 
