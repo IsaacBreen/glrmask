@@ -3692,7 +3692,7 @@ impl<'a> GrammarConstraintState<'a> {
         let t0 = std::time::Instant::now();
         crate::debug!(10, "\n--- get_mask3 START ---");
         crate::debug!(10, "GSS at start of get_mask3:");
-        crate::debug!(2, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
+        crate::debug!(3, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
         let stats = gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
         );
