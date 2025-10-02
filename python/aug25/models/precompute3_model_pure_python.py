@@ -492,6 +492,7 @@ class Model(GraphProvider):
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tokenizer_sid)
 
             for terminal_id, width in matches:
+                print(terminal_id)
                 processed_gss = self._process_token(gss, terminal_id)
                 # Immediate re-match disallow
                 if end_state is not None:
