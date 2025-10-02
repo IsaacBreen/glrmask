@@ -171,52 +171,34 @@ class PyTokenizer:
     def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
         current_state = state_id
         matches = {}
+        done = False
 
         # Check for initial matches (epsilon)
         initial_state_data = self.states[current_state]
-        done = not initial_state_data.transitions
-
         for group_id in initial_state_data.finalizers:
             if group_id in self.non_greedy_finalizers:
                 matches.setdefault(group_id, 0)
             else:
                 matches[group_id] = 0
 
-        if not done:
-            for i, byte in enumerate(text):
-                state_data = self.states[current_state]
-                next_state = state_data.transitions.get(byte)
+        for i, byte in enumerate(text):
+            state_data = self.states[current_state]
+            next_state = state_data.transitions.get(byte)
 
-                if next_state is None:
-                    done = True
-                    break
-                
-                current_state = next_state
-                
-                # Update matches
-                next_state_data = self.states[current_state]
-                for group_id in next_state_data.finalizers:
-                    if group_id in self.non_greedy_finalizers:
-                        matches.setdefault(group_id, i + 1)
-                    else:
-                        matches[group_id] = i + 1
-                
-                # Early termination logic from Rust
-                matched_gids = set(matches.keys())
-                excluded_gids = matched_gids.intersection(self.non_greedy_finalizers)
-                possible_futures = next_state_data.possible_future_group_ids
-                
-                should_terminate = not (possible_futures - excluded_gids)
-                
-                if should_terminate:
-                    done = True
-                    break
+            if next_state is None:
+                done = True
+                break
             
-            if not done:
-                # Reached the end of input, mark as done if no further transitions
-                if not self.states[current_state].transitions:
-                    done = True
-
+            current_state = next_state
+            
+            # Update matches
+            next_state_data = self.states[current_state]
+            for group_id in next_state_data.finalizers:
+                if group_id in self.non_greedy_finalizers:
+                    matches.setdefault(group_id, i + 1)
+                else:
+                    matches[group_id] = i + 1
+        
         end_state = None if done else current_state
         
         result_matches = [(gid, width) for gid, width in matches.items() if width > 0]
