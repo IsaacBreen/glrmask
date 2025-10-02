@@ -1,3 +1,4 @@
 #![ignore(WS)]
-program ::= 'a' 'a';
-WS ::= 'b' ;
+program ::= 'a'? 'EOF';
+WS ::= W+ ;
+W ::=  'b'+ ;
