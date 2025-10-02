@@ -188,7 +188,7 @@ class Model(_Model):
 
         while q:
             node_id = q.popleft()
-            gss = node_gss_map[node_id]
+            gss = node_gss_map.pop(node_id)
 
             node = self.arena0[node_id]
             if node.value.final_tokenizer_state is not None:
