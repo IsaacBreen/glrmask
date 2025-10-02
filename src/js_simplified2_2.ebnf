@@ -1,5 +1,5 @@
 #![ignore(IGNORE)]
 program ::= IDENTIFIER+ EOF ;
 EOF ::= '<|EOF|>' ;
-IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
-IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+IGNORE ::= '//' 'b'? ;
+IDENTIFIER ::= 'a' ;
