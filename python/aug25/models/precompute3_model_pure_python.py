@@ -95,6 +95,7 @@ class DFAState:
     transitions: Dict[int, int] = field(default_factory=dict)
     finalizers: Set[int] = field(default_factory=set)
     possible_future_group_ids: Set[int] = field(default_factory=set)
+    group_id_to_u8set: Dict[int, TerminalIdSet] = field(default_factory=dict)
 
 @dataclass
 class PyTokenizer:
@@ -414,12 +415,21 @@ class Model(GraphProvider):
         print("data['tokenizer']:")
         print(data['tokenizer'])
         for state_data in dfa_data['states']:
-            # The transitions in JSON are a list of [key, value] pairs
-            transitions = {t[0]: t[1] for t in state_data['transitions']}
+            transitions_json = state_data['transitions']
+            # The 'data' field of the TrieMap JSON contains string keys for byte values.
+            transitions = {int(k): v for k, v in transitions_json.get('data', {}).items()}
+
+            group_id_to_u8set_json = state_data.get('group_id_to_u8set', [])
+            group_id_to_u8set = {}
+            for group_id, u8set_ranges in group_id_to_u8set_json:
+                # The u8set is stored as a list of [start, end] ranges.
+                group_id_to_u8set[group_id] = TerminalIdSet.from_ranges(u8set_ranges)
+
             dfa_states.append(DFAState(
                 transitions=transitions,
                 finalizers=set(state_data['finalizers']),
-                possible_future_group_ids=set(state_data['possible_future_group_ids'])
+                possible_future_group_ids=set(state_data['possible_future_group_ids']),
+                group_id_to_u8set=group_id_to_u8set
             ))
 
         tokenizer = PyTokenizer(
