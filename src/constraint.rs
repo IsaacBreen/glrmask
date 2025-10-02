@@ -2160,8 +2160,8 @@ impl<'r> Precomputer0<'r> {
             let mut edges_to_move = Vec::new();
 
             for (key, dest_map) in node_guard.children() {
-                if let Some((gtid, _)) = key {
-                    if *gtid == ignore_tid {
+                if let Some((gtid, tokenizer_state_id_opt)) = key {
+                    if *gtid == ignore_tid && tokenizer_state_id_opt.is_none() {
                         edges_to_move.push((key.clone(), dest_map.clone()));
                     }
                 }
