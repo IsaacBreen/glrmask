@@ -206,6 +206,7 @@ class FFIRangeSet(RangeSet[int]):
             record_metric('FFIRangeSet.from_ranges.in_ranges_count', len(ranges))
         except Exception:
             pass
+        ranges = [tuple(r) for r in ranges]
         self._bitset = ffi.Bitset.from_ranges(ranges)
         try:
             record_metric('FFIRangeSet.from_ranges.out_len', len(self))
