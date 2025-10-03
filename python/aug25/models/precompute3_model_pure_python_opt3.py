@@ -225,21 +225,31 @@ def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArena
             continue
         
         if use_alt_merge:
-            for key, group in itertools.groupby(intermediate_node.children, key=lambda e: (e.pop, e.llm_bv)):
-                pop, llm_bv = key
-                dests: List[ArenaEdgeDest] = []
+            children_it = iter(intermediate_node.children)
+            first = next(children_it)
+            prev_pop = first.pop
+            prev_llm_bv = first.llm_bv
+            edge_dests = [ArenaEdgeDest(first.dests.dest_idx, first.dests.state_bv)]
+            def flush() -> None:
+                nonlocal edge_dests, prev_pop, prev_llm_bv, new_children, llm_bv_union
                 dest_states_union = RangeSetStates.empty()
-                for edge in group:
-                    dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-                    dest_states_union |= edge.dests.state_bv
-                
-                llm_bv_union |= llm_bv
+                for d in edge_dests:
+                    dest_states_union |= d.state_bv
+                llm_bv_union |= prev_llm_bv
                 new_children.append(ArenaEdge(
-                    pop=pop,
-                    llm_bv=llm_bv,
-                    dests=dests,
+                    pop=prev_pop,
+                    llm_bv=prev_llm_bv,
+                    dests=edge_dests,
                     dest_states_union=dest_states_union,
                 ))
+            for edge in children_it:
+                if not (edge.pop == prev_pop and edge.llm_bv == prev_llm_bv):
+                    flush()
+                prev_pop = edge.pop
+                prev_llm_bv = edge.llm_bv
+                edge_dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
+            flush()
+
         else:
             grouped_edges: Dict[Tuple[int, LLMTokenSet], Tuple[List[ArenaEdgeDest], StateIDSet]] = collections.defaultdict(lambda: ([], RangeSetStates.empty()))
 
