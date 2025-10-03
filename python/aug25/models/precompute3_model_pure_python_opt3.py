@@ -7,6 +7,8 @@ from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
 from dataclasses import dataclass, field
 
 from numba import njit
+import numba.typed
+import numba.types
 
 from ..common_interface import GraphProvider
 from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
@@ -46,26 +48,27 @@ def _acc_memoize(use_value_cache: bool = True):
     return decorator
 
 class DFAState(NamedTuple):
-    transitions: Dict[int, int]
-    finalizers: Set[int]
-    possible_future_group_ids: Set[int]
+    transitions: 'numba.typed.Dict'
+    finalizers: 'numba.typed.Set'
+    possible_future_group_ids: 'numba.typed.Set'
 
 
 class PyTokenizer(NamedTuple):
-    states: List[DFAState]
+    states: 'numba.typed.List'
     start_state: int
-    non_greedy_finalizers: Set[int]
+    non_greedy_finalizers: 'numba.typed.Set'
 
     @njit(nopython=True)
-    def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
+    def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], 'numba.typed.List']:
         current_state = state_id
-        matches = {}
+        matches = numba.typed.Dict.empty(key_type=numba.types.int64, value_type=numba.types.int64)
         done = False
 
         # Check for initial matches (epsilon)
         for group_id in self.states[current_state].finalizers:
             if group_id in self.non_greedy_finalizers:
-                matches.setdefault(group_id, 0)
+                if group_id not in matches:
+                    matches[group_id] = 0
             else:
                 matches[group_id] = 0
 
@@ -76,16 +79,21 @@ class PyTokenizer(NamedTuple):
             if next_state is None:
                 done = True
                 break
-            
+
             current_state = next_state
             for group_id in self.states[current_state].finalizers:
                 if group_id in self.non_greedy_finalizers:
-                    matches.setdefault(group_id, i + 1)
+                    if group_id not in matches:
+                        matches[group_id] = i + 1
                 else:
                     matches[group_id] = i + 1
 
         end_state = None if done else current_state
-        return end_state, [(gid, width) for gid, width in matches.items() if width > 0]
+        result = numba.typed.List()
+        for gid, width in matches.items():
+            if width > 0:
+                result.append((gid, width))
+        return end_state, result
 
     def tokens_accessible_from_state(self, state_id: int) -> List[int]:
         return list(self.states[state_id].possible_future_group_ids)
@@ -233,8 +241,14 @@ class Model(GraphProvider):
 
         # Tokenizer
         dfa_data = data['tokenizer']['dfa']
-        dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
-        tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], set(dfa_data['non_greedy_finalizers']))
+        dfa_states_list = [DFAState(
+            transitions=numba.typed.Dict({int(k): v for k, v in s['transitions'].get('data', {}).items()}),
+            finalizers=numba.typed.Set(s['finalizers']),
+            possible_future_group_ids=numba.typed.Set(s['possible_future_group_ids'])
+        ) for s in dfa_data['states']]
+        dfa_states = numba.typed.List(dfa_states_list)
+        non_greedy_finalizers = numba.typed.Set(dfa_data['non_greedy_finalizers'])
+        tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], non_greedy_finalizers)
 
         # Parser Table
         parser_data = data['parser']
