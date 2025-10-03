@@ -6,8 +6,7 @@ import collections
 from typing import Dict, List, Tuple, Optional, Union, Set
 from dataclasses import dataclass, field
 
-from numba import njit, types
-from numba.typed import Dict as NumbaDict, List as NumbaList
+from numba import njit
 
 from ..common_interface import GraphProvider
 from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
@@ -46,52 +45,6 @@ def _acc_memoize(use_value_cache: bool = True):
         return wrapper
     return decorator
 
-@njit
-def _execute_from_state_jitted(states, non_greedy_finalizers, text, state_id):
-    current_state = state_id
-    matches = {}
-    done = False
-
-    # Check for initial matches (epsilon)
-    if current_state < len(states):
-        _, finalizers = states[current_state]
-        for group_id in finalizers:
-            if group_id in non_greedy_finalizers:
-                if group_id not in matches:
-                    matches[group_id] = 0
-            else:
-                matches[group_id] = 0
-
-    for i, byte in enumerate(text):
-        if current_state >= len(states):
-            done = True
-            break
-        
-        transitions, _ = states[current_state]
-        next_state = transitions.get(byte)
-
-        if next_state is None:
-            done = True
-            break
-        
-        current_state = next_state
-        if current_state < len(states):
-            _, finalizers = states[current_state]
-            for group_id in finalizers:
-                if group_id in non_greedy_finalizers:
-                    if group_id not in matches:
-                        matches[group_id] = i + 1
-                else:
-                    matches[group_id] = i + 1
-
-    end_state = None if done else current_state
-    result = []
-    for gid, width in matches.items():
-        if width > 0:
-            result.append((gid, width))
-    return end_state, result
-
-
 @dataclass
 class DFAState:
     transitions: Dict[int, int] = field(default_factory=dict)
@@ -103,23 +56,37 @@ class PyTokenizer:
     states: List[DFAState]
     start_state: int
     non_greedy_finalizers: Set[int]
-    _jitted_data: Optional[Tuple] = field(default=None, init=False, repr=False)
 
+    @njit
     def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
-        if self._jitted_data is None:
-            dfa_states_numba = NumbaList()
-            for s in self.states:
-                transitions = NumbaDict.empty(key_type=types.int64, value_type=types.int64)
-                for k, v in s.transitions.items():
-                    transitions[k] = v
-                finalizers = tuple(sorted(s.finalizers))
-                dfa_states_numba.append((transitions, finalizers))
-            
-            non_greedy_finalizers_numba = tuple(sorted(self.non_greedy_finalizers))
-            self._jitted_data = (dfa_states_numba, non_greedy_finalizers_numba)
+        current_state = state_id
+        matches = {}
+        done = False
 
-        states, non_greedy_finalizers = self._jitted_data
-        return _execute_from_state_jitted(states, non_greedy_finalizers, text, state_id)
+        # Check for initial matches (epsilon)
+        for group_id in self.states[current_state].finalizers:
+            if group_id in self.non_greedy_finalizers:
+                matches.setdefault(group_id, 0)
+            else:
+                matches[group_id] = 0
+
+        for i, byte in enumerate(text):
+            state_data = self.states[current_state]
+            next_state = state_data.transitions.get(byte)
+
+            if next_state is None:
+                done = True
+                break
+            
+            current_state = next_state
+            for group_id in self.states[current_state].finalizers:
+                if group_id in self.non_greedy_finalizers:
+                    matches.setdefault(group_id, i + 1)
+                else:
+                    matches[group_id] = i + 1
+
+        end_state = None if done else current_state
+        return end_state, [(gid, width) for gid, width in matches.items() if width > 0]
 
     def tokens_accessible_from_state(self, state_id: int) -> List[int]:
         return list(self.states[state_id].possible_future_group_ids)
