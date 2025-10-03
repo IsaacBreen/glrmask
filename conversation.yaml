@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - python/aug25/models/precompute3_model_pure_python_opt3.py
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     python/aug25/models/precompute3_model_pure_python_opt3.py: |
@@ -818,6 +818,20 @@ local_system:
               return self.llm_mask.is_empty()
 
       @dataclass
+      class WorkItem:
+          priority: Tuple[int, int, int]
+          node_id: NodeID
+          gss: GSS
+          edge_idx: int
+          dest_idx: int
+          pop_cache: Dict
+
+          def __lt__(self, other: 'WorkItem') -> bool:
+              if not isinstance(other, WorkItem):
+                  return NotImplemented
+              return self.priority < other.priority
+
+      @dataclass
       class Model(GraphProvider):
           arena: Dict[NodeID, ArenaNode]
           roots_map: Dict[int, NodeID]
@@ -1033,12 +1047,19 @@ local_system:
                   if gss.is_empty():
                       return
                   priority = (-self.max_depth.get(node_id, 0), edge_idx, dest_idx)
-                  heapq.heappush(work_heap, (priority, node_id, gss, pop_cache if pop_cache is not None else {}))
+                  item = WorkItem(
+                      priority=priority,
+                      node_id=node_id,
+                      gss=gss,
+                      edge_idx=edge_idx,
+                      dest_idx=dest_idx,
+                      pop_cache=pop_cache if pop_cache is not None else {}
+                  )
+                  heapq.heappush(work_heap, item)
 
               def dequeue() -> Tuple[NodeID, GSS, int, int, Dict]:
-                  priority, node_id, gss, pop_cache = heapq.heappop(work_heap)
-                  _, edge_idx, dest_idx = priority
-                  return node_id, gss, edge_idx, dest_idx, pop_cache
+                  item = heapq.heappop(work_heap)
+                  return item.node_id, item.gss, item.edge_idx, item.dest_idx, item.pop_cache
 
               @_acc_memoize(use_value_cache=False)
               def initialize_acc(acc: PyAcc) -> PyAcc:
@@ -2009,5 +2030,136 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Refactor get_mask traversal queue: Remove
       NodeCursor and integrate cursor state into work_heap items for correct re-enqueueing"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt3.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: Use a queue item dataclass with a custom comparison operator.
+    metadata:
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to refactor the queue to use a dataclass, followed by the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file `python/aug25/models/precompute3_model_pure_python_opt3.py`**.
+
+      2.  **Define the `WorkItem` dataclass**: Just before the `Model` class definition (around line 267), insert the following code to define a new `WorkItem` dataclass. This class will hold the state for each item in the processing queue and includes a custom comparison method for prioritization.
+
+          ```python
+          @dataclass
+          class WorkItem:
+              priority: Tuple[int, int, int]
+              node_id: NodeID
+              gss: GSS
+              edge_idx: int
+              dest_idx: int
+              pop_cache: Dict
+          
+              def __lt__(self, other: 'WorkItem') -> bool:
+                  if not isinstance(other, WorkItem):
+                      return NotImplemented
+                  return self.priority < other.priority
+          ```
+
+      3.  **Update the `get_mask` method**: We will now modify the helper functions within `get_mask` to use the new `WorkItem` dataclass.
+
+          a.  **Modify the `enqueue` helper function**: Replace the current implementation of `enqueue` (starting around line 515) with the following code. This version will instantiate `WorkItem` and push it onto the heap.
+
+          ```python
+          def enqueue(node_id: NodeID, gss: GSS, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
+              if gss.is_empty():
+                  return
+              priority = (-self.max_depth.get(node_id, 0), edge_idx, dest_idx)
+              item = WorkItem(
+                  priority=priority,
+                  node_id=node_id,
+                  gss=gss,
+                  edge_idx=edge_idx,
+                  dest_idx=dest_idx,
+                  pop_cache=pop_cache if pop_cache is not None else {}
+              )
+              heapq.heappush(work_heap, item)
+          ```
+
+          b.  **Modify the `dequeue` helper function**: Replace the current implementation of `dequeue` (starting around line 522) with the following. This version will pop a `WorkItem` from the heap and return its attributes.
+
+          ```python
+          def dequeue() -> Tuple[NodeID, GSS, int, int, Dict]:
+              item = heapq.heappop(work_heap)
+              return item.node_id, item.gss, item.edge_idx, item.dest_idx, item.pop_cache
+          ```
+
+      ### Git Diff
+
+      Here is the git diff to apply these changes directly.
+
+      ```diff
+      diff --git a/python/aug25/models/precompute3_model_pure_python_opt3.py b/python/aug25/models/precompute3_model_pure_python_opt3.py
+      index 2222222..3333333 100644
+      --- a/python/aug25/models/precompute3_model_pure_python_opt3.py
+      +++ b/python/aug25/models/precompute3_model_pure_python_opt3.py
+      @@ -264,6 +264,22 @@
+           def is_empty(self):
+               return self.llm_mask.is_empty()
+       
+      +@dataclass
+      +class WorkItem:
+      +    priority: Tuple[int, int, int]
+      +    node_id: NodeID
+      +    gss: GSS
+      +    edge_idx: int
+      +    dest_idx: int
+      +    pop_cache: Dict
+      +
+      +    def __lt__(self, other: 'WorkItem') -> bool:
+      +        if not isinstance(other, WorkItem):
+      +            return NotImplemented
+      +        return self.priority < other.priority
+      +
+       @dataclass
+       class Model(GraphProvider):
+           arena: Dict[NodeID, ArenaNode]
+      @@ -515,15 +531,22 @@
+               def enqueue(node_id: NodeID, gss: GSS, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
+                   if gss.is_empty():
+                       return
+                   priority = (-self.max_depth.get(node_id, 0), edge_idx, dest_idx)
+      -            heapq.heappush(work_heap, (priority, node_id, gss, pop_cache if pop_cache is not None else {}))
+      +            item = WorkItem(
+      +                priority=priority,
+      +                node_id=node_id,
+      +                gss=gss,
+      +                edge_idx=edge_idx,
+      +                dest_idx=dest_idx,
+      +                pop_cache=pop_cache if pop_cache is not None else {}
+      +            )
+      +            heapq.heappush(work_heap, item)
+       
+               def dequeue() -> Tuple[NodeID, GSS, int, int, Dict]:
+      -            priority, node_id, gss, pop_cache = heapq.heappop(work_heap)
+      -            _, edge_idx, dest_idx = priority
+      -            return node_id, gss, edge_idx, dest_idx, pop_cache
+      +            item = heapq.heappop(work_heap)
+      +            return item.node_id, item.gss, item.edge_idx, item.dest_idx, item.pop_cache
+       
+               @_acc_memoize(use_value_cache=False)
+               def initialize_acc(acc: PyAcc) -> PyAcc:
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/models/precompute3_model_pure_python_opt3.py
+      Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt3.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt3.py.
+    metadata:
+  - user: 'Changes committed with message: "Refactor get_mask traversal queue: Introduce
+      WorkItem dataclass for heap ordering and state management"'
     metadata:
 ...
