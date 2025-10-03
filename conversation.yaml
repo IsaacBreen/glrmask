@@ -10,7 +10,7 @@ local_system:
       import json
       import heapq
       import collections
-      from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
+      from typing import Dict, List, Tuple, Optional, Union, Set
       from dataclasses import dataclass, field
 
       from numba import njit
@@ -52,13 +52,14 @@ local_system:
               return wrapper
           return decorator
 
-      class DFAState(NamedTuple):
-          transitions: Dict[int, int]
-          finalizers: Set[int]
-          possible_future_group_ids: Set[int]
+      @dataclass
+      class DFAState:
+          transitions: Dict[int, int] = field(default_factory=dict)
+          finalizers: Set[int] = field(default_factory=set)
+          possible_future_group_ids: Set[int] = field(default_factory=set)
 
-
-      class PyTokenizer(NamedTuple):
+      @dataclass
+      class PyTokenizer:
           states: List[DFAState]
           start_state: int
           non_greedy_finalizers: Set[int]
@@ -532,579 +533,6 @@ local_system:
       from dataclasses import dataclass, field
 
       from numba import njit
-      import numba.typed
-      import numba.types
-
-      from ..common_interface import GraphProvider
-      from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
-      from ..range_set.set_range_set import SetRangeSet as RangeSetOut
-      from ..range_set.set_range_set import SetRangeSet as RangeSetStates
-      import _sep1 as ffi
-      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
-
-      # Type Aliases
-      NodeID = int
-      LLMTokenSet = RangeSet
-      StateIDSet = RangeSetStates
-      TerminalIdSet = RangeSet
-
-      def _acc_memoize(use_value_cache: bool = True):
-          """Per-invocation memoization for PyAcc transformers."""
-          def decorator(fn):
-              id_memo = {}
-              val_memo = {}
-              def wrapper(acc):
-                  acc_id = id(acc)
-                  if acc_id in id_memo:
-                      return id_memo[acc_id]
-
-                  if use_value_cache:
-                      cached = val_memo.get(acc)
-                      if cached is not None:
-                          id_memo[acc_id] = cached
-                          return cached
-                  
-                  result = fn(acc)
-                  id_memo[acc_id] = result
-                  if use_value_cache and result is not None:
-                      val_memo[acc] = result
-                  return result
-              return wrapper
-          return decorator
-
-      class DFAState(NamedTuple):
-          transitions: 'numba.typed.Dict'
-          finalizers: 'numba.typed.Set'
-          possible_future_group_ids: 'numba.typed.Set'
-
-
-      class PyTokenizer(NamedTuple):
-          states: 'numba.typed.List'
-          start_state: int
-          non_greedy_finalizers: 'numba.typed.Set'
-
-          @njit(nopython=True)
-          def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], 'numba.typed.List']:
-              current_state = state_id
-              matches = numba.typed.Dict.empty(key_type=numba.types.int64, value_type=numba.types.int64)
-              done = False
-
-              # Check for initial matches (epsilon)
-              for group_id in self.states[current_state].finalizers:
-                  if group_id in self.non_greedy_finalizers:
-                      if group_id not in matches:
-                          matches[group_id] = 0
-                  else:
-                      matches[group_id] = 0
-
-              for i, byte in enumerate(text):
-                  state_data = self.states[current_state]
-                  next_state = state_data.transitions.get(byte)
-
-                  if next_state is None:
-                      done = True
-                      break
-
-                  current_state = next_state
-                  for group_id in self.states[current_state].finalizers:
-                      if group_id in self.non_greedy_finalizers:
-                          if group_id not in matches:
-                              matches[group_id] = i + 1
-                      else:
-                          matches[group_id] = i + 1
-
-              end_state = None if done else current_state
-              result = numba.typed.List()
-              for gid, width in matches.items():
-                  if width > 0:
-                      result.append((gid, width))
-              return end_state, result
-
-          def tokens_accessible_from_state(self, state_id: int) -> List[int]:
-              return list(self.states[state_id].possible_future_group_ids)
-
-          def initial_state_id(self) -> int:
-              return self.start_state
-
-          def max_state(self) -> int:
-              return len(self.states)
-
-      @dataclass(frozen=True)
-      class Reduce:
-          nonterminal_id: int
-          len: int
-          production_ids: Tuple[int, ...]
-
-      @dataclass(frozen=True)
-      class Split:
-          shift: Optional[int]
-          reduces: Dict[int, Dict[int, Tuple[int, ...]]]
-
-      Action = Union[int, Reduce, Split]
-
-      @dataclass
-      class Row:
-          actions: Dict[int, Action] = field(default_factory=dict)
-          gotos: Dict[int, int] = field(default_factory=dict)
-
-      @dataclass
-      class ParserTable:
-          start_state_id: int
-          table: Dict[int, Row]
-
-      @dataclass
-      class ArenaEdge:
-          pop: int
-          llm_bv: LLMTokenSet
-          dests: List[Tuple[NodeID, StateIDSet]] = field(default_factory=list)
-          dest_states_union: StateIDSet = field(default_factory=RangeSetStates.empty)
-          llm_bv_not: Optional[LLMTokenSet] = None
-          state_to_dest: Optional[Dict[int, List[int]]] = None
-
-          def ensure_index(self, dest_index_threshold: int = 512, max_states_per_index: int = 100_000) -> None:
-              if self.state_to_dest is not None or len(self.dests) < dest_index_threshold:
-                  return
-              
-              mapping: Dict[int, List[int]] = collections.defaultdict(list)
-              total_assigned = 0
-              for j, (_dest_idx, state_bv) in enumerate(self.dests):
-                  for sid in state_bv.iter_indices():
-                      mapping[sid].append(j)
-                      total_assigned += 1
-                      if total_assigned > max_states_per_index:
-                          self.state_to_dest = {} # Marker for "too big to index"
-                          return
-              self.state_to_dest = dict(mapping)
-
-      @dataclass
-      class ArenaNode:
-          children: List[ArenaEdge] = field(default_factory=list)
-          llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
-          clean_end: bool = False
-
-      @dataclass(frozen=True, eq=False)
-      class PyAcc:
-          terminals_union: Dict[int, TerminalIdSet]
-          llm_mask: LLMTokenSet
-
-          def __eq__(self, other):
-              if not isinstance(other, PyAcc):
-                  return NotImplemented
-              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
-
-          def __hash__(self):
-              # Correctly hash the dictionary content for memoization
-              return hash((frozenset(self.terminals_union.items()), self.llm_mask))
-
-          def merge(self, other: "PyAcc") -> "PyAcc":
-              new_terminals_union = self.terminals_union.copy()
-              for k, v in other.terminals_union.items():
-                  if k in new_terminals_union:
-                      new_terminals_union[k] = new_terminals_union[k].union(v)
-                  else:
-                      new_terminals_union[k] = v
-              return PyAcc(
-                  terminals_union=new_terminals_union,
-                  llm_mask=self.llm_mask.union(other.llm_mask),
-              )
-
-          def is_empty(self):
-              return self.llm_mask.is_empty()
-
-      @dataclass
-      class NodeCursor:
-          edge_idx: int = 0
-          dest_idx: int = 0
-          gss_id: int = 0
-          pop_cache: Optional[Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]]] = None
-
-      @dataclass
-      class Model(GraphProvider):
-          arena: Dict[NodeID, ArenaNode]
-          roots_map: Dict[int, NodeID]
-          max_depth: Dict[NodeID, int]
-          parser_table: ParserTable
-          tokenizer: PyTokenizer
-          tokenizer_initial_state: int
-          possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
-          id_to_token: Dict[int, bytes]
-          internal_to_original_map: Dict[int, RangeSetOut]
-          all_internal_llm_tokens_bitset: LLMTokenSet
-          ignore_terminal_id: Optional[int]
-          state: Dict[int, GSS]
-
-          @staticmethod
-          def from_json_string(s: str) -> 'Model':
-              data = json.loads(s)
-              
-              # Arena
-              roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
-              arena_dict = {int(k): v for k, v in data["trie3_god"].get("values", [])}
-              max_depth: Dict[NodeID, int] = {}
-              dumps, bs_from_json = json.dumps, ffi.Bitset.from_json_string
-
-              for uid, node_data in arena_dict.items():
-                  max_depth[uid] = int(node_data.get("max_depth", 0) or 0)
-                  children_data = node_data.get("children") or []
-                  if not children_data:
-                      node_data["children"], node_data["llm_bv_union"] = [], RangeSet.empty()
-                      continue
-                  
-                  new_children, llm_bv_union = [], RangeSet.empty()
-                  for (pop, llm_json), dest_map_json in children_data:
-                      llm_bv = RangeSet.from_ranges(bs_from_json(dumps(llm_json)).to_ranges())
-                      llm_bv_union |= llm_bv
-                      new_dests, dest_states_union = [], RangeSetStates.empty()
-                      for dest_idx, state_json in dest_map_json:
-                          state_bv = RangeSetStates.from_ranges(bs_from_json(dumps(state_json)).to_ranges())
-                          new_dests.append((int(dest_idx), state_bv))
-                          dest_states_union |= state_bv
-                      new_children.append(ArenaEdge(int(pop), llm_bv, new_dests, dest_states_union))
-                  node_data["children"], node_data["llm_bv_union"] = new_children, llm_bv_union
-
-              arena = {uid: ArenaNode(nd.get("children", []), nd.get("llm_bv_union", RangeSet.empty()), nd.get("value", {}).get("clean_end", False)) for uid, nd in arena_dict.items()}
-
-              # Tokenizer
-              dfa_data = data['tokenizer']['dfa']
-              dfa_states_list = [DFAState(
-                  transitions=numba.typed.Dict({int(k): v for k, v in s['transitions'].get('data', {}).items()}),
-                  finalizers=numba.typed.Set(s['finalizers']),
-                  possible_future_group_ids=numba.typed.Set(s['possible_future_group_ids'])
-              ) for s in dfa_data['states']]
-              dfa_states = numba.typed.List(dfa_states_list)
-              non_greedy_finalizers = numba.typed.Set(dfa_data['non_greedy_finalizers'])
-              tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], non_greedy_finalizers)
-
-              # Parser Table
-              parser_data = data['parser']
-              py_table: Dict[int, Row] = {}
-              for state_id_str, row_data in parser_data['stage_7_table']:
-                  state_id, py_row = int(state_id_str), Row()
-                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
-                      term_id, variant = int(term_id_str), action_data['variant']
-                      if variant == 'Shift': py_row.actions[term_id] = action_data['state_id']
-                      elif variant == 'Reduce': py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], tuple(sorted(action_data['production_ids'])))
-                      elif variant == 'Split':
-                          reduces = {int(l): {int(n): tuple(sorted(p)) for n, p in nd} for l, nd in action_data['reduces']}
-                          py_row.actions[term_id] = Split(action_data['shift'], reduces)
-                  py_row.gotos = {int(nt): goto['state_id'] for nt, goto in row_data['gotos'] if goto['state_id'] is not None}
-                  py_table[state_id] = py_row
-              parser_table = ParserTable(parser_data['start_state_id'], py_table)
-
-              # Misc data (some still requires FFI for loading)
-              constraint = ffi.GrammarConstraint.from_json_string(s)
-              pmc_ffi = constraint.possible_matches()
-              possible_matches_cache = {int(t): {int(i): RangeSet.from_ranges(b.to_ranges()) for i, b in inner.items()} for t, inner in pmc_ffi.items()}
-              vocab = data['precompute3_vocab']
-              all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
-              
-              # Initial state
-              initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
-              initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
-
-              model = Model(
-                  arena=arena, roots_map=roots_map, max_depth=max_depth, parser_table=parser_table,
-                  tokenizer=tokenizer, tokenizer_initial_state=tokenizer.initial_state_id(),
-                  possible_matches_cache=possible_matches_cache,
-                  id_to_token={v: bytes(k) for k, v in data['llm_token_map']},
-                  internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
-                  all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
-                  ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
-                  state={tokenizer.initial_state_id(): initial_gss},
-              )
-              model._compute_edge_accelerators()
-              model.optimize_traversal()
-              return model
-
-          def _compute_edge_accelerators(self) -> None:
-              all_ones = self.all_internal_llm_tokens_bitset
-              for node in self.arena.values():
-                  for edge in node.children:
-                      edge.llm_bv_not = all_ones.difference(edge.llm_bv)
-
-          def optimize_traversal(self) -> None:
-              md = self.max_depth
-              for node in self.arena.values():
-                  if not node.children: continue
-                  for edge in node.children:
-                      edge.dests.sort(key=lambda item: md.get(int(item[0]), 0), reverse=True)
-                  node.children.sort(key=lambda e: (-md.get(int(e.dests[0][0]), 0) if e.dests else -1, e.pop))
-
-          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
-              term_rs = RangeSet.from_indices([terminal_id])
-              @_acc_memoize(use_value_cache=False)
-              def apply_disallow(acc: PyAcc) -> PyAcc:
-                  current = acc.terminals_union.get(state_id, RangeSet.empty())
-                  if current.contains(terminal_id): return acc
-                  new_map = acc.terminals_union.copy()
-                  new_map[state_id] = current.union(term_rs)
-                  return PyAcc(new_map, acc.llm_mask)
-              return gss.apply(apply_disallow)
-
-          def get_root(self, state_id: int) -> NodeID: return self.roots_map[int(state_id)]
-          def is_end(self, node: NodeID) -> bool: return self.arena[node].clean_end
-
-          def iter_edges(self, node: NodeID, token: int):
-              a_node = self.arena.get(node)
-              if not a_node: return
-              for edge in a_node.children:
-                  if edge.llm_bv.contains(token):
-                      for dest_idx, state_bv in edge.dests:
-                          for start, end in state_bv.to_ranges():
-                              for sid in range(start, end + 1):
-                                  yield (edge.pop, sid, dest_idx)
-
-          def commit(self, token_id: int):
-              token_bytes = self.id_to_token[token_id]
-              terminals_map, state_map = {}, {}
-              for tsid in self.state:
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tsid)
-                  if end_state is not None: state_map[tsid] = end_state
-                  terminals_map[tsid] = RangeSet.from_indices([m[0] for m in matches])
-
-              @_acc_memoize()
-              def mutator(acc: PyAcc) -> Optional[PyAcc]:
-                  for tsid, matched in terminals_map.items():
-                      if acc.terminals_union.get(tsid, RangeSet.empty()).intersects(matched): return None
-                  new_bvs = collections.defaultdict(RangeSet.empty)
-                  for old, new in state_map.items():
-                      if old in acc.terminals_union: new_bvs[new] |= acc.terminals_union[old]
-                  return PyAcc(dict(new_bvs), acc.llm_mask)
-
-              current = {tsid: g.apply_and_prune(mutator) for tsid, g in self.state.items()}
-              current = {tsid: g for tsid, g in current.items() if not g.is_empty()}
-
-              new_states = collections.defaultdict(list)
-              work = {(0, tsid): gss for tsid, gss in current.items()}
-              q = collections.deque(work.keys())
-
-              while q:
-                  offset, tsid = q.popleft()
-                  gss = work.pop((offset, tsid))
-                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tsid)
-
-                  for term_id, width in matches:
-                      proc_gss = self._process_token(gss, term_id)
-                      if end_state is not None and term_id in self.tokenizer.states[end_state].possible_future_group_ids:
-                          proc_gss = self._disallow_terminal_in_state(proc_gss, end_state, term_id)
-                      if not proc_gss.is_empty():
-                          new_offset, next_tsid = offset + width, self.tokenizer.initial_state_id()
-                          if new_offset == len(token_bytes): new_states[next_tsid].append(proc_gss)
-                          else:
-                              key = (new_offset, next_tsid)
-                              if key in work: work[key] = work[key].merge(proc_gss)
-                              else:
-                                  work[key] = proc_gss
-                                  q.append(key)
-                  if end_state is not None: new_states[end_state].append(gss)
-              
-              merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
-              self.state = {sid: g for sid, g in merged.items() if not g.is_empty()}
-
-          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-              if self.ignore_terminal_id == terminal_id: return gss
-              
-              heads_by_state = collections.defaultdict(list)
-              for state_id in gss.peek(): heads_by_state[state_id].append(gss.isolate(state_id))
-              
-              shifted = []
-              while heads_by_state:
-                  state_id, gss_list = heads_by_state.popitem()
-                  state_gss = GSS.merge_many(gss_list)
-                  row = self.parser_table.table.get(state_id)
-                  if not row: continue
-                  action = row.actions.get(terminal_id)
-                  if action is None: continue
-
-                  if isinstance(action, int): shifted.append(state_gss.push(action))
-                  elif isinstance(action, Reduce):
-                      popped = state_gss.popn(action.len)
-                      for from_id in popped.peek():
-                          goto_id = self.parser_table.table[from_id].gotos[action.nonterminal_id]
-                          heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
-                  elif isinstance(action, Split):
-                      if action.shift is not None: shifted.append(state_gss.push(action.shift))
-                      for length, nts in action.reduces.items():
-                          popped = state_gss.popn(length)
-                          for nt_id in nts:
-                              for from_id in popped.peek():
-                                  goto_id = self.parser_table.table[from_id].gotos[nt_id]
-                                  heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
-              return GSS.merge_many(shifted)
-
-          def get_mask(self) -> LLMTokenSet:
-              all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
-              values, depth_heap, enqueued = {}, [], set()
-              edge_cursor = {}
-              hp, hpop = heapq.heappush, heapq.heappop
-
-              @_acc_memoize(use_value_cache=False)
-              def initialize_acc(acc: PyAcc) -> PyAcc:
-                  disallowed = RangeSet.empty()
-                  for tsid, terms in acc.terminals_union.items():
-                      if tsid in self.possible_matches_cache:
-                          term_map = self.possible_matches_cache[tsid]
-                          for term_id in terms.iter_indices():
-                              if term_id in term_map: disallowed |= term_map[term_id]
-                  return PyAcc({}, all_ones.difference(disallowed))
-
-              init_cache = {}
-              for sid, gss in self.state.items():
-                  r = self.roots_map[int(sid)]
-                  gss_init = gss.apply(initialize_acc, init_cache)
-                  if r in values: values[r] = values[r].merge(gss_init)
-                  else: values[r] = gss_init
-                  if r not in enqueued: enqueued.add(r); hp(depth_heap, (-self.max_depth[r], r))
-
-              remaining_mask = all_ones
-              while depth_heap:
-                  _, node = hpop(depth_heap)
-                  enqueued.remove(node)
-                  gss_node = values.pop(node)
-                  gss_id = id(gss_node)
-
-                  gss_acc = gss_node.reduce_acc()
-                  gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
-
-                  if self.is_end(node) and gss_acc and not final_mask.issuperset(gss_acc.llm_mask):
-                      final_mask |= gss_acc.llm_mask
-                      remaining_mask = all_ones.difference(final_mask)
-
-                  a_node = self.arena.get(node)
-                  if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
-                      continue
-
-                  saved_cursor = edge_cursor.get(node)
-                  if saved_cursor and saved_cursor.gss_id == gss_id:
-                      start_edge, start_dest, pop_cache = saved_cursor.edge_idx, saved_cursor.dest_idx, saved_cursor.pop_cache or {}
-                  else:
-                      start_edge, start_dest, pop_cache = 0, 0, {}
-
-                  max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
-                  edges_proc, dests_proc = 0, 0
-                  peek0_rs = None
-
-                  for edge_i in range(start_edge, len(a_node.children)):
-                      edge = a_node.children[edge_i]
-                      if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask): continue
-                      if edge.pop == 0:
-                          if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
-                          if edge.dest_states_union.isdisjoint(peek0_rs): continue
-                      
-                      if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
-                      else:
-                          popped = gss_node.popn(edge.pop)
-                          if popped.is_empty(): pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty()); continue
-                          popped_acc = gss_acc if edge.pop == 0 else popped.reduce_acc()
-                          if not popped_acc or popped_acc.llm_mask.is_empty(): pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty()); continue
-                          peeked, peek_rs = popped.peek(), RangeSetStates.from_indices(popped.peek())
-                          pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
-                      
-                      if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
-                      
-                      if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
-                          if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
-                          @_acc_memoize(use_value_cache=False)
-                          def intersect(acc: PyAcc):
-                              new_mask = acc.llm_mask.intersection(edge.llm_bv)
-                              return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-                          popped = popped.apply_and_prune(intersect)
-                          if popped.is_empty(): continue
-                      
-                      if not peeked: continue
-                      
-                      current_start_dest = start_dest if edge_i == start_edge else 0
-                      for dest_j in range(current_start_dest, len(edge.dests)):
-                          if dests_proc >= max_dests:
-                              state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
-                              values[node] = state_to_requeue
-                              edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
-                              if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
-                              edges_proc = max_edges; break
-
-                          dest_idx, state_bv = edge.dests[dest_j]
-                          if state_bv.isdisjoint(peek_rs): continue
-                          
-                          keep_rs = peek_rs.intersection(state_bv)
-                          if keep_rs.is_empty(): continue
-                          
-                          child_gss = popped.isolate_many(list(keep_rs.iter_indices()))
-                          if child_gss.is_empty(): continue
-
-                          d: NodeID = int(dest_idx)
-                          if d in values: values[d] = values[d].merge(child_gss)
-                          else: values[d] = child_gss
-                          if d not in enqueued: enqueued.add(d); hp(depth_heap, (-self.max_depth[d], d))
-                          dests_proc += 1
-                      
-                      if edges_proc >= max_edges: break
-                      edges_proc += 1
-
-                      if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-                          state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
-                          values[node] = state_to_requeue
-                          edge_cursor[node] = NodeCursor(edge_i + 1, 0, id(state_to_requeue), pop_cache)
-                          if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
-                          break
-                  else: edge_cursor.pop(node, None)
-
-              original_indices = RangeSetOut.empty()
-              for i in final_mask.iter_indices():
-                  if i in self.internal_to_original_map:
-                      original_indices |= self.internal_to_original_map[i]
-              return original_indices
-  diffs_applied_this_send: true
-  core_guidance_inserted: true
-  prev_apply_mode: git-llm
-system:
-  message: |-
-    You are a helpful assistant.
-    Respond in markdown format.
-    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
-    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
-  model:
-    - gp
-  code_completion_model:
-    - cp
-  commit_message_model:
-    - gemini/gemini-flash-lite-latest
-  diff_correction_model:
-    - gf
-  max_completion_tokens:
-  temperature: 0.0
-  apply_mode: git-llm
-  llm_context_mode: full
-messages:
-  - user: |-
-      Developer note (core guidance):
-      - Respond in markdown format.
-      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
-      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
-      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
-      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
-        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
-      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
-      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
-      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
-      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
-
-
-      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
-    metadata:
-      kind: core-guidance
-      role: developer
-      ephemeral: false
-  - user: |-
-      ```python 'python/aug25/models/precompute3_model_pure_python_opt3.py'
-      from __future__ import annotations
-
-      import json
-      import heapq
-      import collections
-      from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
-      from dataclasses import dataclass, field
-
-      from numba import njit
 
       from ..common_interface import GraphProvider
       from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
@@ -1612,12 +1040,571 @@ messages:
                   if i in self.internal_to_original_map:
                       original_indices |= self.internal_to_original_map[i]
               return original_indices
+  diffs_applied_this_send: true
+  core_guidance_inserted: true
+  prev_apply_mode: git-llm
+system:
+  message: |-
+    You are a helpful assistant.
+    Respond in markdown format.
+    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
+    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
+  model:
+    - gf
+  code_completion_model:
+    - cp
+  commit_message_model:
+    - gemini/gemini-flash-lite-latest
+  diff_correction_model:
+    - gf
+  max_completion_tokens:
+  temperature: 0.0
+  apply_mode: git-llm
+  llm_context_mode: full
+messages:
+  - user: |-
+      Developer note (core guidance):
+      - Respond in markdown format.
+      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
+      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
+      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
+      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
+        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
+      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
+      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
+      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
+      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
+
+
+      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
+    metadata:
+      kind: core-guidance
+      role: developer
+      ephemeral: false
+  - user: |-
+      ```python 'python/aug25/models/precompute3_model_pure_python_opt3.py'
+      from __future__ import annotations
+
+      import json
+      import heapq
+      import collections
+      from typing import Dict, List, Tuple, Optional, Union, Set
+      from dataclasses import dataclass, field
+
+      from numba import njit
+
+      from ..common_interface import GraphProvider
+      from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
+      from ..range_set.set_range_set import SetRangeSet as RangeSetOut
+      from ..range_set.set_range_set import SetRangeSet as RangeSetStates
+      import _sep1 as ffi
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+
+      # Type Aliases
+      NodeID = int
+      LLMTokenSet = RangeSet
+      StateIDSet = RangeSetStates
+      TerminalIdSet = RangeSet
+
+      def _acc_memoize(use_value_cache: bool = True):
+          """Per-invocation memoization for PyAcc transformers."""
+          def decorator(fn):
+              id_memo = {}
+              val_memo = {}
+              def wrapper(acc):
+                  acc_id = id(acc)
+                  if acc_id in id_memo:
+                      return id_memo[acc_id]
+
+                  if use_value_cache:
+                      cached = val_memo.get(acc)
+                      if cached is not None:
+                          id_memo[acc_id] = cached
+                          return cached
+                  
+                  result = fn(acc)
+                  id_memo[acc_id] = result
+                  if use_value_cache and result is not None:
+                      val_memo[acc] = result
+                  return result
+              return wrapper
+          return decorator
+
+      @dataclass
+      class DFAState:
+          transitions: Dict[int, int] = field(default_factory=dict)
+          finalizers: Set[int] = field(default_factory=set)
+          possible_future_group_ids: Set[int] = field(default_factory=set)
+
+      @dataclass
+      class PyTokenizer:
+          states: List[DFAState]
+          start_state: int
+          non_greedy_finalizers: Set[int]
+
+          @njit(nopython=True)
+          def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
+              current_state = state_id
+              matches = {}
+              done = False
+
+              # Check for initial matches (epsilon)
+              for group_id in self.states[current_state].finalizers:
+                  if group_id in self.non_greedy_finalizers:
+                      matches.setdefault(group_id, 0)
+                  else:
+                      matches[group_id] = 0
+
+              for i, byte in enumerate(text):
+                  state_data = self.states[current_state]
+                  next_state = state_data.transitions.get(byte)
+
+                  if next_state is None:
+                      done = True
+                      break
+                  
+                  current_state = next_state
+                  for group_id in self.states[current_state].finalizers:
+                      if group_id in self.non_greedy_finalizers:
+                          matches.setdefault(group_id, i + 1)
+                      else:
+                          matches[group_id] = i + 1
+
+              end_state = None if done else current_state
+              return end_state, [(gid, width) for gid, width in matches.items() if width > 0]
+
+          def tokens_accessible_from_state(self, state_id: int) -> List[int]:
+              return list(self.states[state_id].possible_future_group_ids)
+
+          def initial_state_id(self) -> int:
+              return self.start_state
+
+          def max_state(self) -> int:
+              return len(self.states)
+
+      @dataclass(frozen=True)
+      class Reduce:
+          nonterminal_id: int
+          len: int
+          production_ids: Tuple[int, ...]
+
+      @dataclass(frozen=True)
+      class Split:
+          shift: Optional[int]
+          reduces: Dict[int, Dict[int, Tuple[int, ...]]]
+
+      Action = Union[int, Reduce, Split]
+
+      @dataclass
+      class Row:
+          actions: Dict[int, Action] = field(default_factory=dict)
+          gotos: Dict[int, int] = field(default_factory=dict)
+
+      @dataclass
+      class ParserTable:
+          start_state_id: int
+          table: Dict[int, Row]
+
+      @dataclass
+      class ArenaEdge:
+          pop: int
+          llm_bv: LLMTokenSet
+          dests: List[Tuple[NodeID, StateIDSet]] = field(default_factory=list)
+          dest_states_union: StateIDSet = field(default_factory=RangeSetStates.empty)
+          llm_bv_not: Optional[LLMTokenSet] = None
+          state_to_dest: Optional[Dict[int, List[int]]] = None
+
+          def ensure_index(self, dest_index_threshold: int = 512, max_states_per_index: int = 100_000) -> None:
+              if self.state_to_dest is not None or len(self.dests) < dest_index_threshold:
+                  return
+              
+              mapping: Dict[int, List[int]] = collections.defaultdict(list)
+              total_assigned = 0
+              for j, (_dest_idx, state_bv) in enumerate(self.dests):
+                  for sid in state_bv.iter_indices():
+                      mapping[sid].append(j)
+                      total_assigned += 1
+                      if total_assigned > max_states_per_index:
+                          self.state_to_dest = {} # Marker for "too big to index"
+                          return
+              self.state_to_dest = dict(mapping)
+
+      @dataclass
+      class ArenaNode:
+          children: List[ArenaEdge] = field(default_factory=list)
+          llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
+          clean_end: bool = False
+
+      @dataclass(frozen=True, eq=False)
+      class PyAcc:
+          terminals_union: Dict[int, TerminalIdSet]
+          llm_mask: LLMTokenSet
+
+          def __eq__(self, other):
+              if not isinstance(other, PyAcc):
+                  return NotImplemented
+              return self.llm_mask == other.llm_mask and self.terminals_union == other.terminals_union
+
+          def __hash__(self):
+              # Correctly hash the dictionary content for memoization
+              return hash((frozenset(self.terminals_union.items()), self.llm_mask))
+
+          def merge(self, other: "PyAcc") -> "PyAcc":
+              new_terminals_union = self.terminals_union.copy()
+              for k, v in other.terminals_union.items():
+                  if k in new_terminals_union:
+                      new_terminals_union[k] = new_terminals_union[k].union(v)
+                  else:
+                      new_terminals_union[k] = v
+              return PyAcc(
+                  terminals_union=new_terminals_union,
+                  llm_mask=self.llm_mask.union(other.llm_mask),
+              )
+
+          def is_empty(self):
+              return self.llm_mask.is_empty()
+
+      @dataclass
+      class NodeCursor:
+          edge_idx: int = 0
+          dest_idx: int = 0
+          gss_id: int = 0
+          pop_cache: Optional[Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]]] = None
+
+      @dataclass
+      class Model(GraphProvider):
+          arena: Dict[NodeID, ArenaNode]
+          roots_map: Dict[int, NodeID]
+          max_depth: Dict[NodeID, int]
+          parser_table: ParserTable
+          tokenizer: PyTokenizer
+          tokenizer_initial_state: int
+          possible_matches_cache: Dict[int, Dict[int, LLMTokenSet]]
+          id_to_token: Dict[int, bytes]
+          internal_to_original_map: Dict[int, RangeSetOut]
+          all_internal_llm_tokens_bitset: LLMTokenSet
+          ignore_terminal_id: Optional[int]
+          state: Dict[int, GSS]
+
+          @staticmethod
+          def from_json_string(s: str) -> 'Model':
+              data = json.loads(s)
+              
+              # Arena
+              roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
+              arena_dict = {int(k): v for k, v in data["trie3_god"].get("values", [])}
+              max_depth: Dict[NodeID, int] = {}
+              dumps, bs_from_json = json.dumps, ffi.Bitset.from_json_string
+
+              for uid, node_data in arena_dict.items():
+                  max_depth[uid] = int(node_data.get("max_depth", 0) or 0)
+                  children_data = node_data.get("children") or []
+                  if not children_data:
+                      node_data["children"], node_data["llm_bv_union"] = [], RangeSet.empty()
+                      continue
+                  
+                  new_children, llm_bv_union = [], RangeSet.empty()
+                  for (pop, llm_json), dest_map_json in children_data:
+                      llm_bv = RangeSet.from_ranges(bs_from_json(dumps(llm_json)).to_ranges())
+                      llm_bv_union |= llm_bv
+                      new_dests, dest_states_union = [], RangeSetStates.empty()
+                      for dest_idx, state_json in dest_map_json:
+                          state_bv = RangeSetStates.from_ranges(bs_from_json(dumps(state_json)).to_ranges())
+                          new_dests.append((int(dest_idx), state_bv))
+                          dest_states_union |= state_bv
+                      new_children.append(ArenaEdge(int(pop), llm_bv, new_dests, dest_states_union))
+                  node_data["children"], node_data["llm_bv_union"] = new_children, llm_bv_union
+
+              arena = {uid: ArenaNode(nd.get("children", []), nd.get("llm_bv_union", RangeSet.empty()), nd.get("value", {}).get("clean_end", False)) for uid, nd in arena_dict.items()}
+
+              # Tokenizer
+              dfa_data = data['tokenizer']['dfa']
+              dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
+              tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], set(dfa_data['non_greedy_finalizers']))
+
+              # Parser Table
+              parser_data = data['parser']
+              py_table: Dict[int, Row] = {}
+              for state_id_str, row_data in parser_data['stage_7_table']:
+                  state_id, py_row = int(state_id_str), Row()
+                  for term_id_str, action_data in row_data['shifts_and_reduces_full']:
+                      term_id, variant = int(term_id_str), action_data['variant']
+                      if variant == 'Shift': py_row.actions[term_id] = action_data['state_id']
+                      elif variant == 'Reduce': py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], tuple(sorted(action_data['production_ids'])))
+                      elif variant == 'Split':
+                          reduces = {int(l): {int(n): tuple(sorted(p)) for n, p in nd} for l, nd in action_data['reduces']}
+                          py_row.actions[term_id] = Split(action_data['shift'], reduces)
+                  py_row.gotos = {int(nt): goto['state_id'] for nt, goto in row_data['gotos'] if goto['state_id'] is not None}
+                  py_table[state_id] = py_row
+              parser_table = ParserTable(parser_data['start_state_id'], py_table)
+
+              # Misc data (some still requires FFI for loading)
+              constraint = ffi.GrammarConstraint.from_json_string(s)
+              pmc_ffi = constraint.possible_matches()
+              possible_matches_cache = {int(t): {int(i): RangeSet.from_ranges(b.to_ranges()) for i, b in inner.items()} for t, inner in pmc_ffi.items()}
+              vocab = data['precompute3_vocab']
+              all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
+              
+              # Initial state
+              initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
+              initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
+
+              model = Model(
+                  arena=arena, roots_map=roots_map, max_depth=max_depth, parser_table=parser_table,
+                  tokenizer=tokenizer, tokenizer_initial_state=tokenizer.initial_state_id(),
+                  possible_matches_cache=possible_matches_cache,
+                  id_to_token={v: bytes(k) for k, v in data['llm_token_map']},
+                  internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
+                  all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
+                  ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
+                  state={tokenizer.initial_state_id(): initial_gss},
+              )
+              model._compute_edge_accelerators()
+              model.optimize_traversal()
+              return model
+
+          def _compute_edge_accelerators(self) -> None:
+              all_ones = self.all_internal_llm_tokens_bitset
+              for node in self.arena.values():
+                  for edge in node.children:
+                      edge.llm_bv_not = all_ones.difference(edge.llm_bv)
+
+          def optimize_traversal(self) -> None:
+              md = self.max_depth
+              for node in self.arena.values():
+                  if not node.children: continue
+                  for edge in node.children:
+                      edge.dests.sort(key=lambda item: md.get(int(item[0]), 0), reverse=True)
+                  node.children.sort(key=lambda e: (-md.get(int(e.dests[0][0]), 0) if e.dests else -1, e.pop))
+
+          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+              term_rs = RangeSet.from_indices([terminal_id])
+              @_acc_memoize(use_value_cache=False)
+              def apply_disallow(acc: PyAcc) -> PyAcc:
+                  current = acc.terminals_union.get(state_id, RangeSet.empty())
+                  if current.contains(terminal_id): return acc
+                  new_map = acc.terminals_union.copy()
+                  new_map[state_id] = current.union(term_rs)
+                  return PyAcc(new_map, acc.llm_mask)
+              return gss.apply(apply_disallow)
+
+          def get_root(self, state_id: int) -> NodeID: return self.roots_map[int(state_id)]
+          def is_end(self, node: NodeID) -> bool: return self.arena[node].clean_end
+
+          def iter_edges(self, node: NodeID, token: int):
+              a_node = self.arena.get(node)
+              if not a_node: return
+              for edge in a_node.children:
+                  if edge.llm_bv.contains(token):
+                      for dest_idx, state_bv in edge.dests:
+                          for start, end in state_bv.to_ranges():
+                              for sid in range(start, end + 1):
+                                  yield (edge.pop, sid, dest_idx)
+
+          def commit(self, token_id: int):
+              token_bytes = self.id_to_token[token_id]
+              terminals_map, state_map = {}, {}
+              for tsid in self.state:
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes, tsid)
+                  if end_state is not None: state_map[tsid] = end_state
+                  terminals_map[tsid] = RangeSet.from_indices([m[0] for m in matches])
+
+              @_acc_memoize()
+              def mutator(acc: PyAcc) -> Optional[PyAcc]:
+                  for tsid, matched in terminals_map.items():
+                      if acc.terminals_union.get(tsid, RangeSet.empty()).intersects(matched): return None
+                  new_bvs = collections.defaultdict(RangeSet.empty)
+                  for old, new in state_map.items():
+                      if old in acc.terminals_union: new_bvs[new] |= acc.terminals_union[old]
+                  return PyAcc(dict(new_bvs), acc.llm_mask)
+
+              current = {tsid: g.apply_and_prune(mutator) for tsid, g in self.state.items()}
+              current = {tsid: g for tsid, g in current.items() if not g.is_empty()}
+
+              new_states = collections.defaultdict(list)
+              work = {(0, tsid): gss for tsid, gss in current.items()}
+              q = collections.deque(work.keys())
+
+              while q:
+                  offset, tsid = q.popleft()
+                  gss = work.pop((offset, tsid))
+                  end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tsid)
+
+                  for term_id, width in matches:
+                      proc_gss = self._process_token(gss, term_id)
+                      if end_state is not None and term_id in self.tokenizer.states[end_state].possible_future_group_ids:
+                          proc_gss = self._disallow_terminal_in_state(proc_gss, end_state, term_id)
+                      if not proc_gss.is_empty():
+                          new_offset, next_tsid = offset + width, self.tokenizer.initial_state_id()
+                          if new_offset == len(token_bytes): new_states[next_tsid].append(proc_gss)
+                          else:
+                              key = (new_offset, next_tsid)
+                              if key in work: work[key] = work[key].merge(proc_gss)
+                              else:
+                                  work[key] = proc_gss
+                                  q.append(key)
+                  if end_state is not None: new_states[end_state].append(gss)
+              
+              merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
+              self.state = {sid: g for sid, g in merged.items() if not g.is_empty()}
+
+          def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
+              if self.ignore_terminal_id == terminal_id: return gss
+              
+              heads_by_state = collections.defaultdict(list)
+              for state_id in gss.peek(): heads_by_state[state_id].append(gss.isolate(state_id))
+              
+              shifted = []
+              while heads_by_state:
+                  state_id, gss_list = heads_by_state.popitem()
+                  state_gss = GSS.merge_many(gss_list)
+                  row = self.parser_table.table.get(state_id)
+                  if not row: continue
+                  action = row.actions.get(terminal_id)
+                  if action is None: continue
+
+                  if isinstance(action, int): shifted.append(state_gss.push(action))
+                  elif isinstance(action, Reduce):
+                      popped = state_gss.popn(action.len)
+                      for from_id in popped.peek():
+                          goto_id = self.parser_table.table[from_id].gotos[action.nonterminal_id]
+                          heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+                  elif isinstance(action, Split):
+                      if action.shift is not None: shifted.append(state_gss.push(action.shift))
+                      for length, nts in action.reduces.items():
+                          popped = state_gss.popn(length)
+                          for nt_id in nts:
+                              for from_id in popped.peek():
+                                  goto_id = self.parser_table.table[from_id].gotos[nt_id]
+                                  heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+              return GSS.merge_many(shifted)
+
+          def get_mask(self) -> LLMTokenSet:
+              all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
+              values, depth_heap, enqueued = {}, [], set()
+              edge_cursor = {}
+              hp, hpop = heapq.heappush, heapq.heappop
+
+              @_acc_memoize(use_value_cache=False)
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  disallowed = RangeSet.empty()
+                  for tsid, terms in acc.terminals_union.items():
+                      if tsid in self.possible_matches_cache:
+                          term_map = self.possible_matches_cache[tsid]
+                          for term_id in terms.iter_indices():
+                              if term_id in term_map: disallowed |= term_map[term_id]
+                  return PyAcc({}, all_ones.difference(disallowed))
+
+              init_cache = {}
+              for sid, gss in self.state.items():
+                  r = self.roots_map[int(sid)]
+                  gss_init = gss.apply(initialize_acc, init_cache)
+                  if r in values: values[r] = values[r].merge(gss_init)
+                  else: values[r] = gss_init
+                  if r not in enqueued: enqueued.add(r); hp(depth_heap, (-self.max_depth[r], r))
+
+              remaining_mask = all_ones
+              while depth_heap:
+                  _, node = hpop(depth_heap)
+                  enqueued.remove(node)
+                  gss_node = values.pop(node)
+                  gss_id = id(gss_node)
+
+                  gss_acc = gss_node.reduce_acc()
+                  gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
+
+                  if self.is_end(node) and gss_acc and not final_mask.issuperset(gss_acc.llm_mask):
+                      final_mask |= gss_acc.llm_mask
+                      remaining_mask = all_ones.difference(final_mask)
+
+                  a_node = self.arena.get(node)
+                  if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
+                      continue
+
+                  saved_cursor = edge_cursor.get(node)
+                  if saved_cursor and saved_cursor.gss_id == gss_id:
+                      start_edge, start_dest, pop_cache = saved_cursor.edge_idx, saved_cursor.dest_idx, saved_cursor.pop_cache or {}
+                  else:
+                      start_edge, start_dest, pop_cache = 0, 0, {}
+
+                  max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
+                  edges_proc, dests_proc = 0, 0
+                  peek0_rs = None
+
+                  for edge_i in range(start_edge, len(a_node.children)):
+                      edge = a_node.children[edge_i]
+                      if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask): continue
+                      if edge.pop == 0:
+                          if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
+                          if edge.dest_states_union.isdisjoint(peek0_rs): continue
+                      
+                      if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+                      else:
+                          popped = gss_node.popn(edge.pop)
+                          if popped.is_empty(): pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty()); continue
+                          popped_acc = gss_acc if edge.pop == 0 else popped.reduce_acc()
+                          if not popped_acc or popped_acc.llm_mask.is_empty(): pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty()); continue
+                          peeked, peek_rs = popped.peek(), RangeSetStates.from_indices(popped.peek())
+                          pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+                      
+                      if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
+                      
+                      if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
+                          if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
+                          @_acc_memoize(use_value_cache=False)
+                          def intersect(acc: PyAcc):
+                              new_mask = acc.llm_mask.intersection(edge.llm_bv)
+                              return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                          popped = popped.apply_and_prune(intersect)
+                          if popped.is_empty(): continue
+                      
+                      if not peeked: continue
+                      
+                      current_start_dest = start_dest if edge_i == start_edge else 0
+                      for dest_j in range(current_start_dest, len(edge.dests)):
+                          if dests_proc >= max_dests:
+                              state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
+                              values[node] = state_to_requeue
+                              edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
+                              if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
+                              edges_proc = max_edges; break
+
+                          dest_idx, state_bv = edge.dests[dest_j]
+                          if state_bv.isdisjoint(peek_rs): continue
+                          
+                          keep_rs = peek_rs.intersection(state_bv)
+                          if keep_rs.is_empty(): continue
+                          
+                          child_gss = popped.isolate_many(list(keep_rs.iter_indices()))
+                          if child_gss.is_empty(): continue
+
+                          d: NodeID = int(dest_idx)
+                          if d in values: values[d] = values[d].merge(child_gss)
+                          else: values[d] = child_gss
+                          if d not in enqueued: enqueued.add(d); hp(depth_heap, (-self.max_depth[d], d))
+                          dests_proc += 1
+                      
+                      if edges_proc >= max_edges: break
+                      edges_proc += 1
+
+                      if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
+                          state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
+                          values[node] = state_to_requeue
+                          edge_cursor[node] = NodeCursor(edge_i + 1, 0, id(state_to_requeue), pop_cache)
+                          if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
+                          break
+                  else: edge_cursor.pop(node, None)
+
+              original_indices = RangeSetOut.empty()
+              for i in final_mask.iter_indices():
+                  if i in self.internal_to_original_map:
+                      original_indices |= self.internal_to_original_map[i]
+              return original_indices
 
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_opt3.py
-  - user: In DFAState and PyTokenizer, use numba.typed.Dict, numba.typed.Set, numba.typed.List
-      etc rather than dict, frozenset, Set, list, etc.
+  - user: Make `DFAState` and `PyTokenizer` both `NamedTuple`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1636,156 +1623,95 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course! Using Numba's typed collections within JIT-compiled functions can significantly improve performance. Here are the step-by-step instructions to make the requested changes, followed by the corresponding git diff.
+      The following steps convert `DFAState` and `PyTokenizer` to use `NamedTuple` instead of `@dataclass`.
 
       ### Step-by-step Instructions
 
-      Here are the edits for `python/aug25/models/precompute3_model_pure_python_opt3.py`:
+      In the file `python/aug25/models/precompute3_model_pure_python_opt3.py`:
 
-      1.  **Import Numba Types**: In `python/aug25/models/precompute3_model_pure_python_opt3.py`, around line 8, add imports for `numba.typed` and `numba.types` which are necessary for creating and type-hinting Numba collections.
+      1.  **Update Imports:**
+          Modify the import statement on line 4 to include `NamedTuple` from the `typing` module.
+          *   **Old:** `from typing import Dict, List, Tuple, Optional, Union, Set`
+          *   **New:** `from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple`
 
-          ```python
-          from numba import njit
-          import numba.typed
-          import numba.types
-          ```
+      2.  **Convert `DFAState`:**
+          Change the definition of `DFAState` (starting around line 38) from a `@dataclass` to a `NamedTuple`. Remove the `@dataclass` decorator and the `field(default_factory=...)` calls, as `NamedTuple` fields are defined by type hints alone.
 
-      2.  **Update `DFAState` and `PyTokenizer` Definitions**: Around line 62, modify the `DFAState` and `PyTokenizer` `NamedTuple` definitions. Change the type hints from standard Python collections (`Dict`, `Set`, `List`) to string hints for their `numba.typed` counterparts.
+          *   **Delete:**
+              ```python
+              @dataclass
+              class DFAState:
+                  transitions: Dict[int, int] = field(default_factory=dict)
+                  finalizers: Set[int] = field(default_factory=set)
+                  possible_future_group_ids: Set[int] = field(default_factory=set)
+              ```
+          *   **Insert:**
+              ```python
+              class DFAState(NamedTuple):
+                  transitions: Dict[int, int]
+                  finalizers: Set[int]
+                  possible_future_group_ids: Set[int]
+              ```
 
-          ```python
-          class DFAState(NamedTuple):
-              transitions: 'numba.typed.Dict'
-              finalizers: 'numba.typed.Set'
-              possible_future_group_ids: 'numba.typed.Set'
+      3.  **Convert `PyTokenizer`:**
+          Change the definition of `PyTokenizer` (starting around line 44) from a `@dataclass` to a `NamedTuple`. Remove the `@dataclass` decorator.
 
-
-          class PyTokenizer(NamedTuple):
-              states: 'numba.typed.List'
-              start_state: int
-              non_greedy_finalizers: 'numba.typed.Set'
-          ```
-
-      3.  **Refactor `PyTokenizer.execute_from_state`**: Starting around line 74, update this method to use Numba's typed dictionary and list. This involves several changes:
-          *   Update the return type hint in the method signature to `'numba.typed.List'`.
-          *   Initialize the `matches` variable as an empty, typed Numba dictionary.
-          *   Replace the two calls to `matches.setdefault()` with `if key not in dict:` blocks, as `setdefault` is not supported by Numba's typed dictionary.
-          *   Replace the final list comprehension with a loop that constructs and returns a `numba.typed.List`.
-
-      4.  **Update Tokenizer Instantiation in `Model.from_json_string`**: Around line 269, replace the existing list comprehensions that create `dfa_states` and `tokenizer` with code that properly instantiates `numba.typed.Dict`, `numba.typed.Set`, and `numba.typed.List`.
-
-          ```python
-          # Tokenizer
-          dfa_data = data['tokenizer']['dfa']
-          dfa_states_list = [DFAState(
-              transitions=numba.typed.Dict({int(k): v for k, v in s['transitions'].get('data', {}).items()}),
-              finalizers=numba.typed.Set(s['finalizers']),
-              possible_future_group_ids=numba.typed.Set(s['possible_future_group_ids'])
-          ) for s in dfa_data['states']]
-          dfa_states = numba.typed.List(dfa_states_list)
-          non_greedy_finalizers = numba.typed.Set(dfa_data['non_greedy_finalizers'])
-          tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], non_greedy_finalizers)
-          ```
+          *   **Delete:**
+              ```python
+              @dataclass
+              class PyTokenizer:
+                  states: List[DFAState]
+                  start_state: int
+                  non_greedy_finalizers: Set[int]
+              ```
+          *   **Insert:**
+              ```python
+              class PyTokenizer(NamedTuple):
+                  states: List[DFAState]
+                  start_state: int
+                  non_greedy_finalizers: Set[int]
+              ```
 
       ### Git Diff
 
-      Here is the git patch that applies the changes described above.
-
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python_opt3.py b/python/aug25/models/precompute3_model_pure_python_opt3.py
-      index 92b152d..5638c41 100644
       --- a/python/aug25/models/precompute3_model_pure_python_opt3.py
       +++ b/python/aug25/models/precompute3_model_pure_python_opt3.py
-      @@ -6,6 +6,8 @@
+      @@ -4,7 +4,7 @@
+       import json
+       import heapq
+       import collections
+      -from typing import Dict, List, Tuple, Optional, Union, Set
+      +from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
        from dataclasses import dataclass, field
        
        from numba import njit
-      +import numba.typed
-      +import numba.types
-       
-       from ..common_interface import GraphProvider
-       from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
-      @@ -61,43 +63,49 @@
+      @@ -36,18 +36,15 @@
+               return wrapper
            return decorator
        
-       class DFAState(NamedTuple):
-      -    transitions: Dict[int, int]
-      -    finalizers: Set[int]
-      -    possible_future_group_ids: Set[int]
-      +    transitions: 'numba.typed.Dict'
-      +    finalizers: 'numba.typed.Set'
-      +    possible_future_group_ids: 'numba.typed.Set'
-       
-       
-       class PyTokenizer(NamedTuple):
-      -    states: List[DFAState]
-      +    states: 'numba.typed.List'
+      -@dataclass
+      -class DFAState:
+      -    transitions: Dict[int, int] = field(default_factory=dict)
+      -    finalizers: Set[int] = field(default_factory=set)
+      -    possible_future_group_ids: Set[int] = field(default_factory=set)
+      -
+      -@dataclass
+      -class PyTokenizer:
+      +class DFAState(NamedTuple):
+      +    transitions: Dict[int, int]
+      +    finalizers: Set[int]
+      +    possible_future_group_ids: Set[int]
+      +
+      +
+      +class PyTokenizer(NamedTuple):
+           states: List[DFAState]
            start_state: int
-      -    non_greedy_finalizers: Set[int]
-      +    non_greedy_finalizers: 'numba.typed.Set'
+           non_greedy_finalizers: Set[int]
        
            @njit(nopython=True)
-      -    def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
-      +    def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], 'numba.typed.List']:
-               current_state = state_id
-      -        matches = {}
-      +        matches = numba.typed.Dict.empty(key_type=numba.types.int64, value_type=numba.types.int64)
-               done = False
-       
-               # Check for initial matches (epsilon)
-               for group_id in self.states[current_state].finalizers:
-                   if group_id in self.non_greedy_finalizers:
-      -                matches.setdefault(group_id, 0)
-      +                if group_id not in matches:
-      +                    matches[group_id] = 0
-                   else:
-                       matches[group_id] = 0
-       
-               for i, byte in enumerate(text):
-                   state_data = self.states[current_state]
-                   next_state = state_data.transitions.get(byte)
-       
-                   if next_state is None:
-                       done = True
-                       break
-      -            
-      +
-                   current_state = next_state
-                   for group_id in self.states[current_state].finalizers:
-                       if group_id in self.non_greedy_finalizers:
-      -                    matches.setdefault(group_id, i + 1)
-      +                    if group_id not in matches:
-      +                        matches[group_id] = i + 1
-                       else:
-                           matches[group_id] = i + 1
-       
-               end_state = None if done else current_state
-      -        return end_state, [(gid, width) for gid, width in matches.items() if width > 0]
-      +        result = numba.typed.List()
-      +        for gid, width in matches.items():
-      +            if width > 0:
-      +                result.append((gid, width))
-      +        return end_state, result
-       
-           def tokens_accessible_from_state(self, state_id: int) -> List[int]:
-               return list(self.states[state_id].possible_future_group_ids)
-      @@ -266,8 +274,15 @@
-       
-               # Tokenizer
-               dfa_data = data['tokenizer']['dfa']
-      -        dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
-      -        tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], set(dfa_data['non_greedy_finalizers']))
-      +        dfa_states_list = [DFAState(
-      +            transitions=numba.typed.Dict({int(k): v for k, v in s['transitions'].get('data', {}).items()}),
-      +            finalizers=numba.typed.Set(s['finalizers']),
-      +            possible_future_group_ids=numba.typed.Set(s['possible_future_group_ids'])
-      +        ) for s in dfa_data['states']]
-      +        dfa_states = numba.typed.List(dfa_states_list)
-      +        non_greedy_finalizers = numba.typed.Set(dfa_data['non_greedy_finalizers'])
-      +        tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], non_greedy_finalizers)
-       
-               # Parser Table
-               parser_data = data['parser']
-
+           def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
       ```
     metadata:
   - user: |
@@ -1797,7 +1723,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt3.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt3.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor DFAState and PyTokenizer to use
-      numba.typed collections for JIT compatibility"'
+  - user: 'Changes committed with message: "Refactor: Convert DFAState and PyTokenizer
+      to NamedTuple"'
     metadata:
 ...
