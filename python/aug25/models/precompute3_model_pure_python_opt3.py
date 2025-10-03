@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import os
 import heapq
 import itertools
 import json
@@ -19,6 +20,14 @@ from ..common_interface import GraphProvider
 from ..range_set import FFIRangeSet as RangeSet
 from ..range_set import SetRangeSet as RangeSetOut
 from ..range_set import SetRangeSet as RangeSetStates
+
+def _progress(iterable, desc: str):
+    """
+    Wrapper around tqdm that disables progress bars by default.
+    Set environment variable SEP_PROGRESS=1 to enable.
+    """
+    enable = os.environ.get("SEP_PROGRESS") == "1"
+    return tqdm(iterable, desc=desc, disable=not enable)
 
 # Type Aliases
 NodeID = int
@@ -50,14 +59,14 @@ def _acc_memoize(use_value_cache: bool = True):
         return wrapper
     return decorator
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DFAState:
     transitions: Dict[int, int]
     finalizers: Set[int]
     possible_future_group_ids: Set[int]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PyTokenizer:
     states: List[DFAState]
     start_state: int
@@ -102,67 +111,67 @@ class PyTokenizer:
     def max_state(self) -> int:
         return len(self.states)
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Reduce:
     nonterminal_id: int
     len: int
     production_ids: Tuple[int, ...]
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Split:
     shift: Optional[int]
     reduces: Dict[int, Dict[int, Tuple[int, ...]]]
 
 Action = Union[int, Reduce, Split]
 
-@dataclass
+@dataclass(slots=True)
 class Row:
     actions: Dict[int, Action] = field(default_factory=dict)
     gotos: Dict[int, int] = field(default_factory=dict)
 
-@dataclass
+@dataclass(slots=True)
 class ParserTable:
     start_state_id: int
     table: Dict[int, Row]
 
-@dataclass
+@dataclass(slots=True)
 class ArenaEdgeDest:
     dest_idx: NodeID
     state_bv: StateIDSet
 
-@dataclass
+@dataclass(slots=True)
 class LoadedArenaEdgeDest:
     dest_idx: NodeID
     state_bv: StateIDSet
 
-@dataclass
+@dataclass(slots=True)
 class LoadedArenaEdge:
     pop: int
     llm_bv: LLMTokenSet
     dests: List[LoadedArenaEdgeDest]
 
-@dataclass
+@dataclass(slots=True)
 class LoadedArenaNode:
     children: List[LoadedArenaEdge]
     clean_end: bool
 
-@dataclass
+@dataclass(slots=True)
 class IntermediateArenaEdgeDest:
     dest_idx: NodeID
     state_bv: StateIDSet
 
-@dataclass
+@dataclass(slots=True)
 class IntermediateArenaEdge:
     pop: int
     llm_bv: LLMTokenSet
     dests: IntermediateArenaEdgeDest
 
-@dataclass
+@dataclass(slots=True)
 class IntermediateArenaNode:
     children: List[IntermediateArenaEdge]
     clean_end: bool
 
-@dataclass
+@dataclass(slots=True)
 class ArenaEdge:
     pop: int
     llm_bv: LLMTokenSet
@@ -181,14 +190,14 @@ class ArenaEdge:
                 mapping[sid].append(j)
         self.state_to_dest = dict(mapping)
 
-@dataclass
+@dataclass(slots=True)
 class ArenaNode:
     children: List[ArenaEdge] = field(default_factory=list)
     llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
     clean_end: bool = False
 
 def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode], max_depth: Dict[NodeID, int]):
-    for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
+    for node in _progress(intermediate_arena.values(), "Optimizing intermediate arena"):
         if not node.children:
             continue
         # Sort edges by destination depth (desc) and then pop count (asc)
@@ -197,7 +206,7 @@ def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateAr
 def _load_and_flatten_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict[NodeID, IntermediateArenaNode]:
     """Stage 1: Convert from the loaded format to a flattened intermediate format."""
     intermediate_arena: Dict[NodeID, IntermediateArenaNode] = {}
-    for uid, loaded_node in tqdm(loaded_arena.items(), desc="Stage 1: Loading and flattening arena"):
+    for uid, loaded_node in _progress(loaded_arena.items(), "Stage 1: Loading and flattening arena"):
         intermediate_children: List[IntermediateArenaEdge] = []
         for loaded_edge in loaded_node.children:
             for d in loaded_edge.dests:
@@ -215,7 +224,7 @@ def _load_and_flatten_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict
 def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode]) -> Dict[NodeID, ArenaNode]:
     """Stage 2: Merge flattened edges back into the final ArenaNode structure."""
     arena: Dict[NodeID, ArenaNode] = {}
-    for uid, intermediate_node in tqdm(intermediate_arena.items(), desc="Stage 2: Merging and converting arena"):
+    for uid, intermediate_node in _progress(intermediate_arena.items(), "Stage 2: Merging and converting arena"):
         new_children: List[ArenaEdge] = []
         llm_bv_union = RangeSet.empty()
 
@@ -264,7 +273,7 @@ def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode], max_depth: Dict[
     final_arena = _merge_and_finalize_arena(intermediate_arena)
     return final_arena
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=True, eq=False, slots=True)
 class PyAcc:
     terminals_union: Dict[int, TerminalIdSet]
     llm_mask: LLMTokenSet
@@ -293,7 +302,7 @@ class PyAcc:
     def is_empty(self):
         return self.llm_mask.is_empty()
 
-@dataclass
+@dataclass(slots=True)
 class WorkItem:
     priority: Tuple[int, int, int]
     node_id: NodeID
@@ -372,6 +381,19 @@ class Model(GraphProvider):
         parser_table = ParserTable(parser_data['start_state_id'], py_table)
 
         # Misc data (some still requires FFI for loading)
+        def _to_bytes(x):
+            # Accept bytes, bytearray, list[int], or str (assumed latin-1 mapping to preserve raw bytes)
+            if isinstance(x, (bytes, bytearray)):
+                return bytes(x)
+            if isinstance(x, list):
+                return bytes(x)
+            if isinstance(x, str):
+                try:
+                    return x.encode('latin1')
+                except Exception:
+                    return x.encode()
+            return bytes(x)
+
         constraint = ffi.GrammarConstraint.from_json_string(s)
         pmc_ffi = constraint.possible_matches()
         possible_matches_cache = {int(t): {int(i): RangeSet.from_ranges(b.to_ranges()) for i, b in inner.items()} for t, inner in pmc_ffi.items()}
@@ -386,7 +408,7 @@ class Model(GraphProvider):
             arena=arena, roots_map=roots_map, max_depth=max_depth, parser_table=parser_table,
             tokenizer=tokenizer, tokenizer_initial_state=tokenizer.initial_state_id(),
             possible_matches_cache=possible_matches_cache,
-            id_to_token={v: bytes(k) for k, v in data['llm_token_map']},
+            id_to_token={v: _to_bytes(k) for k, v in data['llm_token_map']},
             internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
             all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
             ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
@@ -553,6 +575,8 @@ class Model(GraphProvider):
 
         remaining_mask = all_ones
         while work_heap:
+            if remaining_mask.is_empty():
+                break
             node, gss_node, start_edge, start_dest, pop_cache = dequeue()
             gss_acc = gss_node.reduce_acc()
             gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
@@ -562,11 +586,14 @@ class Model(GraphProvider):
                 remaining_mask = all_ones.difference(final_mask)
 
             a_node = self.arena.get(node)
-            if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
+            if not a_node:
+                continue
+            node_union_mask = a_node.llm_bv_union.intersection(remaining_mask)
+            if node_union_mask.is_empty() or gss_mask.isdisjoint(node_union_mask):
                 continue
 
             # max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
-            max_edges, max_dests = (1, 1)
+            max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
             edges_proc, dests_proc = 0, 0
             peek0_rs = None
 
@@ -648,5 +675,6 @@ class Model(GraphProvider):
             if i in self.internal_to_original_map:
                 original_indices |= self.internal_to_original_map[i]
         t3 = time.perf_counter()
-        print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms")
+        if os.environ.get("SEP_TIMING") == "1":
+            print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms")
         return original_indices
