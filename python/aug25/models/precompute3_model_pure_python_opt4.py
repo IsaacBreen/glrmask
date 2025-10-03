@@ -573,6 +573,7 @@ class Model(GraphProvider):
                     else: lst.append(sid)
 
             # Iterate grouped dests in ascending order for locality
+            dests_proc = 0
             for dest_j in sorted(grouped.keys()):
                 if dests_proc >= max_dests:
                     priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
@@ -590,11 +591,11 @@ class Model(GraphProvider):
                 yield Enqueue(d, child_gss)
                 dests_proc += 1
 
+            edges_proc += 1
             if edges_proc >= max_edges:
                 priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
                 yield Suspend(priority)
                 edges_proc = 0
-            edges_proc += 1
 
     def get_mask(self) -> LLMTokenSet:
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
