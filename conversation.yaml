@@ -406,20 +406,7 @@ local_system:
               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
               values, depth_heap, enqueued = {}, [], set()
               edge_cursor = {}
-
-              def enqueue(node_id: NodeID, gss: GSS) -> GSS:
-                  if node_id in values:
-                      gss = values[node_id].merge(gss)
-                  values[node_id] = gss
-                  if node_id not in enqueued:
-                      enqueued.add(node_id)
-                      heapq.heappush(depth_heap, (-self.max_depth[node_id], node_id))
-                  return gss
-
-              def dequeue() -> Tuple[NodeID, GSS]:
-                  _, node_id = heapq.heappop(depth_heap)
-                  enqueued.remove(node_id)
-                  return node_id, values.pop(node_id)
+              hp, hpop = heapq.heappush, heapq.heappop
 
               @_acc_memoize(use_value_cache=False)
               def initialize_acc(acc: PyAcc) -> PyAcc:
@@ -435,11 +422,15 @@ local_system:
               for sid, gss in self.state.items():
                   r = self.roots_map[int(sid)]
                   gss_init = gss.apply(initialize_acc, init_cache)
-                  enqueue(r, gss_init)
+                  if r in values: values[r] = values[r].merge(gss_init)
+                  else: values[r] = gss_init
+                  if r not in enqueued: enqueued.add(r); hp(depth_heap, (-self.max_depth[r], r))
 
               remaining_mask = all_ones
               while depth_heap:
-                  node, gss_node = dequeue()
+                  _, node = hpop(depth_heap)
+                  enqueued.remove(node)
+                  gss_node = values.pop(node)
                   gss_id = id(gss_node)
 
                   gss_acc = gss_node.reduce_acc()
@@ -495,8 +486,10 @@ local_system:
                       current_start_dest = start_dest if edge_i == start_edge else 0
                       for dest_j in range(current_start_dest, len(edge.dests)):
                           if dests_proc >= max_dests:
-                              state_to_requeue = enqueue(node, gss_node)
+                              state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
+                              values[node] = state_to_requeue
                               edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
+                              if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
                               edges_proc = max_edges; break
 
                           dest_idx, state_bv = edge.dests[dest_j]
@@ -509,15 +502,19 @@ local_system:
                           if child_gss.is_empty(): continue
 
                           d: NodeID = int(dest_idx)
-                          enqueue(d, child_gss)
+                          if d in values: values[d] = values[d].merge(child_gss)
+                          else: values[d] = child_gss
+                          if d not in enqueued: enqueued.add(d); hp(depth_heap, (-self.max_depth[d], d))
                           dests_proc += 1
                       
                       if edges_proc >= max_edges: break
                       edges_proc += 1
 
                       if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-                          state_to_requeue = enqueue(node, gss_node)
+                          state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
+                          values[node] = state_to_requeue
                           edge_cursor[node] = NodeCursor(edge_i + 1, 0, id(state_to_requeue), pop_cache)
+                          if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
                           break
                   else: edge_cursor.pop(node, None)
 
@@ -930,24 +927,17 @@ local_system:
               values, depth_heap, enqueued = {}, [], set()
               edge_cursor = {}
 
-              def enqueue(node_id: NodeID, gss: GSS, edge_idx: int = 0) -> GSS:
+              def enqueue(node_id: NodeID, gss: GSS) -> GSS:
                   if node_id in values:
                       gss = values[node_id].merge(gss)
                   values[node_id] = gss
                   if node_id not in enqueued:
                       enqueued.add(node_id)
-                      priority = self.max_depth.get(node_id, 0)
-                      a_node = self.arena.get(node_id)
-                      if a_node and a_node.children and edge_idx < len(a_node.children):
-                          edge = a_node.children[edge_idx]
-                          if edge.dests:
-                              dest_node_id = edge.dests[0][0]
-                              priority = self.max_depth.get(dest_node_id, 0)
-                      heapq.heappush(depth_heap, (-priority, node_id))
+                      heapq.heappush(depth_heap, (-self.max_depth[node_id], node_id))
                   return gss
 
               def dequeue() -> Tuple[NodeID, GSS]:
-                  priority, node_id = heapq.heappop(depth_heap)
+                  _, node_id = heapq.heappop(depth_heap)
                   enqueued.remove(node_id)
                   return node_id, values.pop(node_id)
 
@@ -1025,7 +1015,7 @@ local_system:
                       current_start_dest = start_dest if edge_i == start_edge else 0
                       for dest_j in range(current_start_dest, len(edge.dests)):
                           if dests_proc >= max_dests:
-                              state_to_requeue = enqueue(node, gss_node, edge_i)
+                              state_to_requeue = enqueue(node, gss_node)
                               edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
                               edges_proc = max_edges; break
 
@@ -1046,7 +1036,7 @@ local_system:
                       edges_proc += 1
 
                       if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-                          state_to_requeue = enqueue(node, gss_node, edge_i + 1)
+                          state_to_requeue = enqueue(node, gss_node)
                           edge_cursor[node] = NodeCursor(edge_i + 1, 0, id(state_to_requeue), pop_cache)
                           break
                   else: edge_cursor.pop(node, None)
@@ -1500,20 +1490,7 @@ messages:
               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
               values, depth_heap, enqueued = {}, [], set()
               edge_cursor = {}
-
-              def enqueue(node_id: NodeID, gss: GSS) -> GSS:
-                  if node_id in values:
-                      gss = values[node_id].merge(gss)
-                  values[node_id] = gss
-                  if node_id not in enqueued:
-                      enqueued.add(node_id)
-                      heapq.heappush(depth_heap, (-self.max_depth[node_id], node_id))
-                  return gss
-
-              def dequeue() -> Tuple[NodeID, GSS]:
-                  _, node_id = heapq.heappop(depth_heap)
-                  enqueued.remove(node_id)
-                  return node_id, values.pop(node_id)
+              hp, hpop = heapq.heappush, heapq.heappop
 
               @_acc_memoize(use_value_cache=False)
               def initialize_acc(acc: PyAcc) -> PyAcc:
@@ -1529,11 +1506,15 @@ messages:
               for sid, gss in self.state.items():
                   r = self.roots_map[int(sid)]
                   gss_init = gss.apply(initialize_acc, init_cache)
-                  enqueue(r, gss_init)
+                  if r in values: values[r] = values[r].merge(gss_init)
+                  else: values[r] = gss_init
+                  if r not in enqueued: enqueued.add(r); hp(depth_heap, (-self.max_depth[r], r))
 
               remaining_mask = all_ones
               while depth_heap:
-                  node, gss_node = dequeue()
+                  _, node = hpop(depth_heap)
+                  enqueued.remove(node)
+                  gss_node = values.pop(node)
                   gss_id = id(gss_node)
 
                   gss_acc = gss_node.reduce_acc()
@@ -1589,8 +1570,10 @@ messages:
                       current_start_dest = start_dest if edge_i == start_edge else 0
                       for dest_j in range(current_start_dest, len(edge.dests)):
                           if dests_proc >= max_dests:
-                              state_to_requeue = enqueue(node, gss_node)
+                              state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
+                              values[node] = state_to_requeue
                               edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
+                              if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
                               edges_proc = max_edges; break
 
                           dest_idx, state_bv = edge.dests[dest_j]
@@ -1603,15 +1586,19 @@ messages:
                           if child_gss.is_empty(): continue
 
                           d: NodeID = int(dest_idx)
-                          enqueue(d, child_gss)
+                          if d in values: values[d] = values[d].merge(child_gss)
+                          else: values[d] = child_gss
+                          if d not in enqueued: enqueued.add(d); hp(depth_heap, (-self.max_depth[d], d))
                           dests_proc += 1
                       
                       if edges_proc >= max_edges: break
                       edges_proc += 1
 
                       if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-                          state_to_requeue = enqueue(node, gss_node)
+                          state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
+                          values[node] = state_to_requeue
                           edge_cursor[node] = NodeCursor(edge_i + 1, 0, id(state_to_requeue), pop_cache)
+                          if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
                           break
                   else: edge_cursor.pop(node, None)
 
@@ -1624,13 +1611,7 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_opt3.py
-  - user: Instead of using a depth heap to decide get_mask traversal order, let's
-      impose an ordering over the edges. Every edge gets an integer for its priority.
-      The priority of a queue item is the priority of the next edge it will process.
-      For now, just make this the max depth of the destination. Don't change the ordering
-      of the edges themselves. ie optimize_traversal stays the same. This only affects
-      the ordering of items in the queue. (Although presumably this will be the same.)
-      Keep the changes minimal.
+  - user: Encapsulate queueing and dequeuing in get_mask in helpers.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1649,80 +1630,205 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to modify the traversal order in `get_mask`, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to refactor the queueing and dequeuing logic in `get_mask` into helper functions, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      Here are the edits for the file `python/aug25/models/precompute3_model_pure_python_opt3.py`:
+      1.  **Open the file** `python/aug25/models/precompute3_model_pure_python_opt3.py`.
 
-      1.  **Navigate to the `get_mask` method.**
+      2.  **Navigate to the `get_mask` method** inside the `Model` class.
 
-      2.  **Modify the nested `enqueue` function:**
-          *   Change its signature to accept a new optional integer argument `edge_idx` with a default value of `0`.
-          *   Replace the `heapq.heappush` logic to calculate priority based on the `max_depth` of the next edge's destination.
+      3.  **Remove the `heapq` aliases**: Delete the following line near the beginning of the method:
+          ```python
+          hp, hpop = heapq.heappush, heapq.heappop
+          ```
 
-      3.  **Update the nested `dequeue` function:**
-          *   For improved clarity, change the unpacking of the heap item from `_, node_id` to `priority, node_id`.
+      4.  **Add helper functions**: Insert the `enqueue` and `dequeue` helper functions right after the `edge_cursor = {}` line:
+          ```python
+                  def enqueue(node_id: NodeID, gss: GSS) -> GSS:
+                      if node_id in values:
+                          gss = values[node_id].merge(gss)
+                      values[node_id] = gss
+                      if node_id not in enqueued:
+                          enqueued.add(node_id)
+                          heapq.heappush(depth_heap, (-self.max_depth[node_id], node_id))
+                      return gss
+          
+                  def dequeue() -> Tuple[NodeID, GSS]:
+                      _, node_id = heapq.heappop(depth_heap)
+                      enqueued.remove(node_id)
+                      return node_id, values.pop(node_id)
+          ```
 
-      4.  **Update the two re-queueing calls to `enqueue`:**
-          *   In the first re-queueing location (inside the `dests` loop), pass `edge_i` to the `enqueue` call.
-          *   In the second re-queueing location (after the `dests` loop), pass `edge_i + 1` to the `enqueue` call.
+      5.  **Update initial queue population**: Replace the `for` loop that initializes the queue:
+          ```python
+              init_cache = {}
+              for sid, gss in self.state.items():
+                  r = self.roots_map[int(sid)]
+                  gss_init = gss.apply(initialize_acc, init_cache)
+                  if r in values: values[r] = values[r].merge(gss_init)
+                  else: values[r] = gss_init
+                  if r not in enqueued: enqueued.add(r); hp(depth_heap, (-self.max_depth[r], r))
+          ```
+          with this simplified version using `enqueue`:
+          ```python
+              init_cache = {}
+              for sid, gss in self.state.items():
+                  r = self.roots_map[int(sid)]
+                  gss_init = gss.apply(initialize_acc, init_cache)
+                  enqueue(r, gss_init)
+          ```
+
+      6.  **Update the main loop**: Change how items are dequeued. Replace:
+          ```python
+              while depth_heap:
+                  _, node = hpop(depth_heap)
+                  enqueued.remove(node)
+                  gss_node = values.pop(node)
+          ```
+          with:
+          ```python
+              while depth_heap:
+                  node, gss_node = dequeue()
+          ```
+
+      7.  **Refactor re-queuing logic**: There are two places where a node is put back on the queue due to processing limits.
+          -   First, replace:
+              ```python
+                              if dests_proc >= max_dests:
+                                  state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
+                                  values[node] = state_to_requeue
+                                  edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
+                                  if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
+                                  edges_proc = max_edges; break
+              ```
+              with:
+              ```python
+                              if dests_proc >= max_dests:
+                                  state_to_requeue = enqueue(node, gss_node)
+                                  edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
+                                  edges_proc = max_edges; break
+              ```
+          -   Second, replace:
+              ```python
+                          if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
+                              state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
+                              values[node] = state_to_requeue
+                              edge_cursor[node] = NodeCursor(edge_i + 1, 0, id(state_to_requeue), pop_cache)
+                              if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
+                              break
+              ```
+              with:
+              ```python
+                          if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
+                              state_to_requeue = enqueue(node, gss_node)
+                              edge_cursor[node] = NodeCursor(edge_i + 1, 0, id(state_to_requeue), pop_cache)
+                              break
+              ```
+
+      8.  **Refactor new work item queuing**: In the inner loop, replace the logic for adding a new destination to the queue:
+          ```python
+                              d: NodeID = int(dest_idx)
+                              if d in values: values[d] = values[d].merge(child_gss)
+                              else: values[d] = child_gss
+                              if d not in enqueued: enqueued.add(d); hp(depth_heap, (-self.max_depth[d], d))
+          ```
+          with a simple call to `enqueue`:
+          ```python
+                              d: NodeID = int(dest_idx)
+                              enqueue(d, child_gss)
+          ```
 
       ### Git Diff
 
-      Here is the git diff that applies the changes described above.
+      Here is the git diff to apply these changes:
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python_opt3.py b/python/aug25/models/precompute3_model_pure_python_opt3.py
-      index 10a7051..c160b8d 100644
+      index 4558e80..e62086e 100644
       --- a/python/aug25/models/precompute3_model_pure_python_opt3.py
       +++ b/python/aug25/models/precompute3_model_pure_python_opt3.py
-      @@ -498,18 +498,24 @@
+      @@ -509,8 +509,22 @@
+           def get_mask(self) -> LLMTokenSet:
+               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
                values, depth_heap, enqueued = {}, [], set()
                edge_cursor = {}
+      -        hp, hpop = heapq.heappush, heapq.heappop
        
-      -        def enqueue(node_id: NodeID, gss: GSS) -> GSS:
-      +        def enqueue(node_id: NodeID, gss: GSS, edge_idx: int = 0) -> GSS:
-                   if node_id in values:
-                       gss = values[node_id].merge(gss)
-                   values[node_id] = gss
-                   if node_id not in enqueued:
-                       enqueued.add(node_id)
-      -                heapq.heappush(depth_heap, (-self.max_depth[node_id], node_id))
-      +                priority = self.max_depth.get(node_id, 0)
-      +                a_node = self.arena.get(node_id)
-      +                if a_node and a_node.children and edge_idx < len(a_node.children):
-      +                    edge = a_node.children[edge_idx]
-      +                    if edge.dests:
-      +                        dest_node_id = edge.dests[0][0]
-      +                        priority = self.max_depth.get(dest_node_id, 0)
-      +                heapq.heappush(depth_heap, (-priority, node_id))
-                   return gss
+      +        def enqueue(node_id: NodeID, gss: GSS) -> GSS:
+      +            if node_id in values:
+      +                gss = values[node_id].merge(gss)
+      +            values[node_id] = gss
+      +            if node_id not in enqueued:
+      +                enqueued.add(node_id)
+      +                heapq.heappush(depth_heap, (-self.max_depth[node_id], node_id))
+      +            return gss
+      +
+      +        def dequeue() -> Tuple[NodeID, GSS]:
+      +            _, node_id = heapq.heappop(depth_heap)
+      +            enqueued.remove(node_id)
+      +            return node_id, values.pop(node_id)
+      +
+               @_acc_memoize(use_value_cache=False)
+               def initialize_acc(acc: PyAcc) -> PyAcc:
+                   disallowed = RangeSet.empty()
+      @@ -525,16 +539,12 @@
+               for sid, gss in self.state.items():
+                   r = self.roots_map[int(sid)]
+                   gss_init = gss.apply(initialize_acc, init_cache)
+      -            if r in values: values[r] = values[r].merge(gss_init)
+      -            else: values[r] = gss_init
+      -            if r not in enqueued: enqueued.add(r); hp(depth_heap, (-self.max_depth[r], r))
+      +            enqueue(r, gss_init)
        
-               def dequeue() -> Tuple[NodeID, GSS]:
-      -            _, node_id = heapq.heappop(depth_heap)
-      +            priority, node_id = heapq.heappop(depth_heap)
-                   enqueued.remove(node_id)
-                   return node_id, values.pop(node_id)
+               remaining_mask = all_ones
+               while depth_heap:
+      -            _, node = hpop(depth_heap)
+      -            enqueued.remove(node)
+      -            gss_node = values.pop(node)
+      +            node, gss_node = dequeue()
+                   gss_id = id(gss_node)
        
-      @@ -608,7 +614,7 @@
+                   gss_acc = gss_node.reduce_acc()
+      @@ -586,28 +596,22 @@
                        current_start_dest = start_dest if edge_i == start_edge else 0
                        for dest_j in range(current_start_dest, len(edge.dests)):
                            if dests_proc >= max_dests:
-      -                        state_to_requeue = enqueue(node, gss_node)
-      +                        state_to_requeue = enqueue(node, gss_node, edge_i)
+      -                        state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
+      -                        values[node] = state_to_requeue
+      +                        state_to_requeue = enqueue(node, gss_node)
                                edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
+      -                        if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
                                edges_proc = max_edges; break
        
-      @@ -627,7 +633,7 @@
+                           dest_idx, state_bv = edge.dests[dest_j]
+                           if state_bv.isdisjoint(peek_rs): continue
+                           
+                           keep_rs = peek_rs.intersection(state_bv)
+                           if keep_rs.is_empty(): continue
+                           
+                           child_gss = popped.isolate_many(list(keep_rs.iter_indices()))
+                           if child_gss.is_empty(): continue
+       
+                           d: NodeID = int(dest_idx)
+      -                    if d in values: values[d] = values[d].merge(child_gss)
+      -                    else: values[d] = child_gss
+      -                    if d not in enqueued: enqueued.add(d); hp(depth_heap, (-self.max_depth[d], d))
+      +                    enqueue(d, child_gss)
+                           dests_proc += 1
+                       
+                       if edges_proc >= max_edges: break
                        edges_proc += 1
        
                        if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-      -                    state_to_requeue = enqueue(node, gss_node)
-      +                    state_to_requeue = enqueue(node, gss_node, edge_i + 1)
+      -                    state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
+      -                    values[node] = state_to_requeue
+      +                    state_to_requeue = enqueue(node, gss_node)
                            edge_cursor[node] = NodeCursor(edge_i + 1, 0, id(state_to_requeue), pop_cache)
+      -                    if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
                            break
                    else: edge_cursor.pop(node, None)
+       
 
       ```
     metadata:
@@ -1735,7 +1841,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt3.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt3.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor get_mask traversal priority in
-      enqueue to use next edge destination max depth"'
+  - user: 'Changes committed with message: "Refactor get_mask to use enqueue/dequeue
+      helpers for heap management"'
     metadata:
 ...
