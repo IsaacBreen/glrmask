@@ -144,6 +144,22 @@ class LoadedArenaNode:
     clean_end: bool
 
 @dataclass
+class IntermediateArenaEdgeDest:
+    dest_idx: NodeID
+    state_bv: StateIDSet
+
+@dataclass
+class IntermediateArenaEdge:
+    pop: int
+    llm_bv: LLMTokenSet
+    dests: List[IntermediateArenaEdgeDest]
+
+@dataclass
+class IntermediateArenaNode:
+    children: List[IntermediateArenaEdge]
+    clean_end: bool
+
+@dataclass
 class ArenaEdge:
     pop: int
     llm_bv: LLMTokenSet
@@ -169,31 +185,46 @@ class ArenaNode:
     clean_end: bool = False
 
 def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict[NodeID, ArenaNode]:
+    intermediate_arena: Dict[NodeID, IntermediateArenaNode] = {}
+    for uid, loaded_node in tqdm(loaded_arena.items(), desc="Stage 1: Loading arena"):
+        intermediate_children: List[IntermediateArenaEdge] = []
+        for loaded_edge in loaded_node.children:
+            intermediate_dests = [IntermediateArenaEdgeDest(d.dest_idx, d.state_bv) for d in loaded_edge.dests]
+            intermediate_children.append(IntermediateArenaEdge(
+                pop=loaded_edge.pop,
+                llm_bv=loaded_edge.llm_bv,
+                dests=intermediate_dests,
+            ))
+        intermediate_arena[uid] = IntermediateArenaNode(
+            children=intermediate_children,
+            clean_end=loaded_node.clean_end,
+        )
+
     arena: Dict[NodeID, ArenaNode] = {}
-    for uid, loaded_node in tqdm(loaded_arena.items(), desc="Converting arena"):
+    for uid, intermediate_node in tqdm(intermediate_arena.items(), desc="Stage 2: Converting arena"):
         new_children: List[ArenaEdge] = []
         llm_bv_union = RangeSet.empty()
-        for loaded_edge in loaded_node.children:
-            llm_bv_union |= loaded_edge.llm_bv
+        for edge in intermediate_node.children:
+            llm_bv_union |= edge.llm_bv
             dest_states_union = RangeSetStates.empty()
             new_dests: List[ArenaEdgeDest] = []
-            for loaded_dest in loaded_edge.dests:
-                dest_states_union |= loaded_dest.state_bv
+            for dest in edge.dests:
+                dest_states_union |= dest.state_bv
                 new_dests.append(ArenaEdgeDest(
-                    dest_idx=loaded_dest.dest_idx,
-                    state_bv=loaded_dest.state_bv
+                    dest_idx=dest.dest_idx,
+                    state_bv=dest.state_bv
                 ))
 
             new_children.append(ArenaEdge(
-                pop=loaded_edge.pop,
-                llm_bv=loaded_edge.llm_bv,
+                pop=edge.pop,
+                llm_bv=edge.llm_bv,
                 dests=new_dests,
                 dest_states_union=dest_states_union,
             ))
         arena[uid] = ArenaNode(
             children=new_children,
             llm_bv_union=llm_bv_union,
-            clean_end=loaded_node.clean_end,
+            clean_end=intermediate_node.clean_end,
         )
     return arena
 
