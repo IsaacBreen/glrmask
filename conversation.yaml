@@ -9,7 +9,10 @@ local_system:
 
       import collections
       import heapq
+      import itertools
       import json
+      import os
+      import time
       from dataclasses import dataclass, field
       from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
 
@@ -227,22 +230,32 @@ local_system:
                   arena[uid] = ArenaNode(children=[], llm_bv_union=llm_bv_union, clean_end=intermediate_node.clean_end)
                   continue
               
-              grouped_edges: Dict[Tuple[int, LLMTokenSet], Tuple[List[ArenaEdgeDest], StateIDSet]] = collections.defaultdict(lambda: ([], RangeSetStates.empty()))
-
-              for edge in intermediate_node.children:
-                  key = (edge.pop, edge.llm_bv)
-                  dests, dest_states_union = grouped_edges[key]
-                  dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-                  grouped_edges[key] = (dests, dest_states_union | edge.dests.state_bv)
-
-              for (pop, llm_bv), (dests, dest_states_union) in grouped_edges.items():
-                  llm_bv_union |= llm_bv
+              children_it = iter(intermediate_node.children)
+              first = next(children_it)
+              edge_dests = []
+              prev_pop = first.pop
+              prev_llm_bv = first.llm_bv
+              edge_dests.append(ArenaEdgeDest(first.dests.dest_idx, first.dests.state_bv))
+              def flush() -> None:
+                  nonlocal edge_dests, prev_pop, prev_llm_bv, new_children, llm_bv_union
+                  dest_states_union = RangeSetStates.empty()
+                  for d in edge_dests:
+                      dest_states_union |= d.state_bv
+                  llm_bv_union |= prev_llm_bv
                   new_children.append(ArenaEdge(
-                      pop=pop,
-                      llm_bv=llm_bv,
-                      dests=dests,
+                      pop=prev_pop,
+                      llm_bv=prev_llm_bv,
+                      dests=edge_dests,
                       dest_states_union=dest_states_union,
                   ))
+              for edge in children_it:
+                  if not (edge.pop == prev_pop and edge.llm_bv == prev_llm_bv):
+                      flush()
+                      prev_pop = edge.pop
+                      prev_llm_bv = edge.llm_bv
+                      edge_dests = []
+                  edge_dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
+              flush()
 
               arena[uid] = ArenaNode(
                   children=new_children,
@@ -508,6 +521,7 @@ local_system:
           def get_mask(self) -> LLMTokenSet:
               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
               work_heap = []
+              t0 = time.perf_counter()
 
               def enqueue(node_id: NodeID, gss: GSS, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
                   if gss.is_empty():
@@ -542,6 +556,7 @@ local_system:
                   r = self.roots_map[int(sid)]
                   gss_init = gss.apply(initialize_acc, init_cache)
                   enqueue(r, gss_init)
+              t1 = time.perf_counter()
 
               remaining_mask = all_ones
               while work_heap:
@@ -557,7 +572,8 @@ local_system:
                   if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                       continue
 
-                  max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
+                  # max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
+                  max_edges, max_dests = (1, 1)
                   edges_proc, dests_proc = 0, 0
                   peek0_rs = None
 
@@ -632,11 +648,14 @@ local_system:
                       if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
                           enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
                           break
-              
+              t2 = time.perf_counter()
+
               original_indices = RangeSetOut.empty()
               for i in final_mask.iter_indices():
                   if i in self.internal_to_original_map:
                       original_indices |= self.internal_to_original_map[i]
+              t3 = time.perf_counter()
+              print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms")
               return original_indices
   prev_file_contents:
     python/aug25/models/precompute3_model_pure_python_opt3.py: |
@@ -647,8 +666,10 @@ local_system:
       import itertools
       import json
       import os
+      import time
       from dataclasses import dataclass, field
-      from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
+      from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple, Generator, Any
+      import types
 
       import _sep1 as ffi
       from tqdm import tqdm
@@ -855,8 +876,6 @@ local_system:
 
       def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode]) -> Dict[NodeID, ArenaNode]:
           """Stage 2: Merge flattened edges back into the final ArenaNode structure."""
-          use_alt_merge = os.environ.get('ALT_MERGE_MODE')
-
           arena: Dict[NodeID, ArenaNode] = {}
           for uid, intermediate_node in tqdm(intermediate_arena.items(), desc="Stage 2: Merging and converting arena"):
               new_children: List[ArenaEdge] = []
@@ -866,39 +885,32 @@ local_system:
                   arena[uid] = ArenaNode(children=[], llm_bv_union=llm_bv_union, clean_end=intermediate_node.clean_end)
                   continue
               
-              if use_alt_merge:
-                  for key, group in itertools.groupby(intermediate_node.children, key=lambda e: (e.pop, e.llm_bv)):
-                      pop, llm_bv = key
-                      dests: List[ArenaEdgeDest] = []
-                      dest_states_union = RangeSetStates.empty()
-                      for edge in group:
-                          dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-                          dest_states_union |= edge.dests.state_bv
-                      
-                      llm_bv_union |= llm_bv
-                      new_children.append(ArenaEdge(
-                          pop=pop,
-                          llm_bv=llm_bv,
-                          dests=dests,
-                          dest_states_union=dest_states_union,
-                      ))
-              else:
-                  grouped_edges: Dict[Tuple[int, LLMTokenSet], Tuple[List[ArenaEdgeDest], StateIDSet]] = collections.defaultdict(lambda: ([], RangeSetStates.empty()))
-
-                  for edge in intermediate_node.children:
-                      key = (edge.pop, edge.llm_bv)
-                      dests, dest_states_union = grouped_edges[key]
-                      dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-                      grouped_edges[key] = (dests, dest_states_union | edge.dests.state_bv)
-
-                  for (pop, llm_bv), (dests, dest_states_union) in grouped_edges.items():
-                      llm_bv_union |= llm_bv
-                      new_children.append(ArenaEdge(
-                          pop=pop,
-                          llm_bv=llm_bv,
-                          dests=dests,
-                          dest_states_union=dest_states_union,
-                      ))
+              children_it = iter(intermediate_node.children)
+              first = next(children_it)
+              edge_dests = []
+              prev_pop = first.pop
+              prev_llm_bv = first.llm_bv
+              edge_dests.append(ArenaEdgeDest(first.dests.dest_idx, first.dests.state_bv))
+              def flush() -> None:
+                  nonlocal edge_dests, prev_pop, prev_llm_bv, new_children, llm_bv_union
+                  dest_states_union = RangeSetStates.empty()
+                  for d in edge_dests:
+                      dest_states_union |= d.state_bv
+                  llm_bv_union |= prev_llm_bv
+                  new_children.append(ArenaEdge(
+                      pop=prev_pop,
+                      llm_bv=prev_llm_bv,
+                      dests=edge_dests,
+                      dest_states_union=dest_states_union,
+                  ))
+              for edge in children_it:
+                  if not (edge.pop == prev_pop and edge.llm_bv == prev_llm_bv):
+                      flush()
+                      prev_pop = edge.pop
+                      prev_llm_bv = edge.llm_bv
+                      edge_dests = []
+                  edge_dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
+              flush()
 
               arena[uid] = ArenaNode(
                   children=new_children,
@@ -944,18 +956,13 @@ local_system:
               return self.llm_mask.is_empty()
 
       @dataclass
-      class WorkItem:
-          priority: Tuple[int, int, int]
+      class Enqueue:
           node_id: NodeID
           gss: GSS
-          edge_idx: int
-          dest_idx: int
-          pop_cache: Dict
 
-          def __lt__(self, other: 'WorkItem') -> bool:
-              if not isinstance(other, WorkItem):
-                  return NotImplemented
-              return self.priority < other.priority
+      @dataclass
+      class Suspend:
+          priority: Any
 
       @dataclass
       class Model(GraphProvider):
@@ -1161,27 +1168,99 @@ local_system:
                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
               return GSS.merge_many(shifted)
 
+          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, is_final_mask_empty: bool) -> Generator[Union[Enqueue, Suspend], None, None]:
+              a_node = self.arena.get(node_id)
+              if not a_node:
+                  return
+
+              # max_edges, max_dests = (8, 2048) if is_final_mask_empty else (16, 4096)
+              max_edges, max_dests = (1, 1)
+              edges_proc, dests_proc = 0, 0
+              peek0_rs = None
+              pop_cache = {}
+              gss_acc = gss_node.reduce_acc()
+
+              for edge_i, edge in enumerate(a_node.children):
+                  if edge.llm_bv.isdisjoint(gss_mask): continue
+                  if edge.pop == 0:
+                      if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
+                      if edge.dest_states_union.isdisjoint(peek0_rs): continue
+                  
+                  if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+                  else:
+                      popped = gss_node.popn(edge.pop)
+                      if popped.is_empty():
+                          pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
+                          continue
+                      popped_acc = gss_acc if edge.pop == 0 else popped.reduce_acc()
+                      if not popped_acc or popped_acc.llm_mask.is_empty():
+                          pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
+                          continue
+                      # Avoid double-peek: call once and reuse both list and RangeSetStates
+                      peeked = popped.peek()
+                      peek_rs = RangeSetStates.from_indices(peeked)
+                      pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+                  
+                  if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
+                  
+                  if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
+                      if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
+                      @_acc_memoize(use_value_cache=False)
+                      def intersect(acc: PyAcc):
+                          new_mask = acc.llm_mask.intersection(edge.llm_bv)
+                          return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                      popped = popped.apply_and_prune(intersect)
+                      if popped.is_empty(): continue
+                  if not peeked: continue
+
+                  grouped: Dict[int, List[int]] = {}
+                  m = edge.state_to_dest
+                  for sid in peeked:
+                      dest_list = m.get(sid)
+                      if not dest_list: continue
+                      for dest_j in dest_list:
+                          lst = grouped.get(dest_j)
+                          if lst is None: grouped[dest_j] = [sid]
+                          else: lst.append(sid)
+                  
+                  # Iterate grouped dests in ascending order for locality
+                  for dest_j in sorted(grouped.keys()):
+                      if dests_proc >= max_dests:
+                          priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
+                          yield Suspend(priority)
+                          dests_proc = 0
+                      dest = edge.dests[dest_j]
+                      values_to_keep = grouped[dest_j]
+                      # If all heads survive, reuse popped directly
+                      if len(values_to_keep) == len(peeked):
+                          child_gss = popped
+                      else:
+                          child_gss = popped.isolate_many(values_to_keep)
+                      if child_gss.is_empty(): continue
+                      d: NodeID = int(dest.dest_idx)
+                      yield Enqueue(d, child_gss)
+                      dests_proc += 1
+                  
+                  if edges_proc >= max_edges:
+                      priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
+                      yield Suspend(priority)
+                      edges_proc = 0
+                  edges_proc += 1
+
           def get_mask(self) -> LLMTokenSet:
               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
               work_heap = []
+              t0 = time.perf_counter()
 
-              def enqueue(node_id: NodeID, gss: GSS, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
-                  if gss.is_empty():
-                      return
-                  priority = (-self.max_depth.get(node_id, 0), edge_idx, dest_idx)
-                  item = WorkItem(
-                      priority=priority,
-                      node_id=node_id,
-                      gss=gss,
-                      edge_idx=edge_idx,
-                      dest_idx=dest_idx,
-                      pop_cache=pop_cache if pop_cache is not None else {}
-                  )
-                  heapq.heappush(work_heap, item)
+              @dataclass
+              class HeapItem:
+                  priority: Any
+                  item: Any
 
-              def dequeue() -> Tuple[NodeID, GSS, int, int, Dict]:
-                  item = heapq.heappop(work_heap)
-                  return item.node_id, item.gss, item.edge_idx, item.dest_idx, item.pop_cache
+                  def __lt__(self, other: 'HeapItem') -> bool:
+                      if not isinstance(other, HeapItem):
+                          return NotImplemented
+                      return self.priority < other.priority
 
               @_acc_memoize(use_value_cache=False)
               def initialize_acc(acc: PyAcc) -> PyAcc:
@@ -1197,102 +1276,60 @@ local_system:
               for sid, gss in self.state.items():
                   r = self.roots_map[int(sid)]
                   gss_init = gss.apply(initialize_acc, init_cache)
-                  enqueue(r, gss_init)
+                  if not gss_init.is_empty():
+                      priority = (-self.max_depth.get(r, 0), 0, 0)
+                      heapq.heappush(work_heap, HeapItem(priority, (r, gss_init)))
+              t1 = time.perf_counter()
 
               remaining_mask = all_ones
               while work_heap:
-                  node, gss_node, start_edge, start_dest, pop_cache = dequeue()
-                  gss_acc = gss_node.reduce_acc()
-                  gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
+                  heap_item = heapq.heappop(work_heap)
+                  priority, work = heap_item.priority, heap_item.item
 
-                  if self.is_end(node) and gss_acc and not final_mask.issuperset(gss_acc.llm_mask):
-                      final_mask |= gss_acc.llm_mask
-                      remaining_mask = all_ones.difference(final_mask)
+                  gen = None
+                  if isinstance(work, types.GeneratorType):
+                      gen = work
+                  else:
+                      node_id, gss_node = work
+                      gss_acc = gss_node.reduce_acc()
 
-                  a_node = self.arena.get(node)
-                  if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
-                      continue
+                      if self.is_end(node_id) and gss_acc:
+                          if not final_mask.issuperset(gss_acc.llm_mask):
+                              final_mask |= gss_acc.llm_mask
+                              remaining_mask = all_ones.difference(final_mask)
 
-                  max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
-                  edges_proc, dests_proc = 0, 0
-                  peek0_rs = None
+                      a_node = self.arena.get(node_id)
+                      gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
 
-                  for edge_i in range(start_edge, len(a_node.children)):
-                      edge = a_node.children[edge_i]
-                      if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask): continue
-                      if edge.pop == 0:
-                          if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
-                          if edge.dest_states_union.isdisjoint(peek0_rs): continue
+                      if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
+                          continue
                       
-                      if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
-                      else:
-                          popped = gss_node.popn(edge.pop)
-                          if popped.is_empty():
-                              pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
-                              continue
-                          popped_acc = gss_acc if edge.pop == 0 else popped.reduce_acc()
-                          if not popped_acc or popped_acc.llm_mask.is_empty():
-                              pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
-                              continue
-                          # Avoid double-peek: call once and reuse both list and RangeSetStates
-                          peeked = popped.peek()
-                          peek_rs = RangeSetStates.from_indices(peeked)
-                          pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
-                      
-                      if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
-                      
-                      if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
-                          if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
-                          @_acc_memoize(use_value_cache=False)
-                          def intersect(acc: PyAcc):
-                              new_mask = acc.llm_mask.intersection(edge.llm_bv)
-                              return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-                          popped = popped.apply_and_prune(intersect)
-                          if popped.is_empty(): continue
-                      if not peeked: continue
+                      is_final_mask_empty = final_mask.is_empty()
+                      gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, is_final_mask_empty)
 
-                      current_start_dest = start_dest if edge_i == start_edge else 0
+                  if gen:
+                      try:
+                          yielded = next(gen)
 
-                      grouped: Dict[int, List[int]] = {}
-                      m = edge.state_to_dest
-                      for sid in peeked:
-                          dest_list = m.get(sid)
-                          if not dest_list: continue
-                          for dest_j in dest_list:
-                              if dest_j < current_start_dest: continue
-                              lst = grouped.get(dest_j)
-                              if lst is None: grouped[dest_j] = [sid]
-                              else: lst.append(sid)
-                      
-                      # Iterate grouped dests in ascending order for locality
-                      for dest_j in sorted(grouped.keys()):
-                          if dests_proc >= max_dests:
-                              enqueue(node, gss_node, edge_i, dest_j, pop_cache)
-                              edges_proc = max_edges
-                              break
-                          dest = edge.dests[dest_j]
-                          values_to_keep = grouped[dest_j]
-                          # If all heads survive, reuse popped directly
-                          if len(values_to_keep) == len(peeked):
-                              child_gss = popped
-                          else:
-                              child_gss = popped.isolate_many(values_to_keep)
-                          if child_gss.is_empty(): continue
-                          d: NodeID = int(dest.dest_idx)
-                          enqueue(d, child_gss)
-                          dests_proc += 1
-                      
-                      if edges_proc >= max_edges: break
-                      edges_proc += 1
+                          if isinstance(yielded, Enqueue):
+                              new_node_id, new_gss = yielded.node_id, yielded.gss
+                              if not new_gss.is_empty():
+                                  child_priority = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                                  heapq.heappush(work_heap, HeapItem(child_priority, (new_node_id, new_gss)))
+                              heapq.heappush(work_heap, HeapItem(priority, gen))
+                          elif isinstance(yielded, Suspend):
+                              heapq.heappush(work_heap, HeapItem(yielded.priority, gen))
 
-                      if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-                          enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
-                          break
-              
+                      except StopIteration:
+                          pass # Generator is done.
+              t2 = time.perf_counter()
+
               original_indices = RangeSetOut.empty()
               for i in final_mask.iter_indices():
                   if i in self.internal_to_original_map:
                       original_indices |= self.internal_to_original_map[i]
+              t3 = time.perf_counter()
+              print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms")
               return original_indices
   diffs_applied_this_send: true
   core_guidance_inserted: true
@@ -1341,7 +1378,10 @@ messages:
 
       import collections
       import heapq
+      import itertools
       import json
+      import os
+      import time
       from dataclasses import dataclass, field
       from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
 
@@ -1559,22 +1599,32 @@ messages:
                   arena[uid] = ArenaNode(children=[], llm_bv_union=llm_bv_union, clean_end=intermediate_node.clean_end)
                   continue
               
-              grouped_edges: Dict[Tuple[int, LLMTokenSet], Tuple[List[ArenaEdgeDest], StateIDSet]] = collections.defaultdict(lambda: ([], RangeSetStates.empty()))
-
-              for edge in intermediate_node.children:
-                  key = (edge.pop, edge.llm_bv)
-                  dests, dest_states_union = grouped_edges[key]
-                  dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-                  grouped_edges[key] = (dests, dest_states_union | edge.dests.state_bv)
-
-              for (pop, llm_bv), (dests, dest_states_union) in grouped_edges.items():
-                  llm_bv_union |= llm_bv
+              children_it = iter(intermediate_node.children)
+              first = next(children_it)
+              edge_dests = []
+              prev_pop = first.pop
+              prev_llm_bv = first.llm_bv
+              edge_dests.append(ArenaEdgeDest(first.dests.dest_idx, first.dests.state_bv))
+              def flush() -> None:
+                  nonlocal edge_dests, prev_pop, prev_llm_bv, new_children, llm_bv_union
+                  dest_states_union = RangeSetStates.empty()
+                  for d in edge_dests:
+                      dest_states_union |= d.state_bv
+                  llm_bv_union |= prev_llm_bv
                   new_children.append(ArenaEdge(
-                      pop=pop,
-                      llm_bv=llm_bv,
-                      dests=dests,
+                      pop=prev_pop,
+                      llm_bv=prev_llm_bv,
+                      dests=edge_dests,
                       dest_states_union=dest_states_union,
                   ))
+              for edge in children_it:
+                  if not (edge.pop == prev_pop and edge.llm_bv == prev_llm_bv):
+                      flush()
+                      prev_pop = edge.pop
+                      prev_llm_bv = edge.llm_bv
+                      edge_dests = []
+                  edge_dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
+              flush()
 
               arena[uid] = ArenaNode(
                   children=new_children,
@@ -1840,6 +1890,7 @@ messages:
           def get_mask(self) -> LLMTokenSet:
               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
               work_heap = []
+              t0 = time.perf_counter()
 
               def enqueue(node_id: NodeID, gss: GSS, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
                   if gss.is_empty():
@@ -1874,6 +1925,7 @@ messages:
                   r = self.roots_map[int(sid)]
                   gss_init = gss.apply(initialize_acc, init_cache)
                   enqueue(r, gss_init)
+              t1 = time.perf_counter()
 
               remaining_mask = all_ones
               while work_heap:
@@ -1889,7 +1941,8 @@ messages:
                   if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                       continue
 
-                  max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
+                  # max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
+                  max_edges, max_dests = (1, 1)
                   edges_proc, dests_proc = 0, 0
                   peek0_rs = None
 
@@ -1964,20 +2017,37 @@ messages:
                       if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
                           enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
                           break
-              
+              t2 = time.perf_counter()
+
               original_indices = RangeSetOut.empty()
               for i in final_mask.iter_indices():
                   if i in self.internal_to_original_map:
                       original_indices |= self.internal_to_original_map[i]
+              t3 = time.perf_counter()
+              print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms")
               return original_indices
 
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_opt3.py
   - user: |-
-      Add an alternate mode to `_merge_and_finalize_arena`, controlled by an env var, that does it like this.
-      Accumulate `IntermediateArenaEdgeDest` values **while the other two fields of `IntermediateArenaEdge` - `pop` and `llm_bv` are unchanged from the previous edge dest**.
-      So, we can have two different `IntermediateArenaEdge` in the same node with the same `pop` and `llm_bv` values. That can happen if there's a third `IntermediateArenaEdge` in-between with different `pop` and `llm_bv` values.
+      In get_mask, we have a way of suspending and resuming the processing of a node, and a way of enqueueing with some notion of 'priority'.
+      Without compromising performance, I want to generalise this. My aim is to test lots of different ways of scheduling, with various different precomputed data, maybe per-edge, maybe per-node.
+      I want to make it really general.
+      At the most basic level, we can imagine processing a single internal node. We iterate through that node's edges, do some stuff. Maybe enqueue some of the destinations.
+      Crucially, we never update the final mask while processing an internal node. That's only done on a leaf node.
+
+      So, let's maybe imagine internal node processing as a generator function.
+      In the main loop, we pop an item from a queue, and split based on whether the node is internal or leaf. If it's leaf, we process it ourselves. If it's internal, it should be an already-initialized generator. We generate from it.
+      What do we generate?
+      Well, surely we should generate new queue items. That's one thing. Dests.
+      Another thing we might generate is something that says 'stop processing this node for now, put me back in the queue'. This is something a generator might do if it wants to gracefully give another generator with higher priority a chance. This instruction should also specify the priority with which it should be re-enqueued.
+
+      Let's not do zombie avoidance check inside the generator. We'll do it in the main loop. That way, the generator can be blissfully unaware of the final mask. It doesn't need to read the final mask, and it doesn't need to write to the final mask (remember, generators are only made for internal nodes, not end nodes).
+
+      Actually, I've just realized the node types allow for a node to be both an end and to have children. But that's ok. We can just do end node processing if the node is an end node, and do internal node processing unconditionally.
+
+      Implement this.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1996,179 +2066,536 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add an alternative merging strategy for the arena, controlled by an environment variable.
+      Here are the step-by-step instructions to refactor your code, followed by the git diff.
 
       ### Step-by-step Instructions
 
-      Here are the edits for `python/aug25/models/precompute3_model_pure_python_opt3.py`:
+      1.  **File: `python/aug25/models/precompute3_model_pure_python_opt3.py`**
 
-      1.  **Add `os` and `itertools` imports**: In `python/aug25/models/precompute3_model_pure_python_opt3.py`, locate the import statements at the top of the file and add imports for `os` and `itertools`.
+      2.  **Update Imports**: At the top of the file, modify the `typing` import to include `Generator` and `Any`, and add an import for the `types` module.
 
           ```python
-          import collections
-          import heapq
-          import json
-          ```
-          should be changed to:
-          ```python
-          import collections
-          import heapq
-          import itertools
-          import json
-          import os
+          # Around line 8
+          - from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
+          + from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple, Generator, Any
+          + import types
           ```
 
-      2.  **Update `_merge_and_finalize_arena` function**: Replace the entire `_merge_and_finalize_arena` function with the following implementation. This new version includes a check for the `ALT_MERGE_MODE` environment variable. If it's set, it will use a sequential grouping method; otherwise, it will use the original grouping logic.
+      3.  **Replace `WorkItem` Dataclass**: Remove the `WorkItem` dataclass and replace it with two new dataclasses, `Enqueue` and `Suspend`, which will represent the outputs of the new generator. Place these new classes after the `PyAcc` class definition.
 
           ```python
-          def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode]) -> Dict[NodeID, ArenaNode]:
-              """Stage 2: Merge flattened edges back into the final ArenaNode structure."""
-              use_alt_merge = os.environ.get('ALT_MERGE_MODE')
+          # Around line 319, after PyAcc class
+          @dataclass
+          class Enqueue:
+              node_id: NodeID
+              gss: GSS
           
-              arena: Dict[NodeID, ArenaNode] = {}
-              for uid, intermediate_node in tqdm(intermediate_arena.items(), desc="Stage 2: Merging and converting arena"):
-                  new_children: List[ArenaEdge] = []
-                  llm_bv_union = RangeSet.empty()
-          
-                  if not intermediate_node.children:
-                      arena[uid] = ArenaNode(children=[], llm_bv_union=llm_bv_union, clean_end=intermediate_node.clean_end)
-                      continue
+          @dataclass
+          class Suspend:
+              priority: Any
+
+          # Remove the old WorkItem class
+          - @dataclass
+          - class WorkItem:
+          -     priority: Tuple[int, int, int]
+          -     node_id: NodeID
+          -     gss: GSS
+          -     edge_idx: int
+          -     dest_idx: int
+          -     pop_cache: Dict
+          - 
+          -     def __lt__(self, other: 'WorkItem') -> bool:
+          -         if not isinstance(other, WorkItem):
+          -             return NotImplemented
+          -         return self.priority < other.priority
+          ```
+
+      4.  **Add New Generator Method**: In the `Model` class, after the `_process_token` method, add a new generator method called `_process_internal_node_gen`. This method will contain the core logic for processing the children of a node.
+
+          ```python
+          # In Model class, after _process_token method, around line 621
+          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, is_final_mask_empty: bool) -> Generator[Union[Enqueue, Suspend], None, None]:
+              a_node = self.arena.get(node_id)
+              if not a_node:
+                  return
+
+              # max_edges, max_dests = (8, 2048) if is_final_mask_empty else (16, 4096)
+              max_edges, max_dests = (1, 1)
+              edges_proc, dests_proc = 0, 0
+              peek0_rs = None
+              pop_cache = {}
+              gss_acc = gss_node.reduce_acc()
+
+              for edge_i, edge in enumerate(a_node.children):
+                  if edge.llm_bv.isdisjoint(gss_mask): continue
+                  if edge.pop == 0:
+                      if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
+                      if edge.dest_states_union.isdisjoint(peek0_rs): continue
                   
-                  if use_alt_merge:
-                      for key, group in itertools.groupby(intermediate_node.children, key=lambda e: (e.pop, e.llm_bv)):
-                          pop, llm_bv = key
-                          dests: List[ArenaEdgeDest] = []
-                          dest_states_union = RangeSetStates.empty()
-                          for edge in group:
-                              dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-                              dest_states_union |= edge.dests.state_bv
-                          
-                          llm_bv_union |= llm_bv
-                          new_children.append(ArenaEdge(
-                              pop=pop,
-                              llm_bv=llm_bv,
-                              dests=dests,
-                              dest_states_union=dest_states_union,
-                          ))
+                  if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
                   else:
-                      grouped_edges: Dict[Tuple[int, LLMTokenSet], Tuple[List[ArenaEdgeDest], StateIDSet]] = collections.defaultdict(lambda: ([], RangeSetStates.empty()))
-          
-                      for edge in intermediate_node.children:
-                          key = (edge.pop, edge.llm_bv)
-                          dests, dest_states_union = grouped_edges[key]
-                          dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-                          grouped_edges[key] = (dests, dest_states_union | edge.dests.state_bv)
-          
-                      for (pop, llm_bv), (dests, dest_states_union) in grouped_edges.items():
-                          llm_bv_union |= llm_bv
-                          new_children.append(ArenaEdge(
-                              pop=pop,
-                              llm_bv=llm_bv,
-                              dests=dests,
-                              dest_states_union=dest_states_union,
-                          ))
-          
-                  arena[uid] = ArenaNode(
-                      children=new_children,
-                      llm_bv_union=llm_bv_union,
-                      clean_end=intermediate_node.clean_end,
-                  )
-              return arena
+                      popped = gss_node.popn(edge.pop)
+                      if popped.is_empty():
+                          pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
+                          continue
+                      popped_acc = gss_acc if edge.pop == 0 else popped.reduce_acc()
+                      if not popped_acc or popped_acc.llm_mask.is_empty():
+                          pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
+                          continue
+                      # Avoid double-peek: call once and reuse both list and RangeSetStates
+                      peeked = popped.peek()
+                      peek_rs = RangeSetStates.from_indices(peeked)
+                      pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+                  
+                  if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
+                  
+                  if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
+                      if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
+                      @_acc_memoize(use_value_cache=False)
+                      def intersect(acc: PyAcc):
+                          new_mask = acc.llm_mask.intersection(edge.llm_bv)
+                          return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                      popped = popped.apply_and_prune(intersect)
+                      if popped.is_empty(): continue
+                  if not peeked: continue
+
+                  grouped: Dict[int, List[int]] = {}
+                  m = edge.state_to_dest
+                  for sid in peeked:
+                      dest_list = m.get(sid)
+                      if not dest_list: continue
+                      for dest_j in dest_list:
+                          lst = grouped.get(dest_j)
+                          if lst is None: grouped[dest_j] = [sid]
+                          else: lst.append(sid)
+                  
+                  # Iterate grouped dests in ascending order for locality
+                  for dest_j in sorted(grouped.keys()):
+                      if dests_proc >= max_dests:
+                          priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
+                          yield Suspend(priority)
+                          dests_proc = 0
+                      dest = edge.dests[dest_j]
+                      values_to_keep = grouped[dest_j]
+                      # If all heads survive, reuse popped directly
+                      if len(values_to_keep) == len(peeked):
+                          child_gss = popped
+                      else:
+                          child_gss = popped.isolate_many(values_to_keep)
+                      if child_gss.is_empty(): continue
+                      d: NodeID = int(dest.dest_idx)
+                      yield Enqueue(d, child_gss)
+                      dests_proc += 1
+                  
+                  if edges_proc >= max_edges:
+                      priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
+                      yield Suspend(priority)
+                      edges_proc = 0
+                  edges_proc += 1
+          ```
+
+      5.  **Rewrite `get_mask` Method**: Replace the entire `get_mask` method with the new version that uses a scheduler loop and the generator.
+
+          ```python
+          # Replace the existing get_mask method (from line 623)
+          def get_mask(self) -> LLMTokenSet:
+              all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
+              work_heap = []
+              t0 = time.perf_counter()
+
+              @dataclass
+              class HeapItem:
+                  priority: Any
+                  item: Any
+
+                  def __lt__(self, other: 'HeapItem') -> bool:
+                      if not isinstance(other, HeapItem):
+                          return NotImplemented
+                      return self.priority < other.priority
+
+              @_acc_memoize(use_value_cache=False)
+              def initialize_acc(acc: PyAcc) -> PyAcc:
+                  disallowed = RangeSet.empty()
+                  for tsid, terms in acc.terminals_union.items():
+                      if tsid in self.possible_matches_cache:
+                          term_map = self.possible_matches_cache[tsid]
+                          for term_id in terms.iter_indices():
+                              if term_id in term_map: disallowed |= term_map[term_id]
+                  return PyAcc({}, all_ones.difference(disallowed))
+
+              init_cache = {}
+              for sid, gss in self.state.items():
+                  r = self.roots_map[int(sid)]
+                  gss_init = gss.apply(initialize_acc, init_cache)
+                  if not gss_init.is_empty():
+                      priority = (-self.max_depth.get(r, 0), 0, 0)
+                      heapq.heappush(work_heap, HeapItem(priority, (r, gss_init)))
+              t1 = time.perf_counter()
+
+              remaining_mask = all_ones
+              while work_heap:
+                  heap_item = heapq.heappop(work_heap)
+                  priority, work = heap_item.priority, heap_item.item
+
+                  gen = None
+                  if isinstance(work, types.GeneratorType):
+                      gen = work
+                  else:
+                      node_id, gss_node = work
+                      gss_acc = gss_node.reduce_acc()
+
+                      if self.is_end(node_id) and gss_acc:
+                          if not final_mask.issuperset(gss_acc.llm_mask):
+                              final_mask |= gss_acc.llm_mask
+                              remaining_mask = all_ones.difference(final_mask)
+
+                      a_node = self.arena.get(node_id)
+                      gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
+
+                      if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
+                          continue
+                      
+                      is_final_mask_empty = final_mask.is_empty()
+                      gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, is_final_mask_empty)
+
+                  if gen:
+                      try:
+                          yielded = next(gen)
+
+                          if isinstance(yielded, Enqueue):
+                              new_node_id, new_gss = yielded.node_id, yielded.gss
+                              if not new_gss.is_empty():
+                                  child_priority = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                                  heapq.heappush(work_heap, HeapItem(child_priority, (new_node_id, new_gss)))
+                              heapq.heappush(work_heap, HeapItem(priority, gen))
+                          elif isinstance(yielded, Suspend):
+                              heapq.heappush(work_heap, HeapItem(yielded.priority, gen))
+
+                      except StopIteration:
+                          pass # Generator is done.
+              t2 = time.perf_counter()
+
+              original_indices = RangeSetOut.empty()
+              for i in final_mask.iter_indices():
+                  if i in self.internal_to_original_map:
+                      original_indices |= self.internal_to_original_map[i]
+              t3 = time.perf_counter()
+              print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms")
+              return original_indices
           ```
 
       ### Git Diff
 
-      Here is the git diff for the changes described above.
-
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python_opt3.py b/python/aug25/models/precompute3_model_pure_python_opt3.py
-      index 455b385..146a815 100644
+      index 455243c..0152431 100644
       --- a/python/aug25/models/precompute3_model_pure_python_opt3.py
       +++ b/python/aug25/models/precompute3_model_pure_python_opt3.py
-      @@ -1,7 +1,9 @@
-       from __future__ import annotations
-       
-       import collections
-       import heapq
-      +import itertools
-       import json
-      +import os
+      @@ -5,7 +5,8 @@
+       import os
+       import time
        from dataclasses import dataclass, field
-       from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
+      -from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
+      +from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple, Generator, Any
+      +import types
        
-      @@ -232,36 +234,57 @@
+       import _sep1 as ffi
+       from tqdm import tqdm
+      @@ -318,22 +319,15 @@
+           def is_empty(self):
+               return self.llm_mask.is_empty()
        
-       def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode]) -> Dict[NodeID, ArenaNode]:
-           """Stage 2: Merge flattened edges back into the final ArenaNode structure."""
-      +    use_alt_merge = os.environ.get('ALT_MERGE_MODE')
+      -@dataclass
+      -class WorkItem:
+      -    priority: Tuple[int, int, int]
+      +@dataclass
+      +class Enqueue:
+           node_id: NodeID
+           gss: GSS
+      -    edge_idx: int
+      -    dest_idx: int
+      -    pop_cache: Dict
+      -
+      -    def __lt__(self, other: 'WorkItem') -> bool:
+      -        if not isinstance(other, WorkItem):
+      -            return NotImplemented
+      -        return self.priority < other.priority
+       
+       @dataclass
+      +class Suspend:
+      +    priority: Any
       +
-           arena: Dict[NodeID, ArenaNode] = {}
-           for uid, intermediate_node in tqdm(intermediate_arena.items(), desc="Stage 2: Merging and converting arena"):
-               new_children: List[ArenaEdge] = []
-               llm_bv_union = RangeSet.empty()
+      +@dataclass
+       class Model(GraphProvider):
+           arena: Dict[NodeID, ArenaNode]
+           roots_map: Dict[int, NodeID]
+      @@ -533,165 +527,165 @@
+                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+               return GSS.merge_many(shifted)
        
-               if not intermediate_node.children:
-                   arena[uid] = ArenaNode(children=[], llm_bv_union=llm_bv_union, clean_end=intermediate_node.clean_end)
-                   continue
-               
-      -        grouped_edges: Dict[Tuple[int, LLMTokenSet], Tuple[List[ArenaEdgeDest], StateIDSet]] = collections.defaultdict(lambda: ([], RangeSetStates.empty()))
+      +    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, is_final_mask_empty: bool) -> Generator[Union[Enqueue, Suspend], None, None]:
+      +        a_node = self.arena.get(node_id)
+      +        if not a_node:
+      +            return
+      +
+      +        # max_edges, max_dests = (8, 2048) if is_final_mask_empty else (16, 4096)
+      +        max_edges, max_dests = (1, 1)
+      +        edges_proc, dests_proc = 0, 0
+      +        peek0_rs = None
+      +        pop_cache = {}
+      +        gss_acc = gss_node.reduce_acc()
+      +
+      +        for edge_i, edge in enumerate(a_node.children):
+      +            if edge.llm_bv.isdisjoint(gss_mask): continue
+      +            if edge.pop == 0:
+      +                if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
+      +                if edge.dest_states_union.isdisjoint(peek0_rs): continue
+      +            
+      +            if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+      +            else:
+      +                popped = gss_node.popn(edge.pop)
+      +                if popped.is_empty():
+      +                    pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
+      +                    continue
+      +                popped_acc = gss_acc if edge.pop == 0 else popped.reduce_acc()
+      +                if not popped_acc or popped_acc.llm_mask.is_empty():
+      +                    pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
+      +                    continue
+      +                # Avoid double-peek: call once and reuse both list and RangeSetStates
+      +                peeked = popped.peek()
+      +                peek_rs = RangeSetStates.from_indices(peeked)
+      +                pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+      +            
+      +            if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
+      +            
+      +            if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
+      +                if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
+      +                @_acc_memoize(use_value_cache=False)
+      +                def intersect(acc: PyAcc):
+      +                    new_mask = acc.llm_mask.intersection(edge.llm_bv)
+      +                    return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+      +                popped = popped.apply_and_prune(intersect)
+      +                if popped.is_empty(): continue
+      +            if not peeked: continue
+      +
+      +            grouped: Dict[int, List[int]] = {}
+      +            m = edge.state_to_dest
+      +            for sid in peeked:
+      +                dest_list = m.get(sid)
+      +                if not dest_list: continue
+      +                for dest_j in dest_list:
+      +                    lst = grouped.get(dest_j)
+      +                    if lst is None: grouped[dest_j] = [sid]
+      +                    else: lst.append(sid)
+      +            
+      +            # Iterate grouped dests in ascending order for locality
+      +            for dest_j in sorted(grouped.keys()):
+      +                if dests_proc >= max_dests:
+      +                    priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
+      +                    yield Suspend(priority)
+      +                    dests_proc = 0
+      +                dest = edge.dests[dest_j]
+      +                values_to_keep = grouped[dest_j]
+      +                # If all heads survive, reuse popped directly
+      +                if len(values_to_keep) == len(peeked):
+      +                    child_gss = popped
+      +                else:
+      +                    child_gss = popped.isolate_many(values_to_keep)
+      +                if child_gss.is_empty(): continue
+      +                d: NodeID = int(dest.dest_idx)
+      +                yield Enqueue(d, child_gss)
+      +                dests_proc += 1
+      +            
+      +            if edges_proc >= max_edges:
+      +                priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
+      +                yield Suspend(priority)
+      +                edges_proc = 0
+      +            edges_proc += 1
+      +
+           def get_mask(self) -> LLMTokenSet:
+               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
+               work_heap = []
+               t0 = time.perf_counter()
+       
+      -        def enqueue(node_id: NodeID, gss: GSS, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
+      -            if gss.is_empty():
+      -                return
+      -            priority = (-self.max_depth.get(node_id, 0), edge_idx, dest_idx)
+      -            item = WorkItem(
+      -                priority=priority,
+      -                node_id=node_id,
+      -                gss=gss,
+      -                edge_idx=edge_idx,
+      -                dest_idx=dest_idx,
+      -                pop_cache=pop_cache if pop_cache is not None else {}
+      -            )
+      -            heapq.heappush(work_heap, item)
       -
-      -        for edge in intermediate_node.children:
-      -            key = (edge.pop, edge.llm_bv)
-      -            dests, dest_states_union = grouped_edges[key]
-      -            dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-      -            grouped_edges[key] = (dests, dest_states_union | edge.dests.state_bv)
+      -        def dequeue() -> Tuple[NodeID, GSS, int, int, Dict]:
+      -            item = heapq.heappop(work_heap)
+      -            return item.node_id, item.gss, item.edge_idx, item.dest_idx, item.pop_cache
+      +        @dataclass
+      +        class HeapItem:
+      +            priority: Any
+      +            item: Any
+      +
+      +            def __lt__(self, other: 'HeapItem') -> bool:
+      +                if not isinstance(other, HeapItem):
+      +                    return NotImplemented
+      +                return self.priority < other.priority
+       
+               @_acc_memoize(use_value_cache=False)
+               def initialize_acc(acc: PyAcc) -> PyAcc:
+                   disallowed = RangeSet.empty()
+                   for tsid, terms in acc.terminals_union.items():
+                       if tsid in self.possible_matches_cache:
+                           term_map = self.possible_matches_cache[tsid]
+                           for term_id in terms.iter_indices():
+                               if term_id in term_map: disallowed |= term_map[term_id]
+                   return PyAcc({}, all_ones.difference(disallowed))
+       
+               init_cache = {}
+               for sid, gss in self.state.items():
+                   r = self.roots_map[int(sid)]
+                   gss_init = gss.apply(initialize_acc, init_cache)
+      -            enqueue(r, gss_init)
+      +            if not gss_init.is_empty():
+      +                priority = (-self.max_depth.get(r, 0), 0, 0)
+      +                heapq.heappush(work_heap, HeapItem(priority, (r, gss_init)))
+               t1 = time.perf_counter()
+       
+               remaining_mask = all_ones
+               while work_heap:
+      -            node, gss_node, start_edge, start_dest, pop_cache = dequeue()
+      -            gss_acc = gss_node.reduce_acc()
+      -            gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
       -
-      -        for (pop, llm_bv), (dests, dest_states_union) in grouped_edges.items():
-      -            llm_bv_union |= llm_bv
-      -            new_children.append(ArenaEdge(
-      -                pop=pop,
-      -                llm_bv=llm_bv,
-      -                dests=dests,
-      -                dest_states_union=dest_states_union,
-      -            ))
-      +        if use_alt_merge:
-      +            for key, group in itertools.groupby(intermediate_node.children, key=lambda e: (e.pop, e.llm_bv)):
-      +                pop, llm_bv = key
-      +                dests: List[ArenaEdgeDest] = []
-      +                dest_states_union = RangeSetStates.empty()
-      +                for edge in group:
-      +                    dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-      +                    dest_states_union |= edge.dests.state_bv
+      -            if self.is_end(node) and gss_acc and not final_mask.issuperset(gss_acc.llm_mask):
+      -                final_mask |= gss_acc.llm_mask
+      -                remaining_mask = all_ones.difference(final_mask)
+      -
+      -            a_node = self.arena.get(node)
+      -            if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
+      -                continue
+      -
+      -            # max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
+      -            max_edges, max_dests = (1, 1)
+      -            edges_proc, dests_proc = 0, 0
+      -            peek0_rs = None
+      -
+      -            for edge_i in range(start_edge, len(a_node.children)):
+      -                edge = a_node.children[edge_i]
+      -                if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask): continue
+      -                if edge.pop == 0:
+      -                    if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
+      -                    if edge.dest_states_union.isdisjoint(peek0_rs): continue
+      -                
+      -                if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+      -                else:
+      -                    popped = gss_node.popn(edge.pop)
+      -                    if popped.is_empty():
+      -                        pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
+      -                        continue
+      -                    popped_acc = gss_acc if edge.pop == 0 else popped.reduce_acc()
+      -                    if not popped_acc or popped_acc.llm_mask.is_empty():
+      -                        pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
+      -                        continue
+      -                    # Avoid double-peek: call once and reuse both list and RangeSetStates
+      -                    peeked = popped.peek()
+      -                    peek_rs = RangeSetStates.from_indices(peeked)
+      -                    pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+      -                
+      -                if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
+      -                
+      -                if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
+      -                    if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
+      -                    @_acc_memoize(use_value_cache=False)
+      -                    def intersect(acc: PyAcc):
+      -                        new_mask = acc.llm_mask.intersection(edge.llm_bv)
+      -                        return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+      -                    popped = popped.apply_and_prune(intersect)
+      -                    if popped.is_empty(): continue
+      -                if not peeked: continue
+      -
+      -                current_start_dest = start_dest if edge_i == start_edge else 0
+      -
+      -                grouped: Dict[int, List[int]] = {}
+      -                m = edge.state_to_dest
+      -                for sid in peeked:
+      -                    dest_list = m.get(sid)
+      -                    if not dest_list: continue
+      -                    for dest_j in dest_list:
+      -                        if dest_j < current_start_dest: continue
+      -                        lst = grouped.get(dest_j)
+      -                        if lst is None: grouped[dest_j] = [sid]
+      -                        else: lst.append(sid)
+      -                
+      -                # Iterate grouped dests in ascending order for locality
+      -                for dest_j in sorted(grouped.keys()):
+      -                    if dests_proc >= max_dests:
+      -                        enqueue(node, gss_node, edge_i, dest_j, pop_cache)
+      -                        edges_proc = max_edges
+      -                        break
+      -                    dest = edge.dests[dest_j]
+      -                    values_to_keep = grouped[dest_j]
+      -                    # If all heads survive, reuse popped directly
+      -                    if len(values_to_keep) == len(peeked):
+      -                        child_gss = popped
+      -                    else:
+      -                        child_gss = popped.isolate_many(values_to_keep)
+      -                    if child_gss.is_empty(): continue
+      -                    d: NodeID = int(dest.dest_idx)
+      -                    enqueue(d, child_gss)
+      -                    dests_proc += 1
+      -                
+      -                if edges_proc >= max_edges: break
+      -                edges_proc += 1
+      -
+      -                if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
+      -                    enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
+      -                    break
+      +            heap_item = heapq.heappop(work_heap)
+      +            priority, work = heap_item.priority, heap_item.item
+      +
+      +            gen = None
+      +            if isinstance(work, types.GeneratorType):
+      +                gen = work
+      +            else:
+      +                node_id, gss_node = work
+      +                gss_acc = gss_node.reduce_acc()
+      +
+      +                if self.is_end(node_id) and gss_acc:
+      +                    if not final_mask.issuperset(gss_acc.llm_mask):
+      +                        final_mask |= gss_acc.llm_mask
+      +                        remaining_mask = all_ones.difference(final_mask)
+      +
+      +                a_node = self.arena.get(node_id)
+      +                gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
+      +
+      +                if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
+      +                    continue
       +                
-      +                llm_bv_union |= llm_bv
-      +                new_children.append(ArenaEdge(
-      +                    pop=pop,
-      +                    llm_bv=llm_bv,
-      +                    dests=dests,
-      +                    dest_states_union=dest_states_union,
-      +                ))
-      +        else:
-      +            grouped_edges: Dict[Tuple[int, LLMTokenSet], Tuple[List[ArenaEdgeDest], StateIDSet]] = collections.defaultdict(lambda: ([], RangeSetStates.empty()))
+      +                is_final_mask_empty = final_mask.is_empty()
+      +                gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, is_final_mask_empty)
       +
-      +            for edge in intermediate_node.children:
-      +                key = (edge.pop, edge.llm_bv)
-      +                dests, dest_states_union = grouped_edges[key]
-      +                dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-      +                grouped_edges[key] = (dests, dest_states_union | edge.dests.state_bv)
+      +            if gen:
+      +                try:
+      +                    yielded = next(gen)
       +
-      +            for (pop, llm_bv), (dests, dest_states_union) in grouped_edges.items():
-      +                llm_bv_union |= llm_bv
-      +                new_children.append(ArenaEdge(
-      +                    pop=pop,
-      +                    llm_bv=llm_bv,
-      +                    dests=dests,
-      +                    dest_states_union=dest_states_union,
-      +                ))
+      +                    if isinstance(yielded, Enqueue):
+      +                        new_node_id, new_gss = yielded.node_id, yielded.gss
+      +                        if not new_gss.is_empty():
+      +                            child_priority = (-self.max_depth.get(new_node_id, 0), 0, 0)
+      +                            heapq.heappush(work_heap, HeapItem(child_priority, (new_node_id, new_gss)))
+      +                        heapq.heappush(work_heap, HeapItem(priority, gen))
+      +                    elif isinstance(yielded, Suspend):
+      +                        heapq.heappush(work_heap, HeapItem(yielded.priority, gen))
+      +
+      +                except StopIteration:
+      +                    pass # Generator is done.
+               t2 = time.perf_counter()
        
-               arena[uid] = ArenaNode(
-                   children=new_children,
-                   llm_bv_union=llm_bv_union,
-                   clean_end=intermediate_node.clean_end,
-               )
-           return arena
-       
-       def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode], max_depth: Dict[NodeID, int]) -> Dict[NodeID, ArenaNode]:
+               original_indices = RangeSetOut.empty()
 
       ```
     metadata:
@@ -2181,7 +2608,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt3.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt3.py.
     metadata:
-  - user: 'Changes committed with message: "Add optional alternative merging strategy
-      to _merge_and_finalize_arena controlled by ALT_MERGE_MODE env var"'
+  - user: 'Changes committed with message: "Refactor get_mask to use internal node
+      processing generators for scheduling flexibility"'
     metadata:
 ...
