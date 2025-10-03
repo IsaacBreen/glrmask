@@ -304,6 +304,17 @@ class Suspend:
     priority: Any
 
 @dataclass
+class WorkItemNew:
+    node_id: NodeID
+    gss: GSS
+
+@dataclass
+class WorkItemSuspended:
+    generator: Generator
+    llm_mask: LLMTokenSet
+
+
+@dataclass
 class Model(GraphProvider):
     arena: Dict[NodeID, ArenaNode]
     roots_map: Dict[int, NodeID]
@@ -615,7 +626,7 @@ class Model(GraphProvider):
             gss_init = gss.apply(initialize_acc, init_cache)
             if not gss_init.is_empty():
                 priority = (-self.max_depth.get(r, 0), 0, 0)
-                heapq.heappush(work_heap, HeapItem(priority, (r, gss_init)))
+                heapq.heappush(work_heap, HeapItem(priority, WorkItemNew(r, gss_init)))
         t1 = time.perf_counter()
 
         remaining_mask = all_ones
@@ -624,25 +635,31 @@ class Model(GraphProvider):
             priority, work = heap_item.priority, heap_item.item
 
             gen = None
-            if isinstance(work, types.GeneratorType):
-                gen = work
-            else:
-                node_id, gss_node = work
+            gss_acc_mask_for_suspend = None
+
+            if isinstance(work, WorkItemSuspended):
+                gen = work.generator
+                gss_acc_mask_for_suspend = work.llm_mask
+            elif isinstance(work, WorkItemNew):
+                node_id, gss_node = work.node_id, work.gss
                 assert isinstance(node_id, int)
                 assert isinstance(gss_node, GSS)
                 gss_acc = gss_node.reduce_acc()
-                gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
 
-                if self.is_end(node_id) and gss_acc:
+                if not gss_acc:
+                    continue
+
+                if self.is_end(node_id):
                     if not final_mask.issuperset(gss_acc.llm_mask):
                         final_mask |= gss_acc.llm_mask
                         remaining_mask = all_ones.difference(final_mask)
 
                 a_node = self.arena.get(node_id)
 
-                if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
+                if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask):
                     continue
 
+                gss_acc_mask_for_suspend = gss_acc.llm_mask
                 gen = self._process_internal_node_gen(node_id, gss_node)
 
             if gen:
@@ -653,9 +670,9 @@ class Model(GraphProvider):
                         if isinstance(yielded, Enqueue):
                             new_node_id, new_gss = yielded.node_id, yielded.gss
                             child_priority = (-self.max_depth.get(new_node_id, 0), 0, 0)
-                            heapq.heappush(work_heap, HeapItem(child_priority, (new_node_id, new_gss)))
+                            heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss)))
                         elif isinstance(yielded, Suspend):
-                            heapq.heappush(work_heap, HeapItem(yielded.priority, gen))
+                            heapq.heappush(work_heap, HeapItem(yielded.priority, WorkItemSuspended(gen, gss_acc_mask_for_suspend)))
                             break
 
                     except StopIteration:
