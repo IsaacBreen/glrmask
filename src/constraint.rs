@@ -1088,6 +1088,12 @@ impl GrammarConstraint {
         // Optimizations, similar to precompute0
         let ignore_terminal_id = parser.and_then(|p| p.ignore_terminal_id);
 
+        Self::simplify_none_edges_to_former_end_nodes_trie1(
+            &precomputed1,
+            &trie1_god,
+            trie0_god,
+            &node0_to_node1_map,
+        );
         Self::replace_ignore_token_edges_with_none_edges_trie1(&precomputed1, &trie1_god, ignore_terminal_id);
         Self::simplify_none_edges_trie1(&precomputed1, &trie1_god);
         Trie::recompute_all_max_depths(&trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
@@ -1103,6 +1109,81 @@ impl GrammarConstraint {
 
         Trie::recompute_all_max_depths(&trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
         (precomputed1, trie1_god)
+    }
+
+    fn simplify_none_edges_to_former_end_nodes_trie1(
+        roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+        trie1_god: &Trie1GodWrapper,
+        trie0_god: &Trie0GodWrapper,
+        node0_to_node1_map: &HashMap<PrecomputeNode0Index, PrecomputeNode1Index>,
+    ) {
+        crate::debug!(2, "Simplifying None edges to former end nodes in Trie1...");
+
+        let mut former_end_nodes1: HashSet<PrecomputeNode1Index> = HashSet::new();
+        for (node0_idx, node1_idx) in node0_to_node1_map {
+            let node0_guard = node0_idx.read(trie0_god).unwrap();
+            if node0_guard.value.final_tokenizer_state.is_some() {
+                former_end_nodes1.insert(*node1_idx);
+            }
+        }
+
+        let roots_vec: Vec<_> = roots.values().cloned().collect();
+        let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
+
+        for a_arc in all_nodes {
+            let mut edges_to_add = Vec::new();
+            let mut none_edges_to_b_to_remove = Vec::new();
+
+            { // read lock scope
+                let a_guard = a_arc.read(trie1_god).unwrap();
+                if let Some(none_dest_map) = a_guard.children().get(&None) {
+                    for (b_arc_wrapper, bv_ab) in none_dest_map {
+                        if former_end_nodes1.contains(b_arc_wrapper) {
+                            // This is a candidate: A -(None)-> B, where B is a former end node.
+                            none_edges_to_b_to_remove.push(b_arc_wrapper.clone());
+
+                            let b_arc = b_arc_wrapper.as_arc();
+                            let b_guard = b_arc.read(trie1_god).unwrap();
+                            
+                            // B's children are the edges to add to A.
+                            for (term_opt, c_dest_map) in b_guard.children() {
+                                for (c_arc_wrapper, _bv_bc) in c_dest_map {
+                                    // New edge: A -(term_opt)-> C
+                                    // New BV is bv_ab, since bv_bc is all_tokens.
+                                    let new_bv = bv_ab.clone();
+                                    if !new_bv.is_empty() {
+                                        edges_to_add.push((term_opt.clone(), c_arc_wrapper.clone(), new_bv));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } // end read lock
+
+            if !none_edges_to_b_to_remove.is_empty() {
+                let mut a_guard = a_arc.write(trie1_god).unwrap();
+                
+                // Remove the None edges that point to former end nodes.
+                if let Some(none_dest_map) = a_guard.children_mut().get_mut(&None) {
+                    for b_to_remove in none_edges_to_b_to_remove {
+                        none_dest_map.remove(&b_to_remove);
+                    }
+                }
+                
+                // If the None edge map is now empty, remove it.
+                if a_guard.children().get(&None).map_or(false, |m| m.is_empty()) {
+                    a_guard.children_mut().remove(&None);
+                }
+
+                // Add the new shortcut edges.
+                for (term_opt, c_arc_wrapper, new_bv) in edges_to_add {
+                    let dest_map = a_guard.children_mut().entry(term_opt).or_default();
+                    dest_map.entry(c_arc_wrapper).or_insert_with(LLMTokenBV::zeros).bitor_assign(&new_bv);
+                }
+            }
+        }
+        crate::debug!(2, "Done simplifying None edges to former end nodes in Trie1.");
     }
 
     fn replace_ignore_token_edges_with_none_edges_trie1(
