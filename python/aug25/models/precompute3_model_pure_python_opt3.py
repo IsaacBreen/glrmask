@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import collections
 import heapq
+import itertools
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
 
@@ -211,6 +213,8 @@ def _load_and_flatten_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict
 
 def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode]) -> Dict[NodeID, ArenaNode]:
     """Stage 2: Merge flattened edges back into the final ArenaNode structure."""
+    use_alt_merge = os.environ.get('ALT_MERGE_MODE')
+
     arena: Dict[NodeID, ArenaNode] = {}
     for uid, intermediate_node in tqdm(intermediate_arena.items(), desc="Stage 2: Merging and converting arena"):
         new_children: List[ArenaEdge] = []
@@ -220,22 +224,39 @@ def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArena
             arena[uid] = ArenaNode(children=[], llm_bv_union=llm_bv_union, clean_end=intermediate_node.clean_end)
             continue
         
-        grouped_edges: Dict[Tuple[int, LLMTokenSet], Tuple[List[ArenaEdgeDest], StateIDSet]] = collections.defaultdict(lambda: ([], RangeSetStates.empty()))
+        if use_alt_merge:
+            for key, group in itertools.groupby(intermediate_node.children, key=lambda e: (e.pop, e.llm_bv)):
+                pop, llm_bv = key
+                dests: List[ArenaEdgeDest] = []
+                dest_states_union = RangeSetStates.empty()
+                for edge in group:
+                    dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
+                    dest_states_union |= edge.dests.state_bv
+                
+                llm_bv_union |= llm_bv
+                new_children.append(ArenaEdge(
+                    pop=pop,
+                    llm_bv=llm_bv,
+                    dests=dests,
+                    dest_states_union=dest_states_union,
+                ))
+        else:
+            grouped_edges: Dict[Tuple[int, LLMTokenSet], Tuple[List[ArenaEdgeDest], StateIDSet]] = collections.defaultdict(lambda: ([], RangeSetStates.empty()))
 
-        for edge in intermediate_node.children:
-            key = (edge.pop, edge.llm_bv)
-            dests, dest_states_union = grouped_edges[key]
-            dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-            grouped_edges[key] = (dests, dest_states_union | edge.dests.state_bv)
+            for edge in intermediate_node.children:
+                key = (edge.pop, edge.llm_bv)
+                dests, dest_states_union = grouped_edges[key]
+                dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
+                grouped_edges[key] = (dests, dest_states_union | edge.dests.state_bv)
 
-        for (pop, llm_bv), (dests, dest_states_union) in grouped_edges.items():
-            llm_bv_union |= llm_bv
-            new_children.append(ArenaEdge(
-                pop=pop,
-                llm_bv=llm_bv,
-                dests=dests,
-                dest_states_union=dest_states_union,
-            ))
+            for (pop, llm_bv), (dests, dest_states_union) in grouped_edges.items():
+                llm_bv_union |= llm_bv
+                new_children.append(ArenaEdge(
+                    pop=pop,
+                    llm_bv=llm_bv,
+                    dests=dests,
+                    dest_states_union=dest_states_union,
+                ))
 
         arena[uid] = ArenaNode(
             children=new_children,
