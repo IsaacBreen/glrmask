@@ -230,52 +230,10 @@ class ArenaNode:
 
 def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode], max_depth: Dict[NodeID, int]):
     for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
-        if len(node.children) <= 1:
+        if not node.children:
             continue
-
-        # Initial sort by depth and pop. This gives a baseline priority.
-        sorted_children = sorted(node.children, key=lambda e: (-max_depth.get(int(e.dests.dest_idx), 0), e.pop))
-
-        new_order = []
-        if not sorted_children:
-            continue
-
-        # Always pick the best edge first
-        new_order.append(sorted_children.pop(0))
-
-        while sorted_children:
-            best_next_edge_idx = -1
-            best_score = -1.0
-
-            for i, edge in enumerate(sorted_children):
-                # Score is higher for more diverse and higher-priority edges.
-
-                # Diversity score component (based on Jaccard similarity of LLM token sets)
-                max_similarity = 0.0
-                for chosen_edge in new_order:
-                    intersection_llm = edge.llm_bv.intersection(chosen_edge.llm_bv)
-                    if not intersection_llm.is_empty():
-                        union_llm = edge.llm_bv.union(chosen_edge.llm_bv)
-                        sim_llm = len(intersection_llm) / len(union_llm) if len(union_llm) > 0 else 0
-                        if sim_llm > max_similarity:
-                            max_similarity = sim_llm
-
-                diversity_score = 1.0 - max_similarity
-
-                # Priority is based on original rank (lower index i is better).
-                score = diversity_score / (i + 1)
-
-                if score > best_score:
-                    best_score = score
-                    best_next_edge_idx = i
-
-            if best_next_edge_idx == -1:
-                # This case should ideally not be hit if sorted_children is non-empty
-                best_next_edge_idx = 0
-
-            new_order.append(sorted_children.pop(best_next_edge_idx))
-
-        node.children = new_order
+        # Sort edges by destination depth (desc) and then pop count (asc)
+        node.children.sort(key=lambda e: (-max_depth.get(int(e.dests.dest_idx), 0), e.pop))
 
 def _load_and_flatten_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict[NodeID, IntermediateArenaNode]:
     """Stage 1: Convert from the loaded format to a flattened intermediate format."""
