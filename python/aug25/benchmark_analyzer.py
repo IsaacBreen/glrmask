@@ -192,7 +192,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
 
     # 1. Line plot of timings per token
     plt.figure(figsize=(15, 8))
-    ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='model', alpha=0.7, linewidth=0.7)
+    ax = sns.lineplot(data=df, x='token_index', y='time_sec', hue='model', alpha=0.7, linewidth=0.5)
 
     mismatch_df = df[df['mask_mismatch']]
     plot_title = f'get_mask() Performance per Token (Baseline: {baseline_name})'
@@ -259,7 +259,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
     # 3. Line plot of commit timings per token
     if not df_commit.empty:
         plt.figure(figsize=(15, 8))
-        ax_commit = sns.lineplot(data=df_commit, x='token_index', y='time_sec', hue='model', alpha=0.7, linewidth=0.7)
+        ax_commit = sns.lineplot(data=df_commit, x='token_index', y='time_sec', hue='model', alpha=0.7, linewidth=0.5)
 
         ax_commit.set_xlabel('Token Index in Sequence')
         ax_commit.set_ylabel('Time (seconds)')
@@ -323,7 +323,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
             style='operation',
             style_order=['get_mask', 'commit'],
             palette=custom_palette,
-            linewidth=0.7,
+            linewidth=0.5,
             alpha=0.7
         )
         ax_combined.set_xlabel('Token Index in Sequence')
@@ -408,7 +408,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
         df_total['time_sec'] = df_total['time_sec_get_mask'] + df_total['time_sec_commit']
 
         plt.figure(figsize=(15, 8))
-        ax_total = sns.lineplot(data=df_total, x='token_index', y='time_sec', hue='model', alpha=0.7, linewidth=0.7)
+        ax_total = sns.lineplot(data=df_total, x='token_index', y='time_sec', hue='model', alpha=0.7, linewidth=0.5)
         ax_total.set_xlabel('Token Index in Sequence')
         ax_total.set_ylabel('Total Time (seconds)')
         ax_total.grid(True, which='both', linestyle='--', linewidth=0.5)
