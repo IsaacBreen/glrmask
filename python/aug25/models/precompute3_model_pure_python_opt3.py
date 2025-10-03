@@ -229,7 +229,8 @@ class PyAcc:
 class NodeCursor:
     edge_idx: int = 0
     dest_idx: int = 0
-    pop_cache: Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]] = field(default_factory=dict)
+    gss_id: int = 0
+    pop_cache: Optional[Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]]] = None
 
 @dataclass
 class Model(GraphProvider):
@@ -441,7 +442,22 @@ class Model(GraphProvider):
 
     def get_mask(self) -> LLMTokenSet:
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
-        work_heap = []
+        values, depth_heap, enqueued = {}, [], set()
+        edge_cursor = {}
+
+        def enqueue(node_id: NodeID, gss: GSS) -> GSS:
+            if node_id in values:
+                gss = values[node_id].merge(gss)
+            values[node_id] = gss
+            if node_id not in enqueued:
+                enqueued.add(node_id)
+                heapq.heappush(depth_heap, (-self.max_depth[node_id], node_id))
+            return gss
+
+        def dequeue() -> Tuple[NodeID, GSS]:
+            _, node_id = heapq.heappop(depth_heap)
+            enqueued.remove(node_id)
+            return node_id, values.pop(node_id)
 
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
@@ -457,13 +473,12 @@ class Model(GraphProvider):
         for sid, gss in self.state.items():
             r = self.roots_map[int(sid)]
             gss_init = gss.apply(initialize_acc, init_cache)
-            cursor = NodeCursor()
-            priority = (-self.max_depth.get(r, 0), 0, 0)
-            heapq.heappush(work_heap, (priority, r, gss_init, cursor))
+            enqueue(r, gss_init)
 
         remaining_mask = all_ones
-        while work_heap:
-            priority, node, gss_node, cursor = heapq.heappop(work_heap)
+        while depth_heap:
+            node, gss_node = dequeue()
+            gss_id = id(gss_node)
 
             gss_acc = gss_node.reduce_acc()
             gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
@@ -476,7 +491,11 @@ class Model(GraphProvider):
             if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                 continue
 
-            start_edge, start_dest, pop_cache = cursor.edge_idx, cursor.dest_idx, cursor.pop_cache
+            saved_cursor = edge_cursor.get(node)
+            if saved_cursor and saved_cursor.gss_id == gss_id:
+                start_edge, start_dest, pop_cache = saved_cursor.edge_idx, saved_cursor.dest_idx, saved_cursor.pop_cache or {}
+            else:
+                start_edge, start_dest, pop_cache = 0, 0, {}
 
             max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
             edges_proc, dests_proc = 0, 0
@@ -532,9 +551,8 @@ class Model(GraphProvider):
                 # Iterate grouped dests in ascending order for locality
                 for dest_j in sorted(grouped.keys()):
                     if dests_proc >= max_dests:
-                        new_cursor = NodeCursor(edge_idx=edge_i, dest_idx=dest_j, pop_cache=pop_cache)
-                        priority = (-self.max_depth.get(node, 0), edge_i, dest_j)
-                        heapq.heappush(work_heap, (priority, node, gss_node, new_cursor))
+                        state_to_requeue = enqueue(node, gss_node)
+                        edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
                         edges_proc = max_edges
                         break
                     dest = edge.dests[dest_j]
@@ -546,19 +564,17 @@ class Model(GraphProvider):
                         child_gss = popped.isolate_many(values_to_keep)
                     if child_gss.is_empty(): continue
                     d: NodeID = int(dest.dest_idx)
-                    child_cursor = NodeCursor()
-                    priority = (-self.max_depth.get(d, 0), 0, 0)
-                    heapq.heappush(work_heap, (priority, d, child_gss, child_cursor))
+                    enqueue(d, child_gss)
                     dests_proc += 1
                 
                 if edges_proc >= max_edges: break
                 edges_proc += 1
 
                 if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-                    new_cursor = NodeCursor(edge_idx=edge_i + 1, dest_idx=0, pop_cache=pop_cache)
-                    priority = (-self.max_depth.get(node, 0), edge_i + 1, 0)
-                    heapq.heappush(work_heap, (priority, node, gss_node, new_cursor))
+                    state_to_requeue = enqueue(node, gss_node)
+                    edge_cursor[node] = NodeCursor(edge_i + 1, 0, id(state_to_requeue), pop_cache)
                     break
+            else: edge_cursor.pop(node, None)
 
         original_indices = RangeSetOut.empty()
         for i in final_mask.iter_indices():
