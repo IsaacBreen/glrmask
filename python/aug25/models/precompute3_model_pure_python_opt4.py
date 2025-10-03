@@ -660,6 +660,8 @@ class Model(GraphProvider):
                     continue
 
                 gen = self._process_internal_node_gen(node_id, gss_node)
+            else:
+                raise ValueError(f'Unexpected work item: {work}')
 
             if gen:
                 while True:
