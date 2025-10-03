@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-import json
-import heapq
 import collections
-from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
+import heapq
+import json
 from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
 
+import _sep1 as ffi
 from numba import njit
 
+from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 from ..common_interface import GraphProvider
 from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
 from ..range_set.set_range_set import SetRangeSet as RangeSetOut
 from ..range_set.set_range_set import SetRangeSet as RangeSetStates
-import _sep1 as ffi
-from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 
 # Type Aliases
 NodeID = int
