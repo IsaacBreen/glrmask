@@ -8,7 +8,6 @@ import os
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple, Generator, Any
-import types
 
 import _sep1 as ffi
 from tqdm import tqdm
@@ -27,11 +26,13 @@ LLMTokenSet = RangeSet
 StateIDSet = RangeSetStates
 TerminalIdSet = RangeSet
 
+
 def _acc_memoize(use_value_cache: bool = True):
     """Per-invocation memoization for PyAcc transformers."""
     def decorator(fn):
         id_memo = {}
         val_memo = {}
+
         def wrapper(acc):
             acc_id = id(acc)
             if acc_id in id_memo:
@@ -50,6 +51,7 @@ def _acc_memoize(use_value_cache: bool = True):
             return result
         return wrapper
     return decorator
+
 
 @dataclass(frozen=True)
 class DFAState:
@@ -103,38 +105,46 @@ class PyTokenizer:
     def max_state(self) -> int:
         return len(self.states)
 
+
 @dataclass(frozen=True)
 class Reduce:
     nonterminal_id: int
     len: int
     production_ids: Tuple[int, ...]
 
+
 @dataclass(frozen=True)
 class Split:
     shift: Optional[int]
     reduces: Dict[int, Dict[int, Tuple[int, ...]]]
 
+
 Action = Union[int, Reduce, Split]
+
 
 @dataclass
 class Row:
     actions: Dict[int, Action] = field(default_factory=dict)
     gotos: Dict[int, int] = field(default_factory=dict)
 
+
 @dataclass
 class ParserTable:
     start_state_id: int
     table: Dict[int, Row]
+
 
 @dataclass
 class ArenaEdgeDest:
     dest_idx: NodeID
     state_bv: StateIDSet
 
+
 @dataclass
 class LoadedArenaEdgeDest:
     dest_idx: NodeID
     state_bv: StateIDSet
+
 
 @dataclass
 class LoadedArenaEdge:
@@ -142,15 +152,18 @@ class LoadedArenaEdge:
     llm_bv: LLMTokenSet
     dests: List[LoadedArenaEdgeDest]
 
+
 @dataclass
 class LoadedArenaNode:
     children: List[LoadedArenaEdge]
     clean_end: bool
 
+
 @dataclass
 class IntermediateArenaEdgeDest:
     dest_idx: NodeID
     state_bv: StateIDSet
+
 
 @dataclass
 class IntermediateArenaEdge:
@@ -158,10 +171,12 @@ class IntermediateArenaEdge:
     llm_bv: LLMTokenSet
     dests: IntermediateArenaEdgeDest
 
+
 @dataclass
 class IntermediateArenaNode:
     children: List[IntermediateArenaEdge]
     clean_end: bool
+
 
 @dataclass
 class ArenaEdge:
@@ -182,11 +197,13 @@ class ArenaEdge:
                 mapping[sid].append(j)
         self.state_to_dest = dict(mapping)
 
+
 @dataclass
 class ArenaNode:
     children: List[ArenaEdge] = field(default_factory=list)
     llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
     clean_end: bool = False
+
 
 def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode], max_depth: Dict[NodeID, int]):
     for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
@@ -194,6 +211,7 @@ def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateAr
             continue
         # Sort edges by destination depth (desc) and then pop count (asc)
         node.children.sort(key=lambda e: (-max_depth.get(int(e.dests.dest_idx), 0), e.pop))
+
 
 def _load_and_flatten_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict[NodeID, IntermediateArenaNode]:
     """Stage 1: Convert from the loaded format to a flattened intermediate format."""
@@ -213,6 +231,7 @@ def _load_and_flatten_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict
         )
     return intermediate_arena
 
+
 def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode]) -> Dict[NodeID, ArenaNode]:
     """Stage 2: Merge flattened edges back into the final ArenaNode structure."""
     arena: Dict[NodeID, ArenaNode] = {}
@@ -230,6 +249,7 @@ def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArena
         prev_pop = first.pop
         prev_llm_bv = first.llm_bv
         edge_dests.append(ArenaEdgeDest(first.dests.dest_idx, first.dests.state_bv))
+
         def flush() -> None:
             nonlocal edge_dests, prev_pop, prev_llm_bv, new_children, llm_bv_union
             dest_states_union = RangeSetStates.empty()
@@ -242,6 +262,7 @@ def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArena
                 dests=edge_dests,
                 dest_states_union=dest_states_union,
             ))
+
         for edge in children_it:
             if not (edge.pop == prev_pop and edge.llm_bv == prev_llm_bv):
                 flush()
@@ -258,12 +279,14 @@ def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArena
         )
     return arena
 
+
 def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode], max_depth: Dict[NodeID, int]) -> Dict[NodeID, ArenaNode]:
     """Orchestrates the full conversion from loaded data to the final arena format."""
     intermediate_arena = _load_and_flatten_arena(loaded_arena)
     _optimize_intermediate_arena(intermediate_arena, max_depth)
     final_arena = _merge_and_finalize_arena(intermediate_arena)
     return final_arena
+
 
 @dataclass(frozen=True, eq=False)
 class PyAcc:
@@ -294,14 +317,20 @@ class PyAcc:
     def is_empty(self):
         return self.llm_mask.is_empty()
 
-@dataclass
-class Enqueue:
-    node_id: NodeID
-    gss: GSS
 
 @dataclass
-class Suspend:
-    priority: Any
+class WorkItem:
+    """Generic work item for the scheduler."""
+    priority: Tuple[int, int, int]
+    node_id: NodeID
+    gss: GSS
+    gen: Optional[Generator[Any, None, None]] = None  # Internal node generator
+
+    def __lt__(self, other: 'WorkItem') -> bool:
+        if not isinstance(other, WorkItem):
+            return NotImplemented
+        return self.priority < other.priority
+
 
 @dataclass
 class Model(GraphProvider):
@@ -358,8 +387,10 @@ class Model(GraphProvider):
             state_id, py_row = int(state_id_str), Row()
             for term_id_str, action_data in row_data['shifts_and_reduces_full']:
                 term_id, variant = int(term_id_str), action_data['variant']
-                if variant == 'Shift': py_row.actions[term_id] = action_data['state_id']
-                elif variant == 'Reduce': py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], tuple(sorted(action_data['production_ids'])))
+                if variant == 'Shift':
+                    py_row.actions[term_id] = action_data['state_id']
+                elif variant == 'Reduce':
+                    py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], tuple(sorted(action_data['production_ids'])))
                 elif variant == 'Split':
                     reduces = {int(l): {int(n): tuple(sorted(p)) for n, p in nd} for l, nd in action_data['reduces']}
                     py_row.actions[term_id] = Split(action_data['shift'], reduces)
@@ -405,21 +436,28 @@ class Model(GraphProvider):
 
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         term_rs = RangeSet.from_indices([terminal_id])
+
         @_acc_memoize(use_value_cache=False)
         def apply_disallow(acc: PyAcc) -> PyAcc:
             current = acc.terminals_union.get(state_id, RangeSet.empty())
-            if current.contains(terminal_id): return acc
+            if current.contains(terminal_id):
+                return acc
             new_map = acc.terminals_union.copy()
             new_map[state_id] = current.union(term_rs)
             return PyAcc(new_map, acc.llm_mask)
+
         return gss.apply(apply_disallow)
 
-    def get_root(self, state_id: int) -> NodeID: return self.roots_map[int(state_id)]
-    def is_end(self, node: NodeID) -> bool: return self.arena[node].clean_end
+    def get_root(self, state_id: int) -> NodeID:
+        return self.roots_map[int(state_id)]
+
+    def is_end(self, node: NodeID) -> bool:
+        return self.arena[node].clean_end
 
     def iter_edges(self, node: NodeID, token: int):
         a_node = self.arena.get(node)
-        if not a_node: return
+        if not a_node:
+            return
         for edge in a_node.children:
             if edge.llm_bv.contains(token):
                 for dest in edge.dests:
@@ -432,16 +470,19 @@ class Model(GraphProvider):
         terminals_map, state_map = {}, {}
         for tsid in self.state:
             end_state, matches = self.tokenizer.execute_from_state(token_bytes, tsid)
-            if end_state is not None: state_map[tsid] = end_state
+            if end_state is not None:
+                state_map[tsid] = end_state
             terminals_map[tsid] = RangeSet.from_indices([m[0] for m in matches])
 
         @_acc_memoize()
         def mutator(acc: PyAcc) -> Optional[PyAcc]:
             for tsid, matched in terminals_map.items():
-                if acc.terminals_union.get(tsid, RangeSet.empty()).intersects(matched): return None
+                if acc.terminals_union.get(tsid, RangeSet.empty()).intersects(matched):
+                    return None
             new_bvs = collections.defaultdict(RangeSet.empty)
             for old, new in state_map.items():
-                if old in acc.terminals_union: new_bvs[new] |= acc.terminals_union[old]
+                if old in acc.terminals_union:
+                    new_bvs[new] |= acc.terminals_union[old]
             return PyAcc(dict(new_bvs), acc.llm_mask)
 
         # Share a memo cache across GSSes for this transformation to avoid redundant work
@@ -464,41 +505,50 @@ class Model(GraphProvider):
                     proc_gss = self._disallow_terminal_in_state(proc_gss, end_state, term_id)
                 if not proc_gss.is_empty():
                     new_offset, next_tsid = offset + width, self.tokenizer.initial_state_id()
-                    if new_offset == len(token_bytes): new_states[next_tsid].append(proc_gss)
+                    if new_offset == len(token_bytes):
+                        new_states[next_tsid].append(proc_gss)
                     else:
                         key = (new_offset, next_tsid)
-                        if key in work: work[key] = work[key].merge(proc_gss)
+                        if key in work:
+                            work[key] = work[key].merge(proc_gss)
                         else:
                             work[key] = proc_gss
                             q.append(key)
-            if end_state is not None: new_states[end_state].append(gss)
+            if end_state is not None:
+                new_states[end_state].append(gss)
 
         merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
         self.state = {sid: g for sid, g in merged.items() if not g.is_empty()}
 
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-        if self.ignore_terminal_id == terminal_id: return gss
+        if self.ignore_terminal_id == terminal_id:
+            return gss
 
         heads_by_state = collections.defaultdict(list)
-        for state_id in gss.peek(): heads_by_state[state_id].append(gss.isolate(state_id))
+        for state_id in gss.peek():
+            heads_by_state[state_id].append(gss.isolate(state_id))
 
         shifted = []
         while heads_by_state:
             state_id, gss_list = heads_by_state.popitem()
             state_gss = GSS.merge_many(gss_list)
             row = self.parser_table.table.get(state_id)
-            if not row: continue
+            if not row:
+                continue
             action = row.actions.get(terminal_id)
-            if action is None: continue
+            if action is None:
+                continue
 
-            if isinstance(action, int): shifted.append(state_gss.push(action))
+            if isinstance(action, int):
+                shifted.append(state_gss.push(action))
             elif isinstance(action, Reduce):
                 popped = state_gss.popn(action.len)
                 for from_id in popped.peek():
                     goto_id = self.parser_table.table[from_id].gotos[action.nonterminal_id]
                     heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
             elif isinstance(action, Split):
-                if action.shift is not None: shifted.append(state_gss.push(action.shift))
+                if action.shift is not None:
+                    shifted.append(state_gss.push(action.shift))
                 for length, nts in action.reduces.items():
                     popped = state_gss.popn(length)
                     for nt_id in nts:
@@ -507,99 +557,61 @@ class Model(GraphProvider):
                             heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
         return GSS.merge_many(shifted)
 
-    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, is_final_mask_empty: bool) -> Generator[Union[Enqueue, Suspend], None, None]:
-        a_node = self.arena.get(node_id)
-        if not a_node:
-            return
-
-        # max_edges, max_dests = (8, 2048) if is_final_mask_empty else (16, 4096)
-        max_edges, max_dests = (1, 1)
-        edges_proc, dests_proc = 0, 0
-        peek0_rs = None
-        pop_cache = {}
-        gss_acc = gss_node.reduce_acc()
-
-        for edge_i, edge in enumerate(a_node.children):
-            if edge.llm_bv.isdisjoint(gss_mask): continue
-            if edge.pop == 0:
-                if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
-                if edge.dest_states_union.isdisjoint(peek0_rs): continue
-
-            if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
-            else:
-                popped = gss_node.popn(edge.pop)
-                if popped.is_empty():
-                    pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
-                    continue
-                popped_acc = gss_acc if edge.pop == 0 else popped.reduce_acc()
-                if not popped_acc or popped_acc.llm_mask.is_empty():
-                    pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
-                    continue
-                # Avoid double-peek: call once and reuse both list and RangeSetStates
-                peeked = popped.peek()
-                peek_rs = RangeSetStates.from_indices(peeked)
-                pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
-
-            if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
-
-            if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
-                if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
-                @_acc_memoize(use_value_cache=False)
-                def intersect(acc: PyAcc):
-                    new_mask = acc.llm_mask.intersection(edge.llm_bv)
-                    return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-                popped = popped.apply_and_prune(intersect)
-                if popped.is_empty(): continue
-            if not peeked: continue
-
-            grouped: Dict[int, List[int]] = {}
-            m = edge.state_to_dest
-            for sid in peeked:
-                dest_list = m.get(sid)
-                if not dest_list: continue
-                for dest_j in dest_list:
-                    lst = grouped.get(dest_j)
-                    if lst is None: grouped[dest_j] = [sid]
-                    else: lst.append(sid)
-
-            # Iterate grouped dests in ascending order for locality
-            for dest_j in sorted(grouped.keys()):
-                if dests_proc >= max_dests:
-                    priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-                    yield Suspend(priority)
-                    dests_proc = 0
-                dest = edge.dests[dest_j]
-                values_to_keep = grouped[dest_j]
-                # If all heads survive, reuse popped directly
-                if len(values_to_keep) == len(peeked):
-                    child_gss = popped
-                else:
-                    child_gss = popped.isolate_many(values_to_keep)
-                if child_gss.is_empty(): continue
-                d: NodeID = int(dest.dest_idx)
-                yield Enqueue(d, child_gss)
-                dests_proc += 1
-
-            if edges_proc >= max_edges:
-                priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-                yield Suspend(priority)
-                edges_proc = 0
-            edges_proc += 1
-
     def get_mask(self) -> LLMTokenSet:
-        all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
-        work_heap = []
+        """
+        New generalized scheduling with internal-node generators.
+
+        - Each internal node is processed by a generator that yields:
+          * Emit(dest_node_id, child_gss) events to schedule child work.
+          * Requeue(edge_idx, dest_idx) events to pause and re-enqueue itself with a priority.
+
+        - The main loop:
+          * Updates final_mask only for end nodes.
+          * Performs "zombie" checks (based on final_mask) before resuming a generator.
+          * Enqueues children as new work items (with gen=None initially).
+
+        This preserves performance and enables flexible scheduling policies.
+        """
+        all_ones = self.all_internal_llm_tokens_bitset
+        final_mask = RangeSet.empty()
+        work_heap: List[WorkItem] = []
         t0 = time.perf_counter()
 
-        @dataclass
-        class HeapItem:
-            priority: Any
-            item: Any
+        # Scheduling policy (can be swapped to experiment with different strategies)
+        class DefaultScheduler:
+            def __init__(self, max_depth: Dict[NodeID, int]):
+                self.max_depth = max_depth
 
-            def __lt__(self, other: 'HeapItem') -> bool:
-                if not isinstance(other, HeapItem):
-                    return NotImplemented
-                return self.priority < other.priority
+            def priority(self, node_id: NodeID, edge_idx: int = 0, dest_idx: int = 0) -> Tuple[int, int, int]:
+                return (-self.max_depth.get(node_id, 0), edge_idx, dest_idx)
+
+            def budget(self, final_mask_is_empty: bool) -> Tuple[int, int]:
+                # Keep parity with opt3: very small slices to encourage fairness/latency.
+                # Can be tuned or made adaptive in future experiments.
+                return (1, 1)
+
+        scheduler = DefaultScheduler(self.max_depth)
+
+        # Events produced by the internal-node generator
+        @dataclass
+        class Emit:
+            node_id: NodeID
+            gss: GSS
+
+        @dataclass
+        class Requeue:
+            edge_idx: int
+            dest_idx: int
+
+        def enqueue(node_id: NodeID, gss: GSS, gen: Optional[Generator[Any, None, None]] = None,
+                    edge_idx: int = 0, dest_idx: int = 0):
+            if gss.is_empty():
+                return
+            priority = scheduler.priority(node_id, edge_idx, dest_idx)
+            heapq.heappush(work_heap, WorkItem(priority=priority, node_id=node_id, gss=gss, gen=gen))
+
+        def dequeue() -> WorkItem:
+            return heapq.heappop(work_heap)
 
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
@@ -608,61 +620,231 @@ class Model(GraphProvider):
                 if tsid in self.possible_matches_cache:
                     term_map = self.possible_matches_cache[tsid]
                     for term_id in terms.iter_indices():
-                        if term_id in term_map: disallowed |= term_map[term_id]
+                        if term_id in term_map:
+                            disallowed |= term_map[term_id]
             return PyAcc({}, all_ones.difference(disallowed))
 
+        # Step 1: initialize per-state GSS accumulators and seed the queue with root node work
         init_cache = {}
         for sid, gss in self.state.items():
             r = self.roots_map[int(sid)]
             gss_init = gss.apply(initialize_acc, init_cache)
-            if not gss_init.is_empty():
-                priority = (-self.max_depth.get(r, 0), 0, 0)
-                heapq.heappush(work_heap, HeapItem(priority, (r, gss_init)))
+            enqueue(r, gss_init)
+
         t1 = time.perf_counter()
+
+        # Internal node processor as a generator: takes a node and its GSS, and yields Emit/Requeue events.
+        # It does not read or write final_mask; the main loop manages those concerns.
+        def internal_node_processor(node_id: NodeID, gss_node: GSS) -> Generator[Union[Emit, Requeue], None, None]:
+            a_node = self.arena.get(node_id)
+            if not a_node:
+                return
+            # Compute once per generator lifetime
+            gss_acc = gss_node.reduce_acc()
+            gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
+
+            # Early out if no mask or node has no children
+            if gss_mask.is_empty() or not a_node.children:
+                return
+
+            pop_cache: Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]] = {}
+            peek0_rs: Optional[StateIDSet] = None
+
+            # Scheduling slices: default to the same tiny slices as opt3
+            max_edges, max_dests = scheduler.budget(final_mask_is_empty=True)  # independence from final_mask semantics
+
+            edges_proc = 0
+            # Persistent position across yields
+            edge_idx = 0
+            dest_resume_at = 0
+
+            while edge_idx < len(a_node.children):
+                edge = a_node.children[edge_idx]
+
+                # Filter by GSS mask (independent of final_mask)
+                if edge.llm_bv.isdisjoint(gss_mask):
+                    edge_idx += 1
+                    dest_resume_at = 0
+                    continue
+
+                # If pop==0, ensure at least one peeked head is valid for the dest-state union
+                if edge.pop == 0:
+                    if peek0_rs is None:
+                        peek0_rs = RangeSetStates.from_indices(gss_node.peek())
+                    if edge.dest_states_union.isdisjoint(peek0_rs):
+                        edge_idx += 1
+                        dest_resume_at = 0
+                        continue
+
+                # Pop cache lookup or compute
+                if edge.pop in pop_cache:
+                    popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+                else:
+                    popped = gss_node.popn(edge.pop)
+                    if popped.is_empty():
+                        pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
+                        edge_idx += 1
+                        dest_resume_at = 0
+                        continue
+                    popped_acc = gss_acc if edge.pop == 0 else popped.reduce_acc()
+                    if not popped_acc or popped_acc.llm_mask.is_empty():
+                        pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
+                        edge_idx += 1
+                        dest_resume_at = 0
+                        continue
+                    peeked = popped.peek()
+                    if not peeked:
+                        pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
+                        edge_idx += 1
+                        dest_resume_at = 0
+                        continue
+                    peek_rs = RangeSetStates.from_indices(peeked)
+                    pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+
+                # Re-check with cached data
+                if not popped_acc:
+                    edge_idx += 1
+                    dest_resume_at = 0
+                    continue
+                _, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+
+                if edge.dest_states_union.isdisjoint(peek_rs):
+                    edge_idx += 1
+                    dest_resume_at = 0
+                    continue
+
+                # Intersect per-edge mask if needed (independent of final_mask)
+                popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+                # Fast-path: if popped mask fully contained in the edge's tokens, skip pruning
+                need_intersect = not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not))
+                if need_intersect:
+                    if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
+                        edge_idx += 1
+                        dest_resume_at = 0
+                        continue
+
+                    @_acc_memoize(use_value_cache=False)
+                    def intersect(acc: PyAcc):
+                        new_mask = acc.llm_mask.intersection(edge.llm_bv)
+                        return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+
+                    popped = popped.apply_and_prune(intersect)
+                    if popped.is_empty():
+                        edge_idx += 1
+                        dest_resume_at = 0
+                        continue
+
+                    # Recompute peeked and rs since the graph may have been pruned
+                    peeked = popped.peek()
+                    if not peeked:
+                        edge_idx += 1
+                        dest_resume_at = 0
+                        continue
+                    peek_rs = RangeSetStates.from_indices(peeked)
+                    pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
+
+                # Group destinations by dest index and filter to start index
+                grouped: Dict[int, List[int]] = {}
+                m = edge.state_to_dest or {}
+                for sid in peeked:
+                    dest_list = m.get(sid)
+                    if not dest_list:
+                        continue
+                    for dest_j in dest_list:
+                        if dest_j < dest_resume_at:
+                            continue
+                        lst = grouped.get(dest_j)
+                        if lst is None:
+                            grouped[dest_j] = [sid]
+                        else:
+                            lst.append(sid)
+
+                # Emit children in ascending order for better cache locality
+                dests_proc = 0
+                for dest_j in sorted(grouped.keys()):
+                    values_to_keep = grouped[dest_j]
+                    child_gss = popped if len(values_to_keep) == len(peeked) else popped.isolate_many(values_to_keep)
+                    if child_gss.is_empty():
+                        continue
+                    dest = edge.dests[dest_j]
+                    yield Emit(node_id=int(dest.dest_idx), gss=child_gss)
+                    dests_proc += 1
+                    dest_resume_at = dest_j + 1  # resume after the last processed dest
+
+                    # If we've reached our per-yield budget, requeue ourselves
+                    if dests_proc >= max_dests:
+                        yield Requeue(edge_idx=edge_idx, dest_idx=dest_resume_at)
+                        # On resume, continue from same edge at next dest
+                        break
+
+                # If we yielded a Requeue during dests loop, skip edge advancement now
+                if dests_proc >= max_dests:
+                    continue
+
+                # Move to next edge after finishing current edge's dests
+                edges_proc += 1
+                dest_resume_at = 0
+                if edges_proc >= max_edges and (edge_idx + 1) < len(a_node.children):
+                    # Requeue at the next edge boundary
+                    yield Requeue(edge_idx=edge_idx + 1, dest_idx=0)
+                    # On resume, continue at the next edge
+                    edge_idx += 1
+                    edges_proc = 0
+                    continue
+
+                edge_idx += 1
 
         remaining_mask = all_ones
         while work_heap:
-            heap_item = heapq.heappop(work_heap)
-            priority, work = heap_item.priority, heap_item.item
+            item = dequeue()
+            node_id, gss_node, gen = item.node_id, item.gss, item.gen
 
-            gen = None
-            if isinstance(work, types.GeneratorType):
-                gen = work
-            else:
-                node_id, gss_node = work
-                gss_acc = gss_node.reduce_acc()
+            # Compute current node's accumulated mask (for end-node processing and viability check)
+            gss_acc = gss_node.reduce_acc()
+            gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
 
-                if self.is_end(node_id) and gss_acc:
-                    if not final_mask.issuperset(gss_acc.llm_mask):
-                        final_mask |= gss_acc.llm_mask
-                        remaining_mask = all_ones.difference(final_mask)
+            # End-node processing: update final_mask (generators do not do this)
+            if self.is_end(node_id) and gss_acc and not final_mask.issuperset(gss_acc.llm_mask):
+                final_mask |= gss_acc.llm_mask
+                remaining_mask = all_ones.difference(final_mask)
 
-                a_node = self.arena.get(node_id)
-                gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
+            # Global "zombie" avoidance check: if node contributes nothing new under remaining_mask, skip
+            a_node = self.arena.get(node_id)
+            if not a_node:
+                continue
+            if a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
+                continue
 
-                if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
-                    continue
+            # Initialize generator if needed
+            if gen is None:
+                gen = internal_node_processor(node_id, gss_node)
 
-                is_final_mask_empty = final_mask.is_empty()
-                gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, is_final_mask_empty)
+            # Step the generator until it asks to requeue or finishes
+            requeued = False
+            try:
+                for event in gen:
+                    if isinstance(event, Emit):
+                        # Children are scheduled as new work items (gen=None initially)
+                        enqueue(event.node_id, event.gss, gen=None, edge_idx=0, dest_idx=0)
+                    elif isinstance(event, Requeue):
+                        # Requeue the same generator with updated priority
+                        new_priority = scheduler.priority(node_id, event.edge_idx, event.dest_idx)
+                        heapq.heappush(work_heap, WorkItem(priority=new_priority, node_id=node_id, gss=gss_node, gen=gen))
+                        requeued = True
+                        break
+                    else:
+                        # Unknown event: ignore
+                        continue
+            except StopIteration:
+                requeued = False
 
-            if gen:
-                try:
-                    yielded = next(gen)
+            # If generator finished without requeue, nothing to do (node fully processed)
+            if requeued:
+                continue
 
-                    if isinstance(yielded, Enqueue):
-                        new_node_id, new_gss = yielded.node_id, yielded.gss
-                        if not new_gss.is_empty():
-                            child_priority = (-self.max_depth.get(new_node_id, 0), 0, 0)
-                            heapq.heappush(work_heap, HeapItem(child_priority, (new_node_id, new_gss)))
-                        heapq.heappush(work_heap, HeapItem(priority, gen))
-                    elif isinstance(yielded, Suspend):
-                        heapq.heappush(work_heap, HeapItem(yielded.priority, gen))
-
-                except StopIteration:
-                    pass # Generator is done.
         t2 = time.perf_counter()
 
+        # Map internal indices to original indices
         original_indices = RangeSetOut.empty()
         for i in final_mask.iter_indices():
             if i in self.internal_to_original_map:
