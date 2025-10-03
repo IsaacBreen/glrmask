@@ -876,7 +876,8 @@ class Model(GraphProvider):
 
         stats.stop('get_mask')
 
-        stats.report()
+        if stats.times['get_mask']*1000 > 2:
+            stats.report()
         stats.reset()
 
         return original_indices
