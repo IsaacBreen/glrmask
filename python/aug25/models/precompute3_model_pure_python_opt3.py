@@ -565,9 +565,6 @@ class Model(GraphProvider):
             if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                 continue
 
-            # max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
-            max_edges, max_dests = (1, 1)
-            edges_proc, dests_proc = 0, 0
             peek0_rs = None
 
             for edge_i in range(start_edge, len(a_node.children)):
@@ -617,30 +614,34 @@ class Model(GraphProvider):
                         if lst is None: grouped[dest_j] = [sid]
                         else: lst.append(sid)
 
-                # Iterate grouped dests in ascending order for locality
-                for dest_j in sorted(grouped.keys()):
-                    if dests_proc >= max_dests:
-                        enqueue(node, gss_node, edge_i, dest_j, pop_cache)
-                        edges_proc = max_edges
-                        break
-                    dest = edge.dests[dest_j]
-                    values_to_keep = grouped[dest_j]
-                    # If all heads survive, reuse popped directly
-                    if len(values_to_keep) == len(peeked):
-                        child_gss = popped
-                    else:
-                        child_gss = popped.isolate_many(values_to_keep)
-                    if child_gss.is_empty(): continue
+                dest_indices = sorted(grouped.keys())
+                if not dest_indices:
+                    continue
+
+                # Process the first destination and schedule continuations.
+                dest_j_to_process = dest_indices[0]
+
+                # Schedule continuation for the next destination on this edge.
+                if len(dest_indices) > 1:
+                    enqueue(node, gss_node, edge_i, dest_indices[1], pop_cache)
+
+                # Schedule continuation for the next edge.
+                if edge_i + 1 < len(a_node.children):
+                    enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
+
+                # Process the destination.
+                dest = edge.dests[dest_j_to_process]
+                values_to_keep = grouped[dest_j_to_process]
+                if len(values_to_keep) == len(peeked):
+                    child_gss = popped
+                else:
+                    child_gss = popped.isolate_many(values_to_keep)
+                if not child_gss.is_empty():
                     d: NodeID = int(dest.dest_idx)
                     enqueue(d, child_gss)
-                    dests_proc += 1
 
-                if edges_proc >= max_edges: break
-                edges_proc += 1
-
-                if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-                    enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
-                    break
+                # We've processed one item, so we are done with this work item.
+                break
         t2 = time.perf_counter()
 
         original_indices = RangeSetOut.empty()
