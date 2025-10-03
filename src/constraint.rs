@@ -976,20 +976,20 @@ impl GrammarConstraint {
         );
 
         helper.run_dfs();
-        helper.replace_ignore_token_edges_with_none_edges();
-        helper.simplify_none_edges(); // This can invalidate max_depth.
-
-        // Recompute all max_depth values after major graph surgery.
-        Trie::recompute_all_max_depths(&helper.trie0_god, &helper.roots.values().cloned().collect::<Vec<_>>());
-
-        helper.prune_dead_paths();
-        helper.prune_on_no_terminal_follow();
-        helper.prune_dead_paths();
-        // New: prune using substring parser in "everything state" mode
-        // helper.prune_with_substring_everything_state();
-        helper.prune_dead_paths(); // Clean up after GLR-based pruning
-        helper.factor_common_destinations();
-        helper.merge_nodes();
+        // helper.replace_ignore_token_edges_with_none_edges();
+        // helper.simplify_none_edges(); // This can invalidate max_depth.
+        //
+        // // Recompute all max_depth values after major graph surgery.
+        // Trie::recompute_all_max_depths(&helper.trie0_god, &helper.roots.values().cloned().collect::<Vec<_>>());
+        //
+        // helper.prune_dead_paths();
+        // helper.prune_on_no_terminal_follow();
+        // helper.prune_dead_paths();
+        // // New: prune using substring parser in "everything state" mode
+        // // helper.prune_with_substring_everything_state();
+        // helper.prune_dead_paths(); // Clean up after GLR-based pruning
+        // helper.factor_common_destinations();
+        // helper.merge_nodes();
         // helper.merge_nodes_basic();
         helper.gc();
         Trie::recompute_all_max_depths(&helper.trie0_god, &helper.roots.values().cloned().collect::<Vec<_>>());
@@ -1096,6 +1096,7 @@ impl GrammarConstraint {
         Self::prune_on_no_terminal_follow_trie1(&precomputed1, &trie1_god, terminal_follow_map, ignore_terminal_id);
         Self::prune_dead_paths_trie1(&precomputed1, &trie1_god, internal_max_llm_token);
 
+        Trie::recompute_all_max_depths(&trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
         Self::factor_common_destinations_trie1(&precomputed1, &trie1_god);
         Self::merge_nodes_trie1(&mut precomputed1, &trie1_god);
         Trie::gc(&trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());

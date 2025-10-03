@@ -93,6 +93,10 @@ pub fn optimize_trie3_size(
     if config.optimize_trie3_reorder_llm_tokens {
         reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
     }
+
+    // TODO: Probably not needed
+    crate::debug!(2, "Step 14: Recomputing max depths...");
+    Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 }
 
 fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
