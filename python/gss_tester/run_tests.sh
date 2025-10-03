@@ -57,31 +57,36 @@ fi
 echo "---"
 
 # --- Automated C++ Build Process ---
-echo "Automating C++ module build..."
-C_PLUS_PLUS_MODULES_DIR="$PYTHON_SRC_ROOT/aug25/models"
-C_PLUS_PLUS_BUILD_DIR="$C_PLUS_PLUS_MODULES_DIR/build"
-C_PLUS_PLUS_OUTPUT_DIR="$PYTHON_SRC_ROOT" # Compiled .so files go directly into python/
+if [ "${SKIP_CPP:-0}" == "1" ]; then
+  echo "SKIP_CPP is set. Skipping C++ module build."
+  echo "---"
+else
+  echo "Automating C++ module build..."
+  C_PLUS_PLUS_MODULES_DIR="$PYTHON_SRC_ROOT/aug25/models"
+  C_PLUS_PLUS_BUILD_DIR="$C_PLUS_PLUS_MODULES_DIR/build"
+  C_PLUS_PLUS_OUTPUT_DIR="$PYTHON_SRC_ROOT" # Compiled .so files go directly into python/
 
-# 1. Clean previous build artifacts
-echo "  Cleaning previous C++ build artifacts..."
-rm -rf "$C_PLUS_PLUS_BUILD_DIR"
+  # 1. Clean previous build artifacts
+  echo "  Cleaning previous C++ build artifacts..."
+  rm -rf "$C_PLUS_PLUS_BUILD_DIR"
 
-# 2. Configure the build using CMake
-echo "  Configuring C++ build with CMake..."
-cmake -S "$C_PLUS_PLUS_MODULES_DIR" -B "$C_PLUS_PLUS_BUILD_DIR"
+  # 2. Configure the build using CMake
+  echo "  Configuring C++ build with CMake..."
+  cmake -S "$C_PLUS_PLUS_MODULES_DIR" -B "$C_PLUS_PLUS_BUILD_DIR"
 
-# 3. Build the C++ modules
-echo "  Building C++ modules..."
-cmake --build "$C_PLUS_PLUS_BUILD_DIR"
+  # 3. Build the C++ modules
+  echo "  Building C++ modules..."
+  cmake --build "$C_PLUS_PLUS_BUILD_DIR"
 
-# 4. Copy the compiled module to a location where Python can find it
-echo "  Copying compiled C++ modules to Python path..."
-# Find the exact name of the compiled shared library (e.g., leveled_gss_cpp.cpython-312-darwin.so)
-# and copy it to the PYTHON_SRC_ROOT.
-find "$C_PLUS_PLUS_BUILD_DIR" -name "leveled_gss_cpp.*.so" -exec cp {} "$C_PLUS_PLUS_OUTPUT_DIR" \;
-find "$C_PLUS_PLUS_BUILD_DIR" -name "precompute3_engine.*.so" -exec cp {} "$C_PLUS_PLUS_OUTPUT_DIR" \;
-echo "C++ module build complete."
-echo "---"
+  # 4. Copy the compiled module to a location where Python can find it
+  echo "  Copying compiled C++ modules to Python path..."
+  # Find the exact name of the compiled shared library (e.g., leveled_gss_cpp.cpython-312-darwin.so)
+  # and copy it to the PYTHON_SRC_ROOT.
+  find "$C_PLUS_PLUS_BUILD_DIR" -name "leveled_gss_cpp.*.so" -exec cp {} "$C_PLUS_PLUS_OUTPUT_DIR" \;
+  find "$C_PLUS_PLUS_BUILD_DIR" -name "precompute3_engine.*.so" -exec cp {} "$C_PLUS_PLUS_OUTPUT_DIR" \;
+  echo "C++ module build complete."
+  echo "---"
+fi
 
 # --- Run Tests ---
 echo "Starting test runs..."

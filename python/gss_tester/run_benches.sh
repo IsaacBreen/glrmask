@@ -94,22 +94,27 @@ fi
 echo "---"
 
 # --- Automated C++ Build Process ---
-echo "Automating C++ module build..."
-C_PLUS_PLUS_MODULES_DIR="$PYTHON_SRC_ROOT/aug25/models"
-C_PLUS_PLUS_BUILD_DIR="$C_PLUS_PLUS_MODULES_DIR/build"
-C_PLUS_PLUS_OUTPUT_DIR="$PYTHON_SRC_ROOT" # Compiled .so files go directly into python/
+if [ "${SKIP_CPP:-0}" == "1" ]; then
+  echo "SKIP_CPP is set. Skipping C++ module build."
+  echo "---"
+else
+  echo "Automating C++ module build..."
+  C_PLUS_PLUS_MODULES_DIR="$PYTHON_SRC_ROOT/aug25/models"
+  C_PLUS_PLUS_BUILD_DIR="$C_PLUS_PLUS_MODULES_DIR/build"
+  C_PLUS_PLUS_OUTPUT_DIR="$PYTHON_SRC_ROOT" # Compiled .so files go directly into python/
 
-echo "  Cleaning previous C++ build artifacts..."
-rm -rf "$C_PLUS_PLUS_BUILD_DIR"
-echo "  Configuring C++ build with CMake..."
-cmake -S "$C_PLUS_PLUS_MODULES_DIR" -B "$C_PLUS_PLUS_BUILD_DIR"
-echo "  Building C++ modules..."
-cmake --build "$C_PLUS_PLUS_BUILD_DIR"
-echo "  Copying compiled C++ modules to Python path..."
-find "$C_PLUS_PLUS_BUILD_DIR" -name "leveled_gss_cpp.*.so" -exec cp {} "$C_PLUS_PLUS_OUTPUT_DIR" \;
-find "$C_PLUS_PLUS_BUILD_DIR" -name "precompute3_engine.*.so" -exec cp {} "$C_PLUS_PLUS_OUTPUT_DIR" \;
-echo "C++ module build complete."
-echo "---"
+  echo "  Cleaning previous C++ build artifacts..."
+  rm -rf "$C_PLUS_PLUS_BUILD_DIR"
+  echo "  Configuring C++ build with CMake..."
+  cmake -S "$C_PLUS_PLUS_MODULES_DIR" -B "$C_PLUS_PLUS_BUILD_DIR"
+  echo "  Building C++ modules..."
+  cmake --build "$C_PLUS_PLUS_BUILD_DIR"
+  echo "  Copying compiled C++ modules to Python path..."
+  find "$C_PLUS_PLUS_BUILD_DIR" -name "leveled_gss_cpp.*.so" -exec cp {} "$C_PLUS_PLUS_OUTPUT_DIR" \;
+  find "$C_PLUS_PLUS_BUILD_DIR" -name "precompute3_engine.*.so" -exec cp {} "$C_PLUS_PLUS_OUTPUT_DIR" \;
+  echo "C++ module build complete."
+  echo "---"
+fi
 
 for full_impl_path in "${IMPLS[@]}"; do
   if [[ "$full_impl_path" == *.py ]]; then
