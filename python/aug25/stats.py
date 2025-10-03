@@ -43,7 +43,7 @@ class Stats:
         self.timers: Dict[str, float] = {}
 
         # Enabled flag lets callers noop the collection if needed.
-        self.enabled = True
+        self.enabled = False
 
         # Optional group prefixes (strings).
         self.groups = set()
