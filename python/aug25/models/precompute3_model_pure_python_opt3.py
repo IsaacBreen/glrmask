@@ -127,10 +127,15 @@ class ArenaEdgeDest:
     state_bv: StateIDSet
 
 @dataclass
+class LoadedArenaEdgeDest:
+    dest_idx: NodeID
+    state_bv: StateIDSet
+
+@dataclass
 class LoadedArenaEdge:
     pop: int
     llm_bv: LLMTokenSet
-    dests: List[ArenaEdgeDest]
+    dests: List[LoadedArenaEdgeDest]
 
 @dataclass
 class LoadedArenaNode:
@@ -170,13 +175,18 @@ def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict[NodeID, 
         for loaded_edge in loaded_node.children:
             llm_bv_union |= loaded_edge.llm_bv
             dest_states_union = RangeSetStates.empty()
-            for dest in loaded_edge.dests:
-                dest_states_union |= dest.state_bv
+            new_dests: List[ArenaEdgeDest] = []
+            for loaded_dest in loaded_edge.dests:
+                dest_states_union |= loaded_dest.state_bv
+                new_dests.append(ArenaEdgeDest(
+                    dest_idx=loaded_dest.dest_idx,
+                    state_bv=loaded_dest.state_bv
+                ))
 
             new_children.append(ArenaEdge(
                 pop=loaded_edge.pop,
                 llm_bv=loaded_edge.llm_bv,
-                dests=loaded_edge.dests,
+                dests=new_dests,
                 dest_states_union=dest_states_union,
             ))
         arena[uid] = ArenaNode(
@@ -257,7 +267,7 @@ class Model(GraphProvider):
                 dests: List[ArenaEdgeDest] = []
                 for dest_idx, state_json in dest_map_json:
                     state_bv = RangeSetStates.from_ranges(bs_from_json(dumps(state_json)).to_ranges())
-                    dests.append(ArenaEdgeDest(int(dest_idx), state_bv))
+                    dests.append(LoadedArenaEdgeDest(int(dest_idx), state_bv))
                 loaded_children.append(LoadedArenaEdge(int(pop), llm_bv, dests))
             
             clean_end = node_data.get("value", {}).get("clean_end", False)
