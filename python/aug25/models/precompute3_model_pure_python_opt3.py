@@ -135,19 +135,14 @@ class ArenaEdge:
     llm_bv_not: Optional[LLMTokenSet] = None
     state_to_dest: Optional[Dict[int, List[int]]] = None
 
-    def ensure_index(self, dest_index_threshold: int = 512, max_states_per_index: int = 100_000) -> None:
-        if self.state_to_dest is not None or len(self.dests) < dest_index_threshold:
+    def ensure_index(self) -> None:
+        if self.state_to_dest is not None:
             return
         
         mapping: Dict[int, List[int]] = collections.defaultdict(list)
-        total_assigned = 0
         for j, dest in enumerate(self.dests):
             for sid in dest.state_bv.iter_indices():
                 mapping[sid].append(j)
-                total_assigned += 1
-                if total_assigned > max_states_per_index:
-                    self.state_to_dest = {} # Marker for "too big to index"
-                    return
         self.state_to_dest = dict(mapping)
 
 @dataclass
@@ -296,6 +291,7 @@ class Model(GraphProvider):
             if not node.children: continue
             for edge in node.children:
                 edge.dests.sort(key=lambda dest: md.get(int(dest.dest_idx), 0), reverse=True)
+                edge.ensure_index()
             node.children.sort(key=lambda e: (-md.get(int(e.dests[0].dest_idx), 0) if e.dests else -1, e.pop))
 
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
@@ -499,68 +495,35 @@ class Model(GraphProvider):
 
                 current_start_dest = start_dest if edge_i == start_edge else 0
 
-                # Large-dest fast path: on-demand reverse index from state -> dest indices
-                use_indexer = False
-                if len(edge.dests) >= 512 and len(peeked) <= 64:
-                    edge.ensure_index()
-                    if edge.state_to_dest is not None and len(edge.state_to_dest) > 0:
-                        use_indexer = True
-
-                if use_indexer and current_start_dest == 0:
-                    grouped: Dict[int, List[int]] = {}
-                    m = edge.state_to_dest
-                    for sid in peeked:
-                        dest_list = m.get(sid) if m else None
-                        if not dest_list: continue
-                        for dest_j in dest_list:
-                            if dest_j < current_start_dest: continue
-                            lst = grouped.get(dest_j)
-                            if lst is None: grouped[dest_j] = [sid]
-                            else: lst.append(sid)
-                    # Iterate grouped dests in ascending order for locality
-                    for dest_j in sorted(grouped.keys()):
-                        if dests_proc >= max_dests:
-                            state_to_requeue = enqueue(node, gss_node)
-                            edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
-                            edges_proc = max_edges
-                            break
-                        dest = edge.dests[dest_j]
-                        values_to_keep = grouped[dest_j]
-                        # If all heads survive, reuse popped directly
-                        if len(values_to_keep) == len(peeked):
-                            child_gss = popped
-                        else:
-                            child_gss = popped.isolate_many(values_to_keep)
-                        if child_gss.is_empty(): continue
-                        d: NodeID = int(dest.dest_idx)
-                        enqueue(d, child_gss)
-                        dests_proc += 1
-                else:
-                    # Small-dest/small-head fast path: scan heads using contains()
-                    use_scan = (len(edge.dests) <= 128 and len(peeked) <= 16)
-                    for dest_j in range(current_start_dest, len(edge.dests)):
-                        if dests_proc >= max_dests:
-                            state_to_requeue = enqueue(node, gss_node)
-                            edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
-                            edges_proc = max_edges
-                            break
-                        dest = edge.dests[dest_j]
-                        if dest.state_bv.isdisjoint(peek_rs): continue
-                        if use_scan:
-                            values_to_keep = [sid for sid in peeked if dest.state_bv.contains(sid)]
-                            if not values_to_keep: continue
-                            if len(values_to_keep) == len(peeked):
-                                child_gss = popped
-                            else:
-                                child_gss = popped.isolate_many(values_to_keep)
-                        else:
-                            keep_rs = peek_rs.intersection(dest.state_bv)
-                            if keep_rs.is_empty(): continue
-                            child_gss = popped.isolate_many(list(keep_rs.iter_indices()))
-                        if child_gss.is_empty(): continue
-                        d: NodeID = int(dest.dest_idx)
-                        enqueue(d, child_gss)
-                        dests_proc += 1
+                grouped: Dict[int, List[int]] = {}
+                m = edge.state_to_dest
+                for sid in peeked:
+                    dest_list = m.get(sid)
+                    if not dest_list: continue
+                    for dest_j in dest_list:
+                        if dest_j < current_start_dest: continue
+                        lst = grouped.get(dest_j)
+                        if lst is None: grouped[dest_j] = [sid]
+                        else: lst.append(sid)
+                
+                # Iterate grouped dests in ascending order for locality
+                for dest_j in sorted(grouped.keys()):
+                    if dests_proc >= max_dests:
+                        state_to_requeue = enqueue(node, gss_node)
+                        edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
+                        edges_proc = max_edges
+                        break
+                    dest = edge.dests[dest_j]
+                    values_to_keep = grouped[dest_j]
+                    # If all heads survive, reuse popped directly
+                    if len(values_to_keep) == len(peeked):
+                        child_gss = popped
+                    else:
+                        child_gss = popped.isolate_many(values_to_keep)
+                    if child_gss.is_empty(): continue
+                    d: NodeID = int(dest.dest_idx)
+                    enqueue(d, child_gss)
+                    dests_proc += 1
                 
                 if edges_proc >= max_edges: break
                 edges_proc += 1
