@@ -3,7 +3,6 @@ local_system:
     - python/gss_tester/interface.py
     - python/gss_tester/implementations/leveled_impl.py
     - python/gss_tester/implementations/leveled_per_acc_impl.py
-    - python/gss_tester/implementations/factored_leveled_impl.py
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -1876,318 +1875,6 @@ local_system:
               """Unambiguous string representation."""
               items = self.to_stacks()
               return f"{self.__class__.__name__}(_parts={[ (acc, '<inner>') for acc in self._parts.keys() ]!r})"
-    python/gss_tester/implementations/factored_leveled_impl.py: |
-      from __future__ import annotations
-
-      from dataclasses import dataclass, field
-      from functools import reduce
-      from typing import (Any, Callable, Dict, Generic, Iterable, List, Optional,
-                          Set, Tuple, Type, TypeVar, Literal)
-
-      from ..interface import GSS, Acc, NewAcc, T
-      from .leveled_impl import LeveledGSS, LeveledGSSStats
-      from .reference_impl import ReferenceGSS
-
-
-      @dataclass(eq=False)
-      class FactoredLeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-          """
-          A GSS implementation that factors accumulators out of the core graph structure.
-
-          - It uses a `LeveledGSS[T, int]` as its internal graph representation.
-          - Accumulators (`Acc`) are stored in a separate map from integer IDs to `Acc` instances.
-          - This design makes accumulator transformations (`apply`, `prune`) very fast, as they
-            only need to modify the external map, not traverse the graph structure.
-          - The cost of this factorization is paid during `merge` operations or when a
-            canonical representation is required (`to_stacks`), as accumulator IDs may need
-            to be remapped and the graph structure potentially updated to reflect merged
-            accumulator values.
-          - This implementation aims to combine the structural sharing of `LeveledGSS` with the
-            fast accumulator operations of `LeveledPerAccGSS`.
-          """
-          _inner: LeveledGSS[T, int]
-          _id_to_acc: Dict[int, Acc]
-          _next_id: int
-          _is_canonical: bool = field(repr=False, default=True)
-
-          # ------------------------------
-          # Constructors and serialization
-          # ------------------------------
-          @classmethod
-          def empty(cls: Type["FactoredLeveledGSS[T, Acc]"]) -> "FactoredLeveledGSS[T, Acc]":
-              return cls(
-                  _inner=LeveledGSS.empty(),
-                  _id_to_acc={},
-                  _next_id=0,
-                  _is_canonical=True,
-              )
-
-          @classmethod
-          def from_stacks(cls: Type["FactoredLeveledGSS[T, Acc]"], stacks: List[Tuple[List[T], Acc]]) -> "FactoredLeveledGSS[T, Acc]":
-              # Use ReferenceGSS to merge duplicates first, ensuring canonical input stacks.
-              canonical_stacks = ReferenceGSS(stacks)._stacks
-
-              acc_to_id: Dict[Acc, int] = {}
-              id_to_acc: Dict[int, Acc] = {}
-              next_id = 0
-              inner_stacks: List[Tuple[List[T], int]] = []
-
-              for vals, acc in canonical_stacks:
-                  if acc not in acc_to_id:
-                      acc_to_id[acc] = next_id
-                      id_to_acc[next_id] = acc
-                      next_id += 1
-                  inner_stacks.append((vals, acc_to_id[acc]))
-
-              inner_gss = LeveledGSS.from_stacks(inner_stacks)
-              return cls(
-                  _inner=inner_gss,
-                  _id_to_acc=id_to_acc,
-                  _next_id=next_id,
-                  _is_canonical=True,
-              )
-
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              # This method must produce a canonical list, so it resolves the lazy mappings.
-              result_stacks: List[Tuple[List[T], Acc]] = []
-              for path, acc_id in self._inner.to_stacks():
-                  if acc_id in self._id_to_acc:
-                      acc = self._id_to_acc[acc_id]
-                      result_stacks.append((path, acc))
-
-              # Use ReferenceGSS to merge stacks that might now have identical paths and
-              # accumulators, and to sort into a canonical order.
-              return ReferenceGSS.from_stacks(result_stacks).to_stacks()
-
-          # ------------------------------
-          # Core stack operations
-          # ------------------------------
-          def push(self, value: T) -> "FactoredLeveledGSS[T, Acc]":
-              if self.is_empty():
-                  return self
-              new_inner = self._inner.push(value)
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
-
-          def pop(self) -> "FactoredLeveledGSS[T, Acc]":
-              if self.is_empty():
-                  return self
-              new_inner = self._inner.pop()
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
-
-          def popn(self, n: int) -> "FactoredLeveledGSS[T, Acc]":
-              if n <= 0 or self.is_empty():
-                  return self
-              new_inner = self._inner.popn(n)
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
-
-          def is_empty(self) -> bool:
-              # If the accumulator map is empty, no stacks can exist.
-              # If the inner graph is empty, no stacks can exist.
-              return not self._id_to_acc or self._inner.is_empty()
-
-          def isolate(self, value: Optional[T]) -> "FactoredLeveledGSS[T, Acc]":
-              if self.is_empty():
-                  return self
-              new_inner = self._inner.isolate(value)
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
-
-          def isolate_many(self, values: Iterable[Optional[T]]) -> "FactoredLeveledGSS[T, Acc]":
-              if self.is_empty():
-                  return self
-              new_inner = self._inner.isolate_many(values)
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
-
-          # ------------------------------
-          # Accumulator transforms (Lazy)
-          # ------------------------------
-          def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
-              new_id_to_acc: Dict[int, NewAcc] = {
-                  id: func(acc) for id, acc in self._id_to_acc.items()
-              }
-              return FactoredLeveledGSS(
-                  _inner=self._inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=self._next_id,
-                  _is_canonical=False,
-              )
-
-          def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> "FactoredLeveledGSS[T, Acc]":
-              new_id_to_acc = {
-                  id: acc for id, acc in self._id_to_acc.items() if predicate(acc)
-              }
-              return FactoredLeveledGSS(
-                  _inner=self._inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=self._next_id,
-                  _is_canonical=False,
-              )
-
-          def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
-              new_id_to_acc: Dict[int, NewAcc] = {}
-              for id, acc in self._id_to_acc.items():
-                  new_acc = mutator(acc)
-                  if new_acc is not None:
-                      new_id_to_acc[id] = new_acc
-              return FactoredLeveledGSS(
-                  _inner=self._inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=self._next_id,
-                  _is_canonical=False,
-              )
-
-          # ------------------------------
-          # Merge operations
-          # ------------------------------
-          def merge(self, other: "FactoredLeveledGSS[T, Acc]") -> "FactoredLeveledGSS[T, Acc]":
-              if not isinstance(other, FactoredLeveledGSS):
-                  # Fallback for merging with other GSS types
-                  return FactoredLeveledGSS.from_stacks(self.to_stacks() + other.to_stacks())
-
-              if self.is_empty():
-                  return other
-              if other.is_empty():
-                  return self
-
-              # Lazy merge: create a disjoint union of ID spaces and merge the inner graphs.
-              # The resulting accumulator map may be non-canonical.
-              offset = self._next_id
-              other_inner_remapped = other._inner.apply(lambda old_id: old_id + offset)
-              new_inner = self._inner.merge(other_inner_remapped)
-
-              new_id_to_acc = dict(self._id_to_acc)
-              for other_id, other_acc in other._id_to_acc.items():
-                  new_id_to_acc[other_id + offset] = other_acc
-
-              new_next_id = self._next_id + other._next_id
-
-              return FactoredLeveledGSS(
-                  _inner=new_inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=new_next_id,
-                  _is_canonical=False,
-              )
-
-          # ------------------------------
-          # Structure-level helpers
-          # ------------------------------
-          def peek(self) -> Set[T]:
-              return self._inner.peek()
-
-          def reduce_acc(self) -> Optional[Acc]:
-              # This operates on the potentially non-canonical accumulator map.
-              unique_accs = list(set(self._id_to_acc.values()))
-              if not unique_accs:
-                  return None
-              return reduce(lambda a, b: a.merge(b), unique_accs)
-
-          def canonicalize(self) -> "FactoredLeveledGSS[T, Acc]":
-              """
-              Forces the GSS into a canonical state. This involves:
-              1. Pruning any parts of the inner graph that refer to deleted accumulator IDs.
-              2. Compacting the accumulator map so that each unique accumulator has exactly one ID.
-              3. Applying the ID remapping to the inner graph.
-              This can be an expensive operation and is performed lazily.
-              """
-              if self._is_canonical:
-                  return self
-
-              # 1. Prune dead IDs from inner GSS
-              surviving_old_ids = set(self._id_to_acc.keys())
-              pruned_inner = self._inner.prune(lambda old_id: old_id in surviving_old_ids)
-
-              # 2. Build remapping for compaction
-              new_id_to_acc: Dict[int, Acc] = {}
-              acc_to_new_id: Dict[Acc, int] = {}
-              remapping: Dict[int, int] = {}
-              next_id = 0
-
-              # Sort for deterministic ID assignment
-              sorted_old_ids = sorted(list(surviving_old_ids))
-
-              for old_id in sorted_old_ids:
-                  acc = self._id_to_acc[old_id]
-                  if acc not in acc_to_new_id:
-                      new_id = next_id
-                      acc_to_new_id[acc] = new_id
-                      new_id_to_acc[new_id] = acc
-                      next_id += 1
-                  remapping[old_id] = acc_to_new_id[acc]
-
-              # 3. Apply remapping to the inner graph
-              remapped_inner = pruned_inner.apply(lambda old_id: remapping[old_id])
-
-              return FactoredLeveledGSS(
-                  _inner=remapped_inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=next_id,
-                  _is_canonical=True,
-              )
-
-          # ------------------------------
-          # LeveledGSS-specific (drop-in) extras
-          # ------------------------------
-          def fuse(self, levels: Optional[int | Literal["to_interface"]] = None, memo: Optional[Dict] = None) -> "FactoredLeveledGSS[T, Acc]":
-              new_inner = self._inner.fuse(levels=levels, memo=memo)
-              if new_inner is self._inner:
-                  return self
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
-
-          def stats(self) -> LeveledGSSStats[T, Acc]:
-              """
-              Computes statistics. Structural stats are from the inner graph, while
-              accumulator stats are from the (potentially non-canonical) outer map.
-              """
-              struct_stats = self._inner.stats()
-              
-              # Override accumulator stats with info from the outer map
-              unique_accs = set(self._id_to_acc.values())
-              
-              return LeveledGSSStats(
-                  top_values=struct_stats.top_values,
-                  num_upperbranch_nodes=struct_stats.num_upperbranch_nodes,
-                  num_interface_nodes=struct_stats.num_interface_nodes,
-                  num_lower_nodes=struct_stats.num_lower_nodes,
-                  total_unique_nodes=struct_stats.total_unique_nodes,
-                  upper_edges=struct_stats.upper_edges,
-                  interface_to_lower_edges=struct_stats.interface_to_lower_edges,
-                  lower_edges=struct_stats.lower_edges,
-                  total_edges=struct_stats.total_edges,
-                  max_upper_depth=struct_stats.max_upper_depth,
-                  max_lower_depth=struct_stats.max_lower_depth,
-                  distinct_values_count=struct_stats.distinct_values_count,
-                  distinct_values=struct_stats.distinct_values,
-                  unique_accumulators_count=len(unique_accs),
-                  unique_accumulators=unique_accs,
-                  total_accumulator_instances=struct_stats.total_accumulator_instances,
-                  num_upper_with_empty=struct_stats.num_upper_with_empty,
-                  num_interfaces_with_empty=struct_stats.num_interfaces_with_empty,
-                  num_lower_terminal_nodes=struct_stats.num_lower_terminal_nodes,
-                  num_interface_implicit_terminals=struct_stats.num_interface_implicit_terminals,
-                  num_multi_depth_slots_upper=struct_stats.num_multi_depth_slots_upper,
-                  num_multi_depth_slots_lower=struct_stats.num_multi_depth_slots_lower,
-                  max_multiplicity_per_value_upper=struct_stats.max_multiplicity_per_value_upper,
-                  max_multiplicity_per_value_lower=struct_stats.max_multiplicity_per_value_lower,
-                  average_in_degree=struct_stats.average_in_degree,
-                  max_in_degree=struct_stats.max_in_degree,
-                  structural_sharing_factor=struct_stats.structural_sharing_factor,
-                  promotable_upper_nodes=struct_stats.promotable_upper_nodes,
-              )
-
-          def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
-              lines = []
-              lines.append("--- FactoredLeveledGSS ---")
-              lines.append(f"Canonical: {self._is_canonical}, Next ID: {self._next_id}")
-              lines.append("Accumulator Map:")
-              if not self._id_to_acc:
-                  lines.append("  (empty)")
-              else:
-                  for id, acc in sorted(self._id_to_acc.items()):
-                      lines.append(f"  ID {id} -> {acc!r}")
-              
-              lines.append("\n--- Inner LeveledGSS[T, int] ---")
-              inner_str = self._inner.to_graph_string(memo=memo, upper_only=upper_only)
-              lines.append(inner_str)
-              return "\n".join(lines)
   prev_file_contents:
     python/gss_tester/interface.py: |
       from __future__ import annotations
@@ -3728,84 +3415,219 @@ local_system:
     python/gss_tester/implementations/leveled_per_acc_impl.py: |
       from __future__ import annotations
 
-      from dataclasses import dataclass
+      from collections import defaultdict
+      from dataclasses import dataclass, field
       from functools import reduce
-      from typing import Dict, Generic, Iterable, List, Optional, Set, Tuple, Type, TypeVar, Callable, Any, Literal
+      from itertools import chain
+      from typing import (Any, Callable, Dict, Generic, Iterable, Iterator, List,
+                          Optional, Set, Tuple, Type, TypeVar)
 
-      from ..interface import GSS, T, Acc, NewAcc, Mergeable
-      from .leveled_impl import LeveledGSS, LeveledGSSStats
+      from ..interface import GSS, Acc, Mergeable, NewAcc, T
       from .reference_impl import ReferenceGSS
 
+      # ------------------------------
+      # Internal, accumulator-less GSS implementation
+      # ------------------------------
 
-      # Internal Unit accumulator for inner LeveledGSS graphs.
-      # This accumulator carries no information and simply satisfies the Mergeable protocol.
       @dataclass(frozen=True, eq=True)
-      class _UnitAcc(Mergeable):
-          def merge(self, other: "_UnitAcc") -> "_UnitAcc":
-              return self
+      class _Node(Generic[T]):
+          """Internal node for representing a set of stack suffixes (a trie)."""
+          children: Dict[T, Dict[int, "_Node[T]"]]
+          empty: bool  # True if a stack can end at this node
+          _max_depth: int = field(init=False)
 
-          def __repr__(self) -> str:
-              return "UnitAcc"
+          def __post_init__(self):
+              if not self.children:
+                  depth = 0
+              else:
+                  depth = max(child._max_depth for child in self._all_children()) + 1
+              object.__setattr__(self, '_max_depth', depth)
 
+          def _all_children(self) -> Iterator["_Node[T]"]:
+              for children_at_depth in self.children.values():
+                  yield from children_at_depth.values()
 
-      _UNIT: _UnitAcc = _UnitAcc()
+      def _merge_children_by_depth(
+          c1: Dict[T, Dict[int, _Node[T]]],
+          c2: Dict[T, Dict[int, _Node[T]]],
+          merge_func: Callable[[_Node[T], _Node[T]], _Node[T]],
+      ) -> Dict[T, Dict[int, _Node[T]]]:
+          if c1 is c2:
+              return c1
+          merged_children: Dict[T, Dict[int, _Node[T]]] = {}
+          all_vals = c1.keys() | c2.keys()
+          for v in all_vals:
+              nodes_by_depth: Dict[int, list[_Node[T]]] = defaultdict(list)
+              children_c1 = c1.get(v, {}).items()
+              children_c2 = c2.get(v, {}).items()
+              for depth, child in chain(children_c1, children_c2):
+                  nodes_by_depth[depth].append(child)
+              if not nodes_by_depth:
+                  continue
 
+              v_out: Dict[int, _Node[T]] = {}
+              for nodes in nodes_by_depth.values():
+                  merged = reduce(merge_func, nodes)
+                  v_out[merged._max_depth] = merged
+              merged_children[v] = v_out
+          return merged_children
+
+      def _merge_nodes(n1: _Node[T], n2: _Node[T]) -> _Node[T]:
+          if n1 is n2:
+              return n1
+          new_empty = n1.empty or n2.empty
+          merged_children = _merge_children_by_depth(n1.children, n2.children, _merge_nodes)
+          return _Node(children=merged_children, empty=new_empty)
+
+      @dataclass(frozen=True, eq=True)
+      class _InternalGSS(Generic[T]):
+          """A GSS-like structure for a set of stacks, without accumulators."""
+          root: _Node[T]
+
+          @classmethod
+          def empty(cls) -> "_InternalGSS[T]":
+              return cls(_Node(children={}, empty=False))
+
+          @classmethod
+          def from_stacks(cls, stacks: List[List[T]]) -> "_InternalGSS[T]":
+              if not stacks:
+                  return cls.empty()
+
+              trie: Dict[Any, Any] = {"#empty": False}
+              for stack in stacks:
+                  if not stack:
+                      trie["#empty"] = True
+                      continue
+                  node = trie
+                  for item in reversed(stack):
+                      node = node.setdefault(item, {"#empty": False})
+                  node["#empty"] = True
+
+              def build_node(sub_trie: Dict) -> _Node[T]:
+                  is_empty = sub_trie.pop("#empty", False)
+                  children: Dict[T, Dict[int, _Node[T]]] = {}
+                  for val, next_trie in sub_trie.items():
+                      child_node = build_node(next_trie)
+                      children[val] = {child_node._max_depth: child_node}
+                  return _Node(children=children, empty=is_empty)
+
+              return cls(build_node(trie))
+
+          def to_stacks(self) -> List[List[T]]:
+              res: List[List[T]] = []
+              def dfs(node: _Node[T], prefix: List[T]):
+                  if node.empty:
+                      res.append(list(reversed(prefix)))
+                  for val, children_at_depths in node.children.items():
+                      for child in children_at_depths.values():
+                          dfs(child, prefix + [val])
+              dfs(self.root, [])
+              return res
+
+          def push(self, value: T) -> "_InternalGSS[T]":
+              if self.is_empty():
+                  return self
+              new_root = _Node(children={value: {self.root._max_depth: self.root}}, empty=False)
+              return _InternalGSS(new_root)
+
+          def pop(self) -> "_InternalGSS[T]":
+              all_children = list(self.root._all_children())
+              if not all_children:
+                  return self.empty()
+              merged_root = reduce(_merge_nodes, all_children)
+              return _InternalGSS(merged_root)
+
+          def popn(self, n: int) -> "_InternalGSS[T]":
+              if n <= 0:
+                  return self
+              if self.is_empty():
+                  return self
+              memo: Dict[Tuple[int, int], _Node[T]] = {}
+              def _popn_node(node: _Node[T], k: int) -> _Node[T]:
+                  if k == 0:
+                      return node
+                  key = (id(node), k)
+                  if key in memo:
+                      return memo[key]
+                  all_children = list(node._all_children())
+                  if not all_children:
+                      res = _Node(children={}, empty=False)
+                      memo[key] = res
+                      return res
+                  popped_children = [_popn_node(child, k - 1) for child in all_children]
+                  res = reduce(_merge_nodes, popped_children)
+                  memo[key] = res
+                  return res
+              return _InternalGSS(_popn_node(self.root, n))
+
+          def is_empty(self) -> bool:
+              return not self.root.children and not self.root.empty
+
+          def isolate(self, value: Optional[T]) -> "_InternalGSS[T]":
+              if value is None:
+                  if self.root.empty:
+                      return _InternalGSS(_Node(children={}, empty=True))
+                  else:
+                      return self.empty()
+              children_for_v = self.root.children.get(value)
+              if not children_for_v:
+                  return self.empty()
+              new_root = _Node(children={value: children_for_v}, empty=False)
+              return _InternalGSS(new_root)
+
+          def isolate_many(self, values: Iterable[Optional[T]]) -> "_InternalGSS[T]":
+              values_set = set(values)
+              new_empty = None in values_set and self.root.empty
+              filtered_children = {
+                  v: kids for v, kids in self.root.children.items() if v in values_set
+              }
+              new_root = _Node(children=filtered_children, empty=new_empty)
+              return _InternalGSS(new_root)
+
+          def merge(self, other: "_InternalGSS[T]") -> "_InternalGSS[T]":
+              if self is other: return self
+              if self.is_empty(): return other
+              if other.is_empty(): return self
+              return _InternalGSS(_merge_nodes(self.root, other.root))
+
+          def peek(self) -> Set[T]:
+              return set(self.root.children.keys())
+
+      # ------------------------------
+      # Public GSS implementation
+      # ------------------------------
 
       @dataclass(eq=False)
       class LeveledPerAccGSS(GSS[T, Acc], Generic[T, Acc]):
           """
-          A drop-in GSS implementation that partitions the graph by accumulator.
-
-          - Internally maintains a dict mapping each accumulator (Acc) to a LeveledGSS[T, _UnitAcc].
-          - The inner LeveledGSS graphs do not store real Acc values in their nodes; they carry a
-            single sentinel accumulator (_UnitAcc) everywhere.
-          - All structure-changing operations (push/pop/isolate/merge/etc.) are delegated to the inner
-            LeveledGSS instances and then re-assembled per accumulator partition.
-
-          This can be more efficient when there are few distinct accumulators but large shared structure,
-          as it avoids mixing (and propagating) Acc values into the graph.
+          A GSS implementation that partitions the graph by accumulator.
+          It uses an internal, simplified, accumulator-less GSS representation
+          for each partition, which can be efficient when there are few distinct
+          accumulators.
           """
-
-          # Mapping from accumulator to a leveled GSS that uses a unit accumulator internally.
-          _parts: Dict[Acc, LeveledGSS[T, _UnitAcc]]
+          _parts: Dict[Acc, _InternalGSS[T]]
 
           def __post_init__(self):
-              # Maintain class invariant: drop any empty inner graphs to keep the representation tight.
               self._parts = {a: g for a, g in self._parts.items() if not g.is_empty()}
-
-          # ------------------------------
-          # Constructors and serialization
-          # ------------------------------
-          @classmethod
-          def empty(cls: Type["LeveledPerAccGSS[T, Acc]"]) -> "LeveledPerAccGSS[T, Acc]":
-              return cls(_parts={})
 
           @classmethod
           def from_stacks(cls: Type["LeveledPerAccGSS[T, Acc]"], stacks: List[Tuple[List[T], Acc]]) -> "LeveledPerAccGSS[T, Acc]":
-              # Group stacks by accumulator
-              by_acc: Dict[Acc, List[List[T]]] = {}
+              by_acc: Dict[Acc, List[List[T]]] = defaultdict(list)
               for vals, acc in stacks:
-                  by_acc.setdefault(acc, []).append(list(vals))
-
-              parts: Dict[Acc, LeveledGSS[T, _UnitAcc]] = {}
-              for acc, lists in by_acc.items():
-                  inner_stacks = [(v, _UNIT) for v in lists]
-                  parts[acc] = LeveledGSS.from_stacks(inner_stacks)
-
+                  by_acc[acc].append(list(vals))
+              parts = {
+                  acc: _InternalGSS.from_stacks(acc_stacks)
+                  for acc, acc_stacks in by_acc.items()
+              }
               return cls(_parts=parts)
 
           def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              # Gather stacks from each partition and replace inner UnitAcc with the partition's Acc
               out: List[Tuple[List[T], Acc]] = []
               for acc, inner in self._parts.items():
-                  for vals, _unit in inner.to_stacks():
-                      out.append((list(vals), acc))
-              # Canonicalize ordering and merge possible duplicates via ReferenceGSS
+                  for vals in inner.to_stacks():
+                      out.append((vals, acc))
               return ReferenceGSS.from_stacks(out).to_stacks()
 
-          # ------------------------------
-          # Core stack operations
-          # ------------------------------
           def push(self, value: T) -> "LeveledPerAccGSS[T, Acc]":
               if self.is_empty():
                   return self
@@ -3832,31 +3654,24 @@ local_system:
           def isolate_many(self, values: Iterable[Optional[T]]) -> "LeveledPerAccGSS[T, Acc]":
               valset = set(values)
               if not valset or self.is_empty():
-                  return LeveledPerAccGSS.empty()
+                  return self.empty()
               return LeveledPerAccGSS({acc: g.isolate_many(valset) for acc, g in self._parts.items()})
 
-          # ------------------------------
-          # Accumulator transforms
-          # ------------------------------
           def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
-              # Map each partition's accumulator and merge partitions that map to the same new accumulator.
-              new_parts: Dict[NewAcc, LeveledGSS[T, _UnitAcc]] = {}
+              new_parts: Dict[NewAcc, _InternalGSS[T]] = {}
               for acc, g in self._parts.items():
                   new_acc = func(acc)
                   if new_acc in new_parts:
                       new_parts[new_acc] = new_parts[new_acc].merge(g)
                   else:
                       new_parts[new_acc] = g
-              return LeveledPerAccGSS[T, NewAcc](new_parts)  # type: ignore[type-var]
+              return LeveledPerAccGSS(new_parts)  # type: ignore[arg-type]
 
           def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> "LeveledPerAccGSS[T, Acc]":
-              # Keep only partitions whose accumulator satisfies the predicate.
               return LeveledPerAccGSS({acc: g for acc, g in self._parts.items() if predicate(acc)})
 
           def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
-              # Single pass over partitions: mutate acc, drop if None, merge graphs for identical results.
-              cache: Dict[int, Optional[NewAcc]] = {} if memo is None else memo  # reuse provided memo if any
-
+              cache: Dict[int, Optional[NewAcc]] = {} if memo is None else memo
               def decide(a: Acc) -> Optional[NewAcc]:
                   k = id(a)
                   if k in cache:
@@ -3865,7 +3680,7 @@ local_system:
                   cache[k] = r
                   return r
 
-              new_parts: Dict[NewAcc, LeveledGSS[T, _UnitAcc]] = {}
+              new_parts: Dict[NewAcc, _InternalGSS[T]] = {}
               for acc, g in self._parts.items():
                   new_acc = decide(acc)
                   if new_acc is None:
@@ -3874,19 +3689,14 @@ local_system:
                       new_parts[new_acc] = new_parts[new_acc].merge(g)
                   else:
                       new_parts[new_acc] = g
-              return LeveledPerAccGSS[T, NewAcc](new_parts)  # type: ignore[type-var]
+              return LeveledPerAccGSS(new_parts)  # type: ignore[arg-type]
 
-          # ------------------------------
-          # Merge operations
-          # ------------------------------
           def merge(self, other: "LeveledPerAccGSS[T, Acc]") -> "LeveledPerAccGSS[T, Acc]":
-              if self is other:
-                  return self
-              if self.is_empty():
-                  return other
-              if other.is_empty():
-                  return self
-              merged: Dict[Acc, LeveledGSS[T, _UnitAcc]] = dict(self._parts)
+              if self is other: return self
+              if self.is_empty(): return other
+              if other.is_empty(): return self
+              
+              merged: Dict[Acc, _InternalGSS[T]] = dict(self._parts)
               for acc, g in other._parts.items():
                   if acc in merged:
                       merged[acc] = merged[acc].merge(g)
@@ -3896,7 +3706,7 @@ local_system:
 
           @classmethod
           def merge_many(cls: Type["LeveledPerAccGSS[T, Acc]"], gss_list: Iterable["LeveledPerAccGSS[T, Acc]"]) -> "LeveledPerAccGSS[T, Acc]":
-              result: Dict[Acc, LeveledGSS[T, _UnitAcc]] = {}
+              result: Dict[Acc, _InternalGSS[T]] = {}
               for g in gss_list:
                   for acc, inner in g._parts.items():
                       if acc in result:
@@ -3905,471 +3715,18 @@ local_system:
                           result[acc] = inner
               return cls(result)
 
-          # ------------------------------
-          # Structure-level helpers
-          # ------------------------------
           def peek(self) -> Set[T]:
               tops: Set[T] = set()
               for g in self._parts.values():
-                  tops |= g.peek()
+                  tops.update(g.peek())
               return tops
 
           def reduce_acc(self) -> Optional[Acc]:
-              if self.is_empty():
+              if not self._parts:
                   return None
-              it = iter(self._parts.keys())
-              try:
-                  acc0 = next(it)
-              except StopIteration:
-                  return None
-              result = acc0
-              for acc in it:
-                  if result is acc:
-                      continue
-                  result = result.merge(acc)
-              return result
-
-          def to_reference_impl(self) -> GSS[T, Acc]:
-              # Build ReferenceGSS directly from the stacks of all partitions.
-              return ReferenceGSS.from_stacks(self.to_stacks())
-
-          # ------------------------------
-          # LeveledGSS-specific (drop-in) extras
-          # ------------------------------
-          def fuse(self, levels: Optional[int | Literal["to_interface"]] = None, memo: Optional[Dict] = None) -> "LeveledPerAccGSS[T, Acc]":
-              if self.is_empty():
-                  return self
-              return LeveledPerAccGSS({acc: g.fuse(levels=levels, memo=memo) for acc, g in self._parts.items()})
-
-          def stats(self) -> LeveledGSSStats[T, Acc]:
-              """
-              Aggregate structural stats across all partitions.
-              Structural fields are computed by merging the inner LeveledGSS graphs into one,
-              then calling stats() on the union. Accumulator coverage is reported using the
-              outer partition keys.
-              """
-              if self.is_empty():
-                  # Reuse stats from an empty leveled GSS, then override accumulator coverage fields.
-                  empty_stats = LeveledGSS.from_stacks([]).stats()  # type: ignore[type-var]
-                  return LeveledGSSStats(
-                      top_values=empty_stats.top_values,
-                      num_upperbranch_nodes=empty_stats.num_upperbranch_nodes,
-                      num_interface_nodes=empty_stats.num_interface_nodes,
-                      num_lower_nodes=empty_stats.num_lower_nodes,
-                      total_unique_nodes=empty_stats.total_unique_nodes,
-                      upper_edges=empty_stats.upper_edges,
-                      interface_to_lower_edges=empty_stats.interface_to_lower_edges,
-                      lower_edges=empty_stats.lower_edges,
-                      total_edges=empty_stats.total_edges,
-                      max_upper_depth=empty_stats.max_upper_depth,
-                      max_lower_depth=empty_stats.max_lower_depth,
-                      distinct_values_count=empty_stats.distinct_values_count,
-                      distinct_values=empty_stats.distinct_values,
-                      unique_accumulators_count=0,
-                      unique_accumulators=set(),
-                      total_accumulator_instances=empty_stats.total_accumulator_instances,
-                      num_upper_with_empty=empty_stats.num_upper_with_empty,
-                      num_interfaces_with_empty=empty_stats.num_interfaces_with_empty,
-                      num_lower_terminal_nodes=empty_stats.num_lower_terminal_nodes,
-                      num_interface_implicit_terminals=empty_stats.num_interface_implicit_terminals,
-                      num_multi_depth_slots_upper=empty_stats.num_multi_depth_slots_upper,
-                      num_multi_depth_slots_lower=empty_stats.num_multi_depth_slots_lower,
-                      max_multiplicity_per_value_upper=empty_stats.max_multiplicity_per_value_upper,
-                      max_multiplicity_per_value_lower=empty_stats.max_multiplicity_per_value_lower,
-                      average_in_degree=empty_stats.average_in_degree,
-                      max_in_degree=empty_stats.max_in_degree,
-                      structural_sharing_factor=empty_stats.structural_sharing_factor,
-                      promotable_upper_nodes=empty_stats.promotable_upper_nodes,
-                  )
-
-              # Merge all inner graphs into a single LeveledGSS over UnitAcc to compute structural stats.
-              merged_inner: Optional[LeveledGSS[T, _UnitAcc]] = None
-              for g in self._parts.values():
-                  merged_inner = g if merged_inner is None else merged_inner.merge(g)
-              assert merged_inner is not None
-              struct_stats = merged_inner.stats()
-
-              # Acc coverage uses the outer keys (the true Acc domain for this GSS).
-              acc_keys: Set[Acc] = set(self._parts.keys())
-              acc_count = len(acc_keys)
-
-              return LeveledGSSStats(
-                  top_values=struct_stats.top_values,
-                  num_upperbranch_nodes=struct_stats.num_upperbranch_nodes,
-                  num_interface_nodes=struct_stats.num_interface_nodes,
-                  num_lower_nodes=struct_stats.num_lower_nodes,
-                  total_unique_nodes=struct_stats.total_unique_nodes,
-                  upper_edges=struct_stats.upper_edges,
-                  interface_to_lower_edges=struct_stats.interface_to_lower_edges,
-                  lower_edges=struct_stats.lower_edges,
-                  total_edges=struct_stats.total_edges,
-                  max_upper_depth=struct_stats.max_upper_depth,
-                  max_lower_depth=struct_stats.max_lower_depth,
-                  distinct_values_count=struct_stats.distinct_values_count,
-                  distinct_values=struct_stats.distinct_values,
-                  unique_accumulators_count=acc_count,
-                  unique_accumulators=acc_keys,
-                  # This counts physical accumulator storage in the merged inner graphs (UnitAcc slots).
-                  # It is not equal to unique_accumulators_count, which is keyed by outer Acc values.
-                  total_accumulator_instances=struct_stats.total_accumulator_instances,
-                  num_upper_with_empty=struct_stats.num_upper_with_empty,
-                  num_interfaces_with_empty=struct_stats.num_interfaces_with_empty,
-                  num_lower_terminal_nodes=struct_stats.num_lower_terminal_nodes,
-                  num_interface_implicit_terminals=struct_stats.num_interface_implicit_terminals,
-                  num_multi_depth_slots_upper=struct_stats.num_multi_depth_slots_upper,
-                  num_multi_depth_slots_lower=struct_stats.num_multi_depth_slots_lower,
-                  max_multiplicity_per_value_upper=struct_stats.max_multiplicity_per_value_upper,
-                  max_multiplicity_per_value_lower=struct_stats.max_multiplicity_per_value_lower,
-                  average_in_degree=struct_stats.average_in_degree,
-                  max_in_degree=struct_stats.max_in_degree,
-                  structural_sharing_factor=struct_stats.structural_sharing_factor,
-                  promotable_upper_nodes=struct_stats.promotable_upper_nodes,
-              )
-
-          def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
-              if memo is None:
-                  memo = set()
-              if self.is_empty():
-                  return "--- Empty LeveledPerAccGSS ---"
-              out_lines: List[str] = []
-              for i, (acc, inner) in enumerate(sorted(self._parts.items(), key=lambda kv: repr(kv[0]))):
-                  prefix = "" if i == 0 else "\n"
-                  out_lines.append(prefix + f"=== Partition for Acc: {repr(acc)} ===")
-                  inner_str = inner.to_graph_string(memo=memo, upper_only=upper_only)
-                  # Indent inner graph for clarity
-                  for line in inner_str.splitlines():
-                      out_lines.append("  " + line)
-              return "\n".join(out_lines)
-
-          # ------------------------------
-          # String representations
-          # ------------------------------
-          def __str__(self) -> str:
-              """Human-readable string representation."""
-              items = self.to_stacks()
-              if not items:
-                  return f"{self.__class__.__name__}(empty)"
-              lines = [f"{self.__class__.__name__}:"]
-              for vals, acc in items:
-                  lines.append(f"  - Stack: {vals}, Acc: {acc!r}")
-              return "\n".join(lines)
-
-          def __repr__(self) -> str:
-              """Unambiguous string representation."""
-              items = self.to_stacks()
-              return f"{self.__class__.__name__}(_parts={[ (acc, '<inner>') for acc in self._parts.keys() ]!r})"
-    python/gss_tester/implementations/factored_leveled_impl.py: |
-      from __future__ import annotations
-
-      from dataclasses import dataclass, field
-      from functools import reduce
-      from typing import (Any, Callable, Dict, Generic, Iterable, List, Optional,
-                          Set, Tuple, Type, TypeVar, Literal)
-
-      from ..interface import GSS, Acc, NewAcc, T
-      from .leveled_impl import LeveledGSS, LeveledGSSStats
-      from .reference_impl import ReferenceGSS
-
-
-      @dataclass(eq=False)
-      class FactoredLeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-          """
-          A GSS implementation that factors accumulators out of the core graph structure.
-
-          - It uses a `LeveledGSS[T, int]` as its internal graph representation.
-          - Accumulators (`Acc`) are stored in a separate map from integer IDs to `Acc` instances.
-          - This design makes accumulator transformations (`apply`, `prune`) very fast, as they
-            only need to modify the external map, not traverse the graph structure.
-          - The cost of this factorization is paid during `merge` operations or when a
-            canonical representation is required (`to_stacks`), as accumulator IDs may need
-            to be remapped and the graph structure potentially updated to reflect merged
-            accumulator values.
-          - This implementation aims to combine the structural sharing of `LeveledGSS` with the
-            fast accumulator operations of `LeveledPerAccGSS`.
-          """
-          _inner: LeveledGSS[T, int]
-          _id_to_acc: Dict[int, Acc]
-          _next_id: int
-          _is_canonical: bool = field(repr=False, default=True)
-
-          # ------------------------------
-          # Constructors and serialization
-          # ------------------------------
-          @classmethod
-          def empty(cls: Type["FactoredLeveledGSS[T, Acc]"]) -> "FactoredLeveledGSS[T, Acc]":
-              return cls(
-                  _inner=LeveledGSS.empty(),
-                  _id_to_acc={},
-                  _next_id=0,
-                  _is_canonical=True,
-              )
-
-          @classmethod
-          def from_stacks(cls: Type["FactoredLeveledGSS[T, Acc]"], stacks: List[Tuple[List[T], Acc]]) -> "FactoredLeveledGSS[T, Acc]":
-              # Use ReferenceGSS to merge duplicates first, ensuring canonical input stacks.
-              canonical_stacks = ReferenceGSS(stacks)._stacks
-
-              acc_to_id: Dict[Acc, int] = {}
-              id_to_acc: Dict[int, Acc] = {}
-              next_id = 0
-              inner_stacks: List[Tuple[List[T], int]] = []
-
-              for vals, acc in canonical_stacks:
-                  if acc not in acc_to_id:
-                      acc_to_id[acc] = next_id
-                      id_to_acc[next_id] = acc
-                      next_id += 1
-                  inner_stacks.append((vals, acc_to_id[acc]))
-
-              inner_gss = LeveledGSS.from_stacks(inner_stacks)
-              return cls(
-                  _inner=inner_gss,
-                  _id_to_acc=id_to_acc,
-                  _next_id=next_id,
-                  _is_canonical=True,
-              )
-
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              # This method must produce a canonical list, so it resolves the lazy mappings.
-              result_stacks: List[Tuple[List[T], Acc]] = []
-              for path, acc_id in self._inner.to_stacks():
-                  if acc_id in self._id_to_acc:
-                      acc = self._id_to_acc[acc_id]
-                      result_stacks.append((path, acc))
-
-              # Use ReferenceGSS to merge stacks that might now have identical paths and
-              # accumulators, and to sort into a canonical order.
-              return ReferenceGSS.from_stacks(result_stacks).to_stacks()
-
-          # ------------------------------
-          # Core stack operations
-          # ------------------------------
-          def push(self, value: T) -> "FactoredLeveledGSS[T, Acc]":
-              if self.is_empty():
-                  return self
-              new_inner = self._inner.push(value)
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
-
-          def pop(self) -> "FactoredLeveledGSS[T, Acc]":
-              if self.is_empty():
-                  return self
-              new_inner = self._inner.pop()
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
-
-          def popn(self, n: int) -> "FactoredLeveledGSS[T, Acc]":
-              if n <= 0 or self.is_empty():
-                  return self
-              new_inner = self._inner.popn(n)
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
-
-          def is_empty(self) -> bool:
-              # If the accumulator map is empty, no stacks can exist.
-              # If the inner graph is empty, no stacks can exist.
-              return not self._id_to_acc or self._inner.is_empty()
-
-          def isolate(self, value: Optional[T]) -> "FactoredLeveledGSS[T, Acc]":
-              if self.is_empty():
-                  return self
-              new_inner = self._inner.isolate(value)
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
-
-          def isolate_many(self, values: Iterable[Optional[T]]) -> "FactoredLeveledGSS[T, Acc]":
-              if self.is_empty():
-                  return self
-              new_inner = self._inner.isolate_many(values)
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
-
-          # ------------------------------
-          # Accumulator transforms (Lazy)
-          # ------------------------------
-          def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
-              new_id_to_acc: Dict[int, NewAcc] = {
-                  id: func(acc) for id, acc in self._id_to_acc.items()
-              }
-              return FactoredLeveledGSS(
-                  _inner=self._inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=self._next_id,
-                  _is_canonical=False,
-              )
-
-          def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> "FactoredLeveledGSS[T, Acc]":
-              new_id_to_acc = {
-                  id: acc for id, acc in self._id_to_acc.items() if predicate(acc)
-              }
-              return FactoredLeveledGSS(
-                  _inner=self._inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=self._next_id,
-                  _is_canonical=False,
-              )
-
-          def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
-              new_id_to_acc: Dict[int, NewAcc] = {}
-              for id, acc in self._id_to_acc.items():
-                  new_acc = mutator(acc)
-                  if new_acc is not None:
-                      new_id_to_acc[id] = new_acc
-              return FactoredLeveledGSS(
-                  _inner=self._inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=self._next_id,
-                  _is_canonical=False,
-              )
-
-          # ------------------------------
-          # Merge operations
-          # ------------------------------
-          def merge(self, other: "FactoredLeveledGSS[T, Acc]") -> "FactoredLeveledGSS[T, Acc]":
-              if not isinstance(other, FactoredLeveledGSS):
-                  # Fallback for merging with other GSS types
-                  return FactoredLeveledGSS.from_stacks(self.to_stacks() + other.to_stacks())
-
-              if self.is_empty():
-                  return other
-              if other.is_empty():
-                  return self
-
-              # Lazy merge: create a disjoint union of ID spaces and merge the inner graphs.
-              # The resulting accumulator map may be non-canonical.
-              offset = self._next_id
-              other_inner_remapped = other._inner.apply(lambda old_id: old_id + offset)
-              new_inner = self._inner.merge(other_inner_remapped)
-
-              new_id_to_acc = dict(self._id_to_acc)
-              for other_id, other_acc in other._id_to_acc.items():
-                  new_id_to_acc[other_id + offset] = other_acc
-
-              new_next_id = self._next_id + other._next_id
-
-              return FactoredLeveledGSS(
-                  _inner=new_inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=new_next_id,
-                  _is_canonical=False,
-              )
-
-          # ------------------------------
-          # Structure-level helpers
-          # ------------------------------
-          def peek(self) -> Set[T]:
-              return self._inner.peek()
-
-          def reduce_acc(self) -> Optional[Acc]:
-              # This operates on the potentially non-canonical accumulator map.
-              unique_accs = list(set(self._id_to_acc.values()))
-              if not unique_accs:
-                  return None
-              return reduce(lambda a, b: a.merge(b), unique_accs)
-
-          def canonicalize(self) -> "FactoredLeveledGSS[T, Acc]":
-              """
-              Forces the GSS into a canonical state. This involves:
-              1. Pruning any parts of the inner graph that refer to deleted accumulator IDs.
-              2. Compacting the accumulator map so that each unique accumulator has exactly one ID.
-              3. Applying the ID remapping to the inner graph.
-              This can be an expensive operation and is performed lazily.
-              """
-              if self._is_canonical:
-                  return self
-
-              # 1. Prune dead IDs from inner GSS
-              surviving_old_ids = set(self._id_to_acc.keys())
-              pruned_inner = self._inner.prune(lambda old_id: old_id in surviving_old_ids)
-
-              # 2. Build remapping for compaction
-              new_id_to_acc: Dict[int, Acc] = {}
-              acc_to_new_id: Dict[Acc, int] = {}
-              remapping: Dict[int, int] = {}
-              next_id = 0
-
-              # Sort for deterministic ID assignment
-              sorted_old_ids = sorted(list(surviving_old_ids))
-
-              for old_id in sorted_old_ids:
-                  acc = self._id_to_acc[old_id]
-                  if acc not in acc_to_new_id:
-                      new_id = next_id
-                      acc_to_new_id[acc] = new_id
-                      new_id_to_acc[new_id] = acc
-                      next_id += 1
-                  remapping[old_id] = acc_to_new_id[acc]
-
-              # 3. Apply remapping to the inner graph
-              remapped_inner = pruned_inner.apply(lambda old_id: remapping[old_id])
-
-              return FactoredLeveledGSS(
-                  _inner=remapped_inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=next_id,
-                  _is_canonical=True,
-              )
-
-          # ------------------------------
-          # LeveledGSS-specific (drop-in) extras
-          # ------------------------------
-          def fuse(self, levels: Optional[int | Literal["to_interface"]] = None, memo: Optional[Dict] = None) -> "FactoredLeveledGSS[T, Acc]":
-              new_inner = self._inner.fuse(levels=levels, memo=memo)
-              if new_inner is self._inner:
-                  return self
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
-
-          def stats(self) -> LeveledGSSStats[T, Acc]:
-              """
-              Computes statistics. Structural stats are from the inner graph, while
-              accumulator stats are from the (potentially non-canonical) outer map.
-              """
-              struct_stats = self._inner.stats()
               
-              # Override accumulator stats with info from the outer map
-              unique_accs = set(self._id_to_acc.values())
-              
-              return LeveledGSSStats(
-                  top_values=struct_stats.top_values,
-                  num_upperbranch_nodes=struct_stats.num_upperbranch_nodes,
-                  num_interface_nodes=struct_stats.num_interface_nodes,
-                  num_lower_nodes=struct_stats.num_lower_nodes,
-                  total_unique_nodes=struct_stats.total_unique_nodes,
-                  upper_edges=struct_stats.upper_edges,
-                  interface_to_lower_edges=struct_stats.interface_to_lower_edges,
-                  lower_edges=struct_stats.lower_edges,
-                  total_edges=struct_stats.total_edges,
-                  max_upper_depth=struct_stats.max_upper_depth,
-                  max_lower_depth=struct_stats.max_lower_depth,
-                  distinct_values_count=struct_stats.distinct_values_count,
-                  distinct_values=struct_stats.distinct_values,
-                  unique_accumulators_count=len(unique_accs),
-                  unique_accumulators=unique_accs,
-                  total_accumulator_instances=struct_stats.total_accumulator_instances,
-                  num_upper_with_empty=struct_stats.num_upper_with_empty,
-                  num_interfaces_with_empty=struct_stats.num_interfaces_with_empty,
-                  num_lower_terminal_nodes=struct_stats.num_lower_terminal_nodes,
-                  num_interface_implicit_terminals=struct_stats.num_interface_implicit_terminals,
-                  num_multi_depth_slots_upper=struct_stats.num_multi_depth_slots_upper,
-                  num_multi_depth_slots_lower=struct_stats.num_multi_depth_slots_lower,
-                  max_multiplicity_per_value_upper=struct_stats.max_multiplicity_per_value_upper,
-                  max_multiplicity_per_value_lower=struct_stats.max_multiplicity_per_value_lower,
-                  average_in_degree=struct_stats.average_in_degree,
-                  max_in_degree=struct_stats.max_in_degree,
-                  structural_sharing_factor=struct_stats.structural_sharing_factor,
-                  promotable_upper_nodes=struct_stats.promotable_upper_nodes,
-              )
-
-          def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
-              lines = []
-              lines.append("--- FactoredLeveledGSS ---")
-              lines.append(f"Canonical: {self._is_canonical}, Next ID: {self._next_id}")
-              lines.append("Accumulator Map:")
-              if not self._id_to_acc:
-                  lines.append("  (empty)")
-              else:
-                  for id, acc in sorted(self._id_to_acc.items()):
-                      lines.append(f"  ID {id} -> {acc!r}")
-              
-              lines.append("\n--- Inner LeveledGSS[T, int] ---")
-              inner_str = self._inner.to_graph_string(memo=memo, upper_only=upper_only)
-              lines.append(inner_str)
-              return "\n".join(lines)
+              accs = iter(self._parts.keys())
+              return reduce(lambda a, b: a.merge(b), accs)
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: simple
@@ -6295,11 +5652,20 @@ messages:
       ```
     metadata:
       filename: python/gss_tester/implementations/leveled_per_acc_impl.py
-  - user: Create a simple version of `python/gss_tester/implementations/leveled_per_acc_impl.py`,
-      one that doesn't rely on python/gss_tester/implementations/leveled_impl.py.
-      It should be much simpler than python/gss_tester/implementations/leveled_impl.py
-      because basically it uses internally a variation of LeveledGSS that does away
-      with Acc/Upper/Interface and such, just Lower nodes.
+  - user: |-
+      Weirdly, python/gss_tester/implementations/leveled_per_acc_impl.py can be faster than python/gss_tester/implementations/leveled_impl.py.
+      I suspect it's for the simple reason that `apply`, `prune`, and `apply_and_prune` are much faster when we don't always have to go through the whole top part of the GSS (down to the interfaces).
+      However, it can be slower in other cases.
+      I want the best of both worlds. Let's implement that.
+      Create a new implementation.
+
+      Store accs outside the nodes. In the nodes, store a placeholder.
+      How will we handle merges, then? Figure it out.
+      What about pruning? I guess we could wait and see whether any nodes are *actually* pruned before we walk the whole tree...
+      But then if *any* nodes are pruned then we have to walk the *whole* top part of the tree, down to the interfaces.
+      We must avoid this if at all possible.
+
+      Think about it.
     metadata:
   - user: |-
       Mode instruction: For this turn, output the full, final contents of any created or modified files.
@@ -6318,343 +5684,343 @@ messages:
       mode: simple
       phase: default
   - assistant: |-
-      Okay, I've designed a new GSS implementation that aims to provide the "best of both worlds" by combining the structural sharing of `LeveledGSS` with the fast accumulator transformations of `LeveledPerAccGSS`.
+      Answering your request to create a simpler version of `leveled_per_acc_impl.py` that is self-contained and does not depend on `leveled_impl.py`.
 
-      This new implementation, `FactoredLeveledGSS`, works by "factoring out" the accumulators from the main graph structure. It uses a `LeveledGSS[T, int]` internally to represent the stack structures, and a separate `Dict[int, Acc]` to map integer IDs back to the actual accumulator objects.
+      This implementation follows the per-accumulator partitioning strategy but uses a much simpler, internal GSS representation that only tracks stack structure without involving accumulators. This fulfills the core idea of `LeveledPerAccGSS` while significantly reducing complexity by removing the `UpperBranch`/`Interface`/`Lower` node distinction from the original `LeveledGSS`.
 
-      This approach makes `apply`, `prune`, and `apply_and_prune` operations very fast, as they only need to modify the dictionary rather than traversing the graph. The trade-off is that this introduces a "lazy" or "non-canonical" state. The cost of resolving this state is deferred until it's necessary, such as when merging GSS instances or serializing to a canonical list of stacks.
+      Here is the full code for the new `python/gss_tester/implementations/leveled_per_acc_impl.py`:
 
-      Here is the full implementation in a new file.
-
-      ```python "python/gss_tester/implementations/factored_leveled_impl.py"
+      ```python "python/gss_tester/implementations/leveled_per_acc_impl.py"
       from __future__ import annotations
 
+      from collections import defaultdict
       from dataclasses import dataclass, field
       from functools import reduce
-      from typing import (Any, Callable, Dict, Generic, Iterable, List, Optional,
-                          Set, Tuple, Type, TypeVar, Literal)
+      from itertools import chain
+      from typing import (Any, Callable, Dict, Generic, Iterable, Iterator, List,
+                          Optional, Set, Tuple, Type, TypeVar)
 
-      from ..interface import GSS, Acc, NewAcc, T
-      from .leveled_impl import LeveledGSS, LeveledGSSStats
+      from ..interface import GSS, Acc, Mergeable, NewAcc, T
       from .reference_impl import ReferenceGSS
 
+      # ------------------------------
+      # Internal, accumulator-less GSS implementation
+      # ------------------------------
 
-      @dataclass(eq=False)
-      class FactoredLeveledGSS(GSS[T, Acc], Generic[T, Acc]):
-          """
-          A GSS implementation that factors accumulators out of the core graph structure.
+      @dataclass(frozen=True, eq=True)
+      class _Node(Generic[T]):
+          """Internal node for representing a set of stack suffixes (a trie)."""
+          children: Dict[T, Dict[int, "_Node[T]"]]
+          empty: bool  # True if a stack can end at this node
+          _max_depth: int = field(init=False)
 
-          - It uses a `LeveledGSS[T, int]` as its internal graph representation.
-          - Accumulators (`Acc`) are stored in a separate map from integer IDs to `Acc` instances.
-          - This design makes accumulator transformations (`apply`, `prune`) very fast, as they
-            only need to modify the external map, not traverse the graph structure.
-          - The cost of this factorization is paid during `merge` operations or when a
-            canonical representation is required (`to_stacks`), as accumulator IDs may need
-            to be remapped and the graph structure potentially updated to reflect merged
-            accumulator values.
-          - This implementation aims to combine the structural sharing of `LeveledGSS` with the
-            fast accumulator operations of `LeveledPerAccGSS`.
-          """
-          _inner: LeveledGSS[T, int]
-          _id_to_acc: Dict[int, Acc]
-          _next_id: int
-          _is_canonical: bool = field(repr=False, default=True)
+          def __post_init__(self):
+              if not self.children:
+                  depth = 0
+              else:
+                  depth = max(child._max_depth for child in self._all_children()) + 1
+              object.__setattr__(self, '_max_depth', depth)
 
-          # ------------------------------
-          # Constructors and serialization
-          # ------------------------------
+          def _all_children(self) -> Iterator["_Node[T]"]:
+              for children_at_depth in self.children.values():
+                  yield from children_at_depth.values()
+
+      def _merge_children_by_depth(
+          c1: Dict[T, Dict[int, _Node[T]]],
+          c2: Dict[T, Dict[int, _Node[T]]],
+          merge_func: Callable[[_Node[T], _Node[T]], _Node[T]],
+      ) -> Dict[T, Dict[int, _Node[T]]]:
+          if c1 is c2:
+              return c1
+          merged_children: Dict[T, Dict[int, _Node[T]]] = {}
+          all_vals = c1.keys() | c2.keys()
+          for v in all_vals:
+              nodes_by_depth: Dict[int, list[_Node[T]]] = defaultdict(list)
+              children_c1 = c1.get(v, {}).items()
+              children_c2 = c2.get(v, {}).items()
+              for depth, child in chain(children_c1, children_c2):
+                  nodes_by_depth[depth].append(child)
+              if not nodes_by_depth:
+                  continue
+
+              v_out: Dict[int, _Node[T]] = {}
+              for nodes in nodes_by_depth.values():
+                  merged = reduce(merge_func, nodes)
+                  v_out[merged._max_depth] = merged
+              merged_children[v] = v_out
+          return merged_children
+
+      def _merge_nodes(n1: _Node[T], n2: _Node[T]) -> _Node[T]:
+          if n1 is n2:
+              return n1
+          new_empty = n1.empty or n2.empty
+          merged_children = _merge_children_by_depth(n1.children, n2.children, _merge_nodes)
+          return _Node(children=merged_children, empty=new_empty)
+
+      @dataclass(frozen=True, eq=True)
+      class _InternalGSS(Generic[T]):
+          """A GSS-like structure for a set of stacks, without accumulators."""
+          root: _Node[T]
+
           @classmethod
-          def empty(cls: Type["FactoredLeveledGSS[T, Acc]"]) -> "FactoredLeveledGSS[T, Acc]":
-              return cls(
-                  _inner=LeveledGSS.empty(),
-                  _id_to_acc={},
-                  _next_id=0,
-                  _is_canonical=True,
-              )
+          def empty(cls) -> "_InternalGSS[T]":
+              return cls(_Node(children={}, empty=False))
 
           @classmethod
-          def from_stacks(cls: Type["FactoredLeveledGSS[T, Acc]"], stacks: List[Tuple[List[T], Acc]]) -> "FactoredLeveledGSS[T, Acc]":
-              # Use ReferenceGSS to merge duplicates first, ensuring canonical input stacks.
-              canonical_stacks = ReferenceGSS(stacks)._stacks
+          def from_stacks(cls, stacks: List[List[T]]) -> "_InternalGSS[T]":
+              if not stacks:
+                  return cls.empty()
 
-              acc_to_id: Dict[Acc, int] = {}
-              id_to_acc: Dict[int, Acc] = {}
-              next_id = 0
-              inner_stacks: List[Tuple[List[T], int]] = []
+              trie: Dict[Any, Any] = {"#empty": False}
+              for stack in stacks:
+                  if not stack:
+                      trie["#empty"] = True
+                      continue
+                  node = trie
+                  for item in reversed(stack):
+                      node = node.setdefault(item, {"#empty": False})
+                  node["#empty"] = True
 
-              for vals, acc in canonical_stacks:
-                  if acc not in acc_to_id:
-                      acc_to_id[acc] = next_id
-                      id_to_acc[next_id] = acc
-                      next_id += 1
-                  inner_stacks.append((vals, acc_to_id[acc]))
+              def build_node(sub_trie: Dict) -> _Node[T]:
+                  is_empty = sub_trie.pop("#empty", False)
+                  children: Dict[T, Dict[int, _Node[T]]] = {}
+                  for val, next_trie in sub_trie.items():
+                      child_node = build_node(next_trie)
+                      children[val] = {child_node._max_depth: child_node}
+                  return _Node(children=children, empty=is_empty)
 
-              inner_gss = LeveledGSS.from_stacks(inner_stacks)
-              return cls(
-                  _inner=inner_gss,
-                  _id_to_acc=id_to_acc,
-                  _next_id=next_id,
-                  _is_canonical=True,
-              )
+              return cls(build_node(trie))
 
-          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
-              # This method must produce a canonical list, so it resolves the lazy mappings.
-              result_stacks: List[Tuple[List[T], Acc]] = []
-              for path, acc_id in self._inner.to_stacks():
-                  if acc_id in self._id_to_acc:
-                      acc = self._id_to_acc[acc_id]
-                      result_stacks.append((path, acc))
+          def to_stacks(self) -> List[List[T]]:
+              res: List[List[T]] = []
+              def dfs(node: _Node[T], prefix: List[T]):
+                  if node.empty:
+                      res.append(list(reversed(prefix)))
+                  for val, children_at_depths in node.children.items():
+                      for child in children_at_depths.values():
+                          dfs(child, prefix + [val])
+              dfs(self.root, [])
+              return res
 
-              # Use ReferenceGSS to merge stacks that might now have identical paths and
-              # accumulators, and to sort into a canonical order.
-              return ReferenceGSS.from_stacks(result_stacks).to_stacks()
-
-          # ------------------------------
-          # Core stack operations
-          # ------------------------------
-          def push(self, value: T) -> "FactoredLeveledGSS[T, Acc]":
+          def push(self, value: T) -> "_InternalGSS[T]":
               if self.is_empty():
                   return self
-              new_inner = self._inner.push(value)
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
+              new_root = _Node(children={value: {self.root._max_depth: self.root}}, empty=False)
+              return _InternalGSS(new_root)
 
-          def pop(self) -> "FactoredLeveledGSS[T, Acc]":
+          def pop(self) -> "_InternalGSS[T]":
+              all_children = list(self.root._all_children())
+              if not all_children:
+                  return self.empty()
+              merged_root = reduce(_merge_nodes, all_children)
+              return _InternalGSS(merged_root)
+
+          def popn(self, n: int) -> "_InternalGSS[T]":
+              if n <= 0:
+                  return self
               if self.is_empty():
                   return self
-              new_inner = self._inner.pop()
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
-
-          def popn(self, n: int) -> "FactoredLeveledGSS[T, Acc]":
-              if n <= 0 or self.is_empty():
-                  return self
-              new_inner = self._inner.popn(n)
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
+              memo: Dict[Tuple[int, int], _Node[T]] = {}
+              def _popn_node(node: _Node[T], k: int) -> _Node[T]:
+                  if k == 0:
+                      return node
+                  key = (id(node), k)
+                  if key in memo:
+                      return memo[key]
+                  all_children = list(node._all_children())
+                  if not all_children:
+                      res = _Node(children={}, empty=False)
+                      memo[key] = res
+                      return res
+                  popped_children = [_popn_node(child, k - 1) for child in all_children]
+                  res = reduce(_merge_nodes, popped_children)
+                  memo[key] = res
+                  return res
+              return _InternalGSS(_popn_node(self.root, n))
 
           def is_empty(self) -> bool:
-              # If the accumulator map is empty, no stacks can exist.
-              # If the inner graph is empty, no stacks can exist.
-              return not self._id_to_acc or self._inner.is_empty()
+              return not self.root.children and not self.root.empty
 
-          def isolate(self, value: Optional[T]) -> "FactoredLeveledGSS[T, Acc]":
+          def isolate(self, value: Optional[T]) -> "_InternalGSS[T]":
+              if value is None:
+                  if self.root.empty:
+                      return _InternalGSS(_Node(children={}, empty=True))
+                  else:
+                      return self.empty()
+              children_for_v = self.root.children.get(value)
+              if not children_for_v:
+                  return self.empty()
+              new_root = _Node(children={value: children_for_v}, empty=False)
+              return _InternalGSS(new_root)
+
+          def isolate_many(self, values: Iterable[Optional[T]]) -> "_InternalGSS[T]":
+              values_set = set(values)
+              new_empty = None in values_set and self.root.empty
+              filtered_children = {
+                  v: kids for v, kids in self.root.children.items() if v in values_set
+              }
+              new_root = _Node(children=filtered_children, empty=new_empty)
+              return _InternalGSS(new_root)
+
+          def merge(self, other: "_InternalGSS[T]") -> "_InternalGSS[T]":
+              if self is other: return self
+              if self.is_empty(): return other
+              if other.is_empty(): return self
+              return _InternalGSS(_merge_nodes(self.root, other.root))
+
+          def peek(self) -> Set[T]:
+              return set(self.root.children.keys())
+
+      # ------------------------------
+      # Public GSS implementation
+      # ------------------------------
+
+      @dataclass(eq=False)
+      class LeveledPerAccGSS(GSS[T, Acc], Generic[T, Acc]):
+          """
+          A GSS implementation that partitions the graph by accumulator.
+          It uses an internal, simplified, accumulator-less GSS representation
+          for each partition, which can be efficient when there are few distinct
+          accumulators.
+          """
+          _parts: Dict[Acc, _InternalGSS[T]]
+
+          def __post_init__(self):
+              self._parts = {a: g for a, g in self._parts.items() if not g.is_empty()}
+
+          @classmethod
+          def from_stacks(cls: Type["LeveledPerAccGSS[T, Acc]"], stacks: List[Tuple[List[T], Acc]]) -> "LeveledPerAccGSS[T, Acc]":
+              by_acc: Dict[Acc, List[List[T]]] = defaultdict(list)
+              for vals, acc in stacks:
+                  by_acc[acc].append(list(vals))
+              parts = {
+                  acc: _InternalGSS.from_stacks(acc_stacks)
+                  for acc, acc_stacks in by_acc.items()
+              }
+              return cls(_parts=parts)
+
+          def to_stacks(self) -> List[Tuple[List[T], Acc]]:
+              out: List[Tuple[List[T], Acc]] = []
+              for acc, inner in self._parts.items():
+                  for vals in inner.to_stacks():
+                      out.append((vals, acc))
+              return ReferenceGSS.from_stacks(out).to_stacks()
+
+          def push(self, value: T) -> "LeveledPerAccGSS[T, Acc]":
               if self.is_empty():
                   return self
-              new_inner = self._inner.isolate(value)
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
+              return LeveledPerAccGSS({acc: g.push(value) for acc, g in self._parts.items()})
 
-          def isolate_many(self, values: Iterable[Optional[T]]) -> "FactoredLeveledGSS[T, Acc]":
+          def pop(self) -> "LeveledPerAccGSS[T, Acc]":
               if self.is_empty():
                   return self
-              new_inner = self._inner.isolate_many(values)
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
+              return LeveledPerAccGSS({acc: g.pop() for acc, g in self._parts.items()})
 
-          # ------------------------------
-          # Accumulator transforms (Lazy)
-          # ------------------------------
+          def popn(self, n: int) -> "LeveledPerAccGSS[T, Acc]":
+              if n <= 0 or self.is_empty():
+                  return self
+              return LeveledPerAccGSS({acc: g.popn(n) for acc, g in self._parts.items()})
+
+          def is_empty(self) -> bool:
+              return not self._parts
+
+          def isolate(self, value: Optional[T]) -> "LeveledPerAccGSS[T, Acc]":
+              if self.is_empty():
+                  return self
+              return LeveledPerAccGSS({acc: g.isolate(value) for acc, g in self._parts.items()})
+
+          def isolate_many(self, values: Iterable[Optional[T]]) -> "LeveledPerAccGSS[T, Acc]":
+              valset = set(values)
+              if not valset or self.is_empty():
+                  return self.empty()
+              return LeveledPerAccGSS({acc: g.isolate_many(valset) for acc, g in self._parts.items()})
+
           def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
-              new_id_to_acc: Dict[int, NewAcc] = {
-                  id: func(acc) for id, acc in self._id_to_acc.items()
-              }
-              return FactoredLeveledGSS(
-                  _inner=self._inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=self._next_id,
-                  _is_canonical=False,
-              )
+              new_parts: Dict[NewAcc, _InternalGSS[T]] = {}
+              for acc, g in self._parts.items():
+                  new_acc = func(acc)
+                  if new_acc in new_parts:
+                      new_parts[new_acc] = new_parts[new_acc].merge(g)
+                  else:
+                      new_parts[new_acc] = g
+              return LeveledPerAccGSS(new_parts)  # type: ignore[arg-type]
 
-          def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> "FactoredLeveledGSS[T, Acc]":
-              new_id_to_acc = {
-                  id: acc for id, acc in self._id_to_acc.items() if predicate(acc)
-              }
-              return FactoredLeveledGSS(
-                  _inner=self._inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=self._next_id,
-                  _is_canonical=False,
-              )
+          def prune(self, predicate: Callable[[Acc], bool], memo: Optional[Dict[int, Any]] = None) -> "LeveledPerAccGSS[T, Acc]":
+              return LeveledPerAccGSS({acc: g for acc, g in self._parts.items() if predicate(acc)})
 
           def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
-              new_id_to_acc: Dict[int, NewAcc] = {}
-              for id, acc in self._id_to_acc.items():
-                  new_acc = mutator(acc)
-                  if new_acc is not None:
-                      new_id_to_acc[id] = new_acc
-              return FactoredLeveledGSS(
-                  _inner=self._inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=self._next_id,
-                  _is_canonical=False,
-              )
+              cache: Dict[int, Optional[NewAcc]] = {} if memo is None else memo
+              def decide(a: Acc) -> Optional[NewAcc]:
+                  k = id(a)
+                  if k in cache:
+                      return cache[k]
+                  r = mutator(a)
+                  cache[k] = r
+                  return r
 
-          # ------------------------------
-          # Merge operations
-          # ------------------------------
-          def merge(self, other: "FactoredLeveledGSS[T, Acc]") -> "FactoredLeveledGSS[T, Acc]":
-              if not isinstance(other, FactoredLeveledGSS):
-                  # Fallback for merging with other GSS types
-                  return FactoredLeveledGSS.from_stacks(self.to_stacks() + other.to_stacks())
+              new_parts: Dict[NewAcc, _InternalGSS[T]] = {}
+              for acc, g in self._parts.items():
+                  new_acc = decide(acc)
+                  if new_acc is None:
+                      continue
+                  if new_acc in new_parts:
+                      new_parts[new_acc] = new_parts[new_acc].merge(g)
+                  else:
+                      new_parts[new_acc] = g
+              return LeveledPerAccGSS(new_parts)  # type: ignore[arg-type]
 
-              if self.is_empty():
-                  return other
-              if other.is_empty():
-                  return self
+          def merge(self, other: "LeveledPerAccGSS[T, Acc]") -> "LeveledPerAccGSS[T, Acc]":
+              if self is other: return self
+              if self.is_empty(): return other
+              if other.is_empty(): return self
+              
+              merged: Dict[Acc, _InternalGSS[T]] = dict(self._parts)
+              for acc, g in other._parts.items():
+                  if acc in merged:
+                      merged[acc] = merged[acc].merge(g)
+                  else:
+                      merged[acc] = g
+              return LeveledPerAccGSS(merged)
 
-              # Lazy merge: create a disjoint union of ID spaces and merge the inner graphs.
-              # The resulting accumulator map may be non-canonical.
-              offset = self._next_id
-              other_inner_remapped = other._inner.apply(lambda old_id: old_id + offset)
-              new_inner = self._inner.merge(other_inner_remapped)
+          @classmethod
+          def merge_many(cls: Type["LeveledPerAccGSS[T, Acc]"], gss_list: Iterable["LeveledPerAccGSS[T, Acc]"]) -> "LeveledPerAccGSS[T, Acc]":
+              result: Dict[Acc, _InternalGSS[T]] = {}
+              for g in gss_list:
+                  for acc, inner in g._parts.items():
+                      if acc in result:
+                          result[acc] = result[acc].merge(inner)
+                      else:
+                          result[acc] = inner
+              return cls(result)
 
-              new_id_to_acc = dict(self._id_to_acc)
-              for other_id, other_acc in other._id_to_acc.items():
-                  new_id_to_acc[other_id + offset] = other_acc
-
-              new_next_id = self._next_id + other._next_id
-
-              return FactoredLeveledGSS(
-                  _inner=new_inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=new_next_id,
-                  _is_canonical=False,
-              )
-
-          # ------------------------------
-          # Structure-level helpers
-          # ------------------------------
           def peek(self) -> Set[T]:
-              return self._inner.peek()
+              tops: Set[T] = set()
+              for g in self._parts.values():
+                  tops.update(g.peek())
+              return tops
 
           def reduce_acc(self) -> Optional[Acc]:
-              # This operates on the potentially non-canonical accumulator map.
-              unique_accs = list(set(self._id_to_acc.values()))
-              if not unique_accs:
+              if not self._parts:
                   return None
-              return reduce(lambda a, b: a.merge(b), unique_accs)
-
-          def canonicalize(self) -> "FactoredLeveledGSS[T, Acc]":
-              """
-              Forces the GSS into a canonical state. This involves:
-              1. Pruning any parts of the inner graph that refer to deleted accumulator IDs.
-              2. Compacting the accumulator map so that each unique accumulator has exactly one ID.
-              3. Applying the ID remapping to the inner graph.
-              This can be an expensive operation and is performed lazily.
-              """
-              if self._is_canonical:
-                  return self
-
-              # 1. Prune dead IDs from inner GSS
-              surviving_old_ids = set(self._id_to_acc.keys())
-              pruned_inner = self._inner.prune(lambda old_id: old_id in surviving_old_ids)
-
-              # 2. Build remapping for compaction
-              new_id_to_acc: Dict[int, Acc] = {}
-              acc_to_new_id: Dict[Acc, int] = {}
-              remapping: Dict[int, int] = {}
-              next_id = 0
-
-              # Sort for deterministic ID assignment
-              sorted_old_ids = sorted(list(surviving_old_ids))
-
-              for old_id in sorted_old_ids:
-                  acc = self._id_to_acc[old_id]
-                  if acc not in acc_to_new_id:
-                      new_id = next_id
-                      acc_to_new_id[acc] = new_id
-                      new_id_to_acc[new_id] = acc
-                      next_id += 1
-                  remapping[old_id] = acc_to_new_id[acc]
-
-              # 3. Apply remapping to the inner graph
-              remapped_inner = pruned_inner.apply(lambda old_id: remapping[old_id])
-
-              return FactoredLeveledGSS(
-                  _inner=remapped_inner,
-                  _id_to_acc=new_id_to_acc,
-                  _next_id=next_id,
-                  _is_canonical=True,
-              )
-
-          # ------------------------------
-          # LeveledGSS-specific (drop-in) extras
-          # ------------------------------
-          def fuse(self, levels: Optional[int | Literal["to_interface"]] = None, memo: Optional[Dict] = None) -> "FactoredLeveledGSS[T, Acc]":
-              new_inner = self._inner.fuse(levels=levels, memo=memo)
-              if new_inner is self._inner:
-                  return self
-              return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
-
-          def stats(self) -> LeveledGSSStats[T, Acc]:
-              """
-              Computes statistics. Structural stats are from the inner graph, while
-              accumulator stats are from the (potentially non-canonical) outer map.
-              """
-              struct_stats = self._inner.stats()
               
-              # Override accumulator stats with info from the outer map
-              unique_accs = set(self._id_to_acc.values())
-              
-              return LeveledGSSStats(
-                  top_values=struct_stats.top_values,
-                  num_upperbranch_nodes=struct_stats.num_upperbranch_nodes,
-                  num_interface_nodes=struct_stats.num_interface_nodes,
-                  num_lower_nodes=struct_stats.num_lower_nodes,
-                  total_unique_nodes=struct_stats.total_unique_nodes,
-                  upper_edges=struct_stats.upper_edges,
-                  interface_to_lower_edges=struct_stats.interface_to_lower_edges,
-                  lower_edges=struct_stats.lower_edges,
-                  total_edges=struct_stats.total_edges,
-                  max_upper_depth=struct_stats.max_upper_depth,
-                  max_lower_depth=struct_stats.max_lower_depth,
-                  distinct_values_count=struct_stats.distinct_values_count,
-                  distinct_values=struct_stats.distinct_values,
-                  unique_accumulators_count=len(unique_accs),
-                  unique_accumulators=unique_accs,
-                  total_accumulator_instances=struct_stats.total_accumulator_instances,
-                  num_upper_with_empty=struct_stats.num_upper_with_empty,
-                  num_interfaces_with_empty=struct_stats.num_interfaces_with_empty,
-                  num_lower_terminal_nodes=struct_stats.num_lower_terminal_nodes,
-                  num_interface_implicit_terminals=struct_stats.num_interface_implicit_terminals,
-                  num_multi_depth_slots_upper=struct_stats.num_multi_depth_slots_upper,
-                  num_multi_depth_slots_lower=struct_stats.num_multi_depth_slots_lower,
-                  max_multiplicity_per_value_upper=struct_stats.max_multiplicity_per_value_upper,
-                  max_multiplicity_per_value_lower=struct_stats.max_multiplicity_per_value_lower,
-                  average_in_degree=struct_stats.average_in_degree,
-                  max_in_degree=struct_stats.max_in_degree,
-                  structural_sharing_factor=struct_stats.structural_sharing_factor,
-                  promotable_upper_nodes=struct_stats.promotable_upper_nodes,
-              )
-
-          def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
-              lines = []
-              lines.append("--- FactoredLeveledGSS ---")
-              lines.append(f"Canonical: {self._is_canonical}, Next ID: {self._next_id}")
-              lines.append("Accumulator Map:")
-              if not self._id_to_acc:
-                  lines.append("  (empty)")
-              else:
-                  for id, acc in sorted(self._id_to_acc.items()):
-                      lines.append(f"  ID {id} -> {acc!r}")
-              
-              lines.append("\n--- Inner LeveledGSS[T, int] ---")
-              inner_str = self._inner.to_graph_string(memo=memo, upper_only=upper_only)
-              lines.append(inner_str)
-              return "\n".join(lines)
+              accs = iter(self._parts.keys())
+              return reduce(lambda a, b: a.merge(b), accs)
       ```
     metadata:
   - user: |
-      Identified target file 'python/gss_tester/implementations/factored_leveled_impl.py' on fence open line 1:
-      ```python "python/gss_tester/implementations/factored_leveled_impl.py"
+      Identified target file 'python/gss_tester/implementations/leveled_per_acc_impl.py' on fence open line 1:
+      ```python "python/gss_tester/implementations/leveled_per_acc_impl.py"
       Found 1 code blocks.
       Matching against available files:
         1: python/gss_tester/implementations/leveled_per_acc_impl.py
         2: python/gss_tester/interface.py
         3: python/gss_tester/implementations/leveled_impl.py
       --- Phase 1: Processing explicit file paths in fences ---
-      Assigned block to NEW file python/gss_tester/implementations/factored_leveled_impl.py based on explicit fence path.
-      Remaining unassigned blocks: 0, Available files: 3
+      Assigned block to python/gss_tester/implementations/leveled_per_acc_impl.py based on explicit fence path.
+      Remaining unassigned blocks: 0, Available files: 2
       --- Phase 6: Applying changes to assigned files ---
-      Successfully created new file: python/gss_tester/implementations/factored_leveled_impl.py
     metadata:
-  - user: 'Changes committed with message: "New: Implement FactoredLeveledGSS by factoring
-      accumulators out of the LeveledGSS structure"'
+  - user: 'Changes committed with message: "Refactor LeveledPerAccGSS to use a simplified
+      internal accumulator-less GSS structure"'
     metadata:
 ...
