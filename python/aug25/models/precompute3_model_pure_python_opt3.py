@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import heapq
 import collections
-from typing import Dict, List, Tuple, Optional, Union, Set
+from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
 from dataclasses import dataclass, field
 
 from numba import njit
@@ -45,14 +45,13 @@ def _acc_memoize(use_value_cache: bool = True):
         return wrapper
     return decorator
 
-@dataclass
-class DFAState:
-    transitions: Dict[int, int] = field(default_factory=dict)
-    finalizers: Set[int] = field(default_factory=set)
-    possible_future_group_ids: Set[int] = field(default_factory=set)
+class DFAState(NamedTuple):
+    transitions: Dict[int, int]
+    finalizers: Set[int]
+    possible_future_group_ids: Set[int]
 
-@dataclass
-class PyTokenizer:
+
+class PyTokenizer(NamedTuple):
     states: List[DFAState]
     start_state: int
     non_greedy_finalizers: Set[int]
