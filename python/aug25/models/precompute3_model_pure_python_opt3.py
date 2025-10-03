@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
 
 import _sep1 as ffi
+from tqdm import tqdm
 
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
@@ -169,7 +170,7 @@ class ArenaNode:
 
 def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict[NodeID, ArenaNode]:
     arena: Dict[NodeID, ArenaNode] = {}
-    for uid, loaded_node in loaded_arena.items():
+    for uid, loaded_node in tqdm(loaded_arena.items(), desc="Converting arena"):
         new_children: List[ArenaEdge] = []
         llm_bv_union = RangeSet.empty()
         for loaded_edge in loaded_node.children:
