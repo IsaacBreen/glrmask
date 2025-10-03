@@ -219,45 +219,23 @@ def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArena
         if not intermediate_node.children:
             arena[uid] = ArenaNode(children=[], llm_bv_union=llm_bv_union, clean_end=intermediate_node.clean_end)
             continue
+        
+        grouped_edges: Dict[Tuple[int, LLMTokenSet], Tuple[List[ArenaEdgeDest], StateIDSet]] = collections.defaultdict(lambda: ([], RangeSetStates.empty()))
 
-        # Use an iterator to process the list of children and group consecutive compatible edges
-        it = iter(intermediate_node.children)
-        current_edge = next(it)
+        for edge in intermediate_node.children:
+            key = (edge.pop, edge.llm_bv)
+            dests, dest_states_union = grouped_edges[key]
+            dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
+            grouped_edges[key] = (dests, dest_states_union | edge.dests.state_bv)
 
-        group_pop = current_edge.pop
-        group_llm_bv = current_edge.llm_bv
-        group_dests = [ArenaEdgeDest(current_edge.dests.dest_idx, current_edge.dests.state_bv)]
-        group_dest_states_union = current_edge.dests.state_bv
-
-        for next_edge in it:
-            if next_edge.pop == group_pop and next_edge.llm_bv == group_llm_bv:
-                # This edge belongs to the current group. Append its dest.
-                group_dests.append(ArenaEdgeDest(next_edge.dests.dest_idx, next_edge.dests.state_bv))
-                group_dest_states_union |= next_edge.dests.state_bv
-            else:
-                # This edge starts a new group. Finalize the old one first.
-                llm_bv_union |= group_llm_bv
-                new_children.append(ArenaEdge(
-                    pop=group_pop,
-                    llm_bv=group_llm_bv,
-                    dests=group_dests,
-                    dest_states_union=group_dest_states_union,
-                ))
-                
-                # Start the new group with the current edge's properties
-                group_pop = next_edge.pop
-                group_llm_bv = next_edge.llm_bv
-                group_dests = [ArenaEdgeDest(next_edge.dests.dest_idx, next_edge.dests.state_bv)]
-                group_dest_states_union = next_edge.dests.state_bv
-
-        # After the loop, the last group is still in memory and needs to be finalized.
-        llm_bv_union |= group_llm_bv
-        new_children.append(ArenaEdge(
-            pop=group_pop,
-            llm_bv=group_llm_bv,
-            dests=group_dests,
-            dest_states_union=group_dest_states_union,
-        ))
+        for (pop, llm_bv), (dests, dest_states_union) in grouped_edges.items():
+            llm_bv_union |= llm_bv
+            new_children.append(ArenaEdge(
+                pop=pop,
+                llm_bv=llm_bv,
+                dests=dests,
+                dest_states_union=dest_states_union,
+            ))
 
         arena[uid] = ArenaNode(
             children=new_children,
