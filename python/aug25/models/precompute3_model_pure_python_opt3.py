@@ -294,20 +294,6 @@ class PyAcc:
         return self.llm_mask.is_empty()
 
 @dataclass
-class WorkItem:
-    priority: Tuple[int, int, int]
-    node_id: NodeID
-    gss: GSS
-    edge_idx: int
-    dest_idx: int
-    pop_cache: Dict
-
-    def __lt__(self, other: 'WorkItem') -> bool:
-        if not isinstance(other, WorkItem):
-            return NotImplemented
-        return self.priority < other.priority
-
-@dataclass
 class Model(GraphProvider):
     arena: Dict[NodeID, ArenaNode]
     roots_map: Dict[int, NodeID]
@@ -516,23 +502,11 @@ class Model(GraphProvider):
         work_heap = []
         t0 = time.perf_counter()
 
-        def enqueue(node_id: NodeID, gss: GSS, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
+        def enqueue(node_id: NodeID, gss: GSS):
             if gss.is_empty():
                 return
-            priority = (-self.max_depth.get(node_id, 0), edge_idx, dest_idx)
-            item = WorkItem(
-                priority=priority,
-                node_id=node_id,
-                gss=gss,
-                edge_idx=edge_idx,
-                dest_idx=dest_idx,
-                pop_cache=pop_cache if pop_cache is not None else {}
-            )
-            heapq.heappush(work_heap, item)
-
-        def dequeue() -> Tuple[NodeID, GSS, int, int, Dict]:
-            item = heapq.heappop(work_heap)
-            return item.node_id, item.gss, item.edge_idx, item.dest_idx, item.pop_cache
+            priority = (-self.max_depth.get(node_id, 0),)
+            heapq.heappush(work_heap, (priority, node_id, gss))
 
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
@@ -553,7 +527,7 @@ class Model(GraphProvider):
 
         remaining_mask = all_ones
         while work_heap:
-            node, gss_node, start_edge, start_dest, pop_cache = dequeue()
+            _, node, gss_node = heapq.heappop(work_heap)
             gss_acc = gss_node.reduce_acc()
             gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
 
@@ -565,19 +539,17 @@ class Model(GraphProvider):
             if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                 continue
 
-            # max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
-            max_edges, max_dests = (1, 1)
-            edges_proc, dests_proc = 0, 0
+            pop_cache = {}
             peek0_rs = None
 
-            for edge_i in range(start_edge, len(a_node.children)):
-                edge = a_node.children[edge_i]
+            for edge in a_node.children:
                 if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask): continue
                 if edge.pop == 0:
                     if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
                     if edge.dest_states_union.isdisjoint(peek0_rs): continue
 
-                if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+                if edge.pop in pop_cache:
+                    popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
                 else:
                     popped = gss_node.popn(edge.pop)
                     if popped.is_empty():
@@ -587,60 +559,41 @@ class Model(GraphProvider):
                     if not popped_acc or popped_acc.llm_mask.is_empty():
                         pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
                         continue
-                    # Avoid double-peek: call once and reuse both list and RangeSetStates
                     peeked = popped.peek()
                     peek_rs = RangeSetStates.from_indices(peeked)
                     pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
 
                 if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
 
+                popped_filtered = popped
                 if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
                     if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
                     @_acc_memoize(use_value_cache=False)
                     def intersect(acc: PyAcc):
                         new_mask = acc.llm_mask.intersection(edge.llm_bv)
                         return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-                    popped = popped.apply_and_prune(intersect)
-                    if popped.is_empty(): continue
+                    popped_filtered = popped.apply_and_prune(intersect)
+                    if popped_filtered.is_empty(): continue
                 if not peeked: continue
 
-                current_start_dest = start_dest if edge_i == start_edge else 0
-
-                grouped: Dict[int, List[int]] = {}
+                grouped: Dict[int, List[int]] = collections.defaultdict(list)
                 m = edge.state_to_dest
                 for sid in peeked:
                     dest_list = m.get(sid)
-                    if not dest_list: continue
-                    for dest_j in dest_list:
-                        if dest_j < current_start_dest: continue
-                        lst = grouped.get(dest_j)
-                        if lst is None: grouped[dest_j] = [sid]
-                        else: lst.append(sid)
+                    if dest_list:
+                        for dest_j in dest_list:
+                            grouped[dest_j].append(sid)
 
-                # Iterate grouped dests in ascending order for locality
                 for dest_j in sorted(grouped.keys()):
-                    if dests_proc >= max_dests:
-                        enqueue(node, gss_node, edge_i, dest_j, pop_cache)
-                        edges_proc = max_edges
-                        break
+                    sids_for_dest = grouped[dest_j]
                     dest = edge.dests[dest_j]
-                    values_to_keep = grouped[dest_j]
-                    # If all heads survive, reuse popped directly
-                    if len(values_to_keep) == len(peeked):
-                        child_gss = popped
+                    if len(sids_for_dest) == len(peeked):
+                        child_gss = popped_filtered
                     else:
-                        child_gss = popped.isolate_many(values_to_keep)
+                        child_gss = popped_filtered.isolate_many(sids_for_dest)
                     if child_gss.is_empty(): continue
                     d: NodeID = int(dest.dest_idx)
                     enqueue(d, child_gss)
-                    dests_proc += 1
-
-                if edges_proc >= max_edges: break
-                edges_proc += 1
-
-                if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-                    enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
-                    break
         t2 = time.perf_counter()
 
         original_indices = RangeSetOut.empty()
