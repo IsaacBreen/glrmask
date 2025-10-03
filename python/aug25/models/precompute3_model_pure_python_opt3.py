@@ -184,7 +184,14 @@ class ArenaNode:
     llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
     clean_end: bool = False
 
-def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict[NodeID, ArenaNode]:
+def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode], max_depth: Dict[NodeID, int]):
+    for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
+        if not node.children:
+            continue
+        # Sort edges by destination depth (desc) and then pop count (asc)
+        node.children.sort(key=lambda e: (-max_depth.get(int(e.dests.dest_idx), 0), e.pop))
+
+def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode], max_depth: Dict[NodeID, int]) -> Dict[NodeID, ArenaNode]:
     # Stage 1: Flatten the loaded arena structure
     intermediate_arena: Dict[NodeID, IntermediateArenaNode] = {}
     for uid, loaded_node in tqdm(loaded_arena.items(), desc="Stage 1: Loading and flattening arena"):
@@ -200,6 +207,8 @@ def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict[NodeID, 
             children=intermediate_children,
             clean_end=loaded_node.clean_end,
         )
+
+    _optimize_intermediate_arena(intermediate_arena, max_depth)
 
     # Stage 2: Merge compatible edges and convert to final format
     arena: Dict[NodeID, ArenaNode] = {}
@@ -341,7 +350,7 @@ class Model(GraphProvider):
             clean_end = node_data.get("value", {}).get("clean_end", False)
             loaded_arena[uid] = LoadedArenaNode(children=loaded_children, clean_end=clean_end)
 
-        arena = _convert_arena(loaded_arena)
+        arena = _convert_arena(loaded_arena, max_depth)
         # Tokenizer
         dfa_data = data['tokenizer']['dfa']
         dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
@@ -401,7 +410,6 @@ class Model(GraphProvider):
             for edge in node.children:
                 edge.dests.sort(key=lambda dest: md.get(int(dest.dest_idx), 0), reverse=True)
                 edge.ensure_index()
-            node.children.sort(key=lambda e: (-md.get(int(e.dests[0].dest_idx), 0) if e.dests else -1, e.pop))
 
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         term_rs = RangeSet.from_indices([terminal_id])
