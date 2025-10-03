@@ -830,3 +830,6 @@ class LeveledAccTableGSS(GSS[T, Acc], Generic[T, Acc]):
             else:
                 new_inner = try_promote(UpperBranch(children={}, empty=new_empty))
                 return LeveledAccTableGSS(new_inner, dict(self._values))
+
+
+Leveled_acc_tableGSS = LeveledAccTableGSS
