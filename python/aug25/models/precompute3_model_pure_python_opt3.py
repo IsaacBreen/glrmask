@@ -213,8 +213,6 @@ def _load_and_flatten_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict
 
 def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArenaNode]) -> Dict[NodeID, ArenaNode]:
     """Stage 2: Merge flattened edges back into the final ArenaNode structure."""
-    use_alt_merge = os.environ.get('ALT_MERGE_MODE')
-
     arena: Dict[NodeID, ArenaNode] = {}
     for uid, intermediate_node in tqdm(intermediate_arena.items(), desc="Stage 2: Merging and converting arena"):
         new_children: List[ArenaEdge] = []
@@ -224,51 +222,32 @@ def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArena
             arena[uid] = ArenaNode(children=[], llm_bv_union=llm_bv_union, clean_end=intermediate_node.clean_end)
             continue
         
-        if use_alt_merge:
-            children_it = iter(intermediate_node.children)
-            first = next(children_it)
-            edge_dests = []
-            prev_pop = first.pop
-            prev_llm_bv = first.llm_bv
-            edge_dests.append(ArenaEdgeDest(first.dests.dest_idx, first.dests.state_bv))
-            def flush() -> None:
-                nonlocal edge_dests, prev_pop, prev_llm_bv, new_children, llm_bv_union
-                dest_states_union = RangeSetStates.empty()
-                for d in edge_dests:
-                    dest_states_union |= d.state_bv
-                llm_bv_union |= prev_llm_bv
-                new_children.append(ArenaEdge(
-                    pop=prev_pop,
-                    llm_bv=prev_llm_bv,
-                    dests=edge_dests,
-                    dest_states_union=dest_states_union,
-                ))
-            for edge in children_it:
-                if not (edge.pop == prev_pop and edge.llm_bv == prev_llm_bv):
-                    flush()
-                    prev_pop = edge.pop
-                    prev_llm_bv = edge.llm_bv
-                    edge_dests = []
-                edge_dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-            flush()
-
-        else:
-            grouped_edges: Dict[Tuple[int, LLMTokenSet], Tuple[List[ArenaEdgeDest], StateIDSet]] = collections.defaultdict(lambda: ([], RangeSetStates.empty()))
-
-            for edge in intermediate_node.children:
-                key = (edge.pop, edge.llm_bv)
-                dests, dest_states_union = grouped_edges[key]
-                dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
-                grouped_edges[key] = (dests, dest_states_union | edge.dests.state_bv)
-
-            for (pop, llm_bv), (dests, dest_states_union) in grouped_edges.items():
-                llm_bv_union |= llm_bv
-                new_children.append(ArenaEdge(
-                    pop=pop,
-                    llm_bv=llm_bv,
-                    dests=dests,
-                    dest_states_union=dest_states_union,
-                ))
+        children_it = iter(intermediate_node.children)
+        first = next(children_it)
+        edge_dests = []
+        prev_pop = first.pop
+        prev_llm_bv = first.llm_bv
+        edge_dests.append(ArenaEdgeDest(first.dests.dest_idx, first.dests.state_bv))
+        def flush() -> None:
+            nonlocal edge_dests, prev_pop, prev_llm_bv, new_children, llm_bv_union
+            dest_states_union = RangeSetStates.empty()
+            for d in edge_dests:
+                dest_states_union |= d.state_bv
+            llm_bv_union |= prev_llm_bv
+            new_children.append(ArenaEdge(
+                pop=prev_pop,
+                llm_bv=prev_llm_bv,
+                dests=edge_dests,
+                dest_states_union=dest_states_union,
+            ))
+        for edge in children_it:
+            if not (edge.pop == prev_pop and edge.llm_bv == prev_llm_bv):
+                flush()
+                prev_pop = edge.pop
+                prev_llm_bv = edge.llm_bv
+                edge_dests = []
+            edge_dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
+        flush()
 
         arena[uid] = ArenaNode(
             children=new_children,
