@@ -653,9 +653,8 @@ class Model(GraphProvider):
 
                         if isinstance(yielded, Enqueue):
                             new_node_id, new_gss = yielded.node_id, yielded.gss
-                            if not new_gss.is_empty():
-                                child_priority = (-self.max_depth.get(new_node_id, 0), 0, 0)
-                                heapq.heappush(work_heap, HeapItem(child_priority, (new_node_id, new_gss)))
+                            child_priority = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                            heapq.heappush(work_heap, HeapItem(child_priority, (new_node_id, new_gss)))
                         elif isinstance(yielded, Suspend):
                             heapq.heappush(work_heap, HeapItem(yielded.priority, gen))
                             break
