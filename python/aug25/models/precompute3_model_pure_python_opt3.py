@@ -5,6 +5,7 @@ import heapq
 import itertools
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
 
@@ -513,6 +514,7 @@ class Model(GraphProvider):
     def get_mask(self) -> LLMTokenSet:
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
         work_heap = []
+        t0 = time.perf_counter()
 
         def enqueue(node_id: NodeID, gss: GSS, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
             if gss.is_empty():
@@ -547,6 +549,7 @@ class Model(GraphProvider):
             r = self.roots_map[int(sid)]
             gss_init = gss.apply(initialize_acc, init_cache)
             enqueue(r, gss_init)
+        t1 = time.perf_counter()
 
         remaining_mask = all_ones
         while work_heap:
@@ -638,9 +641,12 @@ class Model(GraphProvider):
                 if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
                     enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
                     break
-        
+        t2 = time.perf_counter()
+
         original_indices = RangeSetOut.empty()
         for i in final_mask.iter_indices():
             if i in self.internal_to_original_map:
                 original_indices |= self.internal_to_original_map[i]
+        t3 = time.perf_counter()
+        print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms")
         return original_indices
