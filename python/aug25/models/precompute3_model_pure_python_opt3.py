@@ -761,7 +761,8 @@ class Model(GraphProvider):
                 stats.inc('get_mask.zombie_check.node.skipped_no_overlap_disjoint')
                 continue
 
-            max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
+            # max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
+            max_edges, max_dests = (1, 1)
             edges_proc, dests_proc = 0, 0
             peek0_rs = None
 
@@ -876,7 +877,7 @@ class Model(GraphProvider):
 
         stats.stop('get_mask')
 
-        if stats.times['get_mask']*1000 > 2:
+        if stats.times['get_mask']*1000 > 3:
             stats.report()
         stats.reset()
 
