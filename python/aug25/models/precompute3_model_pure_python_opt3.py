@@ -463,7 +463,7 @@ class Model(GraphProvider):
                 
                 if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
                 
-                if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
+                if edge.llm_bv_not and not popped_acc.llm_mask.isdisjoint(edge.llm_bv_not):
                     if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
                     @_acc_memoize(use_value_cache=False)
                     def intersect(acc: PyAcc):
