@@ -232,8 +232,77 @@ def _optimize_intermediate_arena(intermediate_arena: Dict[NodeID, IntermediateAr
     for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
         if not node.children:
             continue
-        # Sort edges by destination depth (desc) and then pop count (asc)
-        node.children.sort(key=lambda e: (-max_depth.get(int(e.dests.dest_idx), 0), e.pop))
+        # Greedy "diversity-first" ordering:
+        # - Build the order one edge at a time.
+        # - Score candidates by a combination of destination depth and
+        #   similarity penalties against already-chosen edges.
+        # - Similarity is measured via overlaps in LLM token set, state set,
+        #   and destination id reuse.
+        #
+        # To keep this fast on worst-case very high-fan-out nodes, fall back
+        # to the original simple sort when the number of edges is large.
+        edges = node.children
+        n = len(edges)
+
+        # Safety net for extreme fan-out: keep the very fast original ordering.
+        if n > 256:
+            edges.sort(key=lambda e: (-max_depth.get(int(e.dests.dest_idx), 0), e.pop))
+            continue
+
+        # Tunable weights (chosen so that depth is a major factor, but
+        # overlap penalties are also significant).
+        DEPTH_WEIGHT = 1024
+        POP_WEIGHT = 1
+        PENALTY_LLM_OVERLAP = 512
+        PENALTY_STATE_OVERLAP = 256
+        PENALTY_SAME_DEST = 192
+
+        # Precompute depth and base score for each edge
+        depths = [max_depth.get(int(e.dests.dest_idx), 0) for e in edges]
+        base_scores = [DEPTH_WEIGHT * depths[i] - POP_WEIGHT * edges[i].pop for i in range(n)]
+
+        # Greedy selection state
+        remaining = list(range(n))
+        ordered_indices = []
+        union_llm = RangeSet.empty()
+        union_states = RangeSetStates.empty()
+        chosen_dest_ids: Set[int] = set()
+
+        # Seed with the best base score (prefer deeper, then smaller pop on ties)
+        first_idx = max(remaining, key=lambda i: (base_scores[i], depths[i], -edges[i].pop))
+        ordered_indices.append(first_idx)
+        remaining.remove(first_idx)
+        union_llm |= edges[first_idx].llm_bv
+        union_states |= edges[first_idx].dests.state_bv
+        chosen_dest_ids.add(int(edges[first_idx].dests.dest_idx))
+
+        # Iteratively pick the next best edge considering diversity penalties
+        while remaining:
+            best_idx = None
+            best_key = None
+            for i in remaining:
+                score = base_scores[i]
+                # Prefer diversity by penalizing overlaps with already-chosen coverage
+                if not edges[i].llm_bv.isdisjoint(union_llm):
+                    score -= PENALTY_LLM_OVERLAP
+                if not edges[i].dests.state_bv.isdisjoint(union_states):
+                    score -= PENALTY_STATE_OVERLAP
+                if int(edges[i].dests.dest_idx) in chosen_dest_ids:
+                    score -= PENALTY_SAME_DEST
+                # Tie-break: deeper first, then smaller pop
+                key = (score, depths[i], -edges[i].pop)
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_idx = i
+            ordered_indices.append(best_idx)
+            remaining.remove(best_idx)
+            # Update unions and chosen sets with the selected edge
+            union_llm |= edges[best_idx].llm_bv
+            union_states |= edges[best_idx].dests.state_bv
+            chosen_dest_ids.add(int(edges[best_idx].dests.dest_idx))
+
+        # Reorder node edges
+        node.children = [edges[i] for i in ordered_indices]
 
 def _load_and_flatten_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict[NodeID, IntermediateArenaNode]:
     """Stage 1: Convert from the loaded format to a flattened intermediate format."""
