@@ -294,14 +294,12 @@ class PyAcc:
     def is_empty(self):
         return self.llm_mask.is_empty()
 
-@dataclass
-class Enqueue:
+class Enqueue(NamedTuple):
     node_id: NodeID
     gss: GSS
 
-@dataclass
-class Suspend:
-    priority: Any
+class Suspend(NamedTuple):
+    priority: Tuple[int, int, int]
 
 @dataclass
 class Model(GraphProvider):
@@ -522,14 +520,14 @@ class Model(GraphProvider):
 
         # Fast re-check with the latest remaining mask; bail if nothing can pass now.
         current_remaining = self._current_remaining_mask
-        if (not a_node.children or
-            a_node.llm_bv_union.isdisjoint(current_remaining) or
-            gss_mask.isdisjoint(a_node.llm_bv_union.intersection(current_remaining))):
+        visible_node_mask = gss_mask.intersection(current_remaining)
+        if (not a_node.children or a_node.llm_bv_union.isdisjoint(visible_node_mask)):
             return
 
         for edge_i, edge in enumerate(a_node.children):
-            rem = self._current_remaining_mask
-            if edge.llm_bv.isdisjoint(rem) or edge.llm_bv.isdisjoint(gss_mask):
+            # Recompute visible mask per edge to reflect the latest remaining mask
+            visible_mask = gss_mask.intersection(self._current_remaining_mask)
+            if edge.llm_bv.isdisjoint(visible_mask):
                 continue
             if edge.pop == 0:
                 if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
@@ -599,18 +597,11 @@ class Model(GraphProvider):
 
     def get_mask(self) -> LLMTokenSet:
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
-        work_heap = []
+        work_heap: List[Tuple[Tuple[int, int, int], int, object]] = []
         t0 = time.perf_counter()
 
-        @dataclass
-        class HeapItem:
-            priority: Any
-            item: Any
-
-            def __lt__(self, other: 'HeapItem') -> bool:
-                if not isinstance(other, HeapItem):
-                    return NotImplemented
-                return self.priority < other.priority
+        # Monotonic counter for heap tie-breaks to avoid comparing payloads
+        counter = itertools.count()
 
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
@@ -628,7 +619,7 @@ class Model(GraphProvider):
             gss_init = gss.apply(initialize_acc, init_cache)
             if not gss_init.is_empty():
                 priority = (-self.max_depth.get(r, 0), 0, 0)
-                heapq.heappush(work_heap, HeapItem(priority, (r, gss_init)))
+                heapq.heappush(work_heap, (priority, next(counter), (r, gss_init)))
         t1 = time.perf_counter()
 
         # Track the currently effective remaining mask for generator-based traversal
@@ -636,8 +627,7 @@ class Model(GraphProvider):
         self._mask_version = 0
         remaining_mask = all_ones
         while work_heap:
-            heap_item = heapq.heappop(work_heap)
-            priority, work = heap_item.priority, heap_item.item
+            priority, _, work = heapq.heappop(work_heap)
 
             gen = None
             if isinstance(work, types.GeneratorType):
@@ -672,9 +662,9 @@ class Model(GraphProvider):
                         if isinstance(yielded, Enqueue):
                             new_node_id, new_gss = yielded.node_id, yielded.gss
                             child_priority = (-self.max_depth.get(new_node_id, 0), 0, 0)
-                            heapq.heappush(work_heap, HeapItem(child_priority, (new_node_id, new_gss)))
+                            heapq.heappush(work_heap, (child_priority, next(counter), (new_node_id, new_gss)))
                         elif isinstance(yielded, Suspend):
-                            heapq.heappush(work_heap, HeapItem(yielded.priority, gen))
+                            heapq.heappush(work_heap, (yielded.priority, next(counter), gen))
                             break
 
                     except StopIteration:
