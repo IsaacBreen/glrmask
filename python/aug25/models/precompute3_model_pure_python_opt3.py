@@ -541,7 +541,8 @@ class Model(GraphProvider):
                 if tsid in self.possible_matches_cache:
                     term_map = self.possible_matches_cache[tsid]
                     for term_id in terms.iter_indices():
-                        if term_id in term_map: disallowed |= term_map[term_id]
+                        if term_id in term_map:
+                            disallowed |= term_map[term_id]
             return PyAcc({}, all_ones.difference(disallowed))
 
         init_cache = {}
@@ -557,27 +558,37 @@ class Model(GraphProvider):
             gss_acc = gss_node.reduce_acc()
             gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
 
+            # If we can end here, add mask contribution and shrink remaining search space.
             if self.is_end(node) and gss_acc and not final_mask.issuperset(gss_acc.llm_mask):
                 final_mask |= gss_acc.llm_mask
                 remaining_mask = all_ones.difference(final_mask)
 
             a_node = self.arena.get(node)
-            if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
+            if not a_node:
                 continue
 
-            # max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
-            max_edges, max_dests = (1, 1)
-            edges_proc, dests_proc = 0, 0
-            peek0_rs = None
+            # Fast prune: nothing remaining here or nothing from gss_mask intersects.
+            union_intersection = a_node.llm_bv_union.intersection(remaining_mask)
+            if union_intersection.is_empty() or gss_mask.isdisjoint(union_intersection):
+                continue
 
+            # Process exactly one (edge, destination) per work item.
             for edge_i in range(start_edge, len(a_node.children)):
                 edge = a_node.children[edge_i]
-                if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask): continue
-                if edge.pop == 0:
-                    if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
-                    if edge.dest_states_union.isdisjoint(peek0_rs): continue
 
-                if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+                # Token mask filter for the edge.
+                if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
+                    continue
+
+                # Lightweight precheck for pop==0 using the original gss_node's heads.
+                if edge.pop == 0:
+                    peek0_rs = RangeSetStates.from_indices(gss_node.peek())
+                    if edge.dest_states_union.isdisjoint(peek0_rs):
+                        continue
+
+                # Get/reuse popped gss and its accumulator.
+                if edge.pop in pop_cache:
+                    popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
                 else:
                     popped = gss_node.popn(edge.pop)
                     if popped.is_empty():
@@ -587,60 +598,82 @@ class Model(GraphProvider):
                     if not popped_acc or popped_acc.llm_mask.is_empty():
                         pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
                         continue
-                    # Avoid double-peek: call once and reuse both list and RangeSetStates
                     peeked = popped.peek()
                     peek_rs = RangeSetStates.from_indices(peeked)
                     pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
 
-                if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
+                # Check heads vs destinations.
+                if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs) or not peeked:
+                    continue
 
+                # Intersect popped mask with edge's llm_bv only if needed.
                 if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
-                    if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
+                    if popped_acc.llm_mask.isdisjoint(edge.llm_bv):
+                        continue
+
                     @_acc_memoize(use_value_cache=False)
                     def intersect(acc: PyAcc):
                         new_mask = acc.llm_mask.intersection(edge.llm_bv)
                         return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+
                     popped = popped.apply_and_prune(intersect)
-                    if popped.is_empty(): continue
-                if not peeked: continue
+                    if popped.is_empty():
+                        continue
 
-                current_start_dest = start_dest if edge_i == start_edge else 0
-
-                grouped: Dict[int, List[int]] = {}
+                # Determine the next destination to process on this edge.
+                current_start = start_dest if edge_i == start_edge else 0
+                chosen_dest = None
+                keep_sids: Optional[List[int]] = None
                 m = edge.state_to_dest
                 for sid in peeked:
                     dest_list = m.get(sid)
-                    if not dest_list: continue
-                    for dest_j in dest_list:
-                        if dest_j < current_start_dest: continue
-                        lst = grouped.get(dest_j)
-                        if lst is None: grouped[dest_j] = [sid]
-                        else: lst.append(sid)
+                    if not dest_list:
+                        continue
+                    for dj in dest_list:
+                        if dj < current_start:
+                            continue
+                        if chosen_dest is None or dj < chosen_dest:
+                            chosen_dest = dj
+                            keep_sids = [sid]
+                        elif dj == chosen_dest:
+                            keep_sids.append(sid)
 
-                # Iterate grouped dests in ascending order for locality
-                for dest_j in sorted(grouped.keys()):
-                    if dests_proc >= max_dests:
-                        enqueue(node, gss_node, edge_i, dest_j, pop_cache)
-                        edges_proc = max_edges
-                        break
-                    dest = edge.dests[dest_j]
-                    values_to_keep = grouped[dest_j]
-                    # If all heads survive, reuse popped directly
-                    if len(values_to_keep) == len(peeked):
-                        child_gss = popped
-                    else:
-                        child_gss = popped.isolate_many(values_to_keep)
-                    if child_gss.is_empty(): continue
-                    d: NodeID = int(dest.dest_idx)
-                    enqueue(d, child_gss)
-                    dests_proc += 1
-
-                if edges_proc >= max_edges: break
-                edges_proc += 1
-
-                if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-                    enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
+                # No destinations available at/after current_start for this edge -> move to next edge.
+                if chosen_dest is None:
+                    if edge_i + 1 < len(a_node.children):
+                        enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
                     break
+
+                # Build the child gss for the chosen destination.
+                if keep_sids and len(keep_sids) == len(peeked):
+                    child_gss = popped
+                else:
+                    child_gss = popped.isolate_many(keep_sids or [])
+
+                # If pruning removed everything, just continue with the next destination/edge.
+                if child_gss.is_empty():
+                    next_dest = chosen_dest + 1
+                    if next_dest < len(edge.dests):
+                        enqueue(node, gss_node, edge_i, next_dest, pop_cache)
+                    else:
+                        if edge_i + 1 < len(a_node.children):
+                            enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
+                    break
+
+                # Enqueue traversal to the chosen destination's child.
+                d: NodeID = int(edge.dests[chosen_dest].dest_idx)
+                enqueue(d, child_gss)
+
+                # Re-enqueue continuation at the next destination for the same edge,
+                # or move to the next edge if we exhausted this edge's destinations.
+                next_dest = chosen_dest + 1
+                if next_dest < len(edge.dests):
+                    enqueue(node, gss_node, edge_i, next_dest, pop_cache)
+                else:
+                    if edge_i + 1 < len(a_node.children):
+                        enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
+                break
+
         t2 = time.perf_counter()
 
         original_indices = RangeSetOut.empty()
