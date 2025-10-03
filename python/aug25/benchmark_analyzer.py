@@ -30,15 +30,15 @@ def _normalize_intervals(ranges: Optional[List[List[int]]]) -> Tuple[Tuple[int, 
     return tuple(merged)
 
 
-def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None):
+def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None):
     """
     Loads benchmark results from JSON files, computes statistics, compares masks against a chosen baseline,
     and generates plots.
     """
     all_data_rows = []
-    commit_timings_by_model: Dict[str, List[float]] = {}
-    masks_by_model: Dict[str, List[Tuple[Tuple[int, int], ...]]] = {}
-    get_mask_timings_by_model: Dict[str, List[float]] = {}
+    commit_timings_by_model: Dict[str, List[List[float]]] = {}
+    masks_by_model: Dict[str, List[List[Tuple[Tuple[int, int], ...]]]] = {}
+    get_mask_timings_by_model: Dict[str, List[List[float]]] = {}
 
     model_order: List[str] = []
 
@@ -53,22 +53,89 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
         if model_name not in model_order:
             model_order.append(model_name)
 
+        # Initialize if first time seeing model
+        if model_name not in get_mask_timings_by_model:
+            get_mask_timings_by_model[model_name] = []
+            commit_timings_by_model[model_name] = []
+            masks_by_model[model_name] = []
+
         timings = data["results"].get("get_mask_timings_seconds", [])
-        get_mask_timings_by_model[model_name] = timings
+        get_mask_timings_by_model[model_name].append(timings)
 
         commit_timings = data["results"].get("commit_timings_seconds", [])
-        commit_timings_by_model[model_name] = commit_timings
+        commit_timings_by_model[model_name].append(commit_timings)
 
         masks_raw = data["results"].get("masks_ranges") or data["results"].get("masks_intervals")
         if masks_raw is None:
             print(f"Warning: No masks present in {file_path}. Mask comparisons will be skipped for {model_name}.")
-            masks_by_model[model_name] = []
+            masks_by_model[model_name].append([])
         else:
-            masks_by_model[model_name] = [_normalize_intervals(r) for r in masks_raw]
+            masks_by_model[model_name].append([_normalize_intervals(r) for r in masks_raw])
 
     if not get_mask_timings_by_model:
         print("No data to analyze.")
         return
+
+    # --- Process repeated runs ---
+    final_get_mask_timings: Dict[str, List[float]] = {}
+    final_commit_timings: Dict[str, List[float]] = {}
+    final_masks_by_model: Dict[str, List[Tuple[Tuple[int, int], ...]]] = {}
+    final_model_order: List[str] = []
+
+    if agg_method:
+        print(f"--- Aggregating results from multiple runs using '{agg_method}' ---")
+        import numpy as np
+        for model_name in model_order:
+            # Aggregate get_mask timings
+            runs = get_mask_timings_by_model.get(model_name, [])
+            if runs and any(r for r in runs):
+                max_len = max(len(r) for r in runs if r)
+                padded_runs = [r + ([np.nan] * (max_len - len(r))) for r in runs]
+                df_runs = pd.DataFrame(padded_runs).T
+                final_get_mask_timings[model_name] = df_runs.agg(agg_method, axis=1).dropna().tolist()
+            else:
+                final_get_mask_timings[model_name] = []
+
+            # Aggregate commit timings
+            runs_commit = commit_timings_by_model.get(model_name, [])
+            if runs_commit and any(r for r in runs_commit):
+                max_len_commit = max(len(r) for r in runs_commit if r)
+                padded_runs_commit = [r + ([np.nan] * (max_len_commit - len(r))) for r in runs_commit]
+                df_runs_commit = pd.DataFrame(padded_runs_commit).T
+                final_commit_timings[model_name] = df_runs_commit.agg(agg_method, axis=1).dropna().tolist()
+            else:
+                final_commit_timings[model_name] = []
+
+            # For masks, use the first run
+            mask_runs = masks_by_model.get(model_name, [])
+            if mask_runs:
+                final_masks_by_model[model_name] = mask_runs[0]
+                if len(mask_runs) > 1:
+                    print(f"Info: For model '{model_name}', using masks from the first of {len(mask_runs)} runs for equivalence checks.")
+            else:
+                final_masks_by_model[model_name] = []
+            final_model_order.append(model_name)
+    else:  # No aggregation, unpack runs
+        for model_name in model_order:
+            num_runs = len(get_mask_timings_by_model.get(model_name, []))
+            if num_runs > 1:
+                for i in range(num_runs):
+                    run_name = f"{model_name}_run{i+1}"
+                    final_get_mask_timings[run_name] = get_mask_timings_by_model[model_name][i]
+                    final_commit_timings[run_name] = commit_timings_by_model[model_name][i]
+                    final_masks_by_model[run_name] = masks_by_model[model_name][i]
+                    final_model_order.append(run_name)
+            elif num_runs == 1:
+                final_get_mask_timings[model_name] = get_mask_timings_by_model[model_name][0]
+                final_commit_timings[model_name] = commit_timings_by_model[model_name][0]
+                final_masks_by_model[model_name] = masks_by_model[model_name][0]
+                final_model_order.append(model_name)
+
+    # Replace original data structures with the processed ones
+    get_mask_timings_by_model = final_get_mask_timings
+    commit_timings_by_model = final_commit_timings
+    masks_by_model = final_masks_by_model
+    model_order = final_model_order
 
     # Determine baseline
     if baseline_key:
@@ -446,6 +513,12 @@ def main():
         default=None,
         help="Baseline model name (stem) or a path to a results JSON file. Defaults to the first model found."
     )
+    parser.add_argument(
+        "--agg-method",
+        choices=['mean', 'median', 'min', 'max'],
+        default=None,
+        help="Aggregation method for repeated runs. If not set, runs are plotted individually."
+    )
     args = parser.parse_args()
 
     result_files: List[Path] = []
@@ -460,7 +533,7 @@ def main():
         print(f"Error: No .json files found in the specified paths.")
         return
 
-    analyze_results(sorted(list(set(result_files))), Path(args.output_dir), baseline_key=args.baseline)
+    analyze_results(sorted(list(set(result_files))), Path(args.output_dir), baseline_key=args.baseline, agg_method=args.agg_method)
 
 
 if __name__ == "__main__":

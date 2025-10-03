@@ -22,6 +22,9 @@ set -euo pipefail
 #                    (Default: ./.cache/test_vocabs/js_grammar_constraint.json.gz)
 #   CODE_FILE:    Path to the code file to use as input.
 #                 (Default: ./src/example_code.js)
+#   REPEAT:       Number of times to run each benchmark. (Default: 1)
+#   AGG_METHOD:   Aggregation method for analyzer (mean, median, min, max).
+#                 If unset, runs are plotted individually. (Default: "")
 # ==============================================================================
 
 # --- Configuration ---
@@ -29,6 +32,8 @@ set -euo pipefail
 : "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
 : "${CODE_FILE:="./src/example_code.js"}"
 : "${SKIP_CPP_BUILD:=0}" # Set to 1 to disable C++ compilation
+: "${REPEAT:=1}"
+: "${AGG_METHOD:=""}"
 
 # --- PYTHONPATH setup ---
 # The script is run from the project root. The python modules are in the 'python' directory.
@@ -81,6 +86,10 @@ else
 fi
 echo "Constraint File: $CONSTRAINT_FILE"
 echo "Code: $CODE_FILE"
+echo "Repeat count: $REPEAT"
+if [[ -n "$AGG_METHOD" ]]; then
+  echo "Aggregation: $AGG_METHOD"
+fi
 echo "---"
 
 
@@ -174,7 +183,8 @@ for model_to_benchmark in "${ALL_MODELS[@]}"; do
         --code "$CODE_FILE"
         --constraint-file "$CONSTRAINT_FILE"
         --model "$model_to_benchmark"
-        --output "$RESULTS_DIR")
+        --output "$RESULTS_DIR"
+        --repeat "$REPEAT")
     echo "${cmd[*]}"
     # Prepend the environment variable ONLY for the C++ model
     if [[ "$model_to_benchmark" == *"precompute3_model_cpp.py"* ]]; then
@@ -209,6 +219,11 @@ cmd=(python -m python.aug25.benchmark_analyzer
     "${RESULTS_DIR}"/*.json
     --baseline "$BASELINE_STEM"
     --output-dir "$PLOTS_DIR")
+
+if [[ -n "$AGG_METHOD" ]]; then
+  cmd+=(--agg-method "$AGG_METHOD")
+fi
+
 echo "${cmd[*]}"
 "${cmd[@]}"
 

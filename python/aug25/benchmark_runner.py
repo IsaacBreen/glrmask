@@ -195,7 +195,7 @@ def print_model_statistics(model, model_name: str):
         print_dist("State Bitset sizes", state_rs_sizes)
     print("-" * 20)
 
-def run_benchmark(args):
+def run_benchmark(args, run_index: int = 0):
     """Main benchmark logic (single model; no baseline/reference in-process)."""
     print("--- Setting up benchmark environment ---")
 
@@ -304,9 +304,18 @@ def run_benchmark(args):
     if args.output:
         output_path = Path(args.output)
         if output_path.is_dir():
-            output_path = output_path / f"{args.model.stem}_results.json"
+            base_name = f"{args.model.stem}_results.json"
+            if args.repeat > 1:
+                base_name = f"{args.model.stem}_run{run_index + 1}_results.json"
+            output_path = output_path / base_name
+        else:  # It's a file path
+            if args.repeat > 1:
+                output_path = output_path.with_name(f"{output_path.stem}_run{run_index + 1}{output_path.suffix}")
     else:
-        output_path = Path(f"{args.model.stem}_results.json")
+        base_name = f"{args.model.stem}_results.json"
+        if args.repeat > 1:
+            base_name = f"{args.model.stem}_run{run_index + 1}_results.json"
+        output_path = Path(base_name)
     
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'w') as f:
@@ -322,6 +331,7 @@ def main():
     parser.add_argument("-m", "--model", type=Path, required=True, help="Path to the model .py file.")
     parser.add_argument("-o", "--output", type=Path, help="Output JSON file or directory.")
     parser.add_argument('--print-stats', action='store_true', help="Print detailed statistics about the loaded models before running the benchmark.")
+    parser.add_argument('--repeat', type=int, default=1, help="Number of times to repeat the benchmark run.")
 
     args = parser.parse_args()
 
@@ -329,7 +339,10 @@ def main():
         if not p.exists():
             parser.error(f"File not found: {p}")
 
-    run_benchmark(args)
+    for i in range(args.repeat):
+        if args.repeat > 1:
+            print(f"\n--- Running benchmark: Run {i + 1}/{args.repeat} for {args.model.name} ---")
+        run_benchmark(args, run_index=i)
 
 
 if __name__ == "__main__":
