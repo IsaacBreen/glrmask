@@ -402,6 +402,7 @@ class Model(GraphProvider):
             state={tokenizer.initial_state_id(): initial_gss},
         )
         model._compute_edge_accelerators()
+        model.optimize_traversal()
         return model
 
     def _compute_edge_accelerators(self) -> None:
@@ -409,6 +410,11 @@ class Model(GraphProvider):
         for node in self.arena.values():
             for edge in node.children:
                 edge.llm_bv_not = all_ones.difference(edge.llm_bv)
+
+    def optimize_traversal(self) -> None:
+        for node in self.arena.values():
+            for edge in node.children:
+                edge.ensure_index()
 
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         term_rs = RangeSet.from_indices([terminal_id])
