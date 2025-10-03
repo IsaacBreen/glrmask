@@ -562,7 +562,8 @@ class Model(GraphProvider):
             if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                 continue
 
-            max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
+            # max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
+            max_edges, max_dests = (1, 1)
             edges_proc, dests_proc = 0, 0
             peek0_rs = None
 
