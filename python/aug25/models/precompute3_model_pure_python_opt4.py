@@ -586,9 +586,7 @@ class Model(GraphProvider):
                 return (-self.max_depth.get(node_id, 0), edge_idx, dest_idx)
 
             def budget(self, final_mask_is_empty: bool) -> Tuple[int, int]:
-                # Keep parity with opt3: very small slices to encourage fairness/latency.
-                # Can be tuned or made adaptive in future experiments.
-                return (1, 1)
+                return (8, 2048) if final_mask_is_empty else (16, 4096)
 
         scheduler = DefaultScheduler(self.max_depth)
 
@@ -635,13 +633,10 @@ class Model(GraphProvider):
 
         # Internal node processor as a generator: takes a node and its GSS, and yields Emit/Requeue events.
         # It does not read or write final_mask; the main loop manages those concerns.
-        def internal_node_processor(node_id: NodeID, gss_node: GSS) -> Generator[Union[Emit, Requeue], None, None]:
+        def internal_node_processor(node_id: NodeID, gss_node: GSS, gss_acc: Optional[PyAcc], gss_mask: LLMTokenSet, budget: Tuple[int, int]) -> Generator[Union[Emit, Requeue], None, None]:
             a_node = self.arena.get(node_id)
             if not a_node:
                 return
-            # Compute once per generator lifetime
-            gss_acc = gss_node.reduce_acc()
-            gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
 
             # Early out if no mask or node has no children
             if gss_mask.is_empty() or not a_node.children:
@@ -650,8 +645,7 @@ class Model(GraphProvider):
             pop_cache: Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]] = {}
             peek0_rs: Optional[StateIDSet] = None
 
-            # Scheduling slices: default to the same tiny slices as opt3
-            max_edges, max_dests = scheduler.budget(final_mask_is_empty=True)  # independence from final_mask semantics
+            max_edges, max_dests = budget
 
             edges_proc = 0
             # Persistent position across yields
@@ -817,7 +811,8 @@ class Model(GraphProvider):
 
             # Initialize generator if needed
             if gen is None:
-                gen = internal_node_processor(node_id, gss_node)
+                budget = scheduler.budget(final_mask.is_empty())
+                gen = internal_node_processor(node_id, gss_node, gss_acc, gss_mask, budget)
 
             # Step the generator until it asks to requeue or finishes
             requeued = False
