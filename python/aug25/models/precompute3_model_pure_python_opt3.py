@@ -125,6 +125,7 @@ class ParserTable:
 class ArenaEdgeDest:
     dest_idx: NodeID
     state_bv: StateIDSet
+    priority: int
 
 @dataclass
 class ArenaEdge:
@@ -231,7 +232,9 @@ class Model(GraphProvider):
                 new_dests, dest_states_union = [], RangeSetStates.empty()
                 for dest_idx, state_json in dest_map_json:
                     state_bv = RangeSetStates.from_ranges(bs_from_json(dumps(state_json)).to_ranges())
-                    new_dests.append(ArenaEdgeDest(int(dest_idx), state_bv))
+                    dest_node_id = int(dest_idx)
+                    priority = max_depth.get(dest_node_id, 0)
+                    new_dests.append(ArenaEdgeDest(dest_node_id, state_bv, priority))
                     dest_states_union |= state_bv
                 new_children.append(ArenaEdge(int(pop), llm_bv, new_dests, dest_states_union))
             node_data["children"], node_data["llm_bv_union"] = new_children, llm_bv_union
@@ -402,20 +405,26 @@ class Model(GraphProvider):
 
     def get_mask(self) -> LLMTokenSet:
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
-        values, depth_heap, enqueued = {}, [], set()
+        values, priority_queue, enqueued = {}, [], set()
         edge_cursor = {}
 
-        def enqueue(node_id: NodeID, gss: GSS) -> GSS:
+        def enqueue(node_id: NodeID, gss: GSS, start_edge_idx: int = 0) -> GSS:
             if node_id in values:
                 gss = values[node_id].merge(gss)
             values[node_id] = gss
             if node_id not in enqueued:
                 enqueued.add(node_id)
-                heapq.heappush(depth_heap, (-self.max_depth[node_id], node_id))
+                priority = 0
+                a_node = self.arena.get(node_id)
+                if a_node and start_edge_idx < len(a_node.children):
+                    edge = a_node.children[start_edge_idx]
+                    if edge.dests:
+                        priority = edge.dests[0].priority
+                heapq.heappush(priority_queue, (-priority, node_id))
             return gss
 
         def dequeue() -> Tuple[NodeID, GSS]:
-            _, node_id = heapq.heappop(depth_heap)
+            _, node_id = heapq.heappop(priority_queue)
             enqueued.remove(node_id)
             return node_id, values.pop(node_id)
 
@@ -436,7 +445,7 @@ class Model(GraphProvider):
             enqueue(r, gss_init)
 
         remaining_mask = all_ones
-        while depth_heap:
+        while priority_queue:
             node, gss_node = dequeue()
             gss_id = id(gss_node)
 
@@ -493,7 +502,7 @@ class Model(GraphProvider):
                 current_start_dest = start_dest if edge_i == start_edge else 0
                 for dest_j in range(current_start_dest, len(edge.dests)):
                     if dests_proc >= max_dests:
-                        state_to_requeue = enqueue(node, gss_node)
+                        state_to_requeue = enqueue(node, gss_node, start_edge_idx=edge_i)
                         edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
                         edges_proc = max_edges; break
 
@@ -514,7 +523,7 @@ class Model(GraphProvider):
                 edges_proc += 1
 
                 if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-                    state_to_requeue = enqueue(node, gss_node)
+                    state_to_requeue = enqueue(node, gss_node, start_edge_idx=edge_i + 1)
                     edge_cursor[node] = NodeCursor(edge_i + 1, 0, id(state_to_requeue), pop_cache)
                     break
             else: edge_cursor.pop(node, None)
