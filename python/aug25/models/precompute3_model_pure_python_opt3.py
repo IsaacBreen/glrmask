@@ -8,9 +8,9 @@ from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
 
 import _sep1 as ffi
 
-# from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
-from python.gss_tester.implementations.leveled_per_acc_standalone_impl import LeveledPerAccGSS as GSS
+# from python.gss_tester.implementations.leveled_per_acc_standalone_impl import LeveledPerAccGSS as GSS
 from ..common_interface import GraphProvider
 from ..range_set import FFIRangeSet as RangeSet
 from ..range_set import SetRangeSet as RangeSetOut
@@ -129,6 +129,7 @@ class ArenaEdge:
     dest_states_union: StateIDSet = field(default_factory=RangeSetStates.empty)
     llm_bv_not: Optional[LLMTokenSet] = None
     state_to_dest: Optional[Dict[int, List[int]]] = None
+    priority: int = -1
 
     def ensure_index(self, dest_index_threshold: int = 512, max_states_per_index: int = 100_000) -> None:
         if self.state_to_dest is not None or len(self.dests) < dest_index_threshold:
@@ -291,7 +292,9 @@ class Model(GraphProvider):
             if not node.children: continue
             for edge in node.children:
                 edge.dests.sort(key=lambda item: md.get(int(item[0]), 0), reverse=True)
-            node.children.sort(key=lambda e: (-md.get(int(e.dests[0][0]), 0) if e.dests else -1, e.pop))
+                if edge.dests:
+                    edge.priority = md.get(int(edge.dests[0][0]), 0)
+            node.children.sort(key=lambda e: (-e.priority, e.pop))
 
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         term_rs = RangeSet.from_indices([terminal_id])
@@ -397,7 +400,7 @@ class Model(GraphProvider):
 
     def get_mask(self) -> LLMTokenSet:
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
-        values, depth_heap, enqueued = {}, [], set()
+        values, priority_queue, enqueued = {}, [], set()
         edge_cursor = {}
         hp, hpop = heapq.heappush, heapq.heappop
 
@@ -417,11 +420,15 @@ class Model(GraphProvider):
             gss_init = gss.apply(initialize_acc, init_cache)
             if r in values: values[r] = values[r].merge(gss_init)
             else: values[r] = gss_init
-            if r not in enqueued: enqueued.add(r); hp(depth_heap, (-self.max_depth[r], r))
+            if r not in enqueued:
+                enqueued.add(r)
+                a_node = self.arena.get(r)
+                priority = a_node.children[0].priority if a_node and a_node.children else -1
+                hp(priority_queue, (-priority, r))
 
         remaining_mask = all_ones
-        while depth_heap:
-            _, node = hpop(depth_heap)
+        while priority_queue:
+            _, node = hpop(priority_queue)
             enqueued.remove(node)
             gss_node = values.pop(node)
             gss_id = id(gss_node)
@@ -482,7 +489,10 @@ class Model(GraphProvider):
                         state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
                         values[node] = state_to_requeue
                         edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
-                        if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
+                        if node not in enqueued:
+                            enqueued.add(node)
+                            priority = a_node.children[edge_i].priority
+                            hp(priority_queue, (-priority, node))
                         edges_proc = max_edges; break
 
                     dest_idx, state_bv = edge.dests[dest_j]
@@ -497,7 +507,11 @@ class Model(GraphProvider):
                     d: NodeID = int(dest_idx)
                     if d in values: values[d] = values[d].merge(child_gss)
                     else: values[d] = child_gss
-                    if d not in enqueued: enqueued.add(d); hp(depth_heap, (-self.max_depth[d], d))
+                    if d not in enqueued:
+                        enqueued.add(d)
+                        d_node = self.arena.get(d)
+                        priority = d_node.children[0].priority if d_node and d_node.children else -1
+                        hp(priority_queue, (-priority, d))
                     dests_proc += 1
                 
                 if edges_proc >= max_edges: break
@@ -507,7 +521,10 @@ class Model(GraphProvider):
                     state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
                     values[node] = state_to_requeue
                     edge_cursor[node] = NodeCursor(edge_i + 1, 0, id(state_to_requeue), pop_cache)
-                    if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
+                    if node not in enqueued:
+                        enqueued.add(node)
+                        priority = a_node.children[edge_i + 1].priority
+                        hp(priority_queue, (-priority, node))
                     break
             else: edge_cursor.pop(node, None)
 
