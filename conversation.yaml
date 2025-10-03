@@ -157,13 +157,17 @@ local_system:
           return end_state, match_ids[:num_matches], match_widths[:num_matches]
 
 
-      class PyTokenizer(NamedTuple):
+      @dataclass(frozen=True)
+      class PyTokenizer:
           states: List[DFAState]
           start_state: int
           non_greedy_finalizers: Set[int]
+          transitions_array: np.ndarray = field(init=False, repr=False)
+          finalizers_matrix: np.ndarray = field(init=False, repr=False)
+          non_greedy_array: np.ndarray = field(init=False, repr=False)
 
-          def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
-              # Convert states to numpy arrays for JIT
+          def __post_init__(self):
+              # Use object.__setattr__ because the dataclass is frozen
               num_states = len(self.states)
 
               # Transitions: 2D array [state_id, byte_value] -> next_state_id
@@ -172,6 +176,7 @@ local_system:
               for sid, state in enumerate(self.states):
                   for byte_val, next_state in state.transitions.items():
                       transitions_array[sid, byte_val] = next_state
+              object.__setattr__(self, 'transitions_array', transitions_array)
 
               # Finalizers: 2D array [state_id, finalizer_index] -> group_id
               # Use -1 for padding
@@ -182,10 +187,13 @@ local_system:
               for sid, state in enumerate(self.states):
                   for idx, group_id in enumerate(sorted(state.finalizers)):
                       finalizers_matrix[sid, idx] = group_id
+              object.__setattr__(self, 'finalizers_matrix', finalizers_matrix)
 
               # Non-greedy finalizers
               non_greedy_array = np.array(sorted(self.non_greedy_finalizers), dtype=np.int64)
+              object.__setattr__(self, 'non_greedy_array', non_greedy_array)
 
+          def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
               # Convert text to numpy array
               text_array = np.frombuffer(text, dtype=np.uint8)
 
@@ -193,9 +201,9 @@ local_system:
               end_state, match_ids, match_widths = _execute_from_state_impl(
                   text_array,
                   state_id,
-                  transitions_array,
-                  finalizers_matrix,
-                  non_greedy_array
+                  self.transitions_array,
+                  self.finalizers_matrix,
+                  self.non_greedy_array
               )
 
               # Convert results
@@ -820,6 +828,16 @@ local_system:
               # Non-greedy finalizers
               non_greedy_array = np.array(sorted(self.non_greedy_finalizers), dtype=np.int64)
               object.__setattr__(self, 'non_greedy_array', non_greedy_array)
+
+              # Warm up the JIT-compiled function to avoid a slow first call.
+              if num_states > 0:
+                  _execute_from_state_impl(
+                      np.empty(0, dtype=np.uint8),
+                      self.start_state,
+                      self.transitions_array,
+                      self.finalizers_matrix,
+                      self.non_greedy_array
+                  )
 
           def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
               # Convert text to numpy array
@@ -1462,13 +1480,17 @@ messages:
           return end_state, match_ids[:num_matches], match_widths[:num_matches]
 
 
-      class PyTokenizer(NamedTuple):
+      @dataclass(frozen=True)
+      class PyTokenizer:
           states: List[DFAState]
           start_state: int
           non_greedy_finalizers: Set[int]
+          transitions_array: np.ndarray = field(init=False, repr=False)
+          finalizers_matrix: np.ndarray = field(init=False, repr=False)
+          non_greedy_array: np.ndarray = field(init=False, repr=False)
 
-          def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
-              # Convert states to numpy arrays for JIT
+          def __post_init__(self):
+              # Use object.__setattr__ because the dataclass is frozen
               num_states = len(self.states)
 
               # Transitions: 2D array [state_id, byte_value] -> next_state_id
@@ -1477,6 +1499,7 @@ messages:
               for sid, state in enumerate(self.states):
                   for byte_val, next_state in state.transitions.items():
                       transitions_array[sid, byte_val] = next_state
+              object.__setattr__(self, 'transitions_array', transitions_array)
 
               # Finalizers: 2D array [state_id, finalizer_index] -> group_id
               # Use -1 for padding
@@ -1487,10 +1510,13 @@ messages:
               for sid, state in enumerate(self.states):
                   for idx, group_id in enumerate(sorted(state.finalizers)):
                       finalizers_matrix[sid, idx] = group_id
+              object.__setattr__(self, 'finalizers_matrix', finalizers_matrix)
 
               # Non-greedy finalizers
               non_greedy_array = np.array(sorted(self.non_greedy_finalizers), dtype=np.int64)
+              object.__setattr__(self, 'non_greedy_array', non_greedy_array)
 
+          def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
               # Convert text to numpy array
               text_array = np.frombuffer(text, dtype=np.uint8)
 
@@ -1498,9 +1524,9 @@ messages:
               end_state, match_ids, match_widths = _execute_from_state_impl(
                   text_array,
                   state_id,
-                  transitions_array,
-                  finalizers_matrix,
-                  non_greedy_array
+                  self.transitions_array,
+                  self.finalizers_matrix,
+                  self.non_greedy_array
               )
 
               # Convert results
@@ -1940,8 +1966,8 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_opt3.py
-  - user: '`execute_from_state` is currently really slow because it has to do all
-      this setup each time. Make it much much faster.'
+  - user: The first run of `execute_from_state` is very slow. Make it as fast as the
+      rest.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1960,126 +1986,64 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The performance of `execute_from_state` can be significantly improved by pre-calculating the NumPy arrays it uses, rather than recreating them on every invocation. This can be achieved by changing the `PyTokenizer` class to compute these arrays once during its initialization.
+      Of course. The slowness on the first run of `execute_from_state` is a classic sign of Just-In-Time (JIT) compilation overhead from Numba. The `@njit` decorator compiles the Python function `_execute_from_state_impl` to fast machine code the first time it's called, which can take a moment.
 
-      Here are the step-by-step instructions to apply this optimization:
+      To fix this, we can "warm up" the function by calling it once with dummy data when the `PyTokenizer` is initialized. This moves the one-time compilation cost from the first real execution to the model's setup phase.
+
+      Here are the step-by-step instructions to apply the fix:
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `python/aug25/models/precompute3_model_pure_python_opt3.py`.**
+      1.  **Open the file:**
+          `python/aug25/models/precompute3_model_pure_python_opt3.py`
 
-      2.  **Modify the `PyTokenizer` class:**
-          *   Change the class from a `NamedTuple` to a `dataclass`. This will allow us to add an initialization hook (`__post_init__`) to pre-compute our data.
-          *   In the new `dataclass` definition, add fields to store the pre-computed NumPy arrays: `transitions_array`, `finalizers_matrix`, and `non_greedy_array`.
-          *   Implement the `__post_init__` method. Move the NumPy array creation logic from `execute_from_state` into this method. This ensures the arrays are created only once when the `PyTokenizer` is instantiated.
-          *   Update the `execute_from_state` method to remove the array creation logic and instead use the pre-computed arrays now stored as attributes of the class (`self.transitions_array`, etc.).
+      2.  **Locate the `PyTokenizer` class and its `__post_init__` method.**
 
-          To do this, replace the entire `PyTokenizer` class definition (from line 163 to 228) with the updated version below.
+      3.  **Add the warm-up call:**
+          At the end of the `__post_init__` method, after all the NumPy arrays (`transitions_array`, `finalizers_matrix`, `non_greedy_array`) have been created and assigned, add the following code. This will call the JIT-compiled function with valid, empty inputs, triggering its compilation.
+
+          ```python
+                  # Non-greedy finalizers
+                  non_greedy_array = np.array(sorted(self.non_greedy_finalizers), dtype=np.int64)
+                  object.__setattr__(self, 'non_greedy_array', non_greedy_array)
+          
+                  # Warm up the JIT-compiled function to avoid a slow first call.
+                  if num_states > 0:
+                      _execute_from_state_impl(
+                          np.empty(0, dtype=np.uint8),
+                          self.start_state,
+                          self.transitions_array,
+                          self.finalizers_matrix,
+                          self.non_greedy_array
+                      )
+          ```
 
       ### Git Diff
 
-      Here is the git diff to apply the changes.
+      Here is the corresponding git diff to apply this change directly.
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python_opt3.py b/python/aug25/models/precompute3_model_pure_python_opt3.py
-      index 4514580..09c264a 100644
+      index 45543c7..433f443 100644
       --- a/python/aug25/models/precompute3_model_pure_python_opt3.py
       +++ b/python/aug25/models/precompute3_model_pure_python_opt3.py
-      @@ -160,63 +160,65 @@
-           return end_state, match_ids[:num_matches], match_widths[:num_matches]
-       
-       
-      -class PyTokenizer(NamedTuple):
-      +@dataclass(frozen=True)
-      +class PyTokenizer:
-           states: List[DFAState]
-           start_state: int
-           non_greedy_finalizers: Set[int]
-      +    transitions_array: np.ndarray = field(init=False, repr=False)
-      +    finalizers_matrix: np.ndarray = field(init=False, repr=False)
-      +    non_greedy_array: np.ndarray = field(init=False, repr=False)
+      @@ -201,6 +201,16 @@
+               # Non-greedy finalizers
+               non_greedy_array = np.array(sorted(self.non_greedy_finalizers), dtype=np.int64)
+               object.__setattr__(self, 'non_greedy_array', non_greedy_array)
       +
-      +    def __post_init__(self):
-      +        # Use object.__setattr__ because the dataclass is frozen
-      +        num_states = len(self.states)
-      +
-      +        # Transitions: 2D array [state_id, byte_value] -> next_state_id
-      +        # Use -1 to indicate no transition
-      +        transitions_array = np.full((num_states, 256), -1, dtype=np.int64)
-      +        for sid, state in enumerate(self.states):
-      +            for byte_val, next_state in state.transitions.items():
-      +                transitions_array[sid, byte_val] = next_state
-      +        object.__setattr__(self, 'transitions_array', transitions_array)
-      +
-      +        # Finalizers: 2D array [state_id, finalizer_index] -> group_id
-      +        # Use -1 for padding
-      +        max_finalizers = max((len(state.finalizers) for state in self.states), default=0)
-      +        if max_finalizers == 0:
-      +            max_finalizers = 1
-      +        finalizers_matrix = np.full((num_states, max_finalizers), -1, dtype=np.int64)
-      +        for sid, state in enumerate(self.states):
-      +            for idx, group_id in enumerate(sorted(state.finalizers)):
-      +                finalizers_matrix[sid, idx] = group_id
-      +        object.__setattr__(self, 'finalizers_matrix', finalizers_matrix)
-      +
-      +        # Non-greedy finalizers
-      +        non_greedy_array = np.array(sorted(self.non_greedy_finalizers), dtype=np.int64)
-      +        object.__setattr__(self, 'non_greedy_array', non_greedy_array)
+      +        # Warm up the JIT-compiled function to avoid a slow first call.
+      +        if num_states > 0:
+      +            _execute_from_state_impl(
+      +                np.empty(0, dtype=np.uint8),
+      +                self.start_state,
+      +                self.transitions_array,
+      +                self.finalizers_matrix,
+      +                self.non_greedy_array
+      +            )
        
            def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
-      -        # Convert states to numpy arrays for JIT
-      -        num_states = len(self.states)
-      -
-      -        # Transitions: 2D array [state_id, byte_value] -> next_state_id
-      -        # Use -1 to indicate no transition
-      -        transitions_array = np.full((num_states, 256), -1, dtype=np.int64)
-      -        for sid, state in enumerate(self.states):
-      -            for byte_val, next_state in state.transitions.items():
-      -                transitions_array[sid, byte_val] = next_state
-      -
-      -        # Finalizers: 2D array [state_id, finalizer_index] -> group_id
-      -        # Use -1 for padding
-      -        max_finalizers = max((len(state.finalizers) for state in self.states), default=0)
-      -        if max_finalizers == 0:
-      -            max_finalizers = 1
-      -        finalizers_matrix = np.full((num_states, max_finalizers), -1, dtype=np.int64)
-      -        for sid, state in enumerate(self.states):
-      -            for idx, group_id in enumerate(sorted(state.finalizers)):
-      -                finalizers_matrix[sid, idx] = group_id
-      -
-      -        # Non-greedy finalizers
-      -        non_greedy_array = np.array(sorted(self.non_greedy_finalizers), dtype=np.int64)
-      -
                # Convert text to numpy array
-               text_array = np.frombuffer(text, dtype=np.uint8)
-       
-               # Call JIT function
-               end_state, match_ids, match_widths = _execute_from_state_impl(
-                   text_array,
-                   state_id,
-      -            transitions_array,
-      -            finalizers_matrix,
-      -            non_greedy_array
-      +            self.transitions_array,
-      +            self.finalizers_matrix,
-      +            self.non_greedy_array
-               )
-       
-               # Convert results
-               result_end_state = None if end_state == -1 else end_state
-               result_matches = [(int(gid), int(width)) for gid, width in zip(match_ids, match_widths) if width > 0]
-       
-               return result_end_state, result_matches
-       
-           def tokens_accessible_from_state(self, state_id: int) -> List[int]:
-               return list(self.states[state_id].possible_future_group_ids)
-       
-           def initial_state_id(self) -> int:
-               return self.start_state
-       
-           def max_state(self) -> int:
-               return len(self.states)
-       
 
       ```
     metadata:
@@ -2092,7 +2056,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt3.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt3.py.
     metadata:
-  - user: 'Changes committed with message: "Perf: Pre-calculate NumPy arrays in PyTokenizer
-      for faster execute_from_state"'
+  - user: 'Changes committed with message: "Warm up Numba JIT for _execute_from_state_impl
+      on tokenizer init to speed up first execution"'
     metadata:
 ...
