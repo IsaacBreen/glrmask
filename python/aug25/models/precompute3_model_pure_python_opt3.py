@@ -45,13 +45,15 @@ def _acc_memoize(use_value_cache: bool = True):
         return wrapper
     return decorator
 
-class DFAState(NamedTuple):
+@dataclass(frozen=True)
+class DFAState:
     transitions: Dict[int, int]
     finalizers: Set[int]
     possible_future_group_ids: Set[int]
 
 
-class PyTokenizer(NamedTuple):
+@dataclass(frozen=True)
+class PyTokenizer:
     states: List[DFAState]
     start_state: int
     non_greedy_finalizers: Set[int]
