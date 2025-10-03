@@ -6,6 +6,8 @@ import collections
 from typing import Dict, List, Tuple, Optional, Union, Set
 from dataclasses import dataclass, field
 
+from numba import njit
+
 from ..common_interface import GraphProvider
 from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
 from ..range_set.set_range_set import SetRangeSet as RangeSetOut
@@ -34,7 +36,7 @@ def _acc_memoize(use_value_cache: bool = True):
                 if cached is not None:
                     id_memo[acc_id] = cached
                     return cached
-
+            
             result = fn(acc)
             id_memo[acc_id] = result
             if use_value_cache and result is not None:
@@ -46,15 +48,16 @@ def _acc_memoize(use_value_cache: bool = True):
 @dataclass
 class DFAState:
     transitions: Dict[int, int] = field(default_factory=dict)
-    finalizers: Tuple[int, ...] = field(default_factory=tuple)
-    possible_future_group_ids: Tuple[int, ...] = field(default_factory=tuple)
+    finalizers: Set[int] = field(default_factory=set)
+    possible_future_group_ids: Set[int] = field(default_factory=set)
 
 @dataclass
 class PyTokenizer:
     states: List[DFAState]
     start_state: int
-    non_greedy_finalizers: Tuple[int, ...]
+    non_greedy_finalizers: Set[int]
 
+    @njit
     def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
         current_state = state_id
         matches = {}
@@ -74,7 +77,7 @@ class PyTokenizer:
             if next_state is None:
                 done = True
                 break
-
+            
             current_state = next_state
             for group_id in self.states[current_state].finalizers:
                 if group_id in self.non_greedy_finalizers:
@@ -129,7 +132,7 @@ class ArenaEdge:
     def ensure_index(self, dest_index_threshold: int = 512, max_states_per_index: int = 100_000) -> None:
         if self.state_to_dest is not None or len(self.dests) < dest_index_threshold:
             return
-
+        
         mapping: Dict[int, List[int]] = collections.defaultdict(list)
         total_assigned = 0
         for j, (_dest_idx, state_bv) in enumerate(self.dests):
@@ -201,7 +204,7 @@ class Model(GraphProvider):
     @staticmethod
     def from_json_string(s: str) -> 'Model':
         data = json.loads(s)
-
+        
         # Arena
         roots_map = {int(s): int(r) for s, r in data["precomputed3"]}
         arena_dict = {int(k): v for k, v in data["trie3_god"].get("values", [])}
@@ -214,7 +217,7 @@ class Model(GraphProvider):
             if not children_data:
                 node_data["children"], node_data["llm_bv_union"] = [], RangeSet.empty()
                 continue
-
+            
             new_children, llm_bv_union = [], RangeSet.empty()
             for (pop, llm_json), dest_map_json in children_data:
                 llm_bv = RangeSet.from_ranges(bs_from_json(dumps(llm_json)).to_ranges())
@@ -231,8 +234,8 @@ class Model(GraphProvider):
 
         # Tokenizer
         dfa_data = data['tokenizer']['dfa']
-        dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=tuple(sorted(s['finalizers'])), possible_future_group_ids=tuple(sorted(s['possible_future_group_ids']))) for s in dfa_data['states']]
-        tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], tuple(sorted(dfa_data['non_greedy_finalizers'])))
+        dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
+        tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], set(dfa_data['non_greedy_finalizers']))
 
         # Parser Table
         parser_data = data['parser']
