@@ -47,14 +47,14 @@ def _acc_memoize(use_value_cache: bool = True):
 
 class DFAState(NamedTuple):
     transitions: Dict[int, int]
-    finalizers: Set[int]
-    possible_future_group_ids: Set[int]
+    finalizers: frozenset[int]
+    possible_future_group_ids: frozenset[int]
 
 
 class PyTokenizer(NamedTuple):
     states: List[DFAState]
     start_state: int
-    non_greedy_finalizers: Set[int]
+    non_greedy_finalizers: frozenset[int]
 
     @njit(nopython=True)
     def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
@@ -233,8 +233,8 @@ class Model(GraphProvider):
 
         # Tokenizer
         dfa_data = data['tokenizer']['dfa']
-        dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
-        tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], set(dfa_data['non_greedy_finalizers']))
+        dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=frozenset(s['finalizers']), possible_future_group_ids=frozenset(s['possible_future_group_ids'])) for s in dfa_data['states']]
+        tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], frozenset(dfa_data['non_greedy_finalizers']))
 
         # Parser Table
         parser_data = data['parser']
