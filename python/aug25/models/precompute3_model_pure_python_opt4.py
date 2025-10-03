@@ -634,8 +634,6 @@ class Model(GraphProvider):
             heap_item = heapq.heappop(work_heap)
             priority, work = heap_item.priority, heap_item.item
 
-            gen = None
-
             if isinstance(work, WorkItemSuspended):
                 gen = work.generator
                 work_llm_mask = work.llm_mask
