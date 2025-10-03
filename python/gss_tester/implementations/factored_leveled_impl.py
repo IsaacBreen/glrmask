@@ -309,3 +309,6 @@ class FactoredLeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         inner_str = self._inner.to_graph_string(memo=memo, upper_only=upper_only)
         lines.append(inner_str)
         return "\n".join(lines)
+
+
+Factored_leveledGSS = FactoredLeveledGSS

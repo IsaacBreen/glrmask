@@ -312,3 +312,6 @@ class LeveledPerAccGSS(GSS[T, Acc], Generic[T, Acc]):
         
         accs = iter(self._parts.keys())
         return reduce(lambda a, b: a.merge(b), accs)
+
+
+Leveled_per_acc_standaloneGSS = LeveledPerAccGSS

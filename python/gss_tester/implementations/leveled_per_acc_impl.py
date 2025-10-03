@@ -330,3 +330,6 @@ class LeveledPerAccGSS(GSS[T, Acc], Generic[T, Acc]):
         """Unambiguous string representation."""
         items = self.to_stacks()
         return f"{self.__class__.__name__}(_parts={[ (acc, '<inner>') for acc in self._parts.keys() ]!r})"
+
+
+Leveled_per_accGSS = LeveledPerAccGSS
