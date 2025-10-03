@@ -877,7 +877,7 @@ class Model(GraphProvider):
 
         stats.stop('get_mask')
 
-        if stats.times['get_mask']*1000 > 3:
+        if stats.times['get_mask.main_loop']*1000 > 1:
             stats.report()
         stats.reset()
 
