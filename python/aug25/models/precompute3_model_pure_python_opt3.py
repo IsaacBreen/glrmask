@@ -127,6 +127,17 @@ class ArenaEdgeDest:
     state_bv: StateIDSet
 
 @dataclass
+class LoadedArenaEdge:
+    pop: int
+    llm_bv: LLMTokenSet
+    dests: List[ArenaEdgeDest]
+
+@dataclass
+class LoadedArenaNode:
+    children: List[LoadedArenaEdge]
+    clean_end: bool
+
+@dataclass
 class ArenaEdge:
     pop: int
     llm_bv: LLMTokenSet
@@ -150,6 +161,30 @@ class ArenaNode:
     children: List[ArenaEdge] = field(default_factory=list)
     llm_bv_union: LLMTokenSet = field(default_factory=RangeSet.empty)
     clean_end: bool = False
+
+def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode]) -> Dict[NodeID, ArenaNode]:
+    arena: Dict[NodeID, ArenaNode] = {}
+    for uid, loaded_node in loaded_arena.items():
+        new_children: List[ArenaEdge] = []
+        llm_bv_union = RangeSet.empty()
+        for loaded_edge in loaded_node.children:
+            llm_bv_union |= loaded_edge.llm_bv
+            dest_states_union = RangeSetStates.empty()
+            for dest in loaded_edge.dests:
+                dest_states_union |= dest.state_bv
+
+            new_children.append(ArenaEdge(
+                pop=loaded_edge.pop,
+                llm_bv=loaded_edge.llm_bv,
+                dests=loaded_edge.dests,
+                dest_states_union=dest_states_union,
+            ))
+        arena[uid] = ArenaNode(
+            children=new_children,
+            llm_bv_union=llm_bv_union,
+            clean_end=loaded_node.clean_end,
+        )
+    return arena
 
 @dataclass(frozen=True, eq=False)
 class PyAcc:
@@ -211,27 +246,24 @@ class Model(GraphProvider):
         max_depth: Dict[NodeID, int] = {}
         dumps, bs_from_json = json.dumps, ffi.Bitset.from_json_string
 
+        loaded_arena: Dict[NodeID, LoadedArenaNode] = {}
         for uid, node_data in arena_dict.items():
             max_depth[uid] = int(node_data.get("max_depth", 0) or 0)
             children_data = node_data.get("children") or []
-            if not children_data:
-                node_data["children"], node_data["llm_bv_union"] = [], RangeSet.empty()
-                continue
             
-            new_children, llm_bv_union = [], RangeSet.empty()
+            loaded_children: List[LoadedArenaEdge] = []
             for (pop, llm_json), dest_map_json in children_data:
                 llm_bv = RangeSet.from_ranges(bs_from_json(dumps(llm_json)).to_ranges())
-                llm_bv_union |= llm_bv
-                new_dests, dest_states_union = [], RangeSetStates.empty()
+                dests: List[ArenaEdgeDest] = []
                 for dest_idx, state_json in dest_map_json:
                     state_bv = RangeSetStates.from_ranges(bs_from_json(dumps(state_json)).to_ranges())
-                    new_dests.append(ArenaEdgeDest(int(dest_idx), state_bv))
-                    dest_states_union |= state_bv
-                new_children.append(ArenaEdge(int(pop), llm_bv, new_dests, dest_states_union))
-            node_data["children"], node_data["llm_bv_union"] = new_children, llm_bv_union
+                    dests.append(ArenaEdgeDest(int(dest_idx), state_bv))
+                loaded_children.append(LoadedArenaEdge(int(pop), llm_bv, dests))
+            
+            clean_end = node_data.get("value", {}).get("clean_end", False)
+            loaded_arena[uid] = LoadedArenaNode(children=loaded_children, clean_end=clean_end)
 
-        arena = {uid: ArenaNode(nd.get("children", []), nd.get("llm_bv_union", RangeSet.empty()), nd.get("value", {}).get("clean_end", False)) for uid, nd in arena_dict.items()}
-
+        arena = _convert_arena(loaded_arena)
         # Tokenizer
         dfa_data = data['tokenizer']['dfa']
         dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
