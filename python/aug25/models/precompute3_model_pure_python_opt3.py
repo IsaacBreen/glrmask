@@ -227,20 +227,6 @@ class PyAcc:
         return self.llm_mask.is_empty()
 
 @dataclass
-class WorkItem:
-    priority: Tuple[int, int, int]
-    node_id: NodeID
-    gss: GSS
-    edge_idx: int
-    dest_idx: int
-    pop_cache: Dict
-
-    def __lt__(self, other: 'WorkItem') -> bool:
-        if not isinstance(other, WorkItem):
-            return NotImplemented
-        return self.priority < other.priority
-
-@dataclass
 class Model(GraphProvider):
     arena: Dict[NodeID, ArenaNode]
     roots_map: Dict[int, NodeID]
@@ -451,24 +437,21 @@ class Model(GraphProvider):
     def get_mask(self) -> LLMTokenSet:
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
         work_heap = []
-
+        tie_breaker = 0
+        
         def enqueue(node_id: NodeID, gss: GSS, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
+            nonlocal tie_breaker
             if gss.is_empty():
                 return
             priority = (-self.max_depth.get(node_id, 0), edge_idx, dest_idx)
-            item = WorkItem(
-                priority=priority,
-                node_id=node_id,
-                gss=gss,
-                edge_idx=edge_idx,
-                dest_idx=dest_idx,
-                pop_cache=pop_cache if pop_cache is not None else {}
-            )
+            item = (priority, tie_breaker, node_id, gss, pop_cache if pop_cache is not None else {})
             heapq.heappush(work_heap, item)
+            tie_breaker += 1
 
         def dequeue() -> Tuple[NodeID, GSS, int, int, Dict]:
-            item = heapq.heappop(work_heap)
-            return item.node_id, item.gss, item.edge_idx, item.dest_idx, item.pop_cache
+            priority, _tie_breaker, node_id, gss, pop_cache = heapq.heappop(work_heap)
+            _depth, edge_idx, dest_idx = priority
+            return node_id, gss, edge_idx, dest_idx, pop_cache
 
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
