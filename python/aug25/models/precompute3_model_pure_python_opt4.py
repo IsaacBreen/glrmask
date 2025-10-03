@@ -647,20 +647,21 @@ class Model(GraphProvider):
                 gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, is_final_mask_empty)
 
             if gen:
-                try:
-                    yielded = next(gen)
+                while True:
+                    try:
+                        yielded = next(gen)
 
-                    if isinstance(yielded, Enqueue):
-                        new_node_id, new_gss = yielded.node_id, yielded.gss
-                        if not new_gss.is_empty():
-                            child_priority = (-self.max_depth.get(new_node_id, 0), 0, 0)
-                            heapq.heappush(work_heap, HeapItem(child_priority, (new_node_id, new_gss)))
-                        heapq.heappush(work_heap, HeapItem(priority, gen))
-                    elif isinstance(yielded, Suspend):
-                        heapq.heappush(work_heap, HeapItem(yielded.priority, gen))
+                        if isinstance(yielded, Enqueue):
+                            new_node_id, new_gss = yielded.node_id, yielded.gss
+                            if not new_gss.is_empty():
+                                child_priority = (-self.max_depth.get(new_node_id, 0), 0, 0)
+                                heapq.heappush(work_heap, HeapItem(child_priority, (new_node_id, new_gss)))
+                        elif isinstance(yielded, Suspend):
+                            heapq.heappush(work_heap, HeapItem(yielded.priority, gen))
+                            break
 
-                except StopIteration:
-                    pass # Generator is done.
+                    except StopIteration:
+                        break # Generator is done.
         t2 = time.perf_counter()
 
         original_indices = RangeSetOut.empty()
