@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
 
 import _sep1 as ffi
-from numba import njit
 
 from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 from ..common_interface import GraphProvider
@@ -58,7 +57,6 @@ class PyTokenizer:
     start_state: int
     non_greedy_finalizers: Set[int]
 
-    @njit(nopython=True)
     def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
         current_state = state_id
         matches = {}
