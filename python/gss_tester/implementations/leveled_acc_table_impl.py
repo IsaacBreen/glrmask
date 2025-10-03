@@ -154,18 +154,13 @@ def try_promote(node: UpperBranch[T]) -> Upper[T]:
             return UpperBranch(children={}, empty=None)
         l_children: Dict[T, Dict[int, Lower[T]]] = {}
         for v, kids in node.children.items():
-            nodes_by_depth: DefaultDict[int, List[Lower[T]]] = DefaultDict(list)
+            v_map: Dict[int, Lower[T]] = {}
             for child in kids.values():
                 ci: Interface[T] = child  # type: ignore[assignment]
                 lower = Lower(children=ci.children, empty=(ci.empty is not None))
-                nodes_by_depth[lower._max_depth].append(lower)
-            if nodes_by_depth:
-                v_map = {
-                    depth: reduce(merge_lower, nodes)
-                    for depth, nodes in nodes_by_depth.items()
-                }
-                if v_map:
-                    l_children[v] = v_map
+                v_map[lower._max_depth] = lower
+            if v_map:
+                l_children[v] = v_map
         return Interface(children=l_children, acc=the_acc, empty=node.empty)
     return node
 
