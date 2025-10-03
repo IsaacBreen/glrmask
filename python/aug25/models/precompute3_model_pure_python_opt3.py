@@ -187,14 +187,7 @@ class PyTokenizer:
         object.__setattr__(self, 'non_greedy_array', non_greedy_array)
 
         # Warm up the JIT-compiled function to avoid a slow first call.
-        if num_states > 0:
-            _execute_from_state_impl(
-                np.empty(0, dtype=np.uint8),
-                self.start_state,
-                self.transitions_array,
-                self.finalizers_matrix,
-                self.non_greedy_array
-            )
+        self.execute_from_state(b'a', self.start_state)
 
     def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
         # Convert text to numpy array
