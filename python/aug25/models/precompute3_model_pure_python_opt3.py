@@ -226,13 +226,6 @@ class PyAcc:
         return self.llm_mask.is_empty()
 
 @dataclass
-class NodeCursor:
-    edge_idx: int = 0
-    dest_idx: int = 0
-    gss_id: int = 0
-    pop_cache: Optional[Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]]] = None
-
-@dataclass
 class Model(GraphProvider):
     arena: Dict[NodeID, ArenaNode]
     roots_map: Dict[int, NodeID]
@@ -442,22 +435,18 @@ class Model(GraphProvider):
 
     def get_mask(self) -> LLMTokenSet:
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
-        values, depth_heap, enqueued = {}, [], set()
-        edge_cursor = {}
+        work_heap = []
 
-        def enqueue(node_id: NodeID, gss: GSS) -> GSS:
-            if node_id in values:
-                gss = values[node_id].merge(gss)
-            values[node_id] = gss
-            if node_id not in enqueued:
-                enqueued.add(node_id)
-                heapq.heappush(depth_heap, (-self.max_depth[node_id], node_id))
-            return gss
+        def enqueue(node_id: NodeID, gss: GSS, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
+            if gss.is_empty():
+                return
+            priority = (-self.max_depth.get(node_id, 0), edge_idx, dest_idx)
+            heapq.heappush(work_heap, (priority, node_id, gss, pop_cache if pop_cache is not None else {}))
 
-        def dequeue() -> Tuple[NodeID, GSS]:
-            _, node_id = heapq.heappop(depth_heap)
-            enqueued.remove(node_id)
-            return node_id, values.pop(node_id)
+        def dequeue() -> Tuple[NodeID, GSS, int, int, Dict]:
+            priority, node_id, gss, pop_cache = heapq.heappop(work_heap)
+            _, edge_idx, dest_idx = priority
+            return node_id, gss, edge_idx, dest_idx, pop_cache
 
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
@@ -476,10 +465,8 @@ class Model(GraphProvider):
             enqueue(r, gss_init)
 
         remaining_mask = all_ones
-        while depth_heap:
-            node, gss_node = dequeue()
-            gss_id = id(gss_node)
-
+        while work_heap:
+            node, gss_node, start_edge, start_dest, pop_cache = dequeue()
             gss_acc = gss_node.reduce_acc()
             gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
 
@@ -490,12 +477,6 @@ class Model(GraphProvider):
             a_node = self.arena.get(node)
             if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                 continue
-
-            saved_cursor = edge_cursor.get(node)
-            if saved_cursor and saved_cursor.gss_id == gss_id:
-                start_edge, start_dest, pop_cache = saved_cursor.edge_idx, saved_cursor.dest_idx, saved_cursor.pop_cache or {}
-            else:
-                start_edge, start_dest, pop_cache = 0, 0, {}
 
             max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
             edges_proc, dests_proc = 0, 0
@@ -551,8 +532,7 @@ class Model(GraphProvider):
                 # Iterate grouped dests in ascending order for locality
                 for dest_j in sorted(grouped.keys()):
                     if dests_proc >= max_dests:
-                        state_to_requeue = enqueue(node, gss_node)
-                        edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
+                        enqueue(node, gss_node, edge_i, dest_j, pop_cache)
                         edges_proc = max_edges
                         break
                     dest = edge.dests[dest_j]
@@ -571,11 +551,9 @@ class Model(GraphProvider):
                 edges_proc += 1
 
                 if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-                    state_to_requeue = enqueue(node, gss_node)
-                    edge_cursor[node] = NodeCursor(edge_i + 1, 0, id(state_to_requeue), pop_cache)
+                    enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
                     break
-            else: edge_cursor.pop(node, None)
-
+        
         original_indices = RangeSetOut.empty()
         for i in final_mask.iter_indices():
             if i in self.internal_to_original_map:
