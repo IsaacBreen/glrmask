@@ -1141,115 +1141,110 @@ impl GrammarConstraint {
         roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
         trie1_god: &Trie1GodWrapper,
     ) {
-        crate::debug!(2, "Simplifying all None edge patterns in Trie1 iteratively...");
+        crate::debug!(2, "Simplifying None edges in Trie1...");
+        let root_node_ptrs: HashSet<PrecomputeNode1Index> = roots.values().cloned().collect();
+        let roots_vec: Vec<_> = roots.values().cloned().collect();
+        let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
+        let mut arc_by_ptr: HashMap<PrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
+        for n in &all_nodes {
+            arc_by_ptr.insert(*n, n.clone());
+        }
 
-        // This function now works iteratively. It keeps making passes over the graph
-        // to find A->B->C paths where at least one edge is `None`. It continues
-        // until a full pass makes no changes, ensuring all possible simplifications
-        // have been performed.
-        loop {
-            let mut changed_in_pass = false;
+        let mut incoming: HashMap<
+            PrecomputeNode1Index,
+            Vec<(PrecomputeNode1Index, Option<GrammarTokenID>, LLMTokenBV)>,
+        > = HashMap::new();
+        let mut none_edges_from: HashMap<
+            PrecomputeNode1Index,
+            Vec<(PrecomputeNode1Index, LLMTokenBV)>,
+        > = HashMap::new();
+        let mut none_union: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
 
-            // 1. --- Data Gathering ---
-            // Take a snapshot of the entire graph's structure at the start of the pass.
-            // We will calculate modifications based on this snapshot and apply them later.
-            // This avoids issues with modifying the graph while iterating over it.
-            let roots_vec: Vec<_> = roots.values().cloned().collect();
-            let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-
-            // Create maps for incoming and outgoing edges for every node.
-            let mut outgoing_edges: HashMap<PrecomputeNode1Index, Vec<(Option<GrammarTokenID>, PrecomputeNode1Index, LLMTokenBV)>> = HashMap::new();
-            let mut incoming_edges: HashMap<PrecomputeNode1Index, Vec<(PrecomputeNode1Index, Option<GrammarTokenID>, LLMTokenBV)>> = HashMap::new();
-
-            for src_arc in &all_nodes {
-                let guard = src_arc.read(trie1_god).expect("poison");
-                for (key, dest_map) in guard.children().iter() {
-                    for (dest_arc, bv) in dest_map.iter() {
-                        outgoing_edges.entry(*src_arc).or_default().push((key.clone(), *dest_arc, bv.clone()));
-                        incoming_edges.entry(*dest_arc).or_default().push((*src_arc, key.clone(), bv.clone()));
-                    }
+        for src_arc in &all_nodes {
+            let src_ptr = src_arc;
+            let guard = src_arc.read(trie1_god).expect("poison");
+            for (ek, dest_map) in guard.children().iter() {
+                for (child_wrap, ev_bv) in dest_map.iter() {
+                    let child_arc = child_wrap.as_arc().clone();
+                    let child_ptr = child_arc;
+                    incoming.entry(child_ptr)
+                        .or_default()
+                        .push((src_arc.clone(), ek.clone(), ev_bv.clone()));
                 }
             }
-
-            // 2. --- Calculate Modifications ---
-            // We'll store the changes we want to make in these maps to apply them in a batch.
-            // This avoids race conditions and deadlocks from trying to lock multiple nodes at once.
-            let mut shortcuts_to_add: HashMap<(PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>), LLMTokenBV> = HashMap::new();
-            let mut edges_to_weaken: HashMap<(PrecomputeNode1Index, PrecomputeNode1Index, Option<GrammarTokenID>), LLMTokenBV> = HashMap::new();
-
-            // Iterate over every node `B` as a potential middle-man in an A->B->C chain.
-            for b_arc in &all_nodes {
-                if let (Some(in_edges), Some(out_edges)) = (incoming_edges.get(b_arc), outgoing_edges.get(b_arc)) {
-                    // Check every combination of an incoming edge (A->B) and an outgoing edge (B->C).
-                    for (a_arc, key1, bv1) in in_edges {
-                        for (key2, c_arc, bv2) in out_edges {
-
-                            // --- Simplification Condition ---
-                            // A simplification is possible if at least one of the edges is `None`.
-                            if key1.is_none() || key2.is_none() {
-                                // Determine the key for the new shortcut edge A->C.
-                                // - `None -> Some(T)` results in `Some(T)`
-                                // - `Some(T) -> None` results in `Some(T)`
-                                // - `None -> None` results in `None`
-                                let new_key = key1.clone().or(key2.clone());
-
-                                // The tokens that can flow through this A->B->C path are the intersection.
-                                let tokens_to_move = bv1 & bv2;
-
-                                if !tokens_to_move.is_empty() {
-                                    changed_in_pass = true;
-
-                                    // Record the new shortcut edge to be added.
-                                    let shortcut_key = (*a_arc, *c_arc, new_key.clone());
-                                    shortcuts_to_add.entry(shortcut_key).or_default().bitor_assign(&tokens_to_move);
-
-                                    // Record that the original edges should be weakened by removing these tokens.
-                                    let weaken_key1 = (*a_arc, *b_arc, key1.clone());
-                                    edges_to_weaken.entry(weaken_key1).or_default().bitor_assign(&tokens_to_move);
-
-                                    let weaken_key2 = (*b_arc, *c_arc, key2.clone());
-                                    edges_to_weaken.entry(weaken_key2).or_default().bitor_assign(&tokens_to_move);
-                                }
-                            }
-                        }
-                    }
+            if let Some(dest_map) = guard.children().get(&None) {
+                let list = none_edges_from.entry(*src_ptr).or_default();
+                for (child_wrap, ev_bv) in dest_map.iter() {
+                    list.push((child_wrap.as_arc().clone(), ev_bv.clone()));
+                    let entry = none_union.entry(*src_ptr).or_insert_with(LLMTokenBV::zeros);
+                    *entry |= ev_bv;
                 }
-            }
-
-            // 3. --- Apply Modifications ---
-            if changed_in_pass {
-                // Add all the new shortcut edges.
-                for ((src, dst, key), bv_to_add) in shortcuts_to_add {
-                    let mut src_guard = src.write(trie1_god).expect("poison");
-                    let dest_map = src_guard.children_mut().entry(key).or_default();
-                    dest_map.entry(dst).or_insert_with(LLMTokenBV::zeros).bitor_assign(&bv_to_add);
-                }
-
-                // Weaken (or remove) the original edges.
-                for ((src, dst, key), bv_to_subtract) in edges_to_weaken {
-                    let mut src_guard = src.write(trie1_god).expect("poison");
-                    if let Some(dest_map) = src_guard.children_mut().get_mut(&key) {
-                        if let Some(bv) = dest_map.get_mut(&dst) {
-                            *bv -= &bv_to_subtract;
-                            // If the edge becomes empty, remove it.
-                            if bv.is_empty() {
-                                dest_map.remove(&dst);
-                            }
-                        }
-                        // If the destination map for this key becomes empty, remove it.
-                        if dest_map.is_empty() {
-                            src_guard.children_mut().remove(&key);
-                        }
-                    }
-                }
-            }
-
-            // If a full pass over the graph resulted in no changes, we are done.
-            if !changed_in_pass {
-                break;
             }
         }
 
+        for (b_ptr, none_edges) in none_edges_from.into_iter() {
+            let union_mask = match none_union.get(&b_ptr) {
+                Some(bv) if !bv.is_empty() => bv.clone(),
+                _ => continue,
+            };
+            let in_edges = match incoming.get(&b_ptr) {
+                Some(v) if !v.is_empty() => v.clone(),
+                _ => {
+                    if root_node_ptrs.contains(&b_ptr) {
+                        continue;
+                    }
+                    if let Some(b_arc) = arc_by_ptr.get(&b_ptr).cloned() {
+                        let mut b_guard = b_arc.write(trie1_god).expect("poison");
+                        b_guard.children_mut().remove(&None);
+                    }
+                    continue;
+                }
+            };
+
+            let b_arc = arc_by_ptr.get(&b_ptr).unwrap().clone();
+            let b_key = b_arc.clone();
+
+            for (a_arc, edge_key, bv1_original) in in_edges.into_iter() {
+                if edge_key.is_none() { continue; }
+
+                let mut total_to_move = bv1_original.clone();
+                total_to_move &= &union_mask;
+                if total_to_move.is_empty() {
+                    continue;
+                }
+
+                let mut a_guard = a_arc.write(trie1_god).expect("poison");
+                let dest_map = a_guard.children_mut().entry(edge_key.clone()).or_default();
+
+                for (c_arc, bv2) in &none_edges {
+                    let mut to_move_for_c = bv1_original.clone();
+                    to_move_for_c &= bv2;
+                    if to_move_for_c.is_empty() {
+                        continue;
+                    }
+                    let c_key = c_arc.clone();
+                    if let Some(existing_ev) = dest_map.get_mut(&c_key) {
+                        *existing_ev |= &to_move_for_c;
+                    } else {
+                        dest_map.insert(c_key, to_move_for_c);
+                    }
+                }
+
+                let mut remove_b_edge = false;
+                if let Some(ev_ab) = dest_map.get_mut(&b_key) {
+                    *ev_ab -= &total_to_move;
+                    remove_b_edge = ev_ab.is_empty();
+                }
+                if remove_b_edge {
+                    dest_map.remove(&b_key);
+                }
+            }
+
+            {
+                let mut b_guard = b_arc.write(trie1_god).expect("poison");
+                b_guard.children_mut().remove(&None);
+            }
+        }
         crate::debug!(2, "Done simplifying None edges in Trie1.");
     }
 
