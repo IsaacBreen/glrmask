@@ -213,32 +213,51 @@ def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArena
     """Stage 2: Merge flattened edges back into the final ArenaNode structure."""
     arena: Dict[NodeID, ArenaNode] = {}
     for uid, intermediate_node in tqdm(intermediate_arena.items(), desc="Stage 2: Merging and converting arena"):
-        llm_bv_union = RangeSet.empty()
-        
-        # Group intermediate edges by their common (pop, llm_bv) properties.
-        grouped_edges: Dict[Tuple[int, LLMTokenSet], List[IntermediateArenaEdgeDest]] = collections.defaultdict(list)
-        for edge in intermediate_node.children:
-            key = (edge.pop, edge.llm_bv)
-            grouped_edges[key].append(edge.dests)
-
         new_children: List[ArenaEdge] = []
-        for (pop, llm_bv), dests_list in grouped_edges.items():
-            llm_bv_union |= llm_bv
-            dest_states_union = RangeSetStates.empty()
-            new_dests: List[ArenaEdgeDest] = []
-            for dest in dests_list:
-                dest_states_union |= dest.state_bv
-                new_dests.append(ArenaEdgeDest(
-                    dest_idx=dest.dest_idx,
-                    state_bv=dest.state_bv
+        llm_bv_union = RangeSet.empty()
+
+        if not intermediate_node.children:
+            arena[uid] = ArenaNode(children=[], llm_bv_union=llm_bv_union, clean_end=intermediate_node.clean_end)
+            continue
+
+        # Use an iterator to process the list of children and group consecutive compatible edges
+        it = iter(intermediate_node.children)
+        current_edge = next(it)
+
+        group_pop = current_edge.pop
+        group_llm_bv = current_edge.llm_bv
+        group_dests = [ArenaEdgeDest(current_edge.dests.dest_idx, current_edge.dests.state_bv)]
+        group_dest_states_union = current_edge.dests.state_bv
+
+        for next_edge in it:
+            if next_edge.pop == group_pop and next_edge.llm_bv == group_llm_bv:
+                # This edge belongs to the current group. Append its dest.
+                group_dests.append(ArenaEdgeDest(next_edge.dests.dest_idx, next_edge.dests.state_bv))
+                group_dest_states_union |= next_edge.dests.state_bv
+            else:
+                # This edge starts a new group. Finalize the old one first.
+                llm_bv_union |= group_llm_bv
+                new_children.append(ArenaEdge(
+                    pop=group_pop,
+                    llm_bv=group_llm_bv,
+                    dests=group_dests,
+                    dest_states_union=group_dest_states_union,
                 ))
-            
-            new_children.append(ArenaEdge(
-                pop=pop,
-                llm_bv=llm_bv,
-                dests=new_dests,
-                dest_states_union=dest_states_union,
-            ))
+                
+                # Start the new group with the current edge's properties
+                group_pop = next_edge.pop
+                group_llm_bv = next_edge.llm_bv
+                group_dests = [ArenaEdgeDest(next_edge.dests.dest_idx, next_edge.dests.state_bv)]
+                group_dest_states_union = next_edge.dests.state_bv
+
+        # After the loop, the last group is still in memory and needs to be finalized.
+        llm_bv_union |= group_llm_bv
+        new_children.append(ArenaEdge(
+            pop=group_pop,
+            llm_bv=group_llm_bv,
+            dests=group_dests,
+            dest_states_union=group_dest_states_union,
+        ))
 
         arena[uid] = ArenaNode(
             children=new_children,
