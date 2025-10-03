@@ -978,8 +978,6 @@ local_system:
           all_internal_llm_tokens_bitset: LLMTokenSet
           ignore_terminal_id: Optional[int]
           state: Dict[int, GSS]
-          _current_remaining_mask: Optional[LLMTokenSet] = field(init=False, repr=False, default=None)
-          _mask_version: int = field(init=False, repr=False, default=0)
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
@@ -1170,7 +1168,7 @@ local_system:
                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
               return GSS.merge_many(shifted)
 
-          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, gss_acc: Optional[PyAcc]) -> Generator[Union[Enqueue, Suspend], None, None]:
+          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet) -> Generator[Union[Enqueue, Suspend], None, None]:
               a_node = self.arena.get(node_id)
               if not a_node:
                   return
@@ -1180,17 +1178,10 @@ local_system:
               edges_proc, dests_proc = 0, 0
               peek0_rs = None
               pop_cache = {}
-
-              # Fast re-check with the latest remaining mask; bail if nothing can pass now.
-              current_remaining = self._current_remaining_mask
-              if (not a_node.children or
-                  a_node.llm_bv_union.isdisjoint(current_remaining) or
-                  gss_mask.isdisjoint(a_node.llm_bv_union.intersection(current_remaining))):
-                  return
+              gss_acc = gss_node.reduce_acc()
 
               for edge_i, edge in enumerate(a_node.children):
-                  rem = self._current_remaining_mask
-                  if edge.llm_bv.isdisjoint(rem) or edge.llm_bv.isdisjoint(gss_mask):
+                  if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
                       continue
                   if edge.pop == 0:
                       if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
@@ -1291,9 +1282,6 @@ local_system:
                       heapq.heappush(work_heap, HeapItem(priority, (r, gss_init)))
               t1 = time.perf_counter()
 
-              # Track the currently effective remaining mask for generator-based traversal
-              self._current_remaining_mask = all_ones
-              self._mask_version = 0
               remaining_mask = all_ones
               while work_heap:
                   heap_item = heapq.heappop(work_heap)
@@ -1313,16 +1301,13 @@ local_system:
                           if not final_mask.issuperset(gss_acc.llm_mask):
                               final_mask |= gss_acc.llm_mask
                               remaining_mask = all_ones.difference(final_mask)
-                              # Update the shared current remaining mask for all generators
-                              self._current_remaining_mask = remaining_mask
-                              self._mask_version += 1
 
                       a_node = self.arena.get(node_id)
 
                       if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                           continue
 
-                      gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, gss_acc)
+                      gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask)
 
                   if gen:
                       while True:
@@ -2322,8 +2307,6 @@ local_system:
           all_internal_llm_tokens_bitset: LLMTokenSet
           ignore_terminal_id: Optional[int]
           state: Dict[int, GSS]
-          _current_remaining_mask: Optional[LLMTokenSet] = field(init=False, repr=False, default=None)
-          _mask_version: int = field(init=False, repr=False, default=0)
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
@@ -2514,7 +2497,7 @@ local_system:
                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
               return GSS.merge_many(shifted)
 
-          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, gss_acc: Optional[PyAcc]) -> Generator[Union[Enqueue, Suspend], None, None]:
+          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet, gss_acc: Optional[PyAcc]) -> Generator[Union[Enqueue, Suspend], None, None]:
               a_node = self.arena.get(node_id)
               if not a_node:
                   return
@@ -2525,16 +2508,8 @@ local_system:
               peek0_rs = None
               pop_cache = {}
 
-              # Fast re-check with the latest remaining mask; bail if nothing can pass now.
-              current_remaining = self._current_remaining_mask
-              if (not a_node.children or
-                  a_node.llm_bv_union.isdisjoint(current_remaining) or
-                  gss_mask.isdisjoint(a_node.llm_bv_union.intersection(current_remaining))):
-                  return
-
               for edge_i, edge in enumerate(a_node.children):
-                  rem = self._current_remaining_mask
-                  if edge.llm_bv.isdisjoint(rem) or edge.llm_bv.isdisjoint(gss_mask):
+                  if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
                       continue
                   if edge.pop == 0:
                       if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
@@ -2578,7 +2553,6 @@ local_system:
                           else: lst.append(sid)
 
                   # Iterate grouped dests in ascending order for locality
-                  dests_proc = 0
                   for dest_j in sorted(grouped.keys()):
                       if dests_proc >= max_dests:
                           priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
@@ -2596,11 +2570,11 @@ local_system:
                       yield Enqueue(d, child_gss)
                       dests_proc += 1
 
-                  edges_proc += 1
                   if edges_proc >= max_edges:
                       priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
                       yield Suspend(priority)
                       edges_proc = 0
+                  edges_proc += 1
 
           def get_mask(self) -> LLMTokenSet:
               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
@@ -2636,9 +2610,6 @@ local_system:
                       heapq.heappush(work_heap, HeapItem(priority, (r, gss_init)))
               t1 = time.perf_counter()
 
-              # Track the currently effective remaining mask for generator-based traversal
-              self._current_remaining_mask = all_ones
-              self._mask_version = 0
               remaining_mask = all_ones
               while work_heap:
                   heap_item = heapq.heappop(work_heap)
@@ -2658,16 +2629,13 @@ local_system:
                           if not final_mask.issuperset(gss_acc.llm_mask):
                               final_mask |= gss_acc.llm_mask
                               remaining_mask = all_ones.difference(final_mask)
-                              # Update the shared current remaining mask for all generators
-                              self._current_remaining_mask = remaining_mask
-                              self._mask_version += 1
 
                       a_node = self.arena.get(node_id)
 
                       if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                           continue
 
-                      gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, gss_acc)
+                      gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask, gss_acc)
 
                   if gen:
                       while True:
@@ -3713,8 +3681,6 @@ messages:
           all_internal_llm_tokens_bitset: LLMTokenSet
           ignore_terminal_id: Optional[int]
           state: Dict[int, GSS]
-          _current_remaining_mask: Optional[LLMTokenSet] = field(init=False, repr=False, default=None)
-          _mask_version: int = field(init=False, repr=False, default=0)
 
           @staticmethod
           def from_json_string(s: str) -> 'Model':
@@ -3905,7 +3871,7 @@ messages:
                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
               return GSS.merge_many(shifted)
 
-          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, gss_acc: Optional[PyAcc]) -> Generator[Union[Enqueue, Suspend], None, None]:
+          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet) -> Generator[Union[Enqueue, Suspend], None, None]:
               a_node = self.arena.get(node_id)
               if not a_node:
                   return
@@ -3915,17 +3881,10 @@ messages:
               edges_proc, dests_proc = 0, 0
               peek0_rs = None
               pop_cache = {}
-
-              # Fast re-check with the latest remaining mask; bail if nothing can pass now.
-              current_remaining = self._current_remaining_mask
-              if (not a_node.children or
-                  a_node.llm_bv_union.isdisjoint(current_remaining) or
-                  gss_mask.isdisjoint(a_node.llm_bv_union.intersection(current_remaining))):
-                  return
+              gss_acc = gss_node.reduce_acc()
 
               for edge_i, edge in enumerate(a_node.children):
-                  rem = self._current_remaining_mask
-                  if edge.llm_bv.isdisjoint(rem) or edge.llm_bv.isdisjoint(gss_mask):
+                  if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
                       continue
                   if edge.pop == 0:
                       if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
@@ -4026,9 +3985,6 @@ messages:
                       heapq.heappush(work_heap, HeapItem(priority, (r, gss_init)))
               t1 = time.perf_counter()
 
-              # Track the currently effective remaining mask for generator-based traversal
-              self._current_remaining_mask = all_ones
-              self._mask_version = 0
               remaining_mask = all_ones
               while work_heap:
                   heap_item = heapq.heappop(work_heap)
@@ -4048,16 +4004,13 @@ messages:
                           if not final_mask.issuperset(gss_acc.llm_mask):
                               final_mask |= gss_acc.llm_mask
                               remaining_mask = all_ones.difference(final_mask)
-                              # Update the shared current remaining mask for all generators
-                              self._current_remaining_mask = remaining_mask
-                              self._mask_version += 1
 
                       a_node = self.arena.get(node_id)
 
                       if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                           continue
 
-                      gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, gss_acc)
+                      gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask)
 
                   if gen:
                       while True:
@@ -4089,8 +4042,7 @@ messages:
       filename: python/aug25/models/precompute3_model_pure_python_opt4.py
   - user: Why the major performance difference between these implementations? I'd
       have thought they'd be essentially the same, as the overhead of using generators
-      should be a very small portion of compute. (In case it's not obvious, do NOT
-      change the overall approach in opt4 of using generators.)
+      should be a very small portion of compute.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4109,58 +4061,81 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The performance discrepancy between `opt3` and `opt4` is not due to the inherent overhead of generators, but rather to subtle bugs in the implementation of the suspension logic in `opt4`. Your intuition that the generator-based approach should be efficient is correct.
+      Of course. The performance discrepancy you're observing between the two implementations, despite their logical similarity, is due to a subtle but significant inefficiency in the generator-based version (`opt4`). Here is a step-by-step guide to fix it, followed by the corresponding git diff.
 
-      The primary issues were in how the counters for processed edges (`edges_proc`) and destinations (`dests_proc`) were managed within the generator, leading to far more frequent suspension/resumption cycles than intended.
+      The core issue is that for every new work item, the expensive `gss_node.reduce_acc()` method is called twice in `opt4`: once in the main `get_mask` loop before the generator is created, and then again inside the generator itself. The fix is to compute it only once and pass the result into the generator.
 
-      Here is a step-by-step guide to fix the issues, followed by the corresponding git diff.
+      ### Step-by-Step Instructions
 
-      ### Step-by-step Instructions
+      Here are the precise edits for `python/aug25/models/precompute3_model_pure_python_opt4.py`:
 
-      In the file `python/aug25/models/precompute3_model_pure_python_opt4.py`, we will make two changes to the `_process_internal_node_gen` method:
+      1.  **Modify `_process_internal_node_gen` method signature:**
+          In `python/aug25/models/precompute3_model_pure_python_opt4.py`, locate the definition of the `_process_internal_node_gen` method. Add a new parameter `gss_acc: Optional[PyAcc]` to its signature.
 
-      1.  **Correct the Destination Counter (`dests_proc`):** The `dests_proc` counter was not being reset between processing the destinations of different edges. This caused the generator to suspend almost immediately on subsequent edges after processing just one destination, creating excessive overhead. We will fix this by initializing `dests_proc = 0` right before iterating through an edge's destinations.
+          Change this line:
+          ```python
+          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet) -> Generator[Union[Enqueue, Suspend], None, None]:
+          ```
+          to this:
+          ```python
+          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet, gss_acc: Optional[PyAcc]) -> Generator[Union[Enqueue, Suspend], None, None]:
+          ```
 
-      2.  **Correct the Edge Counter (`edges_proc`):** The logic for batching edges was slightly off. The check for suspension was performed *before* incrementing the counter, causing it to process `max_edges + 1` edges before suspending. We will move the increment before the check to ensure it processes the correct batch size.
+      2.  **Remove redundant computation in `_process_internal_node_gen`:**
+          Inside the `_process_internal_node_gen` method, delete the following line, as the `gss_acc` value will now be provided as an argument:
+          ```python
+          gss_acc = gss_node.reduce_acc()
+          ```
 
-      Here are the specific edits:
+      3.  **Update the call site in `get_mask`:**
+          In the `get_mask` method, find the line where `_process_internal_node_gen` is called. You've already computed `gss_acc` in that scope, so pass it as the new final argument.
 
-      1.  **File:** `python/aug25/models/precompute3_model_pure_python_opt4.py`
-      2.  **Method:** `_process_internal_node_gen`
-      3.  **Change 1:** Locate the loop `for dest_j in sorted(grouped.keys()):`. Immediately before this line, insert `dests_proc = 0`.
-      4.  **Change 2:** Find the block that handles edge suspension. Move the line `edges_proc += 1` from after the `if edges_proc >= max_edges:` block to before it.
+          Change this line:
+          ```python
+          gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask)
+          ```
+          to this:
+          ```python
+          gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask, gss_acc)
+          ```
 
-      These changes will ensure the generator suspends only when a full batch of work is completed, drastically reducing overhead and aligning its performance with its more efficient design.
+      These changes will eliminate the redundant calculation, and the performance of the generator-based implementation should now be much more comparable to the iterative version.
 
-      ### Git Diffs
+      ### Git Diff
 
-      Here is the git patch to apply the changes:
+      Here is the git patch that applies the changes described above.
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python_opt4.py b/python/aug25/models/precompute3_model_pure_python_opt4.py
+      index 455c707..8747492 100644
       --- a/python/aug25/models/precompute3_model_pure_python_opt4.py
       +++ b/python/aug25/models/precompute3_model_pure_python_opt4.py
-      @@ -608,6 +608,7 @@
-                           else: lst.append(sid)
+      @@ -583,7 +583,7 @@
+                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+               return GSS.merge_many(shifted)
        
-                   # Iterate grouped dests in ascending order for locality
-      +            dests_proc = 0
-                   for dest_j in sorted(grouped.keys()):
-                       if dests_proc >= max_dests:
-                           priority = (-self.max_depth.get(node_id, 0), edge_i, dest_j)
-      @@ -625,11 +626,11 @@
-                       yield Enqueue(d, child_gss)
-                       dests_proc += 1
+      -    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet) -> Generator[Union[Enqueue, Suspend], None, None]:
+      +    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet, gss_acc: Optional[PyAcc]) -> Generator[Union[Enqueue, Suspend], None, None]:
+               a_node = self.arena.get(node_id)
+               if not a_node:
+                   return
+      @@ -594,8 +594,6 @@
+               edges_proc, dests_proc = 0, 0
+               peek0_rs = None
+               pop_cache = {}
+      -        gss_acc = gss_node.reduce_acc()
        
-      +            edges_proc += 1
-                   if edges_proc >= max_edges:
-                       priority = (-self.max_depth.get(node_id, 0), edge_i + 1, 0)
-                       yield Suspend(priority)
-                       edges_proc = 0
-      -            edges_proc += 1
+               for edge_i, edge in enumerate(a_node.children):
+                   if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
+      @@ -723,7 +721,7 @@
+                       if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
+                           continue
        
-           def get_mask(self) -> LLMTokenSet:
-               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
+      -                gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask)
+      +                gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask, gss_acc)
+       
+                   if gen:
+                       while True:
 
       ```
     metadata:
@@ -4173,7 +4148,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4.py.
     metadata:
-  - user: 'Changes committed with message: "Fix generator batching in get_mask by
-      resetting dests_proc and correcting edge counter placement"'
+  - user: 'Changes committed with message: "Perf: Pass pre-computed GSS accumulator
+      to generator in get_mask"'
     metadata:
 ...
