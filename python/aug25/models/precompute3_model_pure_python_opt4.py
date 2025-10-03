@@ -507,7 +507,7 @@ class Model(GraphProvider):
                             heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
         return GSS.merge_many(shifted)
 
-    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet, gss_acc: Optional[PyAcc]) -> Generator[Union[Enqueue, Suspend], None, None]:
+    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS) -> Generator[Union[Enqueue, Suspend], None, None]:
         a_node = self.arena.get(node_id)
         if not a_node:
             return
@@ -519,8 +519,6 @@ class Model(GraphProvider):
         pop_cache = {}
 
         for edge_i, edge in enumerate(a_node.children):
-            if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
-                continue
             if edge.pop == 0:
                 if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
                 if edge.dest_states_union.isdisjoint(peek0_rs): continue
@@ -531,7 +529,7 @@ class Model(GraphProvider):
                 if popped.is_empty():
                     pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
                     continue
-                popped_acc = gss_acc if edge.pop == 0 else popped.reduce_acc()
+                popped_acc = popped.reduce_acc()
                 if not popped_acc or popped_acc.llm_mask.is_empty():
                     pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
                     continue
@@ -645,7 +643,7 @@ class Model(GraphProvider):
                 if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                     continue
 
-                gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask, gss_acc)
+                gen = self._process_internal_node_gen(node_id, gss_node)
 
             if gen:
                 while True:
