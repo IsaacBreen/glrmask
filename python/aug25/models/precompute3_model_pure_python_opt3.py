@@ -530,7 +530,7 @@ class Model(GraphProvider):
                         if len(values_to_keep) == len(peeked):
                             child_gss = popped
                         else:
-                            child_gss = popped.isolate_many(list(set(values_to_keep)))
+                            child_gss = popped.isolate_many(values_to_keep)
                         if child_gss.is_empty(): continue
                         d: NodeID = int(dest.dest_idx)
                         enqueue(d, child_gss)
