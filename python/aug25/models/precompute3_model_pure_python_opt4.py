@@ -307,7 +307,6 @@ class Suspend:
 class WorkItemNew:
     node_id: NodeID
     gss: GSS
-    llm_mask: LLMTokenSet
 
 @dataclass
 class WorkItemSuspended:
@@ -627,8 +626,7 @@ class Model(GraphProvider):
             gss_init = gss.apply(initialize_acc, init_cache)
             if not gss_init.is_empty():
                 priority = (-self.max_depth.get(r, 0), 0, 0)
-                llm_mask = gss_init.reduce_acc().llm_mask.intersection(self.arena[r].llm_bv_union)
-                heapq.heappush(work_heap, HeapItem(priority, WorkItemNew(r, gss_init, llm_mask)))
+                heapq.heappush(work_heap, HeapItem(priority, WorkItemNew(r, gss_init)))
         t1 = time.perf_counter()
 
         remaining_mask = all_ones
@@ -643,7 +641,7 @@ class Model(GraphProvider):
                 if work_llm_mask.isdisjoint(remaining_mask):
                     continue
             elif isinstance(work, WorkItemNew):
-                node_id, gss_node, work_llm_mask = work.node_id, work.gss, work.llm_mask
+                node_id, gss_node = work.node_id, work.gss
                 assert isinstance(node_id, int)
                 assert isinstance(gss_node, GSS)
                 gss_acc = gss_node.reduce_acc()
@@ -654,6 +652,7 @@ class Model(GraphProvider):
                         remaining_mask = all_ones.difference(final_mask)
 
                 a_node = self.arena.get(node_id)
+                work_llm_mask = a_node.llm_bv_union.intersection(gss_acc.llm_mask)
 
                 if not a_node or not a_node.children or work_llm_mask.isdisjoint(remaining_mask):
                     continue
@@ -670,9 +669,7 @@ class Model(GraphProvider):
                         if isinstance(yielded, Enqueue):
                             new_node_id, new_gss = yielded.node_id, yielded.gss
                             child_priority = (-self.max_depth.get(new_node_id, 0), 0, 0)
-                            child_llm_mask = new_gss.reduce_acc().llm_mask.intersection(self.arena[new_node_id].llm_bv_union)
-                            if child_llm_mask.intersects(remaining_mask):
-                                heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss, child_llm_mask)))
+                            heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss)))
                         elif isinstance(yielded, Suspend):
                             heapq.heappush(work_heap, HeapItem(yielded.priority, WorkItemSuspended(gen, work_llm_mask)))
                             break
