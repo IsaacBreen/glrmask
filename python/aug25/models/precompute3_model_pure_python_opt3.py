@@ -47,14 +47,14 @@ def _acc_memoize(use_value_cache: bool = True):
 
 class DFAState(NamedTuple):
     transitions: Dict[int, int]
-    finalizers: Tuple[int, ...]
-    possible_future_group_ids: Tuple[int, ...]
+    finalizers: Set[int]
+    possible_future_group_ids: Set[int]
 
 
 class PyTokenizer(NamedTuple):
     states: List[DFAState]
     start_state: int
-    non_greedy_finalizers: Tuple[int, ...]
+    non_greedy_finalizers: Set[int]
 
     @njit(nopython=True)
     def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
@@ -85,11 +85,7 @@ class PyTokenizer(NamedTuple):
                     matches[group_id] = i + 1
 
         end_state = None if done else current_state
-        result = []
-        for gid, width in matches.items():
-            if width > 0:
-                result.append((gid, width))
-        return end_state, result
+        return end_state, [(gid, width) for gid, width in matches.items() if width > 0]
 
     def tokens_accessible_from_state(self, state_id: int) -> List[int]:
         return list(self.states[state_id].possible_future_group_ids)
@@ -237,12 +233,8 @@ class Model(GraphProvider):
 
         # Tokenizer
         dfa_data = data['tokenizer']['dfa']
-        dfa_states = [DFAState(
-            transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()},
-            finalizers=tuple(sorted(s['finalizers'])),
-            possible_future_group_ids=tuple(sorted(s['possible_future_group_ids']))
-        ) for s in dfa_data['states']]
-        tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], tuple(sorted(dfa_data['non_greedy_finalizers'])))
+        dfa_states = [DFAState(transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()}, finalizers=set(s['finalizers']), possible_future_group_ids=set(s['possible_future_group_ids'])) for s in dfa_data['states']]
+        tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], set(dfa_data['non_greedy_finalizers']))
 
         # Parser Table
         parser_data = data['parser']
