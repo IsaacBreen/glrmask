@@ -150,13 +150,17 @@ def _execute_from_state_impl(
     return end_state, match_ids[:num_matches], match_widths[:num_matches]
 
 
-class PyTokenizer(NamedTuple):
+@dataclass(frozen=True)
+class PyTokenizer:
     states: List[DFAState]
     start_state: int
     non_greedy_finalizers: Set[int]
+    transitions_array: np.ndarray = field(init=False, repr=False)
+    finalizers_matrix: np.ndarray = field(init=False, repr=False)
+    non_greedy_array: np.ndarray = field(init=False, repr=False)
 
-    def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
-        # Convert states to numpy arrays for JIT
+    def __post_init__(self):
+        # Use object.__setattr__ because the dataclass is frozen
         num_states = len(self.states)
 
         # Transitions: 2D array [state_id, byte_value] -> next_state_id
@@ -165,6 +169,7 @@ class PyTokenizer(NamedTuple):
         for sid, state in enumerate(self.states):
             for byte_val, next_state in state.transitions.items():
                 transitions_array[sid, byte_val] = next_state
+        object.__setattr__(self, 'transitions_array', transitions_array)
 
         # Finalizers: 2D array [state_id, finalizer_index] -> group_id
         # Use -1 for padding
@@ -175,10 +180,13 @@ class PyTokenizer(NamedTuple):
         for sid, state in enumerate(self.states):
             for idx, group_id in enumerate(sorted(state.finalizers)):
                 finalizers_matrix[sid, idx] = group_id
+        object.__setattr__(self, 'finalizers_matrix', finalizers_matrix)
 
         # Non-greedy finalizers
         non_greedy_array = np.array(sorted(self.non_greedy_finalizers), dtype=np.int64)
+        object.__setattr__(self, 'non_greedy_array', non_greedy_array)
 
+    def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
         # Convert text to numpy array
         text_array = np.frombuffer(text, dtype=np.uint8)
 
@@ -186,9 +194,9 @@ class PyTokenizer(NamedTuple):
         end_state, match_ids, match_widths = _execute_from_state_impl(
             text_array,
             state_id,
-            transitions_array,
-            finalizers_matrix,
-            non_greedy_array
+            self.transitions_array,
+            self.finalizers_matrix,
+            self.non_greedy_array
         )
 
         # Convert results

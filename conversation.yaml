@@ -7,20 +7,22 @@ local_system:
     python/aug25/models/precompute3_model_pure_python_opt3.py: |
       from __future__ import annotations
 
-      import json
-      import heapq
       import collections
-      from typing import Dict, List, Tuple, Optional, Union, Set
+      import heapq
+      import json
       from dataclasses import dataclass, field
+      from typing import NamedTuple, Dict, Set, List, Tuple, Optional
+      from typing import Union
 
+      import _sep1 as ffi
+      import numpy as np
       from numba import njit
 
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
       from ..common_interface import GraphProvider
       from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
       from ..range_set.set_range_set import SetRangeSet as RangeSetOut
       from ..range_set.set_range_set import SetRangeSet as RangeSetStates
-      import _sep1 as ffi
-      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 
       # Type Aliases
       NodeID = int
@@ -52,48 +54,155 @@ local_system:
               return wrapper
           return decorator
 
-      @dataclass
-      class DFAState:
-          transitions: Dict[int, int] = field(default_factory=dict)
-          finalizers: Set[int] = field(default_factory=set)
-          possible_future_group_ids: Set[int] = field(default_factory=set)
+      class DFAState(NamedTuple):
+          transitions: Dict[int, int]
+          finalizers: Set[int]
+          possible_future_group_ids: Set[int]
 
-      @dataclass
-      class PyTokenizer:
+
+      @njit
+      def _execute_from_state_impl(
+          text_array,
+          state_id,
+          transitions_array,  # 2D: [state, byte] -> next_state (-1 if none)
+          finalizers_matrix,  # 2D: [state, idx] -> group_id (-1 for padding)
+          non_greedy_array    # 1D: non-greedy group ids
+      ):
+          current_state = state_id
+          # Use arrays to store matches
+          MAX_MATCHES = 1000
+          match_ids = np.empty(MAX_MATCHES, dtype=np.int64)
+          match_widths = np.empty(MAX_MATCHES, dtype=np.int64)
+          num_matches = 0
+          done = False
+
+          # Check for initial matches (epsilon)
+          for j in range(finalizers_matrix.shape[1]):
+              group_id = finalizers_matrix[current_state, j]
+              if group_id == -1:
+                  break
+
+              # Check if non-greedy
+              is_non_greedy = False
+              for ng_id in non_greedy_array:
+                  if ng_id == group_id:
+                      is_non_greedy = True
+                      break
+
+              # Find if already in matches
+              found_idx = -1
+              for k in range(num_matches):
+                  if match_ids[k] == group_id:
+                      found_idx = k
+                      break
+
+              if is_non_greedy:
+                  if found_idx == -1:  # setdefault behavior
+                      match_ids[num_matches] = group_id
+                      match_widths[num_matches] = 0
+                      num_matches += 1
+              else:
+                  if found_idx == -1:
+                      match_ids[num_matches] = group_id
+                      match_widths[num_matches] = 0
+                      num_matches += 1
+                  else:
+                      match_widths[found_idx] = 0
+
+          # Process each byte
+          for i in range(len(text_array)):
+              byte = int(text_array[i])
+              next_state = transitions_array[current_state, byte]
+
+              if next_state == -1:
+                  done = True
+                  break
+
+              current_state = next_state
+
+              # Process finalizers
+              for j in range(finalizers_matrix.shape[1]):
+                  group_id = finalizers_matrix[current_state, j]
+                  if group_id == -1:
+                      break
+
+                  # Check if non-greedy
+                  is_non_greedy = False
+                  for ng_id in non_greedy_array:
+                      if ng_id == group_id:
+                          is_non_greedy = True
+                          break
+
+                  # Find if already in matches
+                  found_idx = -1
+                  for k in range(num_matches):
+                      if match_ids[k] == group_id:
+                          found_idx = k
+                          break
+
+                  if is_non_greedy:
+                      if found_idx == -1:  # setdefault behavior
+                          match_ids[num_matches] = group_id
+                          match_widths[num_matches] = i + 1
+                          num_matches += 1
+                  else:
+                      if found_idx == -1:
+                          match_ids[num_matches] = group_id
+                          match_widths[num_matches] = i + 1
+                          num_matches += 1
+                      else:
+                          match_widths[found_idx] = i + 1
+
+          end_state = -1 if done else current_state
+          return end_state, match_ids[:num_matches], match_widths[:num_matches]
+
+
+      class PyTokenizer(NamedTuple):
           states: List[DFAState]
           start_state: int
           non_greedy_finalizers: Set[int]
 
-          @njit(nopython=True)
           def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
-              current_state = state_id
-              matches = {}
-              done = False
+              # Convert states to numpy arrays for JIT
+              num_states = len(self.states)
 
-              # Check for initial matches (epsilon)
-              for group_id in self.states[current_state].finalizers:
-                  if group_id in self.non_greedy_finalizers:
-                      matches.setdefault(group_id, 0)
-                  else:
-                      matches[group_id] = 0
+              # Transitions: 2D array [state_id, byte_value] -> next_state_id
+              # Use -1 to indicate no transition
+              transitions_array = np.full((num_states, 256), -1, dtype=np.int64)
+              for sid, state in enumerate(self.states):
+                  for byte_val, next_state in state.transitions.items():
+                      transitions_array[sid, byte_val] = next_state
 
-              for i, byte in enumerate(text):
-                  state_data = self.states[current_state]
-                  next_state = state_data.transitions.get(byte)
+              # Finalizers: 2D array [state_id, finalizer_index] -> group_id
+              # Use -1 for padding
+              max_finalizers = max((len(state.finalizers) for state in self.states), default=0)
+              if max_finalizers == 0:
+                  max_finalizers = 1
+              finalizers_matrix = np.full((num_states, max_finalizers), -1, dtype=np.int64)
+              for sid, state in enumerate(self.states):
+                  for idx, group_id in enumerate(sorted(state.finalizers)):
+                      finalizers_matrix[sid, idx] = group_id
 
-                  if next_state is None:
-                      done = True
-                      break
-                  
-                  current_state = next_state
-                  for group_id in self.states[current_state].finalizers:
-                      if group_id in self.non_greedy_finalizers:
-                          matches.setdefault(group_id, i + 1)
-                      else:
-                          matches[group_id] = i + 1
+              # Non-greedy finalizers
+              non_greedy_array = np.array(sorted(self.non_greedy_finalizers), dtype=np.int64)
 
-              end_state = None if done else current_state
-              return end_state, [(gid, width) for gid, width in matches.items() if width > 0]
+              # Convert text to numpy array
+              text_array = np.frombuffer(text, dtype=np.uint8)
+
+              # Call JIT function
+              end_state, match_ids, match_widths = _execute_from_state_impl(
+                  text_array,
+                  state_id,
+                  transitions_array,
+                  finalizers_matrix,
+                  non_greedy_array
+              )
+
+              # Convert results
+              result_end_state = None if end_state == -1 else end_state
+              result_matches = [(int(gid), int(width)) for gid, width in zip(match_ids, match_widths) if width > 0]
+
+              return result_end_state, result_matches
 
           def tokens_accessible_from_state(self, state_id: int) -> List[int]:
               return list(self.states[state_id].possible_future_group_ids)
@@ -526,20 +635,22 @@ local_system:
     python/aug25/models/precompute3_model_pure_python_opt3.py: |
       from __future__ import annotations
 
-      import json
-      import heapq
       import collections
-      from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
+      import heapq
+      import json
       from dataclasses import dataclass, field
+      from typing import NamedTuple, Dict, Set, List, Tuple, Optional
+      from typing import Union
 
+      import _sep1 as ffi
+      import numpy as np
       from numba import njit
 
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
       from ..common_interface import GraphProvider
       from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
       from ..range_set.set_range_set import SetRangeSet as RangeSetOut
       from ..range_set.set_range_set import SetRangeSet as RangeSetStates
-      import _sep1 as ffi
-      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 
       # Type Aliases
       NodeID = int
@@ -577,41 +688,157 @@ local_system:
           possible_future_group_ids: Set[int]
 
 
-      class PyTokenizer(NamedTuple):
+      @njit
+      def _execute_from_state_impl(
+          text_array,
+          state_id,
+          transitions_array,  # 2D: [state, byte] -> next_state (-1 if none)
+          finalizers_matrix,  # 2D: [state, idx] -> group_id (-1 for padding)
+          non_greedy_array    # 1D: non-greedy group ids
+      ):
+          current_state = state_id
+          # Use arrays to store matches
+          MAX_MATCHES = 1000
+          match_ids = np.empty(MAX_MATCHES, dtype=np.int64)
+          match_widths = np.empty(MAX_MATCHES, dtype=np.int64)
+          num_matches = 0
+          done = False
+
+          # Check for initial matches (epsilon)
+          for j in range(finalizers_matrix.shape[1]):
+              group_id = finalizers_matrix[current_state, j]
+              if group_id == -1:
+                  break
+
+              # Check if non-greedy
+              is_non_greedy = False
+              for ng_id in non_greedy_array:
+                  if ng_id == group_id:
+                      is_non_greedy = True
+                      break
+
+              # Find if already in matches
+              found_idx = -1
+              for k in range(num_matches):
+                  if match_ids[k] == group_id:
+                      found_idx = k
+                      break
+
+              if is_non_greedy:
+                  if found_idx == -1:  # setdefault behavior
+                      match_ids[num_matches] = group_id
+                      match_widths[num_matches] = 0
+                      num_matches += 1
+              else:
+                  if found_idx == -1:
+                      match_ids[num_matches] = group_id
+                      match_widths[num_matches] = 0
+                      num_matches += 1
+                  else:
+                      match_widths[found_idx] = 0
+
+          # Process each byte
+          for i in range(len(text_array)):
+              byte = int(text_array[i])
+              next_state = transitions_array[current_state, byte]
+
+              if next_state == -1:
+                  done = True
+                  break
+
+              current_state = next_state
+
+              # Process finalizers
+              for j in range(finalizers_matrix.shape[1]):
+                  group_id = finalizers_matrix[current_state, j]
+                  if group_id == -1:
+                      break
+
+                  # Check if non-greedy
+                  is_non_greedy = False
+                  for ng_id in non_greedy_array:
+                      if ng_id == group_id:
+                          is_non_greedy = True
+                          break
+
+                  # Find if already in matches
+                  found_idx = -1
+                  for k in range(num_matches):
+                      if match_ids[k] == group_id:
+                          found_idx = k
+                          break
+
+                  if is_non_greedy:
+                      if found_idx == -1:  # setdefault behavior
+                          match_ids[num_matches] = group_id
+                          match_widths[num_matches] = i + 1
+                          num_matches += 1
+                  else:
+                      if found_idx == -1:
+                          match_ids[num_matches] = group_id
+                          match_widths[num_matches] = i + 1
+                          num_matches += 1
+                      else:
+                          match_widths[found_idx] = i + 1
+
+          end_state = -1 if done else current_state
+          return end_state, match_ids[:num_matches], match_widths[:num_matches]
+
+
+      @dataclass(frozen=True)
+      class PyTokenizer:
           states: List[DFAState]
           start_state: int
           non_greedy_finalizers: Set[int]
+          transitions_array: np.ndarray = field(init=False, repr=False)
+          finalizers_matrix: np.ndarray = field(init=False, repr=False)
+          non_greedy_array: np.ndarray = field(init=False, repr=False)
 
-          @njit(nopython=True)
+          def __post_init__(self):
+              # Use object.__setattr__ because the dataclass is frozen
+              num_states = len(self.states)
+
+              # Transitions: 2D array [state_id, byte_value] -> next_state_id
+              # Use -1 to indicate no transition
+              transitions_array = np.full((num_states, 256), -1, dtype=np.int64)
+              for sid, state in enumerate(self.states):
+                  for byte_val, next_state in state.transitions.items():
+                      transitions_array[sid, byte_val] = next_state
+              object.__setattr__(self, 'transitions_array', transitions_array)
+
+              # Finalizers: 2D array [state_id, finalizer_index] -> group_id
+              # Use -1 for padding
+              max_finalizers = max((len(state.finalizers) for state in self.states), default=0)
+              if max_finalizers == 0:
+                  max_finalizers = 1
+              finalizers_matrix = np.full((num_states, max_finalizers), -1, dtype=np.int64)
+              for sid, state in enumerate(self.states):
+                  for idx, group_id in enumerate(sorted(state.finalizers)):
+                      finalizers_matrix[sid, idx] = group_id
+              object.__setattr__(self, 'finalizers_matrix', finalizers_matrix)
+
+              # Non-greedy finalizers
+              non_greedy_array = np.array(sorted(self.non_greedy_finalizers), dtype=np.int64)
+              object.__setattr__(self, 'non_greedy_array', non_greedy_array)
+
           def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
-              current_state = state_id
-              matches = {}
-              done = False
+              # Convert text to numpy array
+              text_array = np.frombuffer(text, dtype=np.uint8)
 
-              # Check for initial matches (epsilon)
-              for group_id in self.states[current_state].finalizers:
-                  if group_id in self.non_greedy_finalizers:
-                      matches.setdefault(group_id, 0)
-                  else:
-                      matches[group_id] = 0
+              # Call JIT function
+              end_state, match_ids, match_widths = _execute_from_state_impl(
+                  text_array,
+                  state_id,
+                  self.transitions_array,
+                  self.finalizers_matrix,
+                  self.non_greedy_array
+              )
 
-              for i, byte in enumerate(text):
-                  state_data = self.states[current_state]
-                  next_state = state_data.transitions.get(byte)
+              # Convert results
+              result_end_state = None if end_state == -1 else end_state
+              result_matches = [(int(gid), int(width)) for gid, width in zip(match_ids, match_widths) if width > 0]
 
-                  if next_state is None:
-                      done = True
-                      break
-                  
-                  current_state = next_state
-                  for group_id in self.states[current_state].finalizers:
-                      if group_id in self.non_greedy_finalizers:
-                          matches.setdefault(group_id, i + 1)
-                      else:
-                          matches[group_id] = i + 1
-
-              end_state = None if done else current_state
-              return end_state, [(gid, width) for gid, width in matches.items() if width > 0]
+              return result_end_state, result_matches
 
           def tokens_accessible_from_state(self, state_id: int) -> List[int]:
               return list(self.states[state_id].possible_future_group_ids)
@@ -1050,7 +1277,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gf
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -1085,20 +1312,22 @@ messages:
       ```python 'python/aug25/models/precompute3_model_pure_python_opt3.py'
       from __future__ import annotations
 
-      import json
-      import heapq
       import collections
-      from typing import Dict, List, Tuple, Optional, Union, Set
+      import heapq
+      import json
       from dataclasses import dataclass, field
+      from typing import NamedTuple, Dict, Set, List, Tuple, Optional
+      from typing import Union
 
+      import _sep1 as ffi
+      import numpy as np
       from numba import njit
 
+      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
       from ..common_interface import GraphProvider
       from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
       from ..range_set.set_range_set import SetRangeSet as RangeSetOut
       from ..range_set.set_range_set import SetRangeSet as RangeSetStates
-      import _sep1 as ffi
-      from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 
       # Type Aliases
       NodeID = int
@@ -1130,48 +1359,155 @@ messages:
               return wrapper
           return decorator
 
-      @dataclass
-      class DFAState:
-          transitions: Dict[int, int] = field(default_factory=dict)
-          finalizers: Set[int] = field(default_factory=set)
-          possible_future_group_ids: Set[int] = field(default_factory=set)
+      class DFAState(NamedTuple):
+          transitions: Dict[int, int]
+          finalizers: Set[int]
+          possible_future_group_ids: Set[int]
 
-      @dataclass
-      class PyTokenizer:
+
+      @njit
+      def _execute_from_state_impl(
+          text_array,
+          state_id,
+          transitions_array,  # 2D: [state, byte] -> next_state (-1 if none)
+          finalizers_matrix,  # 2D: [state, idx] -> group_id (-1 for padding)
+          non_greedy_array    # 1D: non-greedy group ids
+      ):
+          current_state = state_id
+          # Use arrays to store matches
+          MAX_MATCHES = 1000
+          match_ids = np.empty(MAX_MATCHES, dtype=np.int64)
+          match_widths = np.empty(MAX_MATCHES, dtype=np.int64)
+          num_matches = 0
+          done = False
+
+          # Check for initial matches (epsilon)
+          for j in range(finalizers_matrix.shape[1]):
+              group_id = finalizers_matrix[current_state, j]
+              if group_id == -1:
+                  break
+
+              # Check if non-greedy
+              is_non_greedy = False
+              for ng_id in non_greedy_array:
+                  if ng_id == group_id:
+                      is_non_greedy = True
+                      break
+
+              # Find if already in matches
+              found_idx = -1
+              for k in range(num_matches):
+                  if match_ids[k] == group_id:
+                      found_idx = k
+                      break
+
+              if is_non_greedy:
+                  if found_idx == -1:  # setdefault behavior
+                      match_ids[num_matches] = group_id
+                      match_widths[num_matches] = 0
+                      num_matches += 1
+              else:
+                  if found_idx == -1:
+                      match_ids[num_matches] = group_id
+                      match_widths[num_matches] = 0
+                      num_matches += 1
+                  else:
+                      match_widths[found_idx] = 0
+
+          # Process each byte
+          for i in range(len(text_array)):
+              byte = int(text_array[i])
+              next_state = transitions_array[current_state, byte]
+
+              if next_state == -1:
+                  done = True
+                  break
+
+              current_state = next_state
+
+              # Process finalizers
+              for j in range(finalizers_matrix.shape[1]):
+                  group_id = finalizers_matrix[current_state, j]
+                  if group_id == -1:
+                      break
+
+                  # Check if non-greedy
+                  is_non_greedy = False
+                  for ng_id in non_greedy_array:
+                      if ng_id == group_id:
+                          is_non_greedy = True
+                          break
+
+                  # Find if already in matches
+                  found_idx = -1
+                  for k in range(num_matches):
+                      if match_ids[k] == group_id:
+                          found_idx = k
+                          break
+
+                  if is_non_greedy:
+                      if found_idx == -1:  # setdefault behavior
+                          match_ids[num_matches] = group_id
+                          match_widths[num_matches] = i + 1
+                          num_matches += 1
+                  else:
+                      if found_idx == -1:
+                          match_ids[num_matches] = group_id
+                          match_widths[num_matches] = i + 1
+                          num_matches += 1
+                      else:
+                          match_widths[found_idx] = i + 1
+
+          end_state = -1 if done else current_state
+          return end_state, match_ids[:num_matches], match_widths[:num_matches]
+
+
+      class PyTokenizer(NamedTuple):
           states: List[DFAState]
           start_state: int
           non_greedy_finalizers: Set[int]
 
-          @njit(nopython=True)
           def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
-              current_state = state_id
-              matches = {}
-              done = False
+              # Convert states to numpy arrays for JIT
+              num_states = len(self.states)
 
-              # Check for initial matches (epsilon)
-              for group_id in self.states[current_state].finalizers:
-                  if group_id in self.non_greedy_finalizers:
-                      matches.setdefault(group_id, 0)
-                  else:
-                      matches[group_id] = 0
+              # Transitions: 2D array [state_id, byte_value] -> next_state_id
+              # Use -1 to indicate no transition
+              transitions_array = np.full((num_states, 256), -1, dtype=np.int64)
+              for sid, state in enumerate(self.states):
+                  for byte_val, next_state in state.transitions.items():
+                      transitions_array[sid, byte_val] = next_state
 
-              for i, byte in enumerate(text):
-                  state_data = self.states[current_state]
-                  next_state = state_data.transitions.get(byte)
+              # Finalizers: 2D array [state_id, finalizer_index] -> group_id
+              # Use -1 for padding
+              max_finalizers = max((len(state.finalizers) for state in self.states), default=0)
+              if max_finalizers == 0:
+                  max_finalizers = 1
+              finalizers_matrix = np.full((num_states, max_finalizers), -1, dtype=np.int64)
+              for sid, state in enumerate(self.states):
+                  for idx, group_id in enumerate(sorted(state.finalizers)):
+                      finalizers_matrix[sid, idx] = group_id
 
-                  if next_state is None:
-                      done = True
-                      break
-                  
-                  current_state = next_state
-                  for group_id in self.states[current_state].finalizers:
-                      if group_id in self.non_greedy_finalizers:
-                          matches.setdefault(group_id, i + 1)
-                      else:
-                          matches[group_id] = i + 1
+              # Non-greedy finalizers
+              non_greedy_array = np.array(sorted(self.non_greedy_finalizers), dtype=np.int64)
 
-              end_state = None if done else current_state
-              return end_state, [(gid, width) for gid, width in matches.items() if width > 0]
+              # Convert text to numpy array
+              text_array = np.frombuffer(text, dtype=np.uint8)
+
+              # Call JIT function
+              end_state, match_ids, match_widths = _execute_from_state_impl(
+                  text_array,
+                  state_id,
+                  transitions_array,
+                  finalizers_matrix,
+                  non_greedy_array
+              )
+
+              # Convert results
+              result_end_state = None if end_state == -1 else end_state
+              result_matches = [(int(gid), int(width)) for gid, width in zip(match_ids, match_widths) if width > 0]
+
+              return result_end_state, result_matches
 
           def tokens_accessible_from_state(self, state_id: int) -> List[int]:
               return list(self.states[state_id].possible_future_group_ids)
@@ -1604,7 +1940,8 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_opt3.py
-  - user: Make `DFAState` and `PyTokenizer` both `NamedTuple`.
+  - user: '`execute_from_state` is currently really slow because it has to do all
+      this setup each time. Make it much much faster.'
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -1623,95 +1960,127 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      The following steps convert `DFAState` and `PyTokenizer` to use `NamedTuple` instead of `@dataclass`.
+      Of course. The performance of `execute_from_state` can be significantly improved by pre-calculating the NumPy arrays it uses, rather than recreating them on every invocation. This can be achieved by changing the `PyTokenizer` class to compute these arrays once during its initialization.
+
+      Here are the step-by-step instructions to apply this optimization:
 
       ### Step-by-step Instructions
 
-      In the file `python/aug25/models/precompute3_model_pure_python_opt3.py`:
+      1.  **Open the file `python/aug25/models/precompute3_model_pure_python_opt3.py`.**
 
-      1.  **Update Imports:**
-          Modify the import statement on line 4 to include `NamedTuple` from the `typing` module.
-          *   **Old:** `from typing import Dict, List, Tuple, Optional, Union, Set`
-          *   **New:** `from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple`
+      2.  **Modify the `PyTokenizer` class:**
+          *   Change the class from a `NamedTuple` to a `dataclass`. This will allow us to add an initialization hook (`__post_init__`) to pre-compute our data.
+          *   In the new `dataclass` definition, add fields to store the pre-computed NumPy arrays: `transitions_array`, `finalizers_matrix`, and `non_greedy_array`.
+          *   Implement the `__post_init__` method. Move the NumPy array creation logic from `execute_from_state` into this method. This ensures the arrays are created only once when the `PyTokenizer` is instantiated.
+          *   Update the `execute_from_state` method to remove the array creation logic and instead use the pre-computed arrays now stored as attributes of the class (`self.transitions_array`, etc.).
 
-      2.  **Convert `DFAState`:**
-          Change the definition of `DFAState` (starting around line 38) from a `@dataclass` to a `NamedTuple`. Remove the `@dataclass` decorator and the `field(default_factory=...)` calls, as `NamedTuple` fields are defined by type hints alone.
-
-          *   **Delete:**
-              ```python
-              @dataclass
-              class DFAState:
-                  transitions: Dict[int, int] = field(default_factory=dict)
-                  finalizers: Set[int] = field(default_factory=set)
-                  possible_future_group_ids: Set[int] = field(default_factory=set)
-              ```
-          *   **Insert:**
-              ```python
-              class DFAState(NamedTuple):
-                  transitions: Dict[int, int]
-                  finalizers: Set[int]
-                  possible_future_group_ids: Set[int]
-              ```
-
-      3.  **Convert `PyTokenizer`:**
-          Change the definition of `PyTokenizer` (starting around line 44) from a `@dataclass` to a `NamedTuple`. Remove the `@dataclass` decorator.
-
-          *   **Delete:**
-              ```python
-              @dataclass
-              class PyTokenizer:
-                  states: List[DFAState]
-                  start_state: int
-                  non_greedy_finalizers: Set[int]
-              ```
-          *   **Insert:**
-              ```python
-              class PyTokenizer(NamedTuple):
-                  states: List[DFAState]
-                  start_state: int
-                  non_greedy_finalizers: Set[int]
-              ```
+          To do this, replace the entire `PyTokenizer` class definition (from line 163 to 228) with the updated version below.
 
       ### Git Diff
 
+      Here is the git diff to apply the changes.
+
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python_opt3.py b/python/aug25/models/precompute3_model_pure_python_opt3.py
+      index 4514580..09c264a 100644
       --- a/python/aug25/models/precompute3_model_pure_python_opt3.py
       +++ b/python/aug25/models/precompute3_model_pure_python_opt3.py
-      @@ -4,7 +4,7 @@
-       import json
-       import heapq
-       import collections
-      -from typing import Dict, List, Tuple, Optional, Union, Set
-      +from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
-       from dataclasses import dataclass, field
+      @@ -160,63 +160,65 @@
+           return end_state, match_ids[:num_matches], match_widths[:num_matches]
        
-       from numba import njit
-      @@ -36,18 +36,15 @@
-               return wrapper
-           return decorator
        
-      -@dataclass
-      -class DFAState:
-      -    transitions: Dict[int, int] = field(default_factory=dict)
-      -    finalizers: Set[int] = field(default_factory=set)
-      -    possible_future_group_ids: Set[int] = field(default_factory=set)
-      -
-      -@dataclass
-      -class PyTokenizer:
-      +class DFAState(NamedTuple):
-      +    transitions: Dict[int, int]
-      +    finalizers: Set[int]
-      +    possible_future_group_ids: Set[int]
-      +
-      +
-      +class PyTokenizer(NamedTuple):
+      -class PyTokenizer(NamedTuple):
+      +@dataclass(frozen=True)
+      +class PyTokenizer:
            states: List[DFAState]
            start_state: int
            non_greedy_finalizers: Set[int]
+      +    transitions_array: np.ndarray = field(init=False, repr=False)
+      +    finalizers_matrix: np.ndarray = field(init=False, repr=False)
+      +    non_greedy_array: np.ndarray = field(init=False, repr=False)
+      +
+      +    def __post_init__(self):
+      +        # Use object.__setattr__ because the dataclass is frozen
+      +        num_states = len(self.states)
+      +
+      +        # Transitions: 2D array [state_id, byte_value] -> next_state_id
+      +        # Use -1 to indicate no transition
+      +        transitions_array = np.full((num_states, 256), -1, dtype=np.int64)
+      +        for sid, state in enumerate(self.states):
+      +            for byte_val, next_state in state.transitions.items():
+      +                transitions_array[sid, byte_val] = next_state
+      +        object.__setattr__(self, 'transitions_array', transitions_array)
+      +
+      +        # Finalizers: 2D array [state_id, finalizer_index] -> group_id
+      +        # Use -1 for padding
+      +        max_finalizers = max((len(state.finalizers) for state in self.states), default=0)
+      +        if max_finalizers == 0:
+      +            max_finalizers = 1
+      +        finalizers_matrix = np.full((num_states, max_finalizers), -1, dtype=np.int64)
+      +        for sid, state in enumerate(self.states):
+      +            for idx, group_id in enumerate(sorted(state.finalizers)):
+      +                finalizers_matrix[sid, idx] = group_id
+      +        object.__setattr__(self, 'finalizers_matrix', finalizers_matrix)
+      +
+      +        # Non-greedy finalizers
+      +        non_greedy_array = np.array(sorted(self.non_greedy_finalizers), dtype=np.int64)
+      +        object.__setattr__(self, 'non_greedy_array', non_greedy_array)
        
-           @njit(nopython=True)
            def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
+      -        # Convert states to numpy arrays for JIT
+      -        num_states = len(self.states)
+      -
+      -        # Transitions: 2D array [state_id, byte_value] -> next_state_id
+      -        # Use -1 to indicate no transition
+      -        transitions_array = np.full((num_states, 256), -1, dtype=np.int64)
+      -        for sid, state in enumerate(self.states):
+      -            for byte_val, next_state in state.transitions.items():
+      -                transitions_array[sid, byte_val] = next_state
+      -
+      -        # Finalizers: 2D array [state_id, finalizer_index] -> group_id
+      -        # Use -1 for padding
+      -        max_finalizers = max((len(state.finalizers) for state in self.states), default=0)
+      -        if max_finalizers == 0:
+      -            max_finalizers = 1
+      -        finalizers_matrix = np.full((num_states, max_finalizers), -1, dtype=np.int64)
+      -        for sid, state in enumerate(self.states):
+      -            for idx, group_id in enumerate(sorted(state.finalizers)):
+      -                finalizers_matrix[sid, idx] = group_id
+      -
+      -        # Non-greedy finalizers
+      -        non_greedy_array = np.array(sorted(self.non_greedy_finalizers), dtype=np.int64)
+      -
+               # Convert text to numpy array
+               text_array = np.frombuffer(text, dtype=np.uint8)
+       
+               # Call JIT function
+               end_state, match_ids, match_widths = _execute_from_state_impl(
+                   text_array,
+                   state_id,
+      -            transitions_array,
+      -            finalizers_matrix,
+      -            non_greedy_array
+      +            self.transitions_array,
+      +            self.finalizers_matrix,
+      +            self.non_greedy_array
+               )
+       
+               # Convert results
+               result_end_state = None if end_state == -1 else end_state
+               result_matches = [(int(gid), int(width)) for gid, width in zip(match_ids, match_widths) if width > 0]
+       
+               return result_end_state, result_matches
+       
+           def tokens_accessible_from_state(self, state_id: int) -> List[int]:
+               return list(self.states[state_id].possible_future_group_ids)
+       
+           def initial_state_id(self) -> int:
+               return self.start_state
+       
+           def max_state(self) -> int:
+               return len(self.states)
+       
+
       ```
     metadata:
   - user: |
@@ -1723,7 +2092,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt3.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt3.py.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Convert DFAState and PyTokenizer
-      to NamedTuple"'
+  - user: 'Changes committed with message: "Perf: Pre-calculate NumPy arrays in PyTokenizer
+      for faster execute_from_state"'
     metadata:
 ...
