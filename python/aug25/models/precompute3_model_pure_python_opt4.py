@@ -507,7 +507,7 @@ class Model(GraphProvider):
                             heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
         return GSS.merge_many(shifted)
 
-    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, is_final_mask_empty: bool) -> Generator[Union[Enqueue, Suspend], None, None]:
+    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS) -> Generator[Union[Enqueue, Suspend], None, None]:
         a_node = self.arena.get(node_id)
         if not a_node:
             return
@@ -520,7 +520,6 @@ class Model(GraphProvider):
         gss_acc = gss_node.reduce_acc()
 
         for edge_i, edge in enumerate(a_node.children):
-            if edge.llm_bv.isdisjoint(gss_mask): continue
             if edge.pop == 0:
                 if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
                 if edge.dest_states_union.isdisjoint(peek0_rs): continue
@@ -630,6 +629,8 @@ class Model(GraphProvider):
                 gen = work
             else:
                 node_id, gss_node = work
+                assert isinstance(node_id, int)
+                assert isinstance(gss_node, GSS)
                 gss_acc = gss_node.reduce_acc()
 
                 if self.is_end(node_id) and gss_acc:
@@ -638,13 +639,11 @@ class Model(GraphProvider):
                         remaining_mask = all_ones.difference(final_mask)
 
                 a_node = self.arena.get(node_id)
-                gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
 
-                if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
+                if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask):
                     continue
 
-                is_final_mask_empty = final_mask.is_empty()
-                gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, is_final_mask_empty)
+                gen = self._process_internal_node_gen(node_id, gss_node)
 
             if gen:
                 while True:
