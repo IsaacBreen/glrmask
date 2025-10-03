@@ -588,11 +588,110 @@ class LeveledAccTableGSS(GSS[T, Acc], Generic[T, Acc]):
         if other.is_empty():
             return self
 
-        # Canonical, semantics-first merge: build from explicit stacks.
-        # This uses the same canonicalization as the reference implementation
-        # and avoids subtle token-table edge cases during structural merge.
-        combined = self.to_stacks() + other.to_stacks()
-        return LeveledAccTableGSS.from_stacks(combined)
+        out_values: Dict[int, Acc] = {}
+
+        # Memoize merges for nodes and tokens
+        memo_u: Dict[Tuple[int, int], Upper[T]] = {}
+        memo_l: Dict[Tuple[int, int], Lower[T]] = {}
+        memo_tok: Dict[Tuple[Optional[int], Optional[int]], Optional[int]] = {}
+
+        def keep_token(tok: int, pool: Dict[int, Acc]) -> int:
+            if tok in out_values:
+                return tok
+            if tok in pool:
+                out_values[tok] = pool[tok]
+            return tok
+
+        def merge_tokens(a: Optional[int], b: Optional[int]) -> Optional[int]:
+            key = (a, b)
+            if key in memo_tok:
+                return memo_tok[key]
+            # Map presence to liveness
+            a_live = (a is not None) and (a in self._values)
+            b_live = (b is not None) and (b in other._values)
+
+            if not a_live and not b_live:
+                memo_tok[key] = None
+                return None
+            if a_live and not b_live:
+                res = keep_token(a, self._values)  # type: ignore[arg-type]
+                memo_tok[key] = res
+                return res
+            if b_live and not a_live:
+                res = keep_token(b, other._values)  # type: ignore[arg-type]
+                memo_tok[key] = res
+                return res
+            # both live: need to merge the underlying values
+            va = self._values[a]  # type: ignore[index]
+            vb = other._values[b]  # type: ignore[index]
+            merged_val = va if va is vb else va.merge(vb)  # type: ignore[union-attr]
+            new_tok = _new_token()
+            out_values[new_tok] = merged_val
+            memo_tok[key] = new_tok
+            return new_tok
+
+        def merge_lower_nodes(l1: Lower[T], l2: Lower[T]) -> Lower[T]:
+            key = (id(l1), id(l2))
+            if key in memo_l:
+                return memo_l[key]
+            if l1 is l2:
+                memo_l[key] = l1
+                return l1
+            new_empty = l1.empty or l2.empty
+            merged_children = _merge_children_by_depth(l1.children, l2.children, merge_lower_nodes)
+            res = Lower(children=merged_children, empty=new_empty)
+            memo_l[key] = res
+            return res
+
+        def merge_upper_nodes(u1: Upper[T], u2: Upper[T]) -> Upper[T]:
+            key = (id(u1), id(u2))
+            if key in memo_u:
+                return memo_u[key]
+            if u1 is u2:
+                memo_u[key] = u1
+                # if this node carries tokens, ensure they are carried into out_values
+                if isinstance(u1, UpperBranch):
+                    if u1.empty is not None and u1.empty in self._values:
+                        out_values[u1.empty] = self._values[u1.empty]
+                else:
+                    if u1.acc in self._values:
+                        out_values[u1.acc] = self._values[u1.acc]
+                    if u1.empty is not None and u1.empty in self._values:
+                        out_values[u1.empty] = self._values[u1.empty]
+                return u1
+
+            if isinstance(u1, Interface) and isinstance(u2, Interface):
+                merged_children = _merge_children_by_depth(u1.children, u2.children, merge_lower_nodes)
+                new_acc = merge_tokens(u1.acc, u2.acc)
+                new_empty = merge_tokens(u1.empty, u2.empty)
+                if new_acc is None and new_empty is None:
+                    # Both sides eliminated; drop to empty UpperBranch leaf
+                    res_u: Upper[T] = UpperBranch(children={}, empty=None)
+                    memo_u[key] = res_u
+                    return res_u
+                if new_acc is None:
+                    # Only explicit empty remains (if any)
+                    res_u = UpperBranch(children={}, empty=new_empty)
+                    res_u = try_promote(res_u)
+                    memo_u[key] = res_u
+                    return res_u
+                # Keep acc; explicit empty may or may not be present
+                res_u = Interface(children=merged_children, acc=new_acc, empty=new_empty)
+                memo_u[key] = res_u
+                return res_u
+
+            # Mixed types or both UpperBranch
+            ub1 = u1 if isinstance(u1, UpperBranch) else interface_to_upperbranch(u1)
+            ub2 = u2 if isinstance(u2, UpperBranch) else interface_to_upperbranch(u2)
+            new_empty = merge_tokens(ub1.empty, ub2.empty)
+            merged_children = _merge_children_by_depth(ub1.children, ub2.children, merge_upper_nodes)
+            res = UpperBranch(children=merged_children, empty=new_empty)
+            res_promoted = try_promote(res)
+            memo_u[key] = res_promoted
+            return res_promoted
+
+        new_inner = merge_upper_nodes(self.inner, other.inner)
+        return LeveledAccTableGSS(new_inner, out_values)
 
     # ------------------------------
     # Queries
