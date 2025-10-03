@@ -635,19 +635,18 @@ class Model(GraphProvider):
             priority, work = heap_item.priority, heap_item.item
 
             gen = None
-            gss_acc_mask_for_suspend = None
 
             if isinstance(work, WorkItemSuspended):
                 gen = work.generator
-                gss_acc_mask_for_suspend = work.llm_mask
+                work_llm_mask = work.llm_mask
+
+                if work_llm_mask.isdisjoint(remaining_mask):
+                    continue
             elif isinstance(work, WorkItemNew):
                 node_id, gss_node = work.node_id, work.gss
                 assert isinstance(node_id, int)
                 assert isinstance(gss_node, GSS)
                 gss_acc = gss_node.reduce_acc()
-
-                if not gss_acc:
-                    continue
 
                 if self.is_end(node_id):
                     if not final_mask.issuperset(gss_acc.llm_mask):
@@ -655,11 +654,11 @@ class Model(GraphProvider):
                         remaining_mask = all_ones.difference(final_mask)
 
                 a_node = self.arena.get(node_id)
+                work_llm_mask = a_node.llm_bv_union.intersection(gss_acc.llm_mask)
 
-                if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask):
+                if not a_node or not a_node.children or work_llm_mask.isdisjoint(remaining_mask):
                     continue
 
-                gss_acc_mask_for_suspend = gss_acc.llm_mask
                 gen = self._process_internal_node_gen(node_id, gss_node)
 
             if gen:
@@ -672,7 +671,7 @@ class Model(GraphProvider):
                             child_priority = (-self.max_depth.get(new_node_id, 0), 0, 0)
                             heapq.heappush(work_heap, HeapItem(child_priority, WorkItemNew(new_node_id, new_gss)))
                         elif isinstance(yielded, Suspend):
-                            heapq.heappush(work_heap, HeapItem(yielded.priority, WorkItemSuspended(gen, gss_acc_mask_for_suspend)))
+                            heapq.heappush(work_heap, HeapItem(yielded.priority, WorkItemSuspended(gen, work_llm_mask)))
                             break
 
                     except StopIteration:
