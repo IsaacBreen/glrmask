@@ -16,9 +16,39 @@ from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
 # from python.gss_tester.implementations.leveled_per_acc_standalone_impl import LeveledPerAccGSS as GSS
 from ..common_interface import GraphProvider
+from ..stats import Stats
 from ..range_set import FFIRangeSet as RangeSet
 from ..range_set import SetRangeSet as RangeSetOut
 from ..range_set import SetRangeSet as RangeSetStates
+
+# --- Monkey-patch RangeSet to collect stats on union/intersection ---
+# This is to fulfill the request of tracking ffi.Bitset.union and intersection calls.
+# Since the code was refactored to use a pure Python RangeSet, we track its methods instead.
+_original_rangeset_union = RangeSet.union
+_original_rangeset_intersection = RangeSet.intersection
+
+def _patched_union(self, other: "RangeSet") -> "RangeSet":
+    """Patched version of RangeSet.union that increments a stats counter."""
+    stats = Stats.get()
+    stats.inc('bitset.union.calls')
+    stats.start('bitset.union.time')
+    result = _original_rangeset_union(self, other)
+    stats.stop('bitset.union.time')
+    return result
+
+def _patched_intersection(self, other: "RangeSet") -> "RangeSet":
+    """Patched version of RangeSet.intersection that increments a stats counter."""
+    stats = Stats.get()
+    stats.inc('bitset.intersection.calls')
+    stats.start('bitset.intersection.time')
+    result = _original_rangeset_intersection(self, other)
+    stats.stop('bitset.intersection.time')
+    return result
+
+# Apply the patches
+RangeSet.union = _patched_union
+RangeSet.intersection = _patched_intersection
+# --- End of monkey-patch ---
 
 # Type Aliases
 NodeID = int
@@ -26,27 +56,38 @@ LLMTokenSet = RangeSet
 StateIDSet = RangeSetStates
 TerminalIdSet = RangeSet
 
-def _acc_memoize(use_value_cache: bool = True):
-    """Per-invocation memoization for PyAcc transformers."""
+def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
+    """
+    Per-invocation memoization for PyAcc transformers.
+    - Caches by id(acc) (including None results).
+    - Caches by value (acc) for non-None results, if use_value_cache is True.
+    If stats_prefix is provided, increments '{prefix}.memo_hits' on cache hits.
+    Exposes _acc_memo_size() to inspect id-cache size for stats.
+    """
     def decorator(fn):
         id_memo = {}
         val_memo = {}
         def wrapper(acc):
-            acc_id = id(acc)
-            if acc_id in id_memo:
-                return id_memo[acc_id]
+            # Identity-based fast path
+            if id(acc) in id_memo:
+                if stats_prefix:
+                    Stats.get().inc(f'{stats_prefix}.memo_hits')
+                return id_memo[id(acc)]
 
             if use_value_cache:
+                # Structural equality-based cache (only non-None results are useful here)
                 cached = val_memo.get(acc)
                 if cached is not None:
-                    id_memo[acc_id] = cached
+                    id_memo[id(acc)] = cached
+                    if stats_prefix:
+                        Stats.get().inc(f'{stats_prefix}.memo_hits')
                     return cached
-
             result = fn(acc)
-            id_memo[acc_id] = result
-            if use_value_cache and result is not None:
+            id_memo[id(acc)] = result
+            if use_value_cache:
                 val_memo[acc] = result
             return result
+        wrapper._acc_memo_size = lambda: len(id_memo)
         return wrapper
     return decorator
 
@@ -309,6 +350,10 @@ class WorkItem:
 
 @dataclass
 class Model(GraphProvider):
+    stats = Stats.get()
+    stats.add_group('get_mask')
+    stats.add_group('commit')
+
     arena: Dict[NodeID, ArenaNode]
     roots_map: Dict[int, NodeID]
     max_depth: Dict[NodeID, int]
@@ -324,6 +369,7 @@ class Model(GraphProvider):
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
+        Stats.get().reset()
         data = json.loads(s)
 
         # Arena
@@ -397,10 +443,13 @@ class Model(GraphProvider):
         return model
 
     def _compute_edge_accelerators(self) -> None:
+        stats = Stats.get()
+        stats.start('accelerators.compute_edge_complements')
         all_ones = self.all_internal_llm_tokens_bitset
         for node in self.arena.values():
             for edge in node.children:
                 edge.llm_bv_not = all_ones.difference(edge.llm_bv)
+        stats.stop('accelerators.compute_edge_complements')
 
     def optimize_traversal(self) -> None:
         for node in self.arena.values():
@@ -432,13 +481,20 @@ class Model(GraphProvider):
                             yield (edge.pop, sid, dest.dest_idx)
 
     def commit(self, token_id: int):
+        stats = Stats.get()
+        stats.start('commit')
         token_bytes = self.id_to_token[token_id]
+
+        stats.start('commit.build_tokenizer_maps')
+        stats.inc('commit.tokenizer_states_in', len(self.state))
         terminals_map, state_map = {}, {}
         for tsid in self.state:
             end_state, matches = self.tokenizer.execute_from_state(token_bytes, tsid)
             if end_state is not None: state_map[tsid] = end_state
             terminals_map[tsid] = RangeSet.from_indices([m[0] for m in matches])
+        stats.stop('commit.build_tokenizer_maps')
 
+        stats.start('commit.prune_and_map_gss')
         @_acc_memoize()
         def mutator(acc: PyAcc) -> Optional[PyAcc]:
             for tsid, matched in terminals_map.items():
@@ -452,7 +508,9 @@ class Model(GraphProvider):
         cache = {}
         current = {tsid: g.apply_and_prune(mutator, cache) for tsid, g in self.state.items()}
         current = {tsid: g for tsid, g in current.items() if not g.is_empty()}
+        stats.stop('commit.prune_and_map_gss')
 
+        stats.start('commit.main_loop')
         new_states = collections.defaultdict(list)
         work = {(0, tsid): gss for tsid, gss in current.items()}
         q = collections.deque(work.keys())
@@ -476,49 +534,98 @@ class Model(GraphProvider):
                             work[key] = proc_gss
                             q.append(key)
             if end_state is not None: new_states[end_state].append(gss)
+        stats.stop('commit.main_loop')
 
+        stats.start('commit.merge_states')
         merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
-        self.state = {sid: g for sid, g in merged.items() if not g.is_empty()}
+        merged = {sid: g for sid, g in merged.items() if not g.is_empty()}
+        stats.stop('commit.merge_states')
+
+        stats.start('commit.fuse')
+        # memo = {}
+        # merged = {tsid: gss.fuse("to_interface", memo) for tsid, gss in merged.items()}
+        # memo = {}
+        # merged = {tsid: gss.fuse(1, memo) for tsid, gss in merged.items()}
+        stats.stop('commit.fuse')
+
+        stats.inc('commit.tokenizer_states_out', len(merged))
+        self.state = merged
+        stats.stop('commit')
 
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-        if self.ignore_terminal_id == terminal_id: return gss
+        stats = Stats.get()
+        p = 'commit.main_loop._process_token'
+        stats.start(f'{p}.total')
+        stats.inc(f'{p}.calls')
+        stats.inc(f'{p}.initial_heads', len(gss.peek()))
+
+        if self.ignore_terminal_id == terminal_id:
+            stats.inc(f'{p}.ignored_terminal')
+            stats.stop(f'{p}.total')
+            return gss
 
         heads_by_state = collections.defaultdict(list)
         for state_id in gss.peek(): heads_by_state[state_id].append(gss.isolate(state_id))
 
         shifted = []
         while heads_by_state:
+            stats.inc(f'{p}.loop_iterations')
             state_id, gss_list = heads_by_state.popitem()
+            stats.start(f'{p}.merge_many.heads')
             state_gss = GSS.merge_many(gss_list)
+            stats.stop(f'{p}.merge_many.heads')
             row = self.parser_table.table.get(state_id)
             if not row: continue
             action = row.actions.get(terminal_id)
             if action is None: continue
 
-            if isinstance(action, int): shifted.append(state_gss.push(action))
+            if isinstance(action, int):
+                stats.inc(f'{p}.shifts')
+                shifted.append(state_gss.push(action))
             elif isinstance(action, Reduce):
+                stats.inc(f'{p}.reduces')
+                stats.start(f'{p}.reduce.pop')
                 popped = state_gss.popn(action.len)
+                stats.stop(f'{p}.reduce.pop')
                 for from_id in popped.peek():
                     goto_id = self.parser_table.table[from_id].gotos[action.nonterminal_id]
                     heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+                    stats.inc(f'{p}.reduce.new_heads')
             elif isinstance(action, Split):
-                if action.shift is not None: shifted.append(state_gss.push(action.shift))
+                stats.inc(f'{p}.splits')
+                if action.shift is not None:
+                    stats.inc(f'{p}.shifts')
+                    shifted.append(state_gss.push(action.shift))
                 for length, nts in action.reduces.items():
+                    stats.start(f'{p}.reduce.pop')
                     popped = state_gss.popn(length)
+                    stats.stop(f'{p}.reduce.pop')
                     for nt_id in nts:
+                        stats.inc(f'{p}.reduces')
                         for from_id in popped.peek():
                             goto_id = self.parser_table.table[from_id].gotos[nt_id]
                             heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
-        return GSS.merge_many(shifted)
+                            stats.inc(f'{p}.reduce.new_heads')
+
+        stats.start(f'{p}.merge_many.final')
+        result = GSS.merge_many(shifted)
+        stats.stop(f'{p}.merge_many.final')
+        stats.inc(f'{p}.final_heads', len(result.peek()))
+        stats.stop(f'{p}.total')
+        return result
 
     def get_mask(self) -> LLMTokenSet:
+        stats = Stats.get()
+        stats.start('get_mask')
+        stats.inc('get_mask.initial_tokenizer_states', len(self.state))
+
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
         work_heap = []
-        t0 = time.perf_counter()
 
         def enqueue(node_id: NodeID, gss: GSS, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
             if gss.is_empty():
                 return
+            stats.inc('get_mask.traversal.enqueues')
             priority = (-self.max_depth.get(node_id, 0), edge_idx, dest_idx)
             item = WorkItem(
                 priority=priority,
@@ -534,6 +641,7 @@ class Model(GraphProvider):
             item = heapq.heappop(work_heap)
             return item.node_id, item.gss, item.edge_idx, item.dest_idx, item.pop_cache
 
+        stats.start('get_mask.seeding')
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
             disallowed = RangeSet.empty()
@@ -549,42 +657,79 @@ class Model(GraphProvider):
             r = self.roots_map[int(sid)]
             gss_init = gss.apply(initialize_acc, init_cache)
             enqueue(r, gss_init)
-        t1 = time.perf_counter()
+        stats.stop('get_mask.seeding')
 
+        stats.start('get_mask.main_loop')
         remaining_mask = all_ones
         while work_heap:
+            stats.inc('get_mask.traversal.depth_heap.pops')
+            stats.inc('get_mask.traversal.nodes_processed')
             node, gss_node, start_edge, start_dest, pop_cache = dequeue()
+            stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
+
+            stats.start('get_mask.main_loop.node.reduce_acc')
             gss_acc = gss_node.reduce_acc()
+            stats.stop('get_mask.main_loop.node.reduce_acc')
             gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
 
             if self.is_end(node) and gss_acc and not final_mask.issuperset(gss_acc.llm_mask):
+                stats.inc('get_mask.traversal.end_nodes')
+                stats.start('get_mask.main_loop.end_node.final_mask_union')
                 final_mask |= gss_acc.llm_mask
+                stats.stop('get_mask.main_loop.end_node.final_mask_union')
                 remaining_mask = all_ones.difference(final_mask)
 
             a_node = self.arena.get(node)
-            if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
+            if not a_node:
                 continue
 
-            # max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
-            max_edges, max_dests = (1, 1)
+            if a_node.llm_bv_union.isdisjoint(remaining_mask):
+                stats.inc('get_mask.zombie_check.node.skipped_no_potential')
+                continue
+
+            potential_new = a_node.llm_bv_union.intersection(remaining_mask)
+            if gss_acc and gss_mask.isdisjoint(potential_new):
+                stats.inc('get_mask.zombie_check.node.skipped_no_overlap_disjoint')
+                continue
+
+            max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
             edges_proc, dests_proc = 0, 0
             peek0_rs = None
 
             for edge_i in range(start_edge, len(a_node.children)):
                 edge = a_node.children[edge_i]
-                if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask): continue
+                if edge.llm_bv.isdisjoint(remaining_mask):
+                    stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
+                    continue
+                if edge.llm_bv.isdisjoint(gss_mask):
+                    stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
+                    continue
+
                 if edge.pop == 0:
                     if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
-                    if edge.dest_states_union.isdisjoint(peek0_rs): continue
+                    if edge.dest_states_union.isdisjoint(peek0_rs):
+                        stats.inc('get_mask.main_loop.edge.dest_union_pruned_pop0')
+                        continue
 
-                if edge.pop in pop_cache: popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+                stats.inc('get_mask.traversal.edges_traversed')
+                stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
+
+                if edge.pop in pop_cache:
+                    popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
+                    stats.inc('get_mask.main_loop.edge.pop_cache_hits')
                 else:
+                    stats.start('get_mask.main_loop.edge.popn')
                     popped = gss_node.popn(edge.pop)
+                    stats.stop('get_mask.main_loop.edge.popn')
                     if popped.is_empty():
+                        stats.inc('get_mask.traversal.edge.popped_empty')
                         pop_cache[edge.pop] = (popped, None, [], RangeSetStates.empty())
                         continue
+                    stats.start('get_mask.main_loop.edge.popped.reduce_acc')
                     popped_acc = gss_acc if edge.pop == 0 else popped.reduce_acc()
+                    stats.stop('get_mask.main_loop.edge.popped.reduce_acc')
                     if not popped_acc or popped_acc.llm_mask.is_empty():
+                        stats.inc('get_mask.traversal.edge.popped_reduced_empty')
                         pop_cache[edge.pop] = (GSS.empty(), None, [], RangeSetStates.empty())
                         continue
                     # Avoid double-peek: call once and reuse both list and RangeSetStates
@@ -592,15 +737,20 @@ class Model(GraphProvider):
                     peek_rs = RangeSetStates.from_indices(peeked)
                     pop_cache[edge.pop] = (popped, popped_acc, peeked, peek_rs)
 
-                if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs): continue
+                if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):
+                    if popped_acc: stats.inc('get_mask.main_loop.edge.dest_union_pruned_after_pop')
+                    continue
 
                 if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
+                    stats.inc('get_mask.main_loop.edge.popped_mask_subset_fastpath')
                     if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
                     @_acc_memoize(use_value_cache=False)
                     def intersect(acc: PyAcc):
                         new_mask = acc.llm_mask.intersection(edge.llm_bv)
                         return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                    stats.start('get_mask.main_loop.edge.apply_and_prune')
                     popped = popped.apply_and_prune(intersect)
+                    stats.stop('get_mask.main_loop.edge.apply_and_prune')
                     if popped.is_empty(): continue
                 if not peeked: continue
 
@@ -621,6 +771,7 @@ class Model(GraphProvider):
                 for dest_j in sorted(grouped.keys()):
                     if dests_proc >= max_dests:
                         enqueue(node, gss_node, edge_i, dest_j, pop_cache)
+                        stats.inc('get_mask.traversal.node_requeued_for_more_edges')
                         edges_proc = max_edges
                         break
                     dest = edge.dests[dest_j]
@@ -629,7 +780,9 @@ class Model(GraphProvider):
                     if len(values_to_keep) == len(peeked):
                         child_gss = popped
                     else:
+                        stats.start('get_mask.main_loop.edge.isolate_many')
                         child_gss = popped.isolate_many(values_to_keep)
+                        stats.stop('get_mask.main_loop.edge.isolate_many')
                     if child_gss.is_empty(): continue
                     d: NodeID = int(dest.dest_idx)
                     enqueue(d, child_gss)
@@ -638,15 +791,28 @@ class Model(GraphProvider):
                 if edges_proc >= max_edges: break
                 edges_proc += 1
 
+
                 if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
                     enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
+                    stats.inc('get_mask.traversal.node_requeued_for_more_edges')
                     break
-        t2 = time.perf_counter()
+        stats.stop('get_mask.main_loop')
 
+        stats.start('get_mask.final_conversion')
         original_indices = RangeSetOut.empty()
         for i in final_mask.iter_indices():
             if i in self.internal_to_original_map:
                 original_indices |= self.internal_to_original_map[i]
-        t3 = time.perf_counter()
-        print(f"Get mask times: init {(t1 - t0)*1000:.2f}ms, main {(t2 - t1)*1000:.2f}ms, map {(t3 - t2)*1000:.2f}ms")
+        stats.stop('get_mask.final_conversion')
+
+        stats.stop('get_mask')
+
+        stats.report()
+        stats.reset()
+
         return original_indices
+
+    def finalize(self):
+        """Called at the end of a benchmark run to perform any final actions, like printing stats."""
+        print("\n--- Final Stats Report from Model ---")
+        Stats.get().report()
