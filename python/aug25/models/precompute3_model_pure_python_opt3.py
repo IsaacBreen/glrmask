@@ -57,6 +57,7 @@ class PyTokenizer:
     start_state: int
     non_greedy_finalizers: Set[int]
 
+    @njit
     def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
         current_state = state_id
         matches = {}
