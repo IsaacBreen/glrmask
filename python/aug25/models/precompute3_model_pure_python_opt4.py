@@ -317,6 +317,8 @@ class Model(GraphProvider):
     all_internal_llm_tokens_bitset: LLMTokenSet
     ignore_terminal_id: Optional[int]
     state: Dict[int, GSS]
+    _current_remaining_mask: Optional[LLMTokenSet] = field(init=False, repr=False, default=None)
+    _mask_version: int = field(init=False, repr=False, default=0)
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -507,7 +509,7 @@ class Model(GraphProvider):
                             heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
         return GSS.merge_many(shifted)
 
-    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet, gss_acc: Optional[PyAcc]) -> Generator[Union[Enqueue, Suspend], None, None]:
+    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, gss_acc: Optional[PyAcc]) -> Generator[Union[Enqueue, Suspend], None, None]:
         a_node = self.arena.get(node_id)
         if not a_node:
             return
@@ -518,8 +520,16 @@ class Model(GraphProvider):
         peek0_rs = None
         pop_cache = {}
 
+        # Fast re-check with the latest remaining mask; bail if nothing can pass now.
+        current_remaining = self._current_remaining_mask
+        if (not a_node.children or
+            a_node.llm_bv_union.isdisjoint(current_remaining) or
+            gss_mask.isdisjoint(a_node.llm_bv_union.intersection(current_remaining))):
+            return
+
         for edge_i, edge in enumerate(a_node.children):
-            if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
+            rem = self._current_remaining_mask
+            if edge.llm_bv.isdisjoint(rem) or edge.llm_bv.isdisjoint(gss_mask):
                 continue
             if edge.pop == 0:
                 if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
@@ -620,6 +630,9 @@ class Model(GraphProvider):
                 heapq.heappush(work_heap, HeapItem(priority, (r, gss_init)))
         t1 = time.perf_counter()
 
+        # Track the currently effective remaining mask for generator-based traversal
+        self._current_remaining_mask = all_ones
+        self._mask_version = 0
         remaining_mask = all_ones
         while work_heap:
             heap_item = heapq.heappop(work_heap)
@@ -639,13 +652,16 @@ class Model(GraphProvider):
                     if not final_mask.issuperset(gss_acc.llm_mask):
                         final_mask |= gss_acc.llm_mask
                         remaining_mask = all_ones.difference(final_mask)
+                        # Update the shared current remaining mask for all generators
+                        self._current_remaining_mask = remaining_mask
+                        self._mask_version += 1
 
                 a_node = self.arena.get(node_id)
 
                 if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                     continue
 
-                gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask, gss_acc)
+                gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, gss_acc)
 
             if gen:
                 while True:
