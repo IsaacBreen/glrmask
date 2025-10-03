@@ -5,9 +5,23 @@ from functools import reduce
 from typing import (Any, Callable, Dict, Generic, Iterable, List, Optional,
                     Set, Tuple, Type, TypeVar, Literal)
 
-from ..interface import GSS, Acc, NewAcc, T
+from ..interface import GSS, Acc, NewAcc, T, Mergeable
 from .leveled_impl import LeveledGSS, LeveledGSSStats
 from .reference_impl import ReferenceGSS
+
+
+@dataclass(frozen=True, eq=True)
+class _IdSet(Mergeable):
+    """A mergeable wrapper for a frozenset of integer IDs."""
+    ids: frozenset[int]
+
+    def merge(self, other: "_IdSet") -> "_IdSet":
+        """Merge is set union."""
+        return _IdSet(self.ids | other.ids)
+
+    def __repr__(self) -> str:
+        # For cleaner debug output in LeveledGSS.to_graph_string
+        return f"IdSet{sorted(list(self.ids))}"
 
 
 @dataclass(eq=False)
@@ -15,18 +29,15 @@ class FactoredLeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     """
     A GSS implementation that factors accumulators out of the core graph structure.
 
-    - It uses a `LeveledGSS[T, int]` as its internal graph representation.
+    - It uses a `LeveledGSS[T, _IdSet]` as its internal graph representation, where
+      each `_IdSet` contains integer IDs of the actual accumulators.
     - Accumulators (`Acc`) are stored in a separate map from integer IDs to `Acc` instances.
     - This design makes accumulator transformations (`apply`, `prune`) very fast, as they
       only need to modify the external map, not traverse the graph structure.
-    - The cost of this factorization is paid during `merge` operations or when a
-      canonical representation is required (`to_stacks`), as accumulator IDs may need
-      to be remapped and the graph structure potentially updated to reflect merged
-      accumulator values.
-    - This implementation aims to combine the structural sharing of `LeveledGSS` with the
-      fast accumulator operations of `LeveledPerAccGSS`.
+    - The `merge` operation combines graphs by taking the union of `_IdSet`s for
+      stacks with identical paths.
     """
-    _inner: LeveledGSS[T, int]
+    _inner: LeveledGSS[T, _IdSet]
     _id_to_acc: Dict[int, Acc]
     _next_id: int
     _is_canonical: bool = field(repr=False, default=True)
@@ -51,14 +62,14 @@ class FactoredLeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         acc_to_id: Dict[Acc, int] = {}
         id_to_acc: Dict[int, Acc] = {}
         next_id = 0
-        inner_stacks: List[Tuple[List[T], int]] = []
+        inner_stacks: List[Tuple[List[T], _IdSet]] = []
 
         for vals, acc in canonical_stacks:
             if acc not in acc_to_id:
                 acc_to_id[acc] = next_id
                 id_to_acc[next_id] = acc
                 next_id += 1
-            inner_stacks.append((vals, acc_to_id[acc]))
+            inner_stacks.append((vals, _IdSet(frozenset({acc_to_id[acc]}))))
 
         inner_gss = LeveledGSS.from_stacks(inner_stacks)
         return cls(
@@ -71,13 +82,33 @@ class FactoredLeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def to_stacks(self) -> List[Tuple[List[T], Acc]]:
         # This method must produce a canonical list, so it resolves the lazy mappings.
         result_stacks: List[Tuple[List[T], Acc]] = []
-        for path, acc_id in self._inner.to_stacks():
-            if acc_id in self._id_to_acc:
-                acc = self._id_to_acc[acc_id]
-                result_stacks.append((path, acc))
+        merged_acc_cache: Dict[Tuple[int, ...], Acc] = {}
 
-        # Use ReferenceGSS to merge stacks that might now have identical paths and
-        # accumulators, and to sort into a canonical order.
+        for path, id_set_obj in self._inner.to_stacks():
+            id_set = id_set_obj.ids
+            if not id_set:
+                continue
+
+            # Use a sorted tuple of IDs as the cache key for determinism.
+            # Filter out any dead IDs before creating the key.
+            valid_ids = [i for i in id_set if i in self._id_to_acc]
+            if not valid_ids:
+                continue
+
+            sorted_ids_tuple = tuple(sorted(valid_ids))
+
+            final_acc: Acc
+            if sorted_ids_tuple in merged_acc_cache:
+                final_acc = merged_acc_cache[sorted_ids_tuple]
+            else:
+                accs_to_merge = [self._id_to_acc[i] for i in sorted_ids_tuple]
+                final_acc = reduce(lambda a, b: a.merge(b), accs_to_merge)
+                merged_acc_cache[sorted_ids_tuple] = final_acc
+
+            result_stacks.append((path, final_acc))
+
+        # Use ReferenceGSS to sort into a canonical order and merge any duplicates
+        # that may have arisen from different IdSets resolving to the same accumulator.
         return ReferenceGSS.from_stacks(result_stacks).to_stacks()
 
     # ------------------------------
@@ -102,8 +133,6 @@ class FactoredLeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         return FactoredLeveledGSS(new_inner, self._id_to_acc, self._next_id, self._is_canonical)
 
     def is_empty(self) -> bool:
-        # If the accumulator map is empty, no stacks can exist.
-        # If the inner graph is empty, no stacks can exist.
         return not self._id_to_acc or self._inner.is_empty()
 
     def isolate(self, value: Optional[T]) -> "FactoredLeveledGSS[T, Acc]":
@@ -161,7 +190,6 @@ class FactoredLeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     # ------------------------------
     def merge(self, other: "FactoredLeveledGSS[T, Acc]") -> "FactoredLeveledGSS[T, Acc]":
         if not isinstance(other, FactoredLeveledGSS):
-            # Fallback for merging with other GSS types
             return FactoredLeveledGSS.from_stacks(self.to_stacks() + other.to_stacks())
 
         if self.is_empty():
@@ -170,9 +198,13 @@ class FactoredLeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             return self
 
         # Lazy merge: create a disjoint union of ID spaces and merge the inner graphs.
-        # The resulting accumulator map may be non-canonical.
+        # The LeveledGSS merge will union the _IdSets for common paths.
         offset = self._next_id
-        other_inner_remapped = other._inner.apply(lambda old_id: old_id + offset)
+
+        def remap_other_set(old_set: _IdSet) -> _IdSet:
+            return _IdSet(frozenset({i + offset for i in old_set.ids}))
+
+        other_inner_remapped = other._inner.apply(remap_other_set)
         new_inner = self._inner.merge(other_inner_remapped)
 
         new_id_to_acc = dict(self._id_to_acc)
@@ -203,46 +235,15 @@ class FactoredLeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def canonicalize(self) -> "FactoredLeveledGSS[T, Acc]":
         """
-        Forces the GSS into a canonical state. This involves:
-        1. Pruning any parts of the inner graph that refer to deleted accumulator IDs.
-        2. Compacting the accumulator map so that each unique accumulator has exactly one ID.
-        3. Applying the ID remapping to the inner graph.
-        This can be an expensive operation and is performed lazily.
+        Forces the GSS into a canonical state by reconstructing it from its
+        canonical stack representation. This resolves all lazy operations
+        (merges, applies, prunes) and compacts the internal ID map.
         """
         if self._is_canonical:
             return self
-
-        # 1. Prune dead IDs from inner GSS
-        surviving_old_ids = set(self._id_to_acc.keys())
-        pruned_inner = self._inner.prune(lambda old_id: old_id in surviving_old_ids)
-
-        # 2. Build remapping for compaction
-        new_id_to_acc: Dict[int, Acc] = {}
-        acc_to_new_id: Dict[Acc, int] = {}
-        remapping: Dict[int, int] = {}
-        next_id = 0
-
-        # Sort for deterministic ID assignment
-        sorted_old_ids = sorted(list(surviving_old_ids))
-
-        for old_id in sorted_old_ids:
-            acc = self._id_to_acc[old_id]
-            if acc not in acc_to_new_id:
-                new_id = next_id
-                acc_to_new_id[acc] = new_id
-                new_id_to_acc[new_id] = acc
-                next_id += 1
-            remapping[old_id] = acc_to_new_id[acc]
-
-        # 3. Apply remapping to the inner graph
-        remapped_inner = pruned_inner.apply(lambda old_id: remapping[old_id])
-
-        return FactoredLeveledGSS(
-            _inner=remapped_inner,
-            _id_to_acc=new_id_to_acc,
-            _next_id=next_id,
-            _is_canonical=True,
-        )
+        # The simplest and most robust way to canonicalize is to reconstruct
+        # from the canonical stack representation, which resolves all lazy merges.
+        return FactoredLeveledGSS.from_stacks(self.to_stacks())
 
     # ------------------------------
     # LeveledGSS-specific (drop-in) extras
@@ -259,10 +260,10 @@ class FactoredLeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         accumulator stats are from the (potentially non-canonical) outer map.
         """
         struct_stats = self._inner.stats()
-        
+
         # Override accumulator stats with info from the outer map
         unique_accs = set(self._id_to_acc.values())
-        
+
         return LeveledGSSStats(
             top_values=struct_stats.top_values,
             num_upperbranch_nodes=struct_stats.num_upperbranch_nodes,
@@ -304,8 +305,8 @@ class FactoredLeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         else:
             for id, acc in sorted(self._id_to_acc.items()):
                 lines.append(f"  ID {id} -> {acc!r}")
-        
-        lines.append("\n--- Inner LeveledGSS[T, int] ---")
+
+        lines.append("\n--- Inner LeveledGSS[T, _IdSet] ---")
         inner_str = self._inner.to_graph_string(memo=memo, upper_only=upper_only)
         lines.append(inner_str)
         return "\n".join(lines)
