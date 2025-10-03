@@ -186,13 +186,6 @@ class PyAcc:
         return self.llm_mask.is_empty()
 
 @dataclass
-class NodeCursor:
-    edge_idx: int = 0
-    dest_idx: int = 0
-    gss_id: int = 0
-    pop_cache: Optional[Dict[int, Tuple[GSS, Optional[PyAcc], List[int], StateIDSet]]] = None
-
-@dataclass
 class Model(GraphProvider):
     arena: Dict[NodeID, ArenaNode]
     roots_map: Dict[int, NodeID]
@@ -403,16 +396,14 @@ class Model(GraphProvider):
     def get_mask(self) -> LLMTokenSet:
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
         values, depth_heap, enqueued = {}, [], set()
-        edge_cursor = {}
 
-        def enqueue(node_id: NodeID, gss: GSS) -> GSS:
+        def enqueue(node_id: NodeID, gss: GSS) -> None:
             if node_id in values:
                 gss = values[node_id].merge(gss)
             values[node_id] = gss
             if node_id not in enqueued:
                 enqueued.add(node_id)
                 heapq.heappush(depth_heap, (-self.max_depth[node_id], node_id))
-            return gss
 
         def dequeue() -> Tuple[NodeID, GSS]:
             _, node_id = heapq.heappop(depth_heap)
@@ -438,7 +429,6 @@ class Model(GraphProvider):
         remaining_mask = all_ones
         while depth_heap:
             node, gss_node = dequeue()
-            gss_id = id(gss_node)
 
             gss_acc = gss_node.reduce_acc()
             gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
@@ -451,18 +441,10 @@ class Model(GraphProvider):
             if not a_node or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                 continue
 
-            saved_cursor = edge_cursor.get(node)
-            if saved_cursor and saved_cursor.gss_id == gss_id:
-                start_edge, start_dest, pop_cache = saved_cursor.edge_idx, saved_cursor.dest_idx, saved_cursor.pop_cache or {}
-            else:
-                start_edge, start_dest, pop_cache = 0, 0, {}
-
-            max_edges, max_dests = (8, 2048) if final_mask.is_empty() else (16, 4096)
-            edges_proc, dests_proc = 0, 0
+            pop_cache = {}
             peek0_rs = None
 
-            for edge_i in range(start_edge, len(a_node.children)):
-                edge = a_node.children[edge_i]
+            for edge in a_node.children:
                 if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask): continue
                 if edge.pop == 0:
                     if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
@@ -490,14 +472,7 @@ class Model(GraphProvider):
                 
                 if not peeked: continue
                 
-                current_start_dest = start_dest if edge_i == start_edge else 0
-                for dest_j in range(current_start_dest, len(edge.dests)):
-                    if dests_proc >= max_dests:
-                        state_to_requeue = enqueue(node, gss_node)
-                        edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
-                        edges_proc = max_edges; break
-
-                    dest = edge.dests[dest_j]
+                for dest in edge.dests:
                     if dest.state_bv.isdisjoint(peek_rs): continue
                     
                     keep_rs = peek_rs.intersection(dest.state_bv)
@@ -508,16 +483,6 @@ class Model(GraphProvider):
 
                     d: NodeID = int(dest.dest_idx)
                     enqueue(d, child_gss)
-                    dests_proc += 1
-                
-                if edges_proc >= max_edges: break
-                edges_proc += 1
-
-                if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-                    state_to_requeue = enqueue(node, gss_node)
-                    edge_cursor[node] = NodeCursor(edge_i + 1, 0, id(state_to_requeue), pop_cache)
-                    break
-            else: edge_cursor.pop(node, None)
 
         original_indices = RangeSetOut.empty()
         for i in final_mask.iter_indices():
