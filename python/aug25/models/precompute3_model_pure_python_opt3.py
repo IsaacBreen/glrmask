@@ -399,7 +399,20 @@ class Model(GraphProvider):
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
         values, depth_heap, enqueued = {}, [], set()
         edge_cursor = {}
-        hp, hpop = heapq.heappush, heapq.heappop
+
+        def enqueue(node_id: NodeID, gss: GSS) -> GSS:
+            if node_id in values:
+                gss = values[node_id].merge(gss)
+            values[node_id] = gss
+            if node_id not in enqueued:
+                enqueued.add(node_id)
+                heapq.heappush(depth_heap, (-self.max_depth[node_id], node_id))
+            return gss
+
+        def dequeue() -> Tuple[NodeID, GSS]:
+            _, node_id = heapq.heappop(depth_heap)
+            enqueued.remove(node_id)
+            return node_id, values.pop(node_id)
 
         @_acc_memoize(use_value_cache=False)
         def initialize_acc(acc: PyAcc) -> PyAcc:
@@ -415,15 +428,11 @@ class Model(GraphProvider):
         for sid, gss in self.state.items():
             r = self.roots_map[int(sid)]
             gss_init = gss.apply(initialize_acc, init_cache)
-            if r in values: values[r] = values[r].merge(gss_init)
-            else: values[r] = gss_init
-            if r not in enqueued: enqueued.add(r); hp(depth_heap, (-self.max_depth[r], r))
+            enqueue(r, gss_init)
 
         remaining_mask = all_ones
         while depth_heap:
-            _, node = hpop(depth_heap)
-            enqueued.remove(node)
-            gss_node = values.pop(node)
+            node, gss_node = dequeue()
             gss_id = id(gss_node)
 
             gss_acc = gss_node.reduce_acc()
@@ -479,10 +488,8 @@ class Model(GraphProvider):
                 current_start_dest = start_dest if edge_i == start_edge else 0
                 for dest_j in range(current_start_dest, len(edge.dests)):
                     if dests_proc >= max_dests:
-                        state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
-                        values[node] = state_to_requeue
+                        state_to_requeue = enqueue(node, gss_node)
                         edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
-                        if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
                         edges_proc = max_edges; break
 
                     dest_idx, state_bv = edge.dests[dest_j]
@@ -495,19 +502,15 @@ class Model(GraphProvider):
                     if child_gss.is_empty(): continue
 
                     d: NodeID = int(dest_idx)
-                    if d in values: values[d] = values[d].merge(child_gss)
-                    else: values[d] = child_gss
-                    if d not in enqueued: enqueued.add(d); hp(depth_heap, (-self.max_depth[d], d))
+                    enqueue(d, child_gss)
                     dests_proc += 1
                 
                 if edges_proc >= max_edges: break
                 edges_proc += 1
 
                 if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-                    state_to_requeue = values[node].merge(gss_node) if node in values else gss_node
-                    values[node] = state_to_requeue
+                    state_to_requeue = enqueue(node, gss_node)
                     edge_cursor[node] = NodeCursor(edge_i + 1, 0, id(state_to_requeue), pop_cache)
-                    if node not in enqueued: enqueued.add(node); hp(depth_heap, (-self.max_depth[node], node))
                     break
             else: edge_cursor.pop(node, None)
 
