@@ -94,6 +94,10 @@ class RangeSet(ABC, Generic[T]):
         """Return True if self has no elements in common with other."""
         return self.intersection(other).is_empty()
 
+    def intersects(self, other: "RangeSet[T]") -> bool:
+        """Return True if self has any elements in common with other."""
+        return not self.isdisjoint(other)
+
     @abstractmethod
     def contains(self, x: T) -> bool:
         """Return True if x is contained in the set."""
