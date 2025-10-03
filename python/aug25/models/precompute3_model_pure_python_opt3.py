@@ -168,7 +168,7 @@ class PyAcc:
 
     def __hash__(self):
         # Correctly hash the dictionary content for memoization
-        return hash((frozenset(self.terminals_union.items()), self.llm_mask))
+        return hash((len(self.terminals_union), self.llm_mask))
 
     def merge(self, other: "PyAcc") -> "PyAcc":
         new_terminals_union = self.terminals_union.copy()
