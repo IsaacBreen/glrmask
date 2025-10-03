@@ -1168,7 +1168,7 @@ local_system:
                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
               return GSS.merge_many(shifted)
 
-          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS) -> Generator[Union[Enqueue, Suspend], None, None]:
+          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet) -> Generator[Union[Enqueue, Suspend], None, None]:
               a_node = self.arena.get(node_id)
               if not a_node:
                   return
@@ -1181,6 +1181,8 @@ local_system:
               gss_acc = gss_node.reduce_acc()
 
               for edge_i, edge in enumerate(a_node.children):
+                  if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
+                      continue
                   if edge.pop == 0:
                       if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
                       if edge.dest_states_union.isdisjoint(peek0_rs): continue
@@ -1293,6 +1295,7 @@ local_system:
                       assert isinstance(node_id, int)
                       assert isinstance(gss_node, GSS)
                       gss_acc = gss_node.reduce_acc()
+                      gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
 
                       if self.is_end(node_id) and gss_acc:
                           if not final_mask.issuperset(gss_acc.llm_mask):
@@ -1301,10 +1304,10 @@ local_system:
 
                       a_node = self.arena.get(node_id)
 
-                      if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask):
+                      if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                           continue
 
-                      gen = self._process_internal_node_gen(node_id, gss_node)
+                      gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask)
 
                   if gen:
                       while True:
@@ -2494,7 +2497,7 @@ local_system:
                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
               return GSS.merge_many(shifted)
 
-          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet) -> Generator[Union[Enqueue, Suspend], None, None]:
+          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet, gss_acc: Optional[PyAcc]) -> Generator[Union[Enqueue, Suspend], None, None]:
               a_node = self.arena.get(node_id)
               if not a_node:
                   return
@@ -2504,7 +2507,6 @@ local_system:
               edges_proc, dests_proc = 0, 0
               peek0_rs = None
               pop_cache = {}
-              gss_acc = gss_node.reduce_acc()
 
               for edge_i, edge in enumerate(a_node.children):
                   if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
@@ -2633,7 +2635,7 @@ local_system:
                       if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                           continue
 
-                      gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask)
+                      gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask, gss_acc)
 
                   if gen:
                       while True:
@@ -3869,7 +3871,7 @@ messages:
                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
               return GSS.merge_many(shifted)
 
-          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS) -> Generator[Union[Enqueue, Suspend], None, None]:
+          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet) -> Generator[Union[Enqueue, Suspend], None, None]:
               a_node = self.arena.get(node_id)
               if not a_node:
                   return
@@ -3882,6 +3884,8 @@ messages:
               gss_acc = gss_node.reduce_acc()
 
               for edge_i, edge in enumerate(a_node.children):
+                  if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
+                      continue
                   if edge.pop == 0:
                       if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
                       if edge.dest_states_union.isdisjoint(peek0_rs): continue
@@ -3994,6 +3998,7 @@ messages:
                       assert isinstance(node_id, int)
                       assert isinstance(gss_node, GSS)
                       gss_acc = gss_node.reduce_acc()
+                      gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
 
                       if self.is_end(node_id) and gss_acc:
                           if not final_mask.issuperset(gss_acc.llm_mask):
@@ -4002,10 +4007,10 @@ messages:
 
                       a_node = self.arena.get(node_id)
 
-                      if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask):
+                      if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                           continue
 
-                      gen = self._process_internal_node_gen(node_id, gss_node)
+                      gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask)
 
                   if gen:
                       while True:
@@ -4056,145 +4061,78 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. The performance difference between these two implementations, while seemingly subtle, stems from a critical architectural change in how the processing state is managed. The generator-based approach in `opt4.py` loses access to essential context from the main loop, leading to the removal of crucial performance optimizations.
+      Of course. The performance discrepancy you're observing between the two implementations, despite their logical similarity, is due to a subtle but significant inefficiency in the generator-based version (`opt4`). Here is a step-by-step guide to fix it, followed by the corresponding git diff.
 
-      Here is a step-by-step explanation of the issue and the necessary fixes.
-
-      ### Why `opt4.py` is Slower
-
-      The core issue is that the refactoring in `opt4.py` moved the graph traversal logic into a generator function (`_process_internal_node_gen`) but failed to provide it with the necessary context from the main `get_mask` loop. This results in two major performance regressions compared to `opt3.py`:
-
-      1.  **Missing Node-Level Pruning:** `opt3` performs a check to see if the tokens allowed by the current grammar state (`gss_mask`) have any overlap with the tokens handled by the current graph node (`a_node.llm_bv_union`). If there's no overlap, it prunes the entire traversal of that node and its children. `opt4` is missing this check and may start processing a node that can be proven to be a dead end.
-
-      2.  **Missing Edge-Level Pruning:** Before performing expensive operations like `popn` for an edge, `opt3` quickly checks if the edge is viable by comparing the edge's token set (`edge.llm_bv`) against the globally allowed tokens (`remaining_mask`) and the current state's allowed tokens (`gss_mask`). `opt4` omits these cheap checks and proceeds directly to more costly calculations, only to potentially discover later that the edge was not viable.
-
-      3.  **Stale State (Architectural Flaw):** A more subtle issue is that even if the context were passed to the generator, it would become stale. The `remaining_mask` is updated in the main loop as final tokens are found. A suspended generator in `opt4`, when resumed, would continue operating with an old `remaining_mask`, making its pruning less effective. The `opt3` implementation doesn't have this problem because it re-evaluates each work item against the latest `remaining_mask` every time it's pulled from the heap.
-
-      To improve `opt4`'s performance, we need to reintroduce the missing pruning checks. The following changes will make `opt4` logically closer to `opt3`, though the architectural issue of stale state will remain.
+      The core issue is that for every new work item, the expensive `gss_node.reduce_acc()` method is called twice in `opt4`: once in the main `get_mask` loop before the generator is created, and then again inside the generator itself. The fix is to compute it only once and pass the result into the generator.
 
       ### Step-by-Step Instructions
 
-      Here are the edits for `python/aug25/models/precompute3_model_pure_python_opt4.py`:
+      Here are the precise edits for `python/aug25/models/precompute3_model_pure_python_opt4.py`:
 
-      1.  **Modify `_process_internal_node_gen` function signature:**
-          Update the function to accept `gss_mask` and `remaining_mask` from the main loop.
-          
+      1.  **Modify `_process_internal_node_gen` method signature:**
+          In `python/aug25/models/precompute3_model_pure_python_opt4.py`, locate the definition of the `_process_internal_node_gen` method. Add a new parameter `gss_acc: Optional[PyAcc]` to its signature.
+
           Change this line:
-          ```python
-          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS) -> Generator[Union[Enqueue, Suspend], None, None]:
-          ```
-          to this:
           ```python
           def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet) -> Generator[Union[Enqueue, Suspend], None, None]:
           ```
-
-      2.  **Add Edge-Level Pruning to `_process_internal_node_gen`:**
-          Inside this function, at the beginning of the `for` loop that iterates over edges, add the missing check.
-
-          Insert the following lines:
+          to this:
           ```python
-                  if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
-                      continue
-          ```
-          right after this line:
-          ```python
-              for edge_i, edge in enumerate(a_node.children):
+          def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet, gss_acc: Optional[PyAcc]) -> Generator[Union[Enqueue, Suspend], None, None]:
           ```
 
-      3.  **Update the `get_mask` Method:**
-          In the main `while work_heap:` loop, modify the `else` block that handles new work items. You need to calculate `gss_mask`, add the stronger node-level pruning check, and pass the required masks when creating the generator.
-
-          Replace this block:
+      2.  **Remove redundant computation in `_process_internal_node_gen`:**
+          Inside the `_process_internal_node_gen` method, delete the following line, as the `gss_acc` value will now be provided as an argument:
           ```python
-                  else:
-                      node_id, gss_node = work
-                      assert isinstance(node_id, int)
-                      assert isinstance(gss_node, GSS)
-                      gss_acc = gss_node.reduce_acc()
-
-                      if self.is_end(node_id) and gss_acc:
-                          if not final_mask.issuperset(gss_acc.llm_mask):
-                              final_mask |= gss_acc.llm_mask
-                              remaining_mask = all_ones.difference(final_mask)
-
-                      a_node = self.arena.get(node_id)
-
-                      if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask):
-                          continue
-
-                      gen = self._process_internal_node_gen(node_id, gss_node)
-          ```
-          with this updated version:
-          ```python
-                  else:
-                      node_id, gss_node = work
-                      assert isinstance(node_id, int)
-                      assert isinstance(gss_node, GSS)
-                      gss_acc = gss_node.reduce_acc()
-                      gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
-
-                      if self.is_end(node_id) and gss_acc:
-                          if not final_mask.issuperset(gss_acc.llm_mask):
-                              final_mask |= gss_acc.llm_mask
-                              remaining_mask = all_ones.difference(final_mask)
-
-                      a_node = self.arena.get(node_id)
-
-                      if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
-                          continue
-
-                      gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask)
+          gss_acc = gss_node.reduce_acc()
           ```
 
-      These changes will restore the critical optimizations and should significantly improve the performance of `opt4.py`.
+      3.  **Update the call site in `get_mask`:**
+          In the `get_mask` method, find the line where `_process_internal_node_gen` is called. You've already computed `gss_acc` in that scope, so pass it as the new final argument.
+
+          Change this line:
+          ```python
+          gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask)
+          ```
+          to this:
+          ```python
+          gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask, gss_acc)
+          ```
+
+      These changes will eliminate the redundant calculation, and the performance of the generator-based implementation should now be much more comparable to the iterative version.
 
       ### Git Diff
 
-      Here is the git diff to apply the changes to `python/aug25/models/precompute3_model_pure_python_opt4.py`.
+      Here is the git patch that applies the changes described above.
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python_opt4.py b/python/aug25/models/precompute3_model_pure_python_opt4.py
-      index 455e60e..28929e1 100644
+      index 455c707..8747492 100644
       --- a/python/aug25/models/precompute3_model_pure_python_opt4.py
       +++ b/python/aug25/models/precompute3_model_pure_python_opt4.py
-      @@ -582,7 +582,7 @@
+      @@ -583,7 +583,7 @@
                                    heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
                return GSS.merge_many(shifted)
        
-      -    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS) -> Generator[Union[Enqueue, Suspend], None, None]:
-      +    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet) -> Generator[Union[Enqueue, Suspend], None, None]:
+      -    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet) -> Generator[Union[Enqueue, Suspend], None, None]:
+      +    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet, gss_acc: Optional[PyAcc]) -> Generator[Union[Enqueue, Suspend], None, None]:
                a_node = self.arena.get(node_id)
                if not a_node:
                    return
-      @@ -594,6 +594,8 @@
-               gss_acc = gss_node.reduce_acc()
+      @@ -594,8 +594,6 @@
+               edges_proc, dests_proc = 0, 0
+               peek0_rs = None
+               pop_cache = {}
+      -        gss_acc = gss_node.reduce_acc()
        
                for edge_i, edge in enumerate(a_node.children):
-      +            if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
-      +                continue
-                   if edge.pop == 0:
-                       if peek0_rs is None: peek0_rs = RangeSetStates.from_indices(gss_node.peek())
-                       if edge.dest_states_union.isdisjoint(peek0_rs): continue
-      @@ -698,22 +700,24 @@
-                       node_id, gss_node = work
-                       assert isinstance(node_id, int)
-                       assert isinstance(gss_node, GSS)
-                       gss_acc = gss_node.reduce_acc()
-      +                gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
-       
-                       if self.is_end(node_id) and gss_acc:
-                           if not final_mask.issuperset(gss_acc.llm_mask):
-                               final_mask |= gss_acc.llm_mask
-                               remaining_mask = all_ones.difference(final_mask)
-       
-                       a_node = self.arena.get(node_id)
-       
-      -                if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask):
-      +                if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
+                   if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
+      @@ -723,7 +721,7 @@
+                       if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                            continue
        
-      -                gen = self._process_internal_node_gen(node_id, gss_node)
-      +                gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask)
+      -                gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask)
+      +                gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask, gss_acc)
        
                    if gen:
                        while True:
@@ -4210,7 +4148,7 @@ messages:
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt4.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt4.py.
     metadata:
-  - user: 'Changes committed with message: "Restore performance optimizations in get_mask
-      by reintroducing LLM mask pruning checks in the generator traversal."'
+  - user: 'Changes committed with message: "Perf: Pass pre-computed GSS accumulator
+      to generator in get_mask"'
     metadata:
 ...

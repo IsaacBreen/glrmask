@@ -507,7 +507,7 @@ class Model(GraphProvider):
                             heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
         return GSS.merge_many(shifted)
 
-    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet) -> Generator[Union[Enqueue, Suspend], None, None]:
+    def _process_internal_node_gen(self, node_id: NodeID, gss_node: GSS, gss_mask: LLMTokenSet, remaining_mask: LLMTokenSet, gss_acc: Optional[PyAcc]) -> Generator[Union[Enqueue, Suspend], None, None]:
         a_node = self.arena.get(node_id)
         if not a_node:
             return
@@ -517,7 +517,6 @@ class Model(GraphProvider):
         edges_proc, dests_proc = 0, 0
         peek0_rs = None
         pop_cache = {}
-        gss_acc = gss_node.reduce_acc()
 
         for edge_i, edge in enumerate(a_node.children):
             if edge.llm_bv.isdisjoint(remaining_mask) or edge.llm_bv.isdisjoint(gss_mask):
@@ -646,7 +645,7 @@ class Model(GraphProvider):
                 if not a_node or not a_node.children or a_node.llm_bv_union.isdisjoint(remaining_mask) or gss_mask.isdisjoint(a_node.llm_bv_union.intersection(remaining_mask)):
                     continue
 
-                gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask)
+                gen = self._process_internal_node_gen(node_id, gss_node, gss_mask, remaining_mask, gss_acc)
 
             if gen:
                 while True:
