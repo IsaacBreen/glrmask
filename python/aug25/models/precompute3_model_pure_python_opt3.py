@@ -6,6 +6,8 @@ import collections
 from typing import Dict, List, Tuple, Optional, Union, Set
 from dataclasses import dataclass, field
 
+from numba import njit
+
 from ..common_interface import GraphProvider
 from ..range_set.ffi_range_set import FFIRangeSet as RangeSet
 from ..range_set.set_range_set import SetRangeSet as RangeSetOut
@@ -55,6 +57,7 @@ class PyTokenizer:
     start_state: int
     non_greedy_finalizers: Set[int]
 
+    @njit
     def execute_from_state(self, text: bytes, state_id: int) -> Tuple[Optional[int], List[Tuple[int, int]]]:
         current_state = state_id
         matches = {}
