@@ -227,9 +227,10 @@ def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArena
         if use_alt_merge:
             children_it = iter(intermediate_node.children)
             first = next(children_it)
+            edge_dests = []
             prev_pop = first.pop
             prev_llm_bv = first.llm_bv
-            edge_dests = [ArenaEdgeDest(first.dests.dest_idx, first.dests.state_bv)]
+            edge_dests.append(ArenaEdgeDest(first.dests.dest_idx, first.dests.state_bv))
             def flush() -> None:
                 nonlocal edge_dests, prev_pop, prev_llm_bv, new_children, llm_bv_union
                 dest_states_union = RangeSetStates.empty()
@@ -245,8 +246,9 @@ def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArena
             for edge in children_it:
                 if not (edge.pop == prev_pop and edge.llm_bv == prev_llm_bv):
                     flush()
-                prev_pop = edge.pop
-                prev_llm_bv = edge.llm_bv
+                    prev_pop = edge.pop
+                    prev_llm_bv = edge.llm_bv
+                    edge_dests = []
                 edge_dests.append(ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv))
             flush()
 
