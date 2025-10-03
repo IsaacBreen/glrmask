@@ -122,10 +122,15 @@ class ParserTable:
     table: Dict[int, Row]
 
 @dataclass
+class ArenaEdgeDest:
+    dest_idx: NodeID
+    state_bv: StateIDSet
+
+@dataclass
 class ArenaEdge:
     pop: int
     llm_bv: LLMTokenSet
-    dests: List[Tuple[NodeID, StateIDSet]] = field(default_factory=list)
+    dests: List[ArenaEdgeDest] = field(default_factory=list)
     dest_states_union: StateIDSet = field(default_factory=RangeSetStates.empty)
     llm_bv_not: Optional[LLMTokenSet] = None
     state_to_dest: Optional[Dict[int, List[int]]] = None
@@ -136,8 +141,8 @@ class ArenaEdge:
         
         mapping: Dict[int, List[int]] = collections.defaultdict(list)
         total_assigned = 0
-        for j, (_dest_idx, state_bv) in enumerate(self.dests):
-            for sid in state_bv.iter_indices():
+        for j, dest in enumerate(self.dests):
+            for sid in dest.state_bv.iter_indices():
                 mapping[sid].append(j)
                 total_assigned += 1
                 if total_assigned > max_states_per_index:
@@ -226,7 +231,7 @@ class Model(GraphProvider):
                 new_dests, dest_states_union = [], RangeSetStates.empty()
                 for dest_idx, state_json in dest_map_json:
                     state_bv = RangeSetStates.from_ranges(bs_from_json(dumps(state_json)).to_ranges())
-                    new_dests.append((int(dest_idx), state_bv))
+                    new_dests.append(ArenaEdgeDest(int(dest_idx), state_bv))
                     dest_states_union |= state_bv
                 new_children.append(ArenaEdge(int(pop), llm_bv, new_dests, dest_states_union))
             node_data["children"], node_data["llm_bv_union"] = new_children, llm_bv_union
@@ -290,8 +295,8 @@ class Model(GraphProvider):
         for node in self.arena.values():
             if not node.children: continue
             for edge in node.children:
-                edge.dests.sort(key=lambda item: md.get(int(item[0]), 0), reverse=True)
-            node.children.sort(key=lambda e: (-md.get(int(e.dests[0][0]), 0) if e.dests else -1, e.pop))
+                edge.dests.sort(key=lambda dest: md.get(int(dest.dest_idx), 0), reverse=True)
+            node.children.sort(key=lambda e: (-md.get(int(e.dests[0].dest_idx), 0) if e.dests else -1, e.pop))
 
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         term_rs = RangeSet.from_indices([terminal_id])
@@ -312,10 +317,10 @@ class Model(GraphProvider):
         if not a_node: return
         for edge in a_node.children:
             if edge.llm_bv.contains(token):
-                for dest_idx, state_bv in edge.dests:
-                    for start, end in state_bv.to_ranges():
+                for dest in edge.dests:
+                    for start, end in dest.state_bv.to_ranges():
                         for sid in range(start, end + 1):
-                            yield (edge.pop, sid, dest_idx)
+                            yield (edge.pop, sid, dest.dest_idx)
 
     def commit(self, token_id: int):
         token_bytes = self.id_to_token[token_id]
@@ -492,16 +497,16 @@ class Model(GraphProvider):
                         edge_cursor[node] = NodeCursor(edge_i, dest_j, id(state_to_requeue), pop_cache)
                         edges_proc = max_edges; break
 
-                    dest_idx, state_bv = edge.dests[dest_j]
-                    if state_bv.isdisjoint(peek_rs): continue
+                    dest = edge.dests[dest_j]
+                    if dest.state_bv.isdisjoint(peek_rs): continue
                     
-                    keep_rs = peek_rs.intersection(state_bv)
+                    keep_rs = peek_rs.intersection(dest.state_bv)
                     if keep_rs.is_empty(): continue
                     
                     child_gss = popped.isolate_many(list(keep_rs.iter_indices()))
                     if child_gss.is_empty(): continue
 
-                    d: NodeID = int(dest_idx)
+                    d: NodeID = int(dest.dest_idx)
                     enqueue(d, child_gss)
                     dests_proc += 1
                 
