@@ -221,7 +221,7 @@ fn minimize_by_signature_trie1(
     // Produce a stable digest that depends on:
     //  - end flag
     //  - per edge-key (sorted): key id, count, and for each child: (canonical_id, bv hash)
-    let mut digest_for = |node: PrecomputeNode1Index| -> u64 {
+    let digest_for = |node: PrecomputeNode1Index, canonical: &HashMap<PrecomputeNode1Index, PrecomputeNode1Index>| -> u64 {
         let g = node.read(trie1_god).expect("read");
         let mut hasher = DeterministicHasher::new(DefaultHasher::new());
         // end flag
@@ -250,7 +250,7 @@ fn minimize_by_signature_trie1(
 
     // Bottom-up: compute canonical id per node
     for n in &all_nodes {
-        let d = digest_for(*n);
+        let d = digest_for(*n, &canonical);
         let entry = buckets.entry(d).or_default();
         let mut rep: Option<PrecomputeNode1Index> = None;
         for &candidate in entry.iter() {
