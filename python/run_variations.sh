@@ -19,6 +19,7 @@ set -euo pipefail
 #                    (Default: ./.cache/test_vocabs/js_grammar_constraint.json.gz)
 #   CODE_FILE:       Path to the code file to use as input. (Default: ./src/example_code.js)
 #   SKIP_CPP_BUILD:  Set to 1 to disable C++ compilation (Default: 0)
+#   SKIP_RUST:       Set to 1 to disable Rust compilation (Default: 0)
 #   DETECT_REPEAT:   Number of input passes to select hot step. (Default: 3)
 #   EVAL_REPEAT:     Number of repeated get_mask runs for evaluation. (Default: 10)
 #   AGG_METHOD:      Aggregation method (min, mean, median, max). (Default: max)
@@ -30,6 +31,7 @@ set -euo pipefail
 : "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
 : "${CODE_FILE:="./src/example_code.js"}"
 : "${SKIP_CPP_BUILD:=0}"
+: "${SKIP_RUST:=0}"
 : "${DETECT_REPEAT:=3}"
 : "${EVAL_REPEAT:=10}"
 : "${AGG_METHOD:=max}"
@@ -148,6 +150,24 @@ if [[ "${SKIP_CPP_BUILD}" != "1" ]]; then
   echo "---"
 else
   echo "Skipping C++ extension build (SKIP_CPP_BUILD=1)."
+  echo "---"
+fi
+
+# --- Automated Rust Build Process ---
+if [ "${SKIP_RUST:-0}" == "1" ]; then
+  echo "SKIP_RUST is set. Skipping Rust module build."
+  echo "---"
+else
+  echo "Automating Rust module build..."
+  RUST_PROJECT_DIR="$SCRIPT_DIR/leveled_rs"
+  if [ -d "$RUST_PROJECT_DIR" ]; then
+    echo "  Building Rust modules with maturin..."
+    # Assuming maturin is installed in the environment. 'maturin develop' builds and installs the wheel in the current venv.
+    (cd "$RUST_PROJECT_DIR" && maturin develop)
+    echo "Rust module build complete."
+  else
+    echo "Rust project directory not found at $RUST_PROJECT_DIR. Skipping build."
+  fi
   echo "---"
 fi
 
