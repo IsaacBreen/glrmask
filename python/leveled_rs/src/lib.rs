@@ -632,17 +632,9 @@ impl LeveledGSS {
     }
 
     #[pyo3(signature = (func, memo = None))]
-    fn apply(&self, func: PyObject, memo: Option<PyObject>) -> PyResult<Self> {
+    fn apply(&self, func: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
         Python::with_gil(|py| {
-            let memo_dict = if let Some(ref memo_obj) = memo {
-                if memo_obj.is_none(py) {
-                    PyDict::new(py)
-                } else {
-                    memo_obj.downcast::<PyDict>(py)?
-                }
-            } else {
-                PyDict::new(py)
-            };
+            let memo_dict = memo.unwrap_or_else(|| PyDict::new(py));
 
             fn transform(py: Python, node: &Arc<Upper>, func: &PyObject, memo: &PyDict) -> PyResult<Arc<Upper>> {
                 let key = Arc::as_ptr(node) as usize;
@@ -703,17 +695,9 @@ impl LeveledGSS {
     }
 
     #[pyo3(signature = (predicate, memo = None))]
-    fn prune(&self, predicate: PyObject, memo: Option<PyObject>) -> PyResult<Self> {
+    fn prune(&self, predicate: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
         Python::with_gil(|py| {
-            let memo_dict = if let Some(ref memo_obj) = memo {
-                if memo_obj.is_none(py) {
-                    PyDict::new(py)
-                } else {
-                    memo_obj.downcast::<PyDict>(py)?
-                }
-            } else {
-                PyDict::new(py)
-            };
+            let memo_dict = memo.unwrap_or_else(|| PyDict::new(py));
 
             fn transform(py: Python, node: &Arc<Upper>, predicate: &PyObject, memo: &PyDict) -> PyResult<Option<Arc<Upper>>> {
                 let key = Arc::as_ptr(node) as usize;
@@ -922,18 +906,10 @@ impl LeveledGSS {
     }
 
     #[pyo3(signature = (mutator, memo = None))]
-    fn apply_and_prune(&self, mutator: PyObject, memo: Option<PyObject>) -> PyResult<Self> {
+    fn apply_and_prune(&self, mutator: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
         Python::with_gil(|py| {
+            let memo_dict = memo.unwrap_or_else(|| PyDict::new(py));
             let acc_cache = PyDict::new(py);
-            let memo_dict = if let Some(ref memo_obj) = memo {
-                if memo_obj.is_none(py) {
-                    PyDict::new(py)
-                } else {
-                    memo_obj.downcast::<PyDict>(py)?
-                }
-            } else {
-                PyDict::new(py)
-            };
 
             fn mutate_acc<'p>(py: Python<'p>, a: &PyObject, mutator: &PyObject, acc_cache: &'p PyDict) -> PyResult<Option<PyObject>> {
                 let k = a.as_ref(py).as_ptr() as usize;
