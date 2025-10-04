@@ -71,25 +71,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
     }
 }
 
-fn get_max_depth_lower<T: Clone + Eq + Hash>(children: &Children<T, Lower<T>>) -> isize {
-    children
-        .values()
-        .flat_map(|kids| kids.values())
-        .map(|c| c.max_depth)
-        .max()
-        .map_or(0, |d| d + 1)
-}
-
-fn get_max_depth_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
-    children: &Children<T, Upper<T, A>>,
-) -> isize {
-    children
-        .values()
-        .flat_map(|kids| kids.values())
-        .map(|c| c.max_depth())
-        .max()
-        .map_or(0, |d| d + 1)
-}
+// --------------------
+// Small, reusable helpers
+// --------------------
 
 fn merge_optional_acc<A: Merge + Clone>(a: &Option<A>, b: &Option<A>) -> Option<A> {
     match (a, b) {
@@ -100,10 +84,24 @@ fn merge_optional_acc<A: Merge + Clone>(a: &Option<A>, b: &Option<A>) -> Option<
     }
 }
 
-fn merge_children_lower<T: Clone + Eq + Hash>(
-    c1: &Children<T, Lower<T>>,
-    c2: &Children<T, Lower<T>>,
-) -> Children<T, Lower<T>> {
+fn max_depth_from_children<T, N, F>(children: &Children<T, N>, depth_of: F) -> isize
+where
+    T: Clone + Eq + Hash,
+    F: Fn(&Arc<N>) -> isize,
+{
+    children
+        .values()
+        .flat_map(|kids| kids.values())
+        .map(|c| depth_of(c))
+        .max()
+        .map_or(0, |d| d + 1)
+}
+
+fn merge_children<T, N, F>(c1: &Children<T, N>, c2: &Children<T, N>, merge_fn: F) -> Children<T, N>
+where
+    T: Clone + Eq + Hash,
+    F: Fn(&Arc<N>, &Arc<N>) -> Arc<N>,
+{
     if c1.ptr_eq(c2) {
         return c1.clone();
     }
@@ -113,7 +111,7 @@ fn merge_children_lower<T: Clone + Eq + Hash>(
             let mut new_map = v1_map.clone();
             for (depth, child2) in v2_map.iter() {
                 if let Some(child1) = new_map.get(depth) {
-                    let merged_child = merge_lower(child1, child2);
+                    let merged_child = merge_fn(child1, child2);
                     new_map.insert(*depth, merged_child);
                 } else {
                     new_map.insert(*depth, child2.clone());
@@ -127,73 +125,98 @@ fn merge_children_lower<T: Clone + Eq + Hash>(
     merged
 }
 
-fn merge_children_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
-    c1: &Children<T, Upper<T, A>>,
-    c2: &Children<T, Upper<T, A>>,
-) -> Children<T, Upper<T, A>> {
-    if c1.ptr_eq(c2) {
-        return c1.clone();
-    }
-    let mut merged = c1.clone();
-    for (k, v2_map) in c2.iter() {
-        if let Some(v1_map) = merged.get(k) {
-            let mut new_map = v1_map.clone();
-            for (depth, child2) in v2_map.iter() {
-                if let Some(child1) = new_map.get(depth) {
-                    let merged_child = merge_upper(child1, child2);
-                    new_map.insert(*depth, merged_child);
-                } else {
-                    new_map.insert(*depth, child2.clone());
-                }
-            }
-            merged.insert(k.clone(), new_map);
-        } else {
-            merged.insert(k.clone(), v2_map.clone());
-        }
-    }
-    merged
+fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool) -> Arc<Lower<T>> {
+    let max_depth = max_depth_from_children(&children, |n: &Arc<Lower<T>>| n.max_depth);
+    Arc::new(Lower {
+        children,
+        empty,
+        max_depth,
+    })
 }
+
+fn new_interface<T, A>(
+    children: Children<T, Lower<T>>,
+    acc: A,
+    empty: Option<A>,
+) -> Arc<Upper<T, A>>
+where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
+    let max_depth = max_depth_from_children(&children, |n: &Arc<Lower<T>>| n.max_depth);
+    Arc::new(Upper::Interface(Arc::new(Interface {
+        children,
+        acc,
+        empty,
+        max_depth,
+    })))
+}
+
+fn new_branch<T, A>(
+    children: Children<T, Upper<T, A>>,
+    empty: Option<A>,
+) -> Arc<Upper<T, A>>
+where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
+    let max_depth = max_depth_from_children(&children, |n: &Arc<Upper<T, A>>| n.max_depth());
+    Arc::new(Upper::Branch(Arc::new(UpperBranch {
+        children,
+        empty,
+        max_depth,
+    })))
+}
+
+fn empty_upper_inner<T, A>() -> Arc<Upper<T, A>>
+where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
+    new_branch(IHashMap::new(), None)
+}
+
+// --------------------
+// Conversions and merges
+// --------------------
 
 fn merge_lower<T: Clone + Eq + Hash>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> Arc<Lower<T>> {
     if Arc::ptr_eq(l1, l2) {
         return l1.clone();
     }
     let new_empty = l1.empty || l2.empty;
-    let merged_children = merge_children_lower(&l1.children, &l2.children);
-    let max_depth = get_max_depth_lower(&merged_children);
-    Arc::new(Lower {
-        children: merged_children,
-        empty: new_empty,
-        max_depth,
-    })
+    let merged_children = merge_children(&l1.children, &l2.children, |a, b| merge_lower(a, b));
+    new_lower(merged_children, new_empty)
 }
 
-fn interface_to_upperbranch<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
-    it: &Arc<Interface<T, A>>,
-) -> Arc<UpperBranch<T, A>> {
+fn interface_to_upperbranch<T, A>(it: &Arc<Interface<T, A>>) -> Arc<UpperBranch<T, A>>
+where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
     let mut children: Children<T, Upper<T, A>> = IHashMap::new();
     for (v, kids) in it.children.iter() {
         let mut v_map: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
         for lchild in kids.values() {
-            let empty = if lchild.empty { Some(it.acc.clone()) } else { None };
-            let max_depth = get_max_depth_lower(&lchild.children);
-            let ci = Arc::new(Upper::Interface(Arc::new(Interface {
-                children: lchild.children.clone(),
-                acc: it.acc.clone(),
-                empty,
-                max_depth,
-            })));
+            let empty = if lchild.empty {
+                Some(it.acc.clone())
+            } else {
+                None
+            };
+            let ci = new_interface(lchild.children.clone(), it.acc.clone(), empty);
             v_map.insert(ci.max_depth(), ci);
         }
         if !v_map.is_empty() {
             children.insert(v.clone(), v_map);
         }
     }
+
     let mut new_empty = it.empty.clone();
     if it.children.is_empty() && new_empty.is_none() {
         new_empty = Some(it.acc.clone());
     }
-    let max_depth = get_max_depth_upper(&children);
+
+    let max_depth = max_depth_from_children(&children, |n: &Arc<Upper<T, A>>| n.max_depth());
     Arc::new(UpperBranch {
         children,
         empty: new_empty,
@@ -201,39 +224,34 @@ fn interface_to_upperbranch<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
     })
 }
 
-fn merge_upperbranches<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+fn merge_upperbranches<T, A>(
     a: &Arc<UpperBranch<T, A>>,
     b: &Arc<UpperBranch<T, A>>,
-) -> Arc<Upper<T, A>> {
+) -> Arc<Upper<T, A>>
+where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
     if Arc::ptr_eq(a, b) {
         return Arc::new(Upper::Branch(a.clone()));
     }
     let new_empty = merge_optional_acc(&a.empty, &b.empty);
-    let merged_children = merge_children_upper(&a.children, &b.children);
-    let max_depth = get_max_depth_upper(&merged_children);
-    let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-        children: merged_children,
-        empty: new_empty,
-        max_depth,
-    })));
+    let merged_children = merge_children(&a.children, &b.children, |x, y| merge_upper(x, y));
+    let new_b = new_branch(merged_children, new_empty);
     try_promote(&new_b)
 }
 
-fn merge_interfaces<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
-    a: &Arc<Interface<T, A>>,
-    b: &Arc<Interface<T, A>>,
-) -> Arc<Upper<T, A>> {
+fn merge_interfaces<T, A>(a: &Arc<Interface<T, A>>, b: &Arc<Interface<T, A>>) -> Arc<Upper<T, A>>
+where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
     if a.acc == b.acc || a.children.ptr_eq(&b.children) {
-        let merged_children = merge_children_lower(&a.children, &b.children);
+        let merged_children =
+            merge_children(&a.children, &b.children, |x, y| merge_lower(x, y));
         let new_acc = a.acc.merge(&b.acc);
         let new_empty = merge_optional_acc(&a.empty, &b.empty);
-        let max_depth = get_max_depth_lower(&merged_children);
-        Arc::new(Upper::Interface(Arc::new(Interface {
-            children: merged_children,
-            acc: new_acc,
-            empty: new_empty,
-            max_depth,
-        })))
+        new_interface(merged_children, new_acc, new_empty)
     } else {
         let ub1 = interface_to_upperbranch(a);
         let ub2 = interface_to_upperbranch(b);
@@ -241,10 +259,11 @@ fn merge_interfaces<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
     }
 }
 
-fn merge_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
-    u1: &Arc<Upper<T, A>>,
-    u2: &Arc<Upper<T, A>>,
-) -> Arc<Upper<T, A>> {
+fn merge_upper<T, A>(u1: &Arc<Upper<T, A>>, u2: &Arc<Upper<T, A>>) -> Arc<Upper<T, A>>
+where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
     if Arc::ptr_eq(u1, u2) {
         return u1.clone();
     }
@@ -258,23 +277,27 @@ fn merge_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
     }
 }
 
-fn try_promote<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
-    node: &Arc<Upper<T, A>>,
-) -> Arc<Upper<T, A>> {
+fn try_promote<T, A>(node: &Arc<Upper<T, A>>) -> Arc<Upper<T, A>>
+where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
     if let Upper::Branch(b) = &**node {
-        let all_children: Vec<_> = b.children.values().flat_map(|kids| kids.values()).collect();
+        let all_children: Vec<_> = b
+            .children
+            .values()
+            .flat_map(|kids| kids.values())
+            .collect();
+
+        // Leaf-branch with explicit empty: represent as Interface with no children
         if all_children.is_empty() {
             if let Some(empty) = &b.empty {
-                return Arc::new(Upper::Interface(Arc::new(Interface {
-                    children: IHashMap::new(),
-                    acc: empty.clone(),
-                    empty: Some(empty.clone()),
-                    max_depth: 0,
-                })));
+                return new_interface(IHashMap::new(), empty.clone(), Some(empty.clone()));
             }
             return node.clone();
         }
 
+        // Must have all Interface children to be promotable
         if !all_children
             .iter()
             .all(|c| matches!(&***c, Upper::Interface(_)))
@@ -282,6 +305,7 @@ fn try_promote<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
             return node.clone();
         }
 
+        // Collect all accumulators present across children and root empty
         let mut accs: HashSet<A> = HashSet::new();
         if let Some(empty) = &b.empty {
             accs.insert(empty.clone());
@@ -289,26 +313,21 @@ fn try_promote<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
         for c in all_children {
             if let Upper::Interface(ic) = &**c {
                 accs.insert(ic.acc.clone());
-                if let Some(empty) = &ic.empty {
-                    accs.insert(empty.clone());
+                if let Some(e) = &ic.empty {
+                    accs.insert(e.clone());
                 }
             }
         }
 
         if accs.len() <= 1 {
             if let Some(the_acc) = accs.into_iter().next() {
+                // Build lower layer by collapsing interface children to lowers
                 let mut l_children: Children<T, Lower<T>> = IHashMap::new();
                 for (v, kids) in b.children.iter() {
                     let mut v_map: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
                     for child in kids.values() {
                         if let Upper::Interface(ci) = &**child {
-                            let empty = ci.empty.is_some();
-                            let max_depth = get_max_depth_lower(&ci.children);
-                            let lower = Arc::new(Lower {
-                                children: ci.children.clone(),
-                                empty,
-                                max_depth,
-                            });
+                            let lower = new_lower(ci.children.clone(), ci.empty.is_some());
                             v_map.insert(lower.max_depth, lower);
                         }
                     }
@@ -316,29 +335,28 @@ fn try_promote<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
                         l_children.insert(v.clone(), v_map);
                     }
                 }
-                let max_depth = get_max_depth_lower(&l_children);
-                return Arc::new(Upper::Interface(Arc::new(Interface {
-                    children: l_children,
-                    acc: the_acc,
-                    empty: b.empty.clone(),
-                    max_depth,
-                })));
+                return new_interface(l_children, the_acc, b.empty.clone());
             } else {
-                return empty_upper().inner;
+                return empty_upper_inner();
             }
         }
     }
     node.clone()
 }
 
-fn empty_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>() -> LeveledGSS<T, A> {
-    let inner = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-        children: IHashMap::new(),
-        empty: None,
-        max_depth: 0,
-    })));
-    LeveledGSS { inner }
+fn empty_upper<T, A>() -> LeveledGSS<T, A>
+where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
+    LeveledGSS {
+        inner: empty_upper_inner(),
+    }
 }
+
+// --------------------
+// Public GSS type
+// --------------------
 
 #[derive(Clone)]
 pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
@@ -380,7 +398,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let mut trie: StdHashMap<T, Entry<T, A>> = StdHashMap::new();
         let mut empty_acc: Option<A> = None;
 
-        for (vals, acc) in canon.into_iter() {
+        for (mut vals, acc) in canon.into_iter() {
             if vals.is_empty() {
                 empty_acc = match empty_acc.take() {
                     None => Some(acc),
@@ -389,13 +407,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 continue;
             }
 
-            let mut node = &mut trie;
-            let mut rev_vals = vals;
-            rev_vals.reverse();
-
-            // The check for vals.is_empty() above ensures rev_vals is not empty here.
-            if let Some(last_val) = rev_vals.pop() {
-                for v in rev_vals {
+            vals.reverse();
+            if let Some(last_val) = vals.pop() {
+                let mut node = &mut trie;
+                for v in vals {
                     node = &mut node.entry(v).or_default().sub;
                 }
                 let final_entry = node.entry(last_val).or_default();
@@ -408,28 +423,15 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         ) -> Arc<Lower<T>> {
             let mut l_children: Children<T, Lower<T>> = IHashMap::new();
             for (v, e) in d.iter() {
-                let sub_lower = if e.sub.is_empty() {
-                    Arc::new(Lower {
-                        children: IHashMap::new(),
-                        empty: false,
-                        max_depth: 0,
-                    })
+                let sub_children = if e.sub.is_empty() {
+                    IHashMap::new()
                 } else {
-                    build_lower(&e.sub)
+                    build_lower(&e.sub).children.clone()
                 };
-                let node_for_v = Arc::new(Lower {
-                    children: sub_lower.children.clone(),
-                    empty: e.end.is_some(),
-                    max_depth: get_max_depth_lower(&sub_lower.children),
-                });
+                let node_for_v = new_lower(sub_children, e.end.is_some());
                 l_children.insert(v.clone(), OrdMap::unit(node_for_v.max_depth, node_for_v));
             }
-            let max_depth = get_max_depth_lower(&l_children);
-            Arc::new(Lower {
-                children: l_children,
-                empty: false,
-                max_depth,
-            })
+            new_lower(l_children, false)
         }
 
         fn build_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
@@ -442,11 +444,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             for (v, e) in d.iter() {
                 let mut nodes_for_v: Vec<Arc<Upper<T, A>>> = Vec::new();
                 if let Some(end_acc) = &e.end {
-                    let leaf = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                        children: IHashMap::new(),
-                        empty: Some(end_acc.clone()),
-                        max_depth: 0,
-                    })));
+                    let leaf = new_branch(IHashMap::new(), Some(end_acc.clone()));
                     nodes_for_v.push(try_promote(&leaf));
                 }
                 if !e.sub.is_empty() {
@@ -462,6 +460,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 }
             }
 
+            // If all children are Interfaces and share a single accumulator (including root_empty),
+            // we can represent this level as an Interface with a Lower tree.
             let all_interfaces = all_child_nodes
                 .iter()
                 .all(|c| matches!(&**c, Upper::Interface(_)));
@@ -483,25 +483,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 if accs.len() <= 1 {
                     if let Some(the_acc) = accs.into_iter().next() {
                         let lower_tree = build_lower(d);
-                        let max_depth = get_max_depth_lower(&lower_tree.children);
-                        return Arc::new(Upper::Interface(Arc::new(Interface {
-                            children: lower_tree.children.clone(),
-                            acc: the_acc,
-                            empty: root_empty,
-                            max_depth,
-                        })));
+                        return new_interface(lower_tree.children.clone(), the_acc, root_empty);
                     } else {
-                        return empty_upper().inner;
+                        return empty_upper_inner();
                     }
                 }
             }
 
-            let max_depth = get_max_depth_upper(&children);
-            Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                children,
-                empty: root_empty,
-                max_depth,
-            })))
+            new_branch(children, root_empty)
         }
 
         LeveledGSS {
@@ -585,20 +574,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
         let new_inner = match &*self.inner {
             Upper::Interface(i) => {
-                let lower_node = Arc::new(Lower {
-                    children: i.children.clone(),
-                    empty: i.empty.is_some(),
-                    max_depth: get_max_depth_lower(&i.children),
-                });
+                let lower_node = new_lower(i.children.clone(), i.empty.is_some());
                 let mut new_children: Children<T, Lower<T>> = IHashMap::new();
                 new_children.insert(value, OrdMap::unit(lower_node.max_depth, lower_node));
-                let max_depth = get_max_depth_lower(&new_children);
-                Arc::new(Upper::Interface(Arc::new(Interface {
-                    children: new_children,
-                    acc: i.acc.clone(),
-                    empty: None,
-                    max_depth,
-                })))
+                new_interface(new_children, i.acc.clone(), None)
             }
             Upper::Branch(_) => {
                 let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
@@ -606,12 +585,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     value,
                     OrdMap::unit(self.inner.max_depth(), self.inner.clone()),
                 );
-                let max_depth = get_max_depth_upper(&new_children);
-                Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                    children: new_children,
-                    empty: None,
-                    max_depth,
-                })))
+                new_branch(new_children, None)
             }
         };
         LeveledGSS { inner: new_inner }
@@ -648,11 +622,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 .cloned()
                 .collect();
             if all_children.is_empty() {
-                let res = Arc::new(Lower {
-                    children: IHashMap::new(),
-                    empty: false,
-                    max_depth: 0,
-                });
+                let res = new_lower(IHashMap::new(), false);
                 memo_lower.insert(key, res.clone());
                 return res;
             }
@@ -692,7 +662,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         .cloned()
                         .collect();
                     if all_children.is_empty() {
-                        return empty_upper().inner;
+                        return empty_upper_inner();
                     }
                     let popped_children: Vec<_> = all_children
                         .into_iter()
@@ -711,7 +681,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         .cloned()
                         .collect();
                     if all_children.is_empty() {
-                        return empty_upper().inner;
+                        return empty_upper_inner();
                     }
                     let popped_children: Vec<_> = all_children
                         .into_iter()
@@ -721,17 +691,15 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     let first = it.next().unwrap();
                     let merged = it.fold(first, |acc, next| merge_lower(&acc, &next));
 
-                    let new_empty = if merged.empty { Some(i.acc.clone()) } else { None };
-                    if merged.children.is_empty() && new_empty.is_none() {
-                        empty_upper().inner
+                    let new_empty = if merged.empty {
+                        Some(i.acc.clone())
                     } else {
-                        let max_depth = get_max_depth_lower(&merged.children);
-                        Arc::new(Upper::Interface(Arc::new(Interface {
-                            children: merged.children.clone(),
-                            acc: i.acc.clone(),
-                            empty: new_empty,
-                            max_depth,
-                        })))
+                        None
+                    };
+                    if merged.children.is_empty() && new_empty.is_none() {
+                        empty_upper_inner()
+                    } else {
+                        new_interface(merged.children.clone(), i.acc.clone(), new_empty)
                     }
                 }
             };
@@ -764,26 +732,15 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         .get(&val)
                         .map(|kids| IHashMap::unit(val.clone(), kids.clone()))
                         .unwrap_or_else(IHashMap::new);
-                    let max_depth = get_max_depth_upper(&filtered_children);
-                    let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                        children: filtered_children,
-                        empty: None,
-                        max_depth,
-                    })));
+                    let new_b = new_branch(filtered_children, None);
                     try_promote(&new_b)
                 }
                 Upper::Interface(i) => {
                     if let Some(kids) = i.children.get(&val) {
                         let filtered_children = IHashMap::unit(val.clone(), kids.clone());
-                        let max_depth = get_max_depth_lower(&filtered_children);
-                        Arc::new(Upper::Interface(Arc::new(Interface {
-                            children: filtered_children,
-                            acc: i.acc.clone(),
-                            empty: None,
-                            max_depth,
-                        })))
+                        new_interface(filtered_children, i.acc.clone(), None)
                     } else {
-                        empty_upper().inner
+                        empty_upper_inner()
                     }
                 }
             }
@@ -792,11 +749,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 Upper::Branch(b) => b.empty.clone(),
                 Upper::Interface(i) => i.empty.clone(),
             };
-            let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                children: IHashMap::new(),
-                empty: empty_acc,
-                max_depth: 0,
-            })));
+            let new_b = new_branch(IHashMap::new(), empty_acc);
             try_promote(&new_b)
         };
         LeveledGSS { inner: new_inner }
@@ -822,12 +775,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         filtered_children.insert(v.clone(), kids.clone());
                     }
                 }
-                let max_depth = get_max_depth_upper(&filtered_children);
-                let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                    children: filtered_children,
-                    empty: new_empty,
-                    max_depth,
-                })));
+                let new_b = new_branch(filtered_children, new_empty);
                 try_promote(&new_b)
             }
             Upper::Interface(i) => {
@@ -838,19 +786,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     }
                 }
                 if !filtered_children.is_empty() {
-                    let max_depth = get_max_depth_lower(&filtered_children);
-                    Arc::new(Upper::Interface(Arc::new(Interface {
-                        children: filtered_children,
-                        acc: i.acc.clone(),
-                        empty: new_empty,
-                        max_depth,
-                    })))
+                    new_interface(filtered_children, i.acc.clone(), new_empty)
                 } else {
-                    Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                        children: IHashMap::new(),
-                        empty: new_empty,
-                        max_depth: 0,
-                    })))
+                    new_branch(IHashMap::new(), new_empty)
                 }
             }
         };
@@ -895,12 +833,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 Upper::Interface(i) => {
                     let new_acc = map_acc(&i.acc, memo_acc, f);
                     let new_empty = i.empty.as_ref().map(|e| map_acc(e, memo_acc, f));
-                    let res = Arc::new(Upper::Interface(Arc::new(Interface {
-                        children: i.children.clone(),
-                        acc: new_acc,
-                        empty: new_empty,
-                        max_depth: i.max_depth,
-                    })));
+                    let res = new_interface(i.children.clone(), new_acc, new_empty);
                     try_promote(&res)
                 }
                 Upper::Branch(b) => {
@@ -914,12 +847,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         }
                         new_children.insert(v.clone(), new_kids);
                     }
-                    let max_depth = get_max_depth_upper(&new_children);
-                    let res = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                        children: new_children,
-                        empty: new_empty,
-                        max_depth,
-                    })));
+                    let res = new_branch(new_children, new_empty);
                     try_promote(&res)
                 }
             }
@@ -967,20 +895,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     if !keep_acc && !keep_empty {
                         None
                     } else if !keep_acc && keep_empty {
-                        let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                            children: IHashMap::new(),
-                            empty: i.empty.clone(),
-                            max_depth: 0,
-                        })));
+                        let new_b = new_branch(IHashMap::new(), i.empty.clone());
                         Some(try_promote(&new_b))
                     } else {
                         let new_empty = if keep_empty { i.empty.clone() } else { None };
-                        let new_i = Arc::new(Upper::Interface(Arc::new(Interface {
-                            children: i.children.clone(),
-                            acc: i.acc.clone(),
-                            empty: new_empty,
-                            max_depth: i.max_depth,
-                        })));
+                        let new_i = new_interface(i.children.clone(), i.acc.clone(), new_empty);
                         Some(try_promote(&new_i))
                     }
                 }
@@ -1006,12 +925,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     if new_children.is_empty() && new_empty.is_none() {
                         None
                     } else {
-                        let max_depth = get_max_depth_upper(&new_children);
-                        let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                            children: new_children,
-                            empty: new_empty,
-                            max_depth,
-                        })));
+                        let new_b = new_branch(new_children, new_empty);
                         Some(try_promote(&new_b))
                     }
                 }
@@ -1068,19 +982,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     if !keep_acc && !keep_empty {
                         None
                     } else if !keep_acc && keep_empty {
-                        let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                            children: IHashMap::new(),
-                            empty: new_empty_opt,
-                            max_depth: 0,
-                        })));
+                        let new_b = new_branch(IHashMap::new(), new_empty_opt);
                         Some(try_promote(&new_b))
                     } else {
-                        let new_i = Arc::new(Upper::Interface(Arc::new(Interface {
-                            children: i.children.clone(),
-                            acc: new_acc_opt.unwrap(),
-                            empty: new_empty_opt,
-                            max_depth: i.max_depth,
-                        })));
+                        let new_i = new_interface(i.children.clone(), new_acc_opt.unwrap(), new_empty_opt);
                         Some(try_promote(&new_i))
                     }
                 }
@@ -1102,12 +1007,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     if new_children.is_empty() && new_empty_opt.is_none() {
                         None
                     } else {
-                        let max_depth = get_max_depth_upper(&new_children);
-                        let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                            children: new_children,
-                            empty: new_empty_opt,
-                            max_depth,
-                        })));
+                        let new_b = new_branch(new_children, new_empty_opt);
                         Some(try_promote(&new_b))
                     }
                 }
