@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher, DefaultHasher};
 use std::cmp::Reverse;
 use std::ops::BitOrAssign;
@@ -362,6 +362,8 @@ pub fn optimize_trie1_size(
     prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
     prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
     prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+    // New: prune nodes that cannot reach any end node (exact, aggressive).
+    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
 
     Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
     factor_common_destinations_trie1(precomputed1, trie1_god);
@@ -398,18 +400,15 @@ pub fn optimize_trie1_size(
     if config.optimize_trie1_merge_equivalent_llm_tokens {
         merge_equivalent_llm_tokens_trie1(precomputed1, trie1_god, stage_vocab);
     }
-    // Always run normalization pass after potential token changes.
-    optimize_state_masks_and_edges_trie1(precomputed1, trie1_god);
-    if config.optimize_trie1_reorder_llm_tokens {
-        reorder_llm_tokens_for_range_minimization_trie1(precomputed1, trie1_god, stage_vocab);
-    }
     if config.optimize_trie1_minimize_by_signature {
-        // Final canonicalization pass to capture equivalences exposed by token remaps.
         minimize_by_signature_trie1(precomputed1, trie1_god);
         prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+        // New: prune unproductive nodes again after latest merges/token remaps, then GC.
+        prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
         Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
         Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
     }
+
 
     crate::debug!(2, "Final Trie1 stats:");
     let mut stats = PrecomputeStats::default();
@@ -1180,6 +1179,108 @@ fn get_live_tokens_and_prune_trie1(
 
     live_tokens_cache.insert(node_wrapper, returned_live_tokens.clone());
     returned_live_tokens
+}
+
+/// Remove edges to nodes that cannot reach any end node, then GC unreachable nodes.
+/// This is an exact pruning that preserves correctness: nodes that cannot reach an end
+/// can never contribute tokens to the final mask in get_mask1, so their edges are dead.
+fn prune_nodes_not_reaching_end_trie1(
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+    trie1_god: &Trie1GodWrapper,
+)
+{
+    crate::debug!(2, "Pruning Trie1 nodes that cannot reach any end node (reverse reachability)...");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    if roots_vec.is_empty() {
+        return;
+    }
+
+    let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
+    if all_nodes.is_empty() {
+        return;
+    }
+
+    // Build reverse adjacency: dest -> sources having an edge to dest (for any key)
+    let mut incoming: HashMap<PrecomputeNode1Index, Vec<PrecomputeNode1Index>> = HashMap::new();
+    for src in &all_nodes {
+        let g = src.read(trie1_god).expect("read");
+        for (_ek, dm) in g.children() {
+            for (dst, _bv) in dm {
+                incoming.entry(*dst).or_default().push(*src);
+            }
+        }
+    }
+
+    // Initialize worklist with all end nodes
+    let mut productive: HashSet<PrecomputeNode1Index> = HashSet::new();
+    let mut q: VecDeque<PrecomputeNode1Index> = VecDeque::new();
+    let mut end_nodes_count = 0usize;
+    for n in &all_nodes {
+        let r = n.read(trie1_god).expect("read");
+        if r.value.end {
+            end_nodes_count += 1;
+            if productive.insert(*n) {
+                q.push_back(*n);
+            }
+        }
+    }
+    if end_nodes_count == 0 {
+        // No end nodes present: nothing to prune under this criterion.
+        crate::debug!(2, "No end nodes found in Trie1; skipping end-reachability pruning.");
+        return;
+    }
+
+    // Reverse BFS: mark all nodes that can reach some end node
+    while let Some(d) = q.pop_front() {
+        if let Some(srcs) = incoming.get(&d) {
+            for s in srcs {
+                if productive.insert(*s) {
+                    q.push_back(*s);
+                }
+            }
+        }
+    }
+
+    let total_nodes = all_nodes.len();
+    let productive_nodes = productive.len();
+    let prunable = total_nodes.saturating_sub(productive_nodes);
+    crate::debug!(2, "Trie1 end-reachability: total={}, productive={}, prunable={}", total_nodes, productive_nodes, prunable);
+    if prunable == 0 {
+        return;
+    }
+
+    // Remove any edge to a non-productive destination, recompute node live_tokens
+    for n in &all_nodes {
+        let mut w = n.write(trie1_god).expect("write");
+        let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
+        for (ek, dm) in w.children().clone() {
+            let mut new_dm: OrderedHashMap<PrecomputeNode1Index, LLMTokenBV> = OrderedHashMap::new();
+            for (dst, bv) in dm {
+                if productive.contains(&dst) {
+                    new_dm.insert(dst, bv);
+                }
+            }
+            if !new_dm.is_empty() {
+                new_children.insert(ek, new_dm);
+            }
+        }
+        *w.children_mut() = new_children;
+        // Recompute live_tokens = union of outgoing edge masks
+        let mut lt = LLMTokenBV::zeros();
+        for dm in w.children().values() {
+            for bv in dm.values() {
+                lt |= bv;
+            }
+        }
+        w.value.live_tokens = lt;
+    }
+
+    // GC everything now unreachable from roots and recompute depths
+    let roots_vec2: Vec<_> = roots.values().cloned().collect();
+    Trie::gc(trie1_god, &roots_vec2);
+    Trie::recompute_all_max_depths(trie1_god, &roots_vec2);
+
+    crate::debug!(2, "Finished end-reachability pruning in Trie1.");
 }
 
 fn prune_on_no_terminal_follow_trie1(
