@@ -6,6 +6,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use kdam::tqdm;
 use ordered_hash_map::OrderedHashMap;
 use crate::constraint::{GrammarConstraintConfig, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper, StageVocab};
+use crate::constraint_extra::{calculate_final_stats3, print_precompute_stats3, PrecomputeStats};
 use crate::datastructures::EntryApi;
 use crate::datastructures::gss::LLMTokenBV;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
@@ -36,6 +37,11 @@ pub fn optimize_trie3_size(
     stage_vocab: &mut StageVocab,
 ) {
     crate::debug!(2, "Optimizing Trie 3 size...");
+
+    crate::debug!(2, "Initial stats:");
+    let mut stats = PrecomputeStats::default();
+    calculate_final_stats3(roots, &mut stats, trie3_god);
+    print_precompute_stats3(&stats, trie3_god);
 
     crate::debug!(2, "Step 1: Merging equivalent LLM tokens...");
     if config.optimize_trie3_merge_equivalent_llm_tokens {
@@ -97,6 +103,11 @@ pub fn optimize_trie3_size(
     // TODO: Probably not needed
     crate::debug!(2, "Step 14: Recomputing max depths...");
     Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+
+    crate::debug!(2, "Final stats:");
+    let mut stats = PrecomputeStats::default();
+    calculate_final_stats3(roots, &mut stats, trie3_god);
+    print_precompute_stats3(&stats, trie3_god);
 }
 
 fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
