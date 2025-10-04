@@ -128,6 +128,8 @@ fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn E
         optimize_trie1_reorder_llm_tokens: false,
         optimize_trie3_merge_equivalent_llm_tokens: false,
         optimize_trie3_reorder_llm_tokens: false,
+        optimize_trie1_minimize_by_signature: false,
+        optimize_trie1_early_flatten_epsilon: false,
     };
     let gc = GrammarConstraint::from_compiled_grammar_with_config(
         compiled,
@@ -256,6 +258,8 @@ fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn s
             optimize_trie1_reorder_llm_tokens: false,
             optimize_trie3_merge_equivalent_llm_tokens: false,
             optimize_trie3_reorder_llm_tokens: false,
+            optimize_trie1_minimize_by_signature: false,
+            optimize_trie1_early_flatten_epsilon: false,
         };
         let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
             compiled_grammar.clone(),
