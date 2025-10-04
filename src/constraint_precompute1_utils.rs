@@ -8,6 +8,7 @@ use kdam::tqdm;
 use crate::constraint::{GrammarConstraintConfig, PrecomputeNode0Index, PrecomputeNode1, PrecomputedNodeContents, Trie0GodWrapper};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::constraint::{StageVocab, PrecomputeNode1Index, Trie1GodWrapper};
+use crate::constraint_extra::PrecomputeStats;
 use crate::datastructures::EntryApi;
 use crate::datastructures::gss::LLMTokenBV;
 use crate::datastructures::trie::Trie;
@@ -27,6 +28,7 @@ pub fn optimize_trie1_size(
     config: &GrammarConstraintConfig,
     stage_vocab: &mut StageVocab,
 ) {
+    crate::debug!(2, "Starting Trie1 size optimization...");
     simplify_none_edges_to_former_end_nodes_trie1(
         precomputed1,
         trie1_god,
