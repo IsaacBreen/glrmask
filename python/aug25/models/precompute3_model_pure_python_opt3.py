@@ -915,14 +915,13 @@ class Model(GraphProvider):
             a_node = self.arena.get(node)
             if not a_node:
                 continue
-
-            if a_node.llm_bv_union.isdisjoint(remaining_mask):
-                stats.inc('get_mask.zombie_check.node.skipped_no_potential')
-                continue
-
+            # Compute the tokens that (1) aren't already finalized, (2) are reachable in this node,
+            # and (3) are allowed by current GSS accumulators.
             potential_new = a_node.llm_bv_union.intersection(remaining_mask)
-            if gss_acc and gss_mask.isdisjoint(potential_new):
-                stats.inc('get_mask.zombie_check.node.skipped_no_overlap_disjoint')
+            allowed_at_node = potential_new if not gss_acc else potential_new.intersection(gss_mask)
+            if allowed_at_node.is_empty():
+                # Nothing new can be contributed by this node under current GSS and remaining mask.
+                stats.inc('get_mask.zombie_check.node.skipped_no_potential')
                 continue
 
             # Per-model traversal budgets (tunable by variations)
@@ -932,11 +931,10 @@ class Model(GraphProvider):
 
             for edge_i in range(start_edge, len(a_node.children)):
                 edge = a_node.children[edge_i]
-                if edge.llm_bv.isdisjoint(remaining_mask):
+                # Strong pre-check: limit edge to tokens still useful and allowed at this node.
+                edge_allowed_mask = allowed_at_node.intersection(edge.llm_bv)
+                if edge_allowed_mask.is_empty():
                     stats.inc('get_mask.traversal.edge.skipped_no_new_tokens')
-                    continue
-                if edge.llm_bv.isdisjoint(gss_mask):
-                    stats.inc('get_mask.main_loop.edge.pre_gss_disjoint_skips')
                     continue
 
                 if edge.pop == 0:
@@ -975,24 +973,32 @@ class Model(GraphProvider):
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
 
-                if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
-                    stats.inc('get_mask.main_loop.edge.popped_mask_subset_fastpath')
-                    if popped_acc.llm_mask.isdisjoint(edge.llm_bv): continue
-                    @_acc_memoize(use_value_cache=False)
-                    def intersect(acc: PyAcc):
-                        new_mask = acc.llm_mask.intersection(edge.llm_bv)
-                        return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
-                    stats.start('get_mask.main_loop.edge.apply_and_prune')
-                    popped = popped.apply_and_prune(intersect)
-                    stats.stop('get_mask.main_loop.edge.apply_and_prune')
-                    if popped.is_empty(): continue
-                if not peeked: continue
+                # If after popping there are no tokens left that matter for this node, skip.
+                if popped_acc.llm_mask.isdisjoint(allowed_at_node):
+                    stats.inc('get_mask.main_loop.edge.popped_mask_no_remaining')
+                    continue
+
+                # Intersect with edge_allowed_mask (includes remaining_mask and gss allowance).
+                @_acc_memoize(use_value_cache=False)
+                def intersect(acc: PyAcc):
+                    new_mask = acc.llm_mask.intersection(edge_allowed_mask)
+                    return None if new_mask.is_empty() else PyAcc(acc.terminals_union, new_mask)
+                stats.start('get_mask.main_loop.edge.apply_and_prune')
+                popped = popped.apply_and_prune(intersect)
+                stats.stop('get_mask.main_loop.edge.apply_and_prune')
+                if popped.is_empty():
+                    continue
+
+                # Recompute heads after pruning to ensure correct routing to destinations.
+                peeked_after = popped.peek()
+                if not peeked_after:
+                    continue
 
                 current_start_dest = start_dest if edge_i == start_edge else 0
 
                 grouped: Dict[int, List[int]] = {}
                 m = edge.state_to_dest
-                for sid in peeked:
+                for sid in peeked_after:
                     dest_list = m.get(sid)
                     if not dest_list: continue
                     for dest_j in dest_list:
@@ -1011,7 +1017,7 @@ class Model(GraphProvider):
                     dest = edge.dests[dest_j]
                     values_to_keep = grouped[dest_j]
                     # If all heads survive, reuse popped directly
-                    if len(values_to_keep) == len(peeked):
+                    if len(values_to_keep) == len(peeked_after):
                         child_gss = popped
                     else:
                         stats.start('get_mask.main_loop.edge.isolate_many')
