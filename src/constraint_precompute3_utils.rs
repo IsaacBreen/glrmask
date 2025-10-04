@@ -28,6 +28,16 @@ fn count_total_ranges_trie3(
     }
     count
 }
+
+fn compute_and_print_precompute_stats3(
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+    trie3_god: &Trie3GodWrapper,
+) {
+    let mut stats = PrecomputeStats::default();
+    calculate_final_stats3(roots, &mut stats, trie3_god);
+    print_precompute_stats3(&stats, trie3_god);
+}
+
 pub fn optimize_trie3_size(
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
@@ -39,9 +49,7 @@ pub fn optimize_trie3_size(
     crate::debug!(2, "Optimizing Trie 3 size...");
 
     crate::debug!(2, "Initial stats:");
-    let mut stats = PrecomputeStats::default();
-    calculate_final_stats3(roots, &mut stats, trie3_god);
-    print_precompute_stats3(&stats, trie3_god);
+    compute_and_print_precompute_stats3(roots, trie3_god);
 
     crate::debug!(2, "Step 1: Merging equivalent LLM tokens...");
     if config.optimize_trie3_merge_equivalent_llm_tokens {
@@ -105,9 +113,7 @@ pub fn optimize_trie3_size(
     Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 
     crate::debug!(2, "Final stats:");
-    let mut stats = PrecomputeStats::default();
-    calculate_final_stats3(roots, &mut stats, trie3_god);
-    print_precompute_stats3(&stats, trie3_god);
+    compute_and_print_precompute_stats3(roots, trie3_god);
 }
 
 fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
