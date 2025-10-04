@@ -12,6 +12,7 @@ from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
 from collections import defaultdict
 import numpy as np
 
+from typing import Any
 import _sep1 as ffi
 from tqdm import tqdm
 
@@ -52,6 +53,10 @@ def _patched_intersection(self, other: "RangeSet") -> "RangeSet":
 RangeSet.union = _patched_union
 RangeSet.intersection = _patched_intersection
 # --- End of monkey-patch ---
+
+# --- Global get_mask memoization cache (per-process) ---
+# Key: deterministic signature of Model.state at call time; Value: RangeSetOut (original token indices)
+_GET_MASK_CACHE: Dict[Tuple, RangeSetOut] = {}
 
 # --- Variation framework and arena optimization params ---
 
@@ -485,6 +490,7 @@ class Model(GraphProvider):
     state: Dict[int, GSS]
     # Runtime tunables and results
     gm_max_edges: int = 1
+    gm_global_edge_budget: Optional[int] = 4
     gm_max_dests: int = 1
     last_get_mask_cost: int = 0
     last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
@@ -593,6 +599,7 @@ class Model(GraphProvider):
             ignore_terminal_id=self.ignore_terminal_id,
             state=self.make_initial_state(),
             gm_max_edges=self.gm_max_edges,
+            gm_global_edge_budget=self.gm_global_edge_budget,
             gm_max_dests=self.gm_max_dests,
             suppress_stats_report=self.suppress_stats_report,
         )
@@ -852,6 +859,51 @@ class Model(GraphProvider):
         stats.start('get_mask')
         stats.inc('get_mask.initial_tokenizer_states', len(self.state))
 
+        # --- Cache fast path: build deterministic state signature and return memoized result if available ---
+        def _ranges_sig(rs: RangeSet) -> Tuple[Tuple[int, int], ...]:
+            # Represent a RangeSet by its ranges for a stable, hashable signature
+            return tuple(rs.to_ranges())
+
+        def _acc_sig(acc: Optional[PyAcc]) -> Any:
+            if not acc:
+                return None
+            llm_sig = _ranges_sig(acc.llm_mask)
+            # terminals_union: Dict[int, RangeSet] -> sorted list of (state_id, ranges)
+            tu_sig = tuple(sorted((int(k), _ranges_sig(v)) for k, v in acc.terminals_union.items()))
+            return (llm_sig, tu_sig)
+
+        # Create a signature from all tokenizer states and their GSS snapshots
+        try:
+            state_sigs = []
+            for tsid, gss in sorted(self.state.items()):
+                peek_sig = tuple(sorted(gss.peek()))
+                # reduce_acc may be relatively cheap here (usually few heads); it ensures a deterministic snapshot
+                acc = gss.reduce_acc()
+                acc_sig = _acc_sig(acc)
+                state_sigs.append((int(tsid), peek_sig, acc_sig))
+            signature = ('get_mask.v2', tuple(state_sigs), self.gm_global_edge_budget)
+        except Exception:
+            # If anything unexpected happens in signature building, fall back to no-cache path
+            signature = None
+
+        if signature is not None:
+            cached = _GET_MASK_CACHE.get(signature)
+            if cached is not None:
+                stats.inc('get_mask.cache_hits')
+                # Update per-call metrics for the coordinator
+                self.last_get_mask_cost = 0
+                self.last_get_mask_metrics = {
+                    "edges_traversed": 0.0,
+                    "nodes_processed": 0.0,
+                    "end_nodes": 0.0,
+                    "main_loop_ms": 0.0,
+                    "total_ms": float(Stats.get().times.get('get_mask', 0.0) * 1000.0),
+                }
+                stats.stop('get_mask')
+                return cached
+            else:
+                stats.inc('get_mask.cache_misses')
+
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
         work_heap = []
 
@@ -893,8 +945,11 @@ class Model(GraphProvider):
         stats.stop('get_mask.seeding')
 
         stats.start('get_mask.main_loop')
+        # Global traversal capping (drastic): stop after N total edges processed
+        global_edges_proc = 0
+        terminate = False
         remaining_mask = all_ones
-        while work_heap:
+        while work_heap and not terminate:
             stats.inc('get_mask.traversal.depth_heap.pops')
             stats.inc('get_mask.traversal.nodes_processed')
             node, gss_node, start_edge, start_dest, pop_cache = dequeue()
@@ -971,6 +1026,12 @@ class Model(GraphProvider):
                     continue
 
                 stats.inc('get_mask.traversal.edges_traversed')
+                global_edges_proc += 1
+                if self.gm_global_edge_budget is not None and global_edges_proc >= self.gm_global_edge_budget:
+                    # Hit global budget: terminate traversal immediately
+                    terminate = True
+                    break
+
                 stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
 
                 # If after popping there are no tokens left that matter for this node, skip.
@@ -1036,6 +1097,9 @@ class Model(GraphProvider):
                     enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
                     stats.inc('get_mask.traversal.node_requeued_for_more_edges')
                     break
+            if terminate:
+                # Break out of node processing; outer while will exit due to terminate flag
+                break
         stats.stop('get_mask.main_loop')
 
         stats.start('get_mask.final_conversion')
@@ -1056,6 +1120,10 @@ class Model(GraphProvider):
             "main_loop_ms": float(Stats.get().times.get('get_mask.main_loop', 0.0) * 1000.0),
             "total_ms": float(Stats.get().times.get('get_mask', 0.0) * 1000.0),
         }
+
+        # Store in cache for future identical-state lookups
+        if 'signature' in locals() and signature is not None:
+            _GET_MASK_CACHE[signature] = original_indices
 
         # Optional internal stats printout (suppressed by default)
         if not self.suppress_stats_report:
