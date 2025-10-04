@@ -565,7 +565,7 @@ impl GrammarDefinition {
             GrammarExpr::AnyChar => Ok(Expr::U8Class(U8Set::all())),
             GrammarExpr::Literal(bytes) => Ok(Expr::U8Seq(bytes.clone())),
             GrammarExpr::CharClass(class_def) => {
-                println!("class_def: {}", class_def);
+                // println!("class_def: {}", class_def);
                 let content = &class_def[1..class_def.len() - 1];
                 let (negated, content) = if content.starts_with('^') {
                     (true, &content[1..])
@@ -616,7 +616,7 @@ impl GrammarDefinition {
                         u8set.insert(start_char as u8);
                     }
                 }
-                println!("Converted char class '{}' to U8Set: {:?}", class_def, Expr::U8Class(if negated { u8set.complement() } else { u8set }));
+                // println!("Converted char class '{}' to U8Set: {:?}", class_def, Expr::U8Class(if negated { u8set.complement() } else { u8set }));
                 Ok(Expr::U8Class(if negated { u8set.complement() } else { u8set }))
             }
             GrammarExpr::Ref(name) => {
