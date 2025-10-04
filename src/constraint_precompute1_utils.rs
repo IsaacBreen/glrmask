@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::ops::BitOrAssign;
 use std::sync::Arc;
 use bitvec::macros::internal::funty::Fundamental;
@@ -17,10 +18,17 @@ use crate::tokenizer::TokenizerStateID;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::ordered_hash_map::Retain;
 
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 struct MergeKey {
     end: bool,
     children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>>,
+}
+
+impl Hash for MergeKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.end.hash(state);
+        self.children.hash(state);
+    }
 }
 
 fn aggressive_deduplicate_recursive_trie1(
