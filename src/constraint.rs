@@ -1056,7 +1056,7 @@ impl GrammarConstraint {
         let ignore_terminal_id = parser.and_then(|p| p.ignore_terminal_id);
 
         constraint_precompute1_utils::optimize_trie1_size(
-            &precomputed1,
+            &mut precomputed1,
             &trie1_god,
             trie0_god,
             &node0_to_node1_map,

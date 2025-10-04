@@ -15,8 +15,9 @@ use crate::glr::parser::GLRParser;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
-use crate::LLMVocab;
+use crate::constraint::LLMVocab;
 use crate::constraint_extra::{PrecomputeStats};
+use crate::datastructures::ordered_hash_map::Retain;
 
 const MERGE_THRESHOLD: usize = 20;
 

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ops::BitOrAssign;
 use std::sync::Arc;
 use bitvec::macros::internal::funty::Fundamental;
 use range_set_blaze::RangeSetBlaze;
@@ -13,6 +14,7 @@ use crate::datastructures::trie::Trie;
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::tokenizer::TokenizerStateID;
 use crate::datastructures::hybrid_bitset::HybridBitset;
+use crate::datastructures::ordered_hash_map::Retain;
 
 pub fn optimize_trie1_size(
     precomputed1: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
