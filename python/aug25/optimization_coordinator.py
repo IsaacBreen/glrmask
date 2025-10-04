@@ -157,6 +157,7 @@ def coordinator_main():
             "metric": args.metric,
             "chosen_step": chosen_step,
         },
+        "baseline_for_comparison": None,
         "variations": [],
         "hot_steps_agg": aggregated,
         "selected_hot_steps": hot_steps,
@@ -167,7 +168,7 @@ def coordinator_main():
     benchmark_config = base_model_for_config.get_benchmark_config()
     del base_model_for_config
 
-    def run_eval_for_variation(var: VariationBase):
+    def run_eval_for_variation(var: VariationBase, baseline_mask_holder: dict, results_dict: dict):
         print("\n----------------------------------------")
         print(f"[Coordinator] Variation: {var.name}")
         # New instance sharing structures
@@ -179,12 +180,29 @@ def coordinator_main():
         for i in range(chosen_step):
             vm.commit(token_ids[i])
         # Evaluate get_mask multiple times in that same state
+        is_consistent = True
         all_run_stats = defaultdict(list)
         stats_to_collect = benchmark_config['stats_to_collect']
 
         for r in range(args.eval_repeat):
             Stats.get().reset()
-            vm.get_mask()
+            mask_result = vm.get_mask()
+
+            # On the first evaluation run, check for mask consistency
+            if r == 0:
+                if baseline_mask_holder['mask'] is None:
+                    # This is the baseline run, store its mask as the ground truth
+                    baseline_mask_holder['mask'] = mask_result
+                    results_dict['baseline_for_comparison'] = var.name
+                    print("[Coordinator] Stored baseline mask for comparison.")
+                else:
+                    # This is a competitor variation, compare its mask to the baseline
+                    if baseline_mask_holder['mask'] != mask_result:
+                        is_consistent = False
+                        print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+                        print(f"[WARNING] MASK MISMATCH for variation '{var.name}'")
+                        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
+
             stats = Stats.get()
             for key in stats_to_collect:
                 if key in stats.times:
@@ -203,13 +221,15 @@ def coordinator_main():
             "name": var.name,
             "metric": args.metric,
             "agg_method": args.agg_method,
+            "is_consistent": is_consistent,
             "aggregated": agg_value,
             "all_stats": dict(all_run_stats),
         }
 
+    baseline_mask_holder = {'mask': None}
     for var in variations:
         try:
-            res = run_eval_for_variation(var)
+            res = run_eval_for_variation(var, baseline_mask_holder, results)
             results["variations"].append(res)
         except Exception as e:
             print(f"[Coordinator] Variation '{var.name}' failed with error: {e}")
