@@ -61,10 +61,12 @@ pub fn hit(name: &str) {
 
 /// Resets all profiling data (hits and timings).
 pub fn reset() {
-    let mut data = profiler().lock().unwrap();
-    data.call_tree = ProfileNode::default();
-    data.timing_stack.clear();
-    data.hits.clear();
+    if PROFILING_ENABLED {
+        let mut data = profiler().lock().unwrap();
+        data.call_tree = ProfileNode::default();
+        data.timing_stack.clear();
+        data.hits.clear();
+    }
 }
 
 /// Formats a `Duration` into a human-readable string with appropriate units (s, ms, µs, ns).
