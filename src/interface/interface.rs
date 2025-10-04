@@ -988,8 +988,8 @@ impl GrammarDefinition {
         ).collect();
 
         let mut grammar_def = GrammarDefinition::from_exprs(non_terminal_rules, terminal_defs)?;
-        println!("GrammarDefinition from EBNF:");
-        println!("{}", grammar_def);
+        // println!("GrammarDefinition from EBNF:");
+        // println!("{}", grammar_def);
 
         if let Some(ignore_name) = &ebnf.ignore_symbol_name {
             let group_id = grammar_def.regex_name_to_group_id.get_by_left(ignore_name)
