@@ -821,6 +821,9 @@ fn test_ignore_token() {
     );
     // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
+    constraint.dump_precomputed0();
+    constraint.dump_precomputed1();
+    constraint.dump_precomputed3();
 
     // --- Runtime check ---
     // Scenario 1: commit "a", then " ", then "b"
