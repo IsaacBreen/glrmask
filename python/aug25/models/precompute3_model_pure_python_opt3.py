@@ -92,19 +92,6 @@ class ArenaReorderVariation(VariationBase):
         print(f"[Variation] {self.name}: re-optimizing arena with params={self.params}")
         model.optimize_arena(self.params)
 
-@dataclass
-class GlobalCutoffVariation(VariationBase):
-    edge_budget: int = 5
-    approx_fill: bool = True
-
-    def __call__(self, model: "Model") -> None:
-        # Drastic: enforce a global edge traversal cutoff inside get_mask.
-        # If approx_fill is True, we add a cheap upper-bound approximation
-        # from the remaining frontier to avoid returning a severely under-approximated mask.
-        print(f"[Variation] {self.name}: enabling global edge cutoff at {self.edge_budget} edges (approx_fill={self.approx_fill})")
-        model.gm_global_edge_budget = int(self.edge_budget)
-        model.gm_approx_on_cutoff = bool(self.approx_fill)
-
 # Type Aliases
 NodeID = int
 LLMTokenSet = RangeSet
@@ -502,8 +489,6 @@ class Model(GraphProvider):
     last_get_mask_cost: int = 0
     last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
     suppress_stats_report: bool = True
-    gm_global_edge_budget: Optional[int] = None
-    gm_approx_on_cutoff: bool = False
 
     # ------------- Construction and structure management -------------
 
@@ -609,8 +594,6 @@ class Model(GraphProvider):
             state=self.make_initial_state(),
             gm_max_edges=self.gm_max_edges,
             gm_max_dests=self.gm_max_dests,
-            gm_global_edge_budget=self.gm_global_edge_budget,
-            gm_approx_on_cutoff=self.gm_approx_on_cutoff,
             suppress_stats_report=self.suppress_stats_report,
         )
 
@@ -670,7 +653,6 @@ class Model(GraphProvider):
         vars.append(ArenaReorderVariation(name="arena_diversity_default", params=ArenaOptimizeParams()))
         vars.append(ArenaReorderVariation(name="arena_diversity_more_depth", params=ArenaOptimizeParams(depth_weight=2048)))
         vars.append(ArenaReorderVariation(name="arena_diversity_less_overlap_penalty", params=ArenaOptimizeParams(penalty_llm_overlap=256, penalty_state_overlap=128)))
-        vars.append(GlobalCutoffVariation(name="drastic_cutoff5_approx", edge_budget=5, approx_fill=True))
         return vars
 
     def get_benchmark_config(self) -> Dict:
@@ -869,11 +851,6 @@ class Model(GraphProvider):
         stats.start('get_mask')
         stats.inc('get_mask.initial_tokenizer_states', len(self.state))
 
-        # Global "drastic" edge budget (optional, controlled by variation).
-        # None means no cutoff (default/baseline). When set, we stop early after N edges.
-        remaining_global_edge_budget = None if self.gm_global_edge_budget is None else int(self.gm_global_edge_budget)
-        cutoff_triggered = False
-
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
         work_heap = []
 
@@ -891,41 +868,6 @@ class Model(GraphProvider):
                 pop_cache=pop_cache if pop_cache is not None else {}
             )
             heapq.heappush(work_heap, item)
-
-        def maybe_trigger_cutoff(current_node: Optional[NodeID], current_gss: Optional[GSS], current_gss_acc: Optional[PyAcc]) -> None:
-            # When the global cutoff triggers, we optionally perform a cheap approximation
-            # over the current frontier to avoid returning a severely under-approximated mask.
-            nonlocal cutoff_triggered, final_mask, work_heap, remaining_mask
-            if cutoff_triggered:
-                return
-            if self.gm_approx_on_cutoff:
-                # Include potential from the current node being processed.
-                if current_node is not None and current_gss is not None:
-                    a_node_local = self.arena.get(current_node)
-                    if a_node_local is not None:
-                        acc_local = current_gss_acc if current_gss_acc is not None else current_gss.reduce_acc()
-                        if acc_local:
-                            pot = a_node_local.llm_bv_union.intersection(acc_local.llm_mask)
-                            # Only add what's not already in final_mask
-                            pot = pot.intersection(remaining_mask)
-                            if not pot.is_empty():
-                                final_mask |= pot
-                                remaining_mask = all_ones.difference(final_mask)
-                # Include potential from all items still in the heap
-                for item in work_heap:
-                    a_node_heap = self.arena.get(item.node_id)
-                    if a_node_heap is None:
-                        continue
-                    acc_heap = item.gss.reduce_acc()
-                    if not acc_heap:
-                        continue
-                    pot = a_node_heap.llm_bv_union.intersection(acc_heap.llm_mask)
-                    pot = pot.intersection(remaining_mask)
-                    if not pot.is_empty():
-                        final_mask |= pot
-                        remaining_mask = all_ones.difference(final_mask)
-            work_heap.clear()
-            cutoff_triggered = True
 
         def dequeue() -> Tuple[NodeID, GSS, int, int, Dict]:
             item = heapq.heappop(work_heap)
@@ -961,9 +903,6 @@ class Model(GraphProvider):
             gss_acc = gss_node.reduce_acc()
             stats.stop('get_mask.main_loop.node.reduce_acc')
             gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
-
-            if cutoff_triggered:
-                break
 
             if self.is_end(node) and gss_acc and not final_mask.issuperset(gss_acc.llm_mask):
                 stats.inc('get_mask.traversal.end_nodes')
@@ -1004,15 +943,6 @@ class Model(GraphProvider):
                     if edge.dest_states_union.isdisjoint(peek0_rs):
                         stats.inc('get_mask.main_loop.edge.dest_union_pruned_pop0')
                         continue
-
-                # Count traversal of this edge and apply global cutoff if configured
-                stats.inc('get_mask.traversal.edges_traversed')
-                stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
-                if remaining_global_edge_budget is not None:
-                    remaining_global_edge_budget -= 1
-                    if remaining_global_edge_budget <= 0:
-                        maybe_trigger_cutoff(node, gss_node, gss_acc)
-                        break
 
                 stats.inc('get_mask.traversal.edges_traversed')
                 stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
@@ -1091,9 +1021,6 @@ class Model(GraphProvider):
                     enqueue(d, child_gss)
                     dests_proc += 1
 
-                if cutoff_triggered:
-                    break
-
                 if edges_proc >= max_edges: break
                 edges_proc += 1
 
@@ -1102,9 +1029,6 @@ class Model(GraphProvider):
                     enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
                     stats.inc('get_mask.traversal.node_requeued_for_more_edges')
                     break
-
-            if cutoff_triggered:
-                break
         stats.stop('get_mask.main_loop')
 
         stats.start('get_mask.final_conversion')
