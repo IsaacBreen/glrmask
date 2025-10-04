@@ -631,14 +631,16 @@ impl LeveledGSS {
         })
     }
 
-    fn apply(&self, func: PyObject) -> PyResult<Self> {
+    #[pyo3(signature = (func, memo = None))]
+    fn apply(&self, func: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
         Python::with_gil(|py| {
-            let mut memo: HashMap<usize, Arc<Upper>> = HashMap::new();
+            let memo_dict = memo.unwrap_or_else(|| PyDict::new(py));
 
-            fn transform(py: Python, node: &Arc<Upper>, func: &PyObject, memo: &mut HashMap<usize, Arc<Upper>>) -> PyResult<Arc<Upper>> {
+            fn transform(py: Python, node: &Arc<Upper>, func: &PyObject, memo: &PyDict) -> PyResult<Arc<Upper>> {
                 let key = Arc::as_ptr(node) as usize;
-                if let Some(cached) = memo.get(&key) {
-                    return Ok(cached.clone());
+                if let Some(cached_obj) = memo.get_item(key)? {
+                    let cached_gss: PyRef<LeveledGSS> = cached_obj.extract()?;
+                    return Ok(cached_gss.inner.clone());
                 }
 
                 let res = match &**node {
@@ -681,26 +683,33 @@ impl LeveledGSS {
                         LeveledGSS::try_promote(py, &new_b)?
                     }
                 };
-                memo.insert(key, res.clone());
+
+                let res_gss = LeveledGSS { inner: res.clone() };
+                memo.set_item(key, res_gss.into_py(py))?;
                 Ok(res)
             }
 
-            let new_inner = transform(py, &self.inner, &func, &mut memo)?;
+            let new_inner = transform(py, &self.inner, &func, memo_dict)?;
             Ok(LeveledGSS { inner: new_inner })
         })
     }
 
-    fn prune(&self, predicate: PyObject) -> PyResult<Self> {
+    #[pyo3(signature = (predicate, memo = None))]
+    fn prune(&self, predicate: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
         Python::with_gil(|py| {
-            let mut memo: HashMap<usize, Option<Arc<Upper>>> = HashMap::new();
+            let memo_dict = memo.unwrap_or_else(|| PyDict::new(py));
 
-            fn transform(py: Python, node: &Arc<Upper>, predicate: &PyObject, memo: &mut HashMap<usize, Option<Arc<Upper>>>) -> PyResult<Option<Arc<Upper>>> {
+            fn transform(py: Python, node: &Arc<Upper>, predicate: &PyObject, memo: &PyDict) -> PyResult<Option<Arc<Upper>>> {
                 let key = Arc::as_ptr(node) as usize;
-                if let Some(cached) = memo.get(&key) {
-                    return Ok(cached.clone());
+                if let Some(cached_obj) = memo.get_item(key)? {
+                    if cached_obj.is_none(py) {
+                        return Ok(None);
+                    }
+                    let cached_gss: PyRef<LeveledGSS> = cached_obj.extract()?;
+                    return Ok(Some(cached_gss.inner.clone()));
                 }
 
-                let res = match &**node {
+                let res_opt = match &**node {
                     Upper::Interface(i) => {
                         let keep_acc = predicate.call1(py, (i.acc.clone(),))?.is_true(py)?;
                         let keep_empty = if let Some(empty) = &i.empty {
@@ -766,12 +775,20 @@ impl LeveledGSS {
                         }
                     }
                 };
-                memo.insert(key, res.clone());
-                Ok(res)
+
+                let value_to_cache = if let Some(res_inner) = &res_opt {
+                    let res_gss = LeveledGSS { inner: res_inner.clone() };
+                    res_gss.into_py(py)
+                } else {
+                    py.None()
+                };
+                memo.set_item(key, value_to_cache)?;
+
+                Ok(res_opt)
             }
 
-            let new_inner = transform(py, &self.inner, &predicate, &mut memo)?;
-            Ok(new_inner.map_or_else(LeveledGSS::_empty, |inner| LeveledGSS { inner }))
+            let new_inner_opt = transform(py, &self.inner, &predicate, memo_dict)?;
+            Ok(new_inner_opt.map_or_else(LeveledGSS::_empty, |inner| LeveledGSS { inner }))
         })
     }
 
@@ -888,11 +905,118 @@ impl LeveledGSS {
         Ok(LeveledGSS { inner: new_inner })
     }
 
-    fn apply_and_prune(&self, mutator: PyObject) -> PyResult<Self> {
-        // The default implementation in Python is prune + apply.
-        // A single-pass version is an optimization. For now, let's use the composed version.
-        let pruned = self.prune(mutator.clone())?;
-        pruned.apply(mutator)
+    #[pyo3(signature = (mutator, memo = None))]
+    fn apply_and_prune(&self, mutator: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
+        Python::with_gil(|py| {
+            let memo_dict = memo.unwrap_or_else(|| PyDict::new(py));
+            let acc_cache = PyDict::new(py);
+
+            fn mutate_acc<'p>(py: Python<'p>, a: &PyObject, mutator: &PyObject, acc_cache: &'p PyDict) -> PyResult<Option<PyObject>> {
+                let k = a.as_ref(py).as_ptr() as usize;
+                if let Some(cached) = acc_cache.get_item(k)? {
+                    if cached.is_none(py) {
+                        return Ok(None);
+                    }
+                    return Ok(Some(cached.to_object(py)));
+                }
+                let r = mutator.call1(py, (a.clone(),))?;
+                acc_cache.set_item(k, r.clone_ref(py))?;
+                if r.is_none(py) {
+                    Ok(None)
+                } else {
+                    Ok(Some(r))
+                }
+            }
+
+            fn transform(py: Python, node: &Arc<Upper>, mutator: &PyObject, memo: &PyDict, acc_cache: &PyDict) -> PyResult<Option<Arc<Upper>>> {
+                let key = Arc::as_ptr(node) as usize;
+                if let Some(cached_obj) = memo.get_item(key)? {
+                    if cached_obj.is_none(py) {
+                        return Ok(None);
+                    }
+                    let cached_gss: PyRef<LeveledGSS> = cached_obj.extract()?;
+                    return Ok(Some(cached_gss.inner.clone()));
+                }
+
+                let res_opt: Option<Arc<Upper>> = match &**node {
+                    Upper::Interface(i) => {
+                        let new_acc_opt = mutate_acc(py, &i.acc, mutator, acc_cache)?;
+                        let new_empty_opt = if let Some(empty) = &i.empty {
+                            mutate_acc(py, empty, mutator, acc_cache)?
+                        } else {
+                            None
+                        };
+
+                        let keep_acc = new_acc_opt.is_some();
+                        let keep_empty = new_empty_opt.is_some();
+
+                        if !keep_acc && !keep_empty {
+                            None
+                        } else if !keep_acc && keep_empty {
+                            let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
+                                children: HashMap::new(),
+                                empty: new_empty_opt,
+                                max_depth: 0,
+                            })));
+                            Some(LeveledGSS::try_promote(py, &new_b)?)
+                        } else { // keep_acc is true
+                            let new_i = Arc::new(Upper::Interface(Arc::new(Interface {
+                                children: i.children.clone(),
+                                acc: new_acc_opt.unwrap(),
+                                empty: new_empty_opt,
+                                max_depth: i.max_depth,
+                            })));
+                            Some(LeveledGSS::try_promote(py, &new_i)?)
+                        }
+                    }
+                    Upper::Branch(b) => {
+                        let new_empty_opt = if let Some(empty) = &b.empty {
+                            mutate_acc(py, empty, mutator, acc_cache)?
+                        } else {
+                            None
+                        };
+
+                        let mut new_children = Children::new();
+                        for (v, kids) in b.children.iter() {
+                            let mut new_kids_for_v = OrdMap::new();
+                            for child in kids.values() {
+                                if let Some(new_child) = transform(py, child, mutator, memo, acc_cache)? {
+                                    new_kids_for_v.insert(new_child.max_depth(), new_child);
+                                }
+                            }
+                            if !new_kids_for_v.is_empty() {
+                                new_children.insert(v.clone(), new_kids_for_v);
+                            }
+                        }
+
+                        if new_children.is_empty() && new_empty_opt.is_none() {
+                            None
+                        } else {
+                            let max_depth = get_max_depth_upper(&new_children);
+                            let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
+                                children: new_children,
+                                empty: new_empty_opt,
+                                max_depth,
+                            })));
+                            Some(LeveledGSS::try_promote(py, &new_b)?)
+                        }
+                    }
+                };
+
+                let value_to_cache = if let Some(res_inner) = &res_opt {
+                    let res_gss = LeveledGSS { inner: res_inner.clone() };
+                    res_gss.into_py(py)
+                } else {
+                    py.None()
+                };
+                memo.set_item(key, value_to_cache)?;
+
+                Ok(res_opt)
+            }
+
+            let new_inner_opt = transform(py, &self.inner, &mutator, memo_dict, acc_cache)?;
+            Ok(new_inner_opt.map_or_else(LeveledGSS::_empty, |inner| LeveledGSS { inner }))
+        })
     }
 
     fn merge(&self, other: &Self) -> PyResult<Self> {
