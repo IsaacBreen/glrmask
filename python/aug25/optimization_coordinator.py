@@ -11,6 +11,7 @@ import gzip
 import json
 import os
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from statistics import mean, median
 
@@ -108,6 +109,7 @@ def coordinator_main():
         print(f"--- Detection pass {r+1}/{args.detect_repeat} ---")
         model.reset_state()
         for i, tok in enumerate(token_ids):
+            Stats.get().reset()
             # Measure and store metric for this step
             model.get_mask()
             m = model.get_last_get_mask_metrics()
@@ -160,6 +162,11 @@ def coordinator_main():
         "selected_hot_steps": hot_steps,
     }
 
+    # Get benchmark config from a clean model instance
+    base_model_for_config = model.clone_sharing_structure()
+    benchmark_config = base_model_for_config.get_benchmark_config()
+    del base_model_for_config
+
     def run_eval_for_variation(var: VariationBase):
         print("\n----------------------------------------")
         print(f"[Coordinator] Variation: {var.name}")
@@ -172,19 +179,32 @@ def coordinator_main():
         for i in range(chosen_step):
             vm.commit(token_ids[i])
         # Evaluate get_mask multiple times in that same state
-        eval_values = []
+        all_run_stats = defaultdict(list)
+        stats_to_collect = benchmark_config['stats_to_collect']
+
         for r in range(args.eval_repeat):
+            Stats.get().reset()
             vm.get_mask()
-            metric_value = float(vm.get_last_get_mask_metrics().get(args.metric, 0.0))
-            eval_values.append(metric_value)
-        agg_value = aggregate(eval_values, args.agg_method)
-        print(f"[Coordinator] Variation '{var.name}' aggregated {args.metric}={format_human(agg_value)} over {args.eval_repeat} runs")
+            stats = Stats.get()
+            for key in stats_to_collect:
+                if key in stats.times:
+                    all_run_stats[key].append(stats.times[key])
+                elif key in stats.counts:
+                    all_run_stats[key].append(float(stats.counts[key]))
+
+        # Use the model's own reporting function
+        benchmark_config['print_report'](var.name, all_run_stats)
+
+        # Calculate the primary aggregate value for the JSON result
+        primary_metric_values = all_run_stats.get(args.metric, [])
+        agg_value = aggregate(primary_metric_values, args.agg_method)
+
         return {
             "name": var.name,
             "metric": args.metric,
             "agg_method": args.agg_method,
-            "eval_values": eval_values,
             "aggregated": agg_value,
+            "all_stats": dict(all_run_stats),
         }
 
     for var in variations:

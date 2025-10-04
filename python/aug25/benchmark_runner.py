@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 import numpy as np
 from tqdm import tqdm
 
+from python.aug25.stats import Stats
+
 # --- Helper Functions (from former example_js.py) ---
 
 def load_or_download_gpt2_vocab(cache_dir, file_name, url):
@@ -244,6 +246,7 @@ def run_benchmark(args, run_index: int = 0):
     progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps", disable=os.environ.get("DISABLE_TQDM") == "1")
     for i, token_id in progress_bar:
         if not os.environ.get("NO_GET_MASK") == '1':
+            Stats.get().reset()
             gc.disable()
             t_start_mask = time.perf_counter()
             mask_rs = model.get_mask()

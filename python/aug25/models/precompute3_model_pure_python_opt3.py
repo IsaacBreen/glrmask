@@ -9,6 +9,8 @@ import os
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
+from collections import defaultdict
+import numpy as np
 
 import _sep1 as ffi
 from tqdm import tqdm
@@ -653,6 +655,25 @@ class Model(GraphProvider):
         vars.append(ArenaReorderVariation(name="arena_diversity_less_overlap_penalty", params=ArenaOptimizeParams(penalty_llm_overlap=256, penalty_state_overlap=128)))
         return vars
 
+    def get_benchmark_config(self) -> Dict:
+        """Provides configuration to the optimizer script for benchmarking variations."""
+        stats_to_collect = ['get_mask', 'get_mask.main_loop', 'get_mask.traversal.edges_traversed', 'get_mask.traversal.nodes_processed']
+
+        def print_report(variation_name: str, results: Dict[str, List[float]]):
+            print(f"  Results for: {variation_name}")
+            for key in stats_to_collect:
+                values = results.get(key, [])
+                if not values:
+                    print(f"    {key:<40}: No data")
+                    continue
+                is_time = 'time' in key or '.ms' in key or key in ('get_mask', 'get_mask.main_loop')
+                agg_val, agg_name = (np.min(values), 'min') if is_time else (np.mean(values), 'mean')
+                unit = "ms" if is_time else ""
+                val_str = f"{agg_val*1000 if is_time else agg_val:10,.3f}"
+                print(f"    {key:<40}: {val_str} {unit} ({agg_name} of {len(values)})")
+
+        return {"stats_to_collect": stats_to_collect, "print_report": print_report}
+
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         term_rs = RangeSet.from_indices([terminal_id])
         @_acc_memoize(use_value_cache=False)
@@ -1033,8 +1054,6 @@ class Model(GraphProvider):
         if not self.suppress_stats_report:
             if stats.times['get_mask.main_loop']*1000 > 1:
                 stats.report()
-        # Prepare for next call
-        stats.reset()
 
         return original_indices
 
