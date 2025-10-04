@@ -1,7 +1,6 @@
 local_system:
   attached_files:
     - python/aug25/models/precompute3_model_pure_python_opt3.py
-    - python/aug25/stats.py
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -99,19 +98,6 @@ local_system:
           def __call__(self, model: "Model") -> None:
               print(f"[Variation] {self.name}: re-optimizing arena with params={self.params}")
               model.optimize_arena(self.params)
-
-      @dataclass
-      class GlobalCutoffVariation(VariationBase):
-          edge_budget: int = 5
-          approx_fill: bool = True
-
-          def __call__(self, model: "Model") -> None:
-              # Drastic: enforce a global edge traversal cutoff inside get_mask.
-              # If approx_fill is True, we add a cheap upper-bound approximation
-              # from the remaining frontier to avoid returning a severely under-approximated mask.
-              print(f"[Variation] {self.name}: enabling global edge cutoff at {self.edge_budget} edges (approx_fill={self.approx_fill})")
-              model.gm_global_edge_budget = int(self.edge_budget)
-              model.gm_approx_on_cutoff = bool(self.approx_fill)
 
       # Type Aliases
       NodeID = int
@@ -510,8 +496,6 @@ local_system:
           last_get_mask_cost: int = 0
           last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
           suppress_stats_report: bool = True
-          gm_global_edge_budget: Optional[int] = None
-          gm_approx_on_cutoff: bool = False
 
           # ------------- Construction and structure management -------------
 
@@ -617,8 +601,6 @@ local_system:
                   state=self.make_initial_state(),
                   gm_max_edges=self.gm_max_edges,
                   gm_max_dests=self.gm_max_dests,
-                  gm_global_edge_budget=self.gm_global_edge_budget,
-                  gm_approx_on_cutoff=self.gm_approx_on_cutoff,
                   suppress_stats_report=self.suppress_stats_report,
               )
 
@@ -678,7 +660,6 @@ local_system:
               vars.append(ArenaReorderVariation(name="arena_diversity_default", params=ArenaOptimizeParams()))
               vars.append(ArenaReorderVariation(name="arena_diversity_more_depth", params=ArenaOptimizeParams(depth_weight=2048)))
               vars.append(ArenaReorderVariation(name="arena_diversity_less_overlap_penalty", params=ArenaOptimizeParams(penalty_llm_overlap=256, penalty_state_overlap=128)))
-              vars.append(GlobalCutoffVariation(name="drastic_cutoff5_approx", edge_budget=5, approx_fill=True))
               return vars
 
           def get_benchmark_config(self) -> Dict:
@@ -877,11 +858,6 @@ local_system:
               stats.start('get_mask')
               stats.inc('get_mask.initial_tokenizer_states', len(self.state))
 
-              # Global "drastic" edge budget (optional, controlled by variation).
-              # None means no cutoff (default/baseline). When set, we stop early after N edges.
-              remaining_global_edge_budget = None if self.gm_global_edge_budget is None else int(self.gm_global_edge_budget)
-              cutoff_triggered = False
-
               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
               work_heap = []
 
@@ -899,41 +875,6 @@ local_system:
                       pop_cache=pop_cache if pop_cache is not None else {}
                   )
                   heapq.heappush(work_heap, item)
-
-              def maybe_trigger_cutoff(current_node: Optional[NodeID], current_gss: Optional[GSS], current_gss_acc: Optional[PyAcc]) -> None:
-                  # When the global cutoff triggers, we optionally perform a cheap approximation
-                  # over the current frontier to avoid returning a severely under-approximated mask.
-                  nonlocal cutoff_triggered, final_mask, work_heap, remaining_mask
-                  if cutoff_triggered:
-                      return
-                  if self.gm_approx_on_cutoff:
-                      # Include potential from the current node being processed.
-                      if current_node is not None and current_gss is not None:
-                          a_node_local = self.arena.get(current_node)
-                          if a_node_local is not None:
-                              acc_local = current_gss_acc if current_gss_acc is not None else current_gss.reduce_acc()
-                              if acc_local:
-                                  pot = a_node_local.llm_bv_union.intersection(acc_local.llm_mask)
-                                  # Only add what's not already in final_mask
-                                  pot = pot.intersection(remaining_mask)
-                                  if not pot.is_empty():
-                                      final_mask |= pot
-                                      remaining_mask = all_ones.difference(final_mask)
-                      # Include potential from all items still in the heap
-                      for item in work_heap:
-                          a_node_heap = self.arena.get(item.node_id)
-                          if a_node_heap is None:
-                              continue
-                          acc_heap = item.gss.reduce_acc()
-                          if not acc_heap:
-                              continue
-                          pot = a_node_heap.llm_bv_union.intersection(acc_heap.llm_mask)
-                          pot = pot.intersection(remaining_mask)
-                          if not pot.is_empty():
-                              final_mask |= pot
-                              remaining_mask = all_ones.difference(final_mask)
-                  work_heap.clear()
-                  cutoff_triggered = True
 
               def dequeue() -> Tuple[NodeID, GSS, int, int, Dict]:
                   item = heapq.heappop(work_heap)
@@ -969,9 +910,6 @@ local_system:
                   gss_acc = gss_node.reduce_acc()
                   stats.stop('get_mask.main_loop.node.reduce_acc')
                   gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
-
-                  if cutoff_triggered:
-                      break
 
                   if self.is_end(node) and gss_acc and not final_mask.issuperset(gss_acc.llm_mask):
                       stats.inc('get_mask.traversal.end_nodes')
@@ -1012,15 +950,6 @@ local_system:
                           if edge.dest_states_union.isdisjoint(peek0_rs):
                               stats.inc('get_mask.main_loop.edge.dest_union_pruned_pop0')
                               continue
-
-                      # Count traversal of this edge and apply global cutoff if configured
-                      stats.inc('get_mask.traversal.edges_traversed')
-                      stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
-                      if remaining_global_edge_budget is not None:
-                          remaining_global_edge_budget -= 1
-                          if remaining_global_edge_budget <= 0:
-                              maybe_trigger_cutoff(node, gss_node, gss_acc)
-                              break
 
                       stats.inc('get_mask.traversal.edges_traversed')
                       stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
@@ -1099,9 +1028,6 @@ local_system:
                           enqueue(d, child_gss)
                           dests_proc += 1
 
-                      if cutoff_triggered:
-                          break
-
                       if edges_proc >= max_edges: break
                       edges_proc += 1
 
@@ -1110,9 +1036,6 @@ local_system:
                           enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
                           stats.inc('get_mask.traversal.node_requeued_for_more_edges')
                           break
-
-                  if cutoff_triggered:
-                      break
               stats.stop('get_mask.main_loop')
 
               stats.start('get_mask.final_conversion')
@@ -1145,420 +1068,6 @@ local_system:
               """Called at the end of a benchmark run to perform any final actions, like printing stats."""
               print("\n--- Final Stats Report from Model ---")
               Stats.get().report()
-    python/aug25/stats.py: |
-      import time
-      import inspect
-      from collections import defaultdict
-      from typing import Dict, Iterable, List, Tuple, Optional
-
-
-      class Stats:
-          """A simple singleton class for collecting performance stats with grouping.
-
-          Features:
-          - Counters via inc(key).
-          - Timers via start(key)/stop(key) with duration totals AND hit counts.
-          - Optional groups defined by key prefixes, e.g. "get_mask" or "get_mask.seeding".
-            Each group reports:
-              * All timed members whose keys are equal to the group prefix or start with "prefix.".
-              * The group's "hit count": if there is a timer count for the exact group key, use it;
-                otherwise, use the maximum timer count among descendant members.
-              * For each member: total ms, hits, avg ms per hit, and ms per group hit.
-            Notes:
-              - Defining nested groups (e.g. "get_mask" and "get_mask.seeding") is supported.
-                A key may appear in multiple groups independently. Each group computes its own
-                per-group-hit normalization using its own group hit count.
-              - Group totals are simple sums of member totals and may double-count if some timers
-                are nested within others. These totals are provided to aid quick inspection rather
-                than to guarantee exclusivity.
-          """
-          _instance = None
-
-          def __init__(self):
-              # General counters (manual via inc()).
-              self.counts: Dict[str, int] = defaultdict(int)
-
-              # Timings: total duration (seconds) per key.
-              self.times: Dict[str, float] = defaultdict(float)
-
-              # Timings: hit counts per key (number of successful stop() calls).
-              self.time_counts: Dict[str, int] = defaultdict(int)
-
-              # Location of first call for each key: key -> (file, line)
-              self.key_positions: Dict[str, Tuple[str, int]] = {}
-
-              # Active timers: key -> start_time
-              self.timers: Dict[str, float] = {}
-
-              # Enabled flag lets callers noop the collection if needed.
-              self.enabled = True
-
-              # Optional group prefixes (strings).
-              self.groups = set()
-
-          @staticmethod
-          def get():
-              """Get the singleton instance."""
-              if Stats._instance is None:
-                  Stats._instance = Stats()
-              return Stats._instance
-
-          def reset(self):
-              """Clear all collected stats."""
-              self.counts.clear()
-              self.times.clear()
-              self.time_counts.clear()
-              self.timers.clear()
-              self.key_positions.clear()
-
-          def inc(self, key: str, value: int = 1):
-              """Increment a counter."""
-              if not self.enabled:
-                  return
-              self._record_key_position(key)
-              self.counts[key] += value
-
-          def start(self, key: str):
-              """Start a timer."""
-              if not self.enabled:
-                  return
-              self._record_key_position(key)
-              self.timers[key] = time.perf_counter()
-
-          def stop(self, key: str):
-              """Stop a timer and record the duration and hit count."""
-              if not self.enabled:
-                  return
-              if key in self.timers:
-                  self.times[key] += time.perf_counter() - self.timers[key]
-                  self.time_counts[key] += 1
-                  del self.timers[key]
-
-          def _record_key_position(self, key: str):
-              """If seeing a key for the first time, record its call site (file, line)."""
-              if self.enabled and key not in self.key_positions:
-                  # Inspection is expensive. Pause all active timers while it runs.
-                  now = time.perf_counter()
-                  active_timer_keys = list(self.timers.keys())
-                  for k in active_timer_keys:
-                      self.times[k] += now - self.timers[k]
-
-                  # --- Expensive operation ---
-                  caller_frame = None
-                  try:
-                      frame = inspect.currentframe()
-                      # The call stack is:
-                      #   - model code (the one we want)
-                      #   - inc() or start() in this class
-                      #   - _record_key_position() (current frame)
-                      # So we need to go up two levels.
-                      if frame and frame.f_back and frame.f_back.f_back:
-                          caller_frame = frame.f_back.f_back
-                          info = inspect.getframeinfo(caller_frame)
-                          self.key_positions[key] = (info.filename, info.lineno)
-                      else:
-                          self.key_positions[key] = ("<unknown>", 0)
-                  finally:
-                      # Avoid reference cycles
-                      del frame
-                      if caller_frame:
-                          del caller_frame
-                  # --- End of expensive operation ---
-
-                  # Resume timers
-                  new_start_time = time.perf_counter()
-                  for k in active_timer_keys:
-                      self.timers[k] = new_start_time
-
-          # -------- Group management --------
-
-          def add_group(self, prefix: str):
-              """Register a single group prefix."""
-              self.groups.add(prefix)
-
-          def set_groups(self, prefixes: Iterable[str]):
-              """Replace current group prefixes with the provided list/iterable."""
-              self.groups = set(prefixes)
-
-          def clear_groups(self):
-              """Clear configured groups."""
-              self.groups.clear()
-
-          # -------- Reporting --------
-
-          def report(self):
-              """Print a formatted report of all collected stats."""
-              if not self.enabled:
-                  return
-
-              # --- Data Preparation Phase ---
-              # This phase gathers all data and rows for all tables before printing.
-
-              # 1. Prepare combined stats data  
-              stats_headers = ("key", "hits", "total_ms", "avg_ms")
-              stats_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
-              stats_rows = []
-              all_keys = self.counts.keys() | self.times.keys()
-              if all_keys:
-                  sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
-                  for key in sorted_keys:
-                      # 'hits' is timer hits if available, otherwise counter value.
-                      hits = self.time_counts.get(key)
-                      if hits is None:
-                          hits = self.counts.get(key)
-
-                      total_ms = None
-                      avg_ms = None
-                      if key in self.times:
-                          total_ms = self.times[key] * 1000.0
-                          timer_hits_for_avg = self.time_counts.get(key, 0)
-                          avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
-
-                      stats_rows.append((key, hits, total_ms, avg_ms))
-
-              # 2. Prepare Groups data
-              groups_data = []
-              group_members_headers = ("member", "hits", "hits/group_hit", "total_ms", "avg_ms", "ms/group_hit")
-              group_members_formats = (str, self._fmt_int_or_blank, self._fmt_ratio_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
-              if self.groups:
-                  group_sort_keys = {}
-                  for g in self.groups:
-                      members = self._group_members(g)
-                      if members:
-                          min_pos = min(self.key_positions.get(m, ("~", float("inf"))) for m in members)
-                          group_sort_keys[g] = min_pos
-
-                  sorted_groups = sorted(self.groups, key=lambda g: group_sort_keys.get(g, ("~", float("inf"))))
-                  for g in sorted_groups:
-                      all_members = self._group_members(g)
-                      if not all_members:
-                          continue
-
-                      timing_members = [m for m in all_members if m in self.times]
-
-                      group_hits = self._group_hits(g, timing_members)
-                      group_total_ms = sum(self.times[k] for k in timing_members) * 1000.0
-                      group_avg_ms = (group_total_ms / group_hits) if group_hits else 0.0
-
-                      group_info = {
-                          "name": g,
-                          "members_count": len(all_members),
-                          "timing_members_count": len(timing_members),
-                          "hits": group_hits,
-                          "total_ms": group_total_ms,
-                          "avg_ms": group_avg_ms,
-                      }
-
-                      member_rows = []
-                      if all_members:
-                          sorted_members = sorted(all_members, key=lambda k: self.key_positions.get(k, ("", 0)))
-                          for k in sorted_members:
-                              # 'hits' is timer hits if available, otherwise counter value.
-                              hits = self.time_counts.get(k)
-                              if hits is None:
-                                  hits = self.counts.get(k)
-
-                              hits_per_group_hit = None
-                              if hits is not None and group_hits > 0:
-                                  hits_per_group_hit = hits / group_hits
-
-                              total_ms = None
-                              avg_ms = None
-                              per_group_ms = None
-                              if k in self.times:
-                                  total_ms = self.times[k] * 1000.0
-                                  timer_hits_for_avg = self.time_counts.get(k, 0)
-                                  avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
-                                  per_group_ms = (total_ms / group_hits) if group_hits else 0.0
-
-                              member_rows.append((k, hits, hits_per_group_hit, total_ms, avg_ms, per_group_ms))
-
-                      groups_data.append({"info": group_info, "member_rows": member_rows})
-
-              # --- Width Calculation Phase ---
-              # This phase determines the max width for each column across all tables.
-
-              max_widths = defaultdict(int)
-
-              def update_widths(headers, rows, formats):
-                  fmts = formats if formats is not None else tuple([str] * len(headers))
-                  for i, h in enumerate(headers):
-                      max_widths[h] = max(max_widths[h], len(h))
-                  for r in rows:
-                      for i, h in enumerate(headers):
-                          val = r[i]
-                          cell_str = fmts[i](val) if callable(fmts[i]) else str(val)
-                          max_widths[h] = max(max_widths[h], len(cell_str))
-
-              if stats_rows: update_widths(stats_headers, stats_rows, stats_formats)
-              if groups_data:
-                  for group in groups_data:
-                      if group["member_rows"]:
-                          update_widths(group_members_headers, group["member_rows"], group_members_formats)
-
-              # Unify 'key' and 'member' widths for consistent alignment
-              if 'key' in max_widths or 'member' in max_widths:
-                  unified_width = max(max_widths.get('key', 0), max_widths.get('member', 0))
-                  max_widths['key'] = unified_width
-                  max_widths['member'] = unified_width
-
-              # --- Printing Phase ---
-              # This phase prints all the tables using the pre-calculated widths.
-
-              print("\n═══ Performance Stats ═══")
-
-              if stats_rows:
-                  print("\n▶ All Stats")
-                  self._print_table(headers=stats_headers, rows=stats_rows, formats=stats_formats, indent="  ", widths=max_widths)
-
-              if self.groups and groups_data:
-                  print("\n▶ Groups")
-                  for group in groups_data:
-                      info = group["info"]
-                      print(f"\n  [{info['name']}]")
-                      summary_parts = []
-                      if info['timing_members_count'] > 0:
-                          summary_parts.append(f"{info['members_count']} members")
-                          summary_parts.append(f"{self._fmt_int(info['hits'])} hits")
-                          summary_parts.append(f"{self._fmt_ms(info['total_ms'])}ms total")
-                          summary_parts.append(f"{self._fmt_ms(info['avg_ms'])}ms/hit")
-                      print(f"    {' · '.join(summary_parts)}")
-
-                      if group["member_rows"]:
-                          self._print_table(headers=group_members_headers, rows=group["member_rows"], formats=group_members_formats, indent="    ", widths=max_widths)
-
-              print("\n═════════════════════════\n")
-
-          # -------- Helpers --------
-
-          @staticmethod
-          def _fmt_int(value: int) -> str:
-              """Format integer with thousands separator."""
-              return f"{value:,}"
-
-          @staticmethod
-          def _fmt_ms(value: float) -> str:
-              """Format milliseconds with 3 decimals and thousands separator."""
-              return f"{value:,.3f}"
-
-          @staticmethod
-          def _fmt_int_or_blank(value: Optional[int]) -> str:
-              """Format integer with thousands separator, or return blank string if None."""
-              if value is None:
-                  return ""
-              return f"{value:,}"
-
-          @staticmethod
-          def _fmt_ms_or_blank(value: Optional[float]) -> str:
-              """Format ms with 3 decimals and thousands separator, or return blank string if None."""
-              if value is None:
-                  return ""
-              return f"{value:,.3f}"
-
-          @staticmethod
-          def _fmt_ratio_or_blank(value: Optional[float]) -> str:
-              """Format a ratio with 2 decimals, or return blank string if None."""
-              if value is None:
-                  return ""
-              return f"{value:.2f}"
-
-          def _print_table(
-              self,
-              headers: Tuple[str, ...],
-              rows: List[Tuple],
-              formats: Tuple = None,
-              indent: str = "",
-              widths: Dict[str, int] = None,
-          ):
-              """Print a simple aligned table.
-
-              headers: tuple of column names.
-              rows: list of tuples aligned with headers.
-              formats: tuple of formatter callables (len == len(headers)), applied to each cell.
-                       If None, str() is used.
-              indent: left indentation for each printed row.
-              widths: optional dict of {header: width} to enforce column widths.
-              """
-              if not rows:
-                  return
-
-              ncols = len(headers)
-              fmts = formats if formats is not None else tuple([str] * ncols)
-
-              # Determine which columns are numeric (should be right-aligned)
-              # Check against the static formatters defined in the class.
-              numeric_formatters = (self._fmt_int, self._fmt_ms, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ratio_or_blank)
-              is_numeric_col = [f in numeric_formatters for f in fmts]
-
-              # Convert cells to strings using provided formatters
-              str_rows: List[List[str]] = []
-              for r in rows:
-                  str_row = []
-                  for i in range(ncols):
-                      val = r[i]
-                      str_row.append(fmts[i](val) if callable(fmts[i]) else str(val))
-                  str_rows.append(str_row)
-
-              # Compute column widths
-              if widths:
-                  col_widths = [widths[h] for h in headers]
-              else:
-                  col_widths = [len(h) for h in headers]
-                  for r in str_rows:
-                      for i, cell in enumerate(r):
-                          col_widths[i] = max(col_widths[i], len(cell))
-
-              # Print header
-              header_line = indent + " | ".join(
-                  h.rjust(col_widths[i]) if is_numeric_col[i] else h.ljust(col_widths[i])
-                  for i, h in enumerate(headers)
-              )
-              sep_line = indent + "-+-".join("-" * col_widths[i] for i in range(ncols))
-              print(header_line)
-              print(sep_line)
-
-              # Print rows
-              for r in str_rows:
-                  print(
-                      indent + " | ".join(
-                          r[i].rjust(col_widths[i]) if is_numeric_col[i] else r[i].ljust(col_widths[i])
-                          for i in range(ncols)
-                      )
-                  )
-
-          def _group_members(self, prefix: str) -> List[str]:
-              """Return all timing and count keys that belong to the group 'prefix'.
-
-              A key belongs if key == prefix or key.startswith(prefix + ".").
-              """
-              pfx_dot = prefix + "."
-              all_keys = self.times.keys() | self.counts.keys()
-              members = [k for k in all_keys if k == prefix or k.startswith(pfx_dot)]
-              return members
-
-          def _group_hits(self, prefix: str, members: List[str]) -> int:
-              """Determine the 'group hit count' for a group.
-
-              Rule:
-              - If the exact group key has a timing hit count, use that.
-              - Else use the maximum timing hit count among its members (descendants).
-              This approximates "how many times the group ran" even if the root itself
-              wasn't timed explicitly.
-              """
-              direct = self.time_counts.get(prefix, 0)
-              if direct > 0:
-                  return direct
-              max_desc = 0
-              for k in members:
-                  max_desc = max(max_desc, self.time_counts.get(k, 0))
-              return max_desc
-
-          def __enter__(self):
-              self.reset()
-              return self
-
-          def __exit__(self, exc_type, exc_val, exc_tb):
-              self.report()
   prev_file_contents:
     python/aug25/models/precompute3_model_pure_python_opt3.py: |
       from __future__ import annotations
@@ -2577,6 +2086,9 @@ local_system:
                               maybe_trigger_cutoff(node, gss_node, gss_acc)
                               break
 
+                      stats.inc('get_mask.traversal.edges_traversed')
+                      stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
+
                       if edge.pop in pop_cache:
                           popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
                           stats.inc('get_mask.main_loop.edge.pop_cache_hits')
@@ -2697,420 +2209,6 @@ local_system:
               """Called at the end of a benchmark run to perform any final actions, like printing stats."""
               print("\n--- Final Stats Report from Model ---")
               Stats.get().report()
-    python/aug25/stats.py: |
-      import time
-      import inspect
-      from collections import defaultdict
-      from typing import Dict, Iterable, List, Tuple, Optional
-
-
-      class Stats:
-          """A simple singleton class for collecting performance stats with grouping.
-
-          Features:
-          - Counters via inc(key).
-          - Timers via start(key)/stop(key) with duration totals AND hit counts.
-          - Optional groups defined by key prefixes, e.g. "get_mask" or "get_mask.seeding".
-            Each group reports:
-              * All timed members whose keys are equal to the group prefix or start with "prefix.".
-              * The group's "hit count": if there is a timer count for the exact group key, use it;
-                otherwise, use the maximum timer count among descendant members.
-              * For each member: total ms, hits, avg ms per hit, and ms per group hit.
-            Notes:
-              - Defining nested groups (e.g. "get_mask" and "get_mask.seeding") is supported.
-                A key may appear in multiple groups independently. Each group computes its own
-                per-group-hit normalization using its own group hit count.
-              - Group totals are simple sums of member totals and may double-count if some timers
-                are nested within others. These totals are provided to aid quick inspection rather
-                than to guarantee exclusivity.
-          """
-          _instance = None
-
-          def __init__(self):
-              # General counters (manual via inc()).
-              self.counts: Dict[str, int] = defaultdict(int)
-
-              # Timings: total duration (seconds) per key.
-              self.times: Dict[str, float] = defaultdict(float)
-
-              # Timings: hit counts per key (number of successful stop() calls).
-              self.time_counts: Dict[str, int] = defaultdict(int)
-
-              # Location of first call for each key: key -> (file, line)
-              self.key_positions: Dict[str, Tuple[str, int]] = {}
-
-              # Active timers: key -> start_time
-              self.timers: Dict[str, float] = {}
-
-              # Enabled flag lets callers noop the collection if needed.
-              self.enabled = True
-
-              # Optional group prefixes (strings).
-              self.groups = set()
-
-          @staticmethod
-          def get():
-              """Get the singleton instance."""
-              if Stats._instance is None:
-                  Stats._instance = Stats()
-              return Stats._instance
-
-          def reset(self):
-              """Clear all collected stats."""
-              self.counts.clear()
-              self.times.clear()
-              self.time_counts.clear()
-              self.timers.clear()
-              self.key_positions.clear()
-
-          def inc(self, key: str, value: int = 1):
-              """Increment a counter."""
-              if not self.enabled:
-                  return
-              self._record_key_position(key)
-              self.counts[key] += value
-
-          def start(self, key: str):
-              """Start a timer."""
-              if not self.enabled:
-                  return
-              self._record_key_position(key)
-              self.timers[key] = time.perf_counter()
-
-          def stop(self, key: str):
-              """Stop a timer and record the duration and hit count."""
-              if not self.enabled:
-                  return
-              if key in self.timers:
-                  self.times[key] += time.perf_counter() - self.timers[key]
-                  self.time_counts[key] += 1
-                  del self.timers[key]
-
-          def _record_key_position(self, key: str):
-              """If seeing a key for the first time, record its call site (file, line)."""
-              if self.enabled and key not in self.key_positions:
-                  # Inspection is expensive. Pause all active timers while it runs.
-                  now = time.perf_counter()
-                  active_timer_keys = list(self.timers.keys())
-                  for k in active_timer_keys:
-                      self.times[k] += now - self.timers[k]
-
-                  # --- Expensive operation ---
-                  caller_frame = None
-                  try:
-                      frame = inspect.currentframe()
-                      # The call stack is:
-                      #   - model code (the one we want)
-                      #   - inc() or start() in this class
-                      #   - _record_key_position() (current frame)
-                      # So we need to go up two levels.
-                      if frame and frame.f_back and frame.f_back.f_back:
-                          caller_frame = frame.f_back.f_back
-                          info = inspect.getframeinfo(caller_frame)
-                          self.key_positions[key] = (info.filename, info.lineno)
-                      else:
-                          self.key_positions[key] = ("<unknown>", 0)
-                  finally:
-                      # Avoid reference cycles
-                      del frame
-                      if caller_frame:
-                          del caller_frame
-                  # --- End of expensive operation ---
-
-                  # Resume timers
-                  new_start_time = time.perf_counter()
-                  for k in active_timer_keys:
-                      self.timers[k] = new_start_time
-
-          # -------- Group management --------
-
-          def add_group(self, prefix: str):
-              """Register a single group prefix."""
-              self.groups.add(prefix)
-
-          def set_groups(self, prefixes: Iterable[str]):
-              """Replace current group prefixes with the provided list/iterable."""
-              self.groups = set(prefixes)
-
-          def clear_groups(self):
-              """Clear configured groups."""
-              self.groups.clear()
-
-          # -------- Reporting --------
-
-          def report(self):
-              """Print a formatted report of all collected stats."""
-              if not self.enabled:
-                  return
-
-              # --- Data Preparation Phase ---
-              # This phase gathers all data and rows for all tables before printing.
-
-              # 1. Prepare combined stats data  
-              stats_headers = ("key", "hits", "total_ms", "avg_ms")
-              stats_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
-              stats_rows = []
-              all_keys = self.counts.keys() | self.times.keys()
-              if all_keys:
-                  sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
-                  for key in sorted_keys:
-                      # 'hits' is timer hits if available, otherwise counter value.
-                      hits = self.time_counts.get(key)
-                      if hits is None:
-                          hits = self.counts.get(key)
-
-                      total_ms = None
-                      avg_ms = None
-                      if key in self.times:
-                          total_ms = self.times[key] * 1000.0
-                          timer_hits_for_avg = self.time_counts.get(key, 0)
-                          avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
-
-                      stats_rows.append((key, hits, total_ms, avg_ms))
-
-              # 2. Prepare Groups data
-              groups_data = []
-              group_members_headers = ("member", "hits", "hits/group_hit", "total_ms", "avg_ms", "ms/group_hit")
-              group_members_formats = (str, self._fmt_int_or_blank, self._fmt_ratio_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
-              if self.groups:
-                  group_sort_keys = {}
-                  for g in self.groups:
-                      members = self._group_members(g)
-                      if members:
-                          min_pos = min(self.key_positions.get(m, ("~", float("inf"))) for m in members)
-                          group_sort_keys[g] = min_pos
-
-                  sorted_groups = sorted(self.groups, key=lambda g: group_sort_keys.get(g, ("~", float("inf"))))
-                  for g in sorted_groups:
-                      all_members = self._group_members(g)
-                      if not all_members:
-                          continue
-
-                      timing_members = [m for m in all_members if m in self.times]
-
-                      group_hits = self._group_hits(g, timing_members)
-                      group_total_ms = sum(self.times[k] for k in timing_members) * 1000.0
-                      group_avg_ms = (group_total_ms / group_hits) if group_hits else 0.0
-
-                      group_info = {
-                          "name": g,
-                          "members_count": len(all_members),
-                          "timing_members_count": len(timing_members),
-                          "hits": group_hits,
-                          "total_ms": group_total_ms,
-                          "avg_ms": group_avg_ms,
-                      }
-
-                      member_rows = []
-                      if all_members:
-                          sorted_members = sorted(all_members, key=lambda k: self.key_positions.get(k, ("", 0)))
-                          for k in sorted_members:
-                              # 'hits' is timer hits if available, otherwise counter value.
-                              hits = self.time_counts.get(k)
-                              if hits is None:
-                                  hits = self.counts.get(k)
-
-                              hits_per_group_hit = None
-                              if hits is not None and group_hits > 0:
-                                  hits_per_group_hit = hits / group_hits
-
-                              total_ms = None
-                              avg_ms = None
-                              per_group_ms = None
-                              if k in self.times:
-                                  total_ms = self.times[k] * 1000.0
-                                  timer_hits_for_avg = self.time_counts.get(k, 0)
-                                  avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
-                                  per_group_ms = (total_ms / group_hits) if group_hits else 0.0
-
-                              member_rows.append((k, hits, hits_per_group_hit, total_ms, avg_ms, per_group_ms))
-
-                      groups_data.append({"info": group_info, "member_rows": member_rows})
-
-              # --- Width Calculation Phase ---
-              # This phase determines the max width for each column across all tables.
-
-              max_widths = defaultdict(int)
-
-              def update_widths(headers, rows, formats):
-                  fmts = formats if formats is not None else tuple([str] * len(headers))
-                  for i, h in enumerate(headers):
-                      max_widths[h] = max(max_widths[h], len(h))
-                  for r in rows:
-                      for i, h in enumerate(headers):
-                          val = r[i]
-                          cell_str = fmts[i](val) if callable(fmts[i]) else str(val)
-                          max_widths[h] = max(max_widths[h], len(cell_str))
-
-              if stats_rows: update_widths(stats_headers, stats_rows, stats_formats)
-              if groups_data:
-                  for group in groups_data:
-                      if group["member_rows"]:
-                          update_widths(group_members_headers, group["member_rows"], group_members_formats)
-
-              # Unify 'key' and 'member' widths for consistent alignment
-              if 'key' in max_widths or 'member' in max_widths:
-                  unified_width = max(max_widths.get('key', 0), max_widths.get('member', 0))
-                  max_widths['key'] = unified_width
-                  max_widths['member'] = unified_width
-
-              # --- Printing Phase ---
-              # This phase prints all the tables using the pre-calculated widths.
-
-              print("\n═══ Performance Stats ═══")
-
-              if stats_rows:
-                  print("\n▶ All Stats")
-                  self._print_table(headers=stats_headers, rows=stats_rows, formats=stats_formats, indent="  ", widths=max_widths)
-
-              if self.groups and groups_data:
-                  print("\n▶ Groups")
-                  for group in groups_data:
-                      info = group["info"]
-                      print(f"\n  [{info['name']}]")
-                      summary_parts = []
-                      if info['timing_members_count'] > 0:
-                          summary_parts.append(f"{info['members_count']} keys ({info['timing_members_count']} timed)")
-                          summary_parts.append(f"{self._fmt_int(info['hits'])} hits")
-                          summary_parts.append(f"{self._fmt_ms(info['total_ms'])}ms total")
-                          summary_parts.append(f"{self._fmt_ms(info['avg_ms'])}ms/hit")
-                      print(f"    {' · '.join(summary_parts)}")
-
-                      if group["member_rows"]:
-                          self._print_table(headers=group_members_headers, rows=group["member_rows"], formats=group_members_formats, indent="    ", widths=max_widths)
-
-              print("\n═════════════════════════\n")
-
-          # -------- Helpers --------
-
-          @staticmethod
-          def _fmt_int(value: int) -> str:
-              """Format integer with thousands separator."""
-              return f"{value:,}"
-
-          @staticmethod
-          def _fmt_ms(value: float) -> str:
-              """Format milliseconds with 3 decimals and thousands separator."""
-              return f"{value:,.3f}"
-
-          @staticmethod
-          def _fmt_int_or_blank(value: Optional[int]) -> str:
-              """Format integer with thousands separator, or return blank string if None."""
-              if value is None:
-                  return ""
-              return f"{value:,}"
-
-          @staticmethod
-          def _fmt_ms_or_blank(value: Optional[float]) -> str:
-              """Format ms with 3 decimals and thousands separator, or return blank string if None."""
-              if value is None:
-                  return ""
-              return f"{value:,.3f}"
-
-          @staticmethod
-          def _fmt_ratio_or_blank(value: Optional[float]) -> str:
-              """Format a ratio with 2 decimals, or return blank string if None."""
-              if value is None:
-                  return ""
-              return f"{value:.2f}"
-
-          def _print_table(
-              self,
-              headers: Tuple[str, ...],
-              rows: List[Tuple],
-              formats: Tuple = None,
-              indent: str = "",
-              widths: Dict[str, int] = None,
-          ):
-              """Print a simple aligned table.
-
-              headers: tuple of column names.
-              rows: list of tuples aligned with headers.
-              formats: tuple of formatter callables (len == len(headers)), applied to each cell.
-                       If None, str() is used.
-              indent: left indentation for each printed row.
-              widths: optional dict of {header: width} to enforce column widths.
-              """
-              if not rows:
-                  return
-
-              ncols = len(headers)
-              fmts = formats if formats is not None else tuple([str] * ncols)
-
-              # Determine which columns are numeric (should be right-aligned)
-              # Check against the static formatters defined in the class.
-              numeric_formatters = (self._fmt_int, self._fmt_ms, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ratio_or_blank)
-              is_numeric_col = [f in numeric_formatters for f in fmts]
-
-              # Convert cells to strings using provided formatters
-              str_rows: List[List[str]] = []
-              for r in rows:
-                  str_row = []
-                  for i in range(ncols):
-                      val = r[i]
-                      str_row.append(fmts[i](val) if callable(fmts[i]) else str(val))
-                  str_rows.append(str_row)
-
-              # Compute column widths
-              if widths:
-                  col_widths = [widths[h] for h in headers]
-              else:
-                  col_widths = [len(h) for h in headers]
-                  for r in str_rows:
-                      for i, cell in enumerate(r):
-                          col_widths[i] = max(col_widths[i], len(cell))
-
-              # Print header
-              header_line = indent + " | ".join(
-                  h.rjust(col_widths[i]) if is_numeric_col[i] else h.ljust(col_widths[i])
-                  for i, h in enumerate(headers)
-              )
-              sep_line = indent + "-+-".join("-" * col_widths[i] for i in range(ncols))
-              print(header_line)
-              print(sep_line)
-
-              # Print rows
-              for r in str_rows:
-                  print(
-                      indent + " | ".join(
-                          r[i].rjust(col_widths[i]) if is_numeric_col[i] else r[i].ljust(col_widths[i])
-                          for i in range(ncols)
-                      )
-                  )
-
-          def _group_members(self, prefix: str) -> List[str]:
-              """Return all timing and count keys that belong to the group 'prefix'.
-
-              A key belongs if key == prefix or key.startswith(prefix + ".").
-              """
-              pfx_dot = prefix + "."
-              all_keys = self.times.keys() | self.counts.keys()
-              members = [k for k in all_keys if k == prefix or k.startswith(pfx_dot)]
-              return members
-
-          def _group_hits(self, prefix: str, members: List[str]) -> int:
-              """Determine the 'group hit count' for a group.
-
-              Rule:
-              - If the exact group key has a timing hit count, use that.
-              - Else use the maximum timing hit count among its members (descendants).
-              This approximates "how many times the group ran" even if the root itself
-              wasn't timed explicitly.
-              """
-              direct = self.time_counts.get(prefix, 0)
-              if direct > 0:
-                  return direct
-              max_desc = 0
-              for k in members:
-                  max_desc = max(max_desc, self.time_counts.get(k, 0))
-              return max_desc
-
-          def __enter__(self):
-              self.reset()
-              return self
-
-          def __exit__(self, exc_type, exc_val, exc_tb):
-              self.report()
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -3121,7 +2219,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -3247,19 +2345,6 @@ messages:
           def __call__(self, model: "Model") -> None:
               print(f"[Variation] {self.name}: re-optimizing arena with params={self.params}")
               model.optimize_arena(self.params)
-
-      @dataclass
-      class GlobalCutoffVariation(VariationBase):
-          edge_budget: int = 5
-          approx_fill: bool = True
-
-          def __call__(self, model: "Model") -> None:
-              # Drastic: enforce a global edge traversal cutoff inside get_mask.
-              # If approx_fill is True, we add a cheap upper-bound approximation
-              # from the remaining frontier to avoid returning a severely under-approximated mask.
-              print(f"[Variation] {self.name}: enabling global edge cutoff at {self.edge_budget} edges (approx_fill={self.approx_fill})")
-              model.gm_global_edge_budget = int(self.edge_budget)
-              model.gm_approx_on_cutoff = bool(self.approx_fill)
 
       # Type Aliases
       NodeID = int
@@ -3658,8 +2743,6 @@ messages:
           last_get_mask_cost: int = 0
           last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
           suppress_stats_report: bool = True
-          gm_global_edge_budget: Optional[int] = None
-          gm_approx_on_cutoff: bool = False
 
           # ------------- Construction and structure management -------------
 
@@ -3765,8 +2848,6 @@ messages:
                   state=self.make_initial_state(),
                   gm_max_edges=self.gm_max_edges,
                   gm_max_dests=self.gm_max_dests,
-                  gm_global_edge_budget=self.gm_global_edge_budget,
-                  gm_approx_on_cutoff=self.gm_approx_on_cutoff,
                   suppress_stats_report=self.suppress_stats_report,
               )
 
@@ -3826,7 +2907,6 @@ messages:
               vars.append(ArenaReorderVariation(name="arena_diversity_default", params=ArenaOptimizeParams()))
               vars.append(ArenaReorderVariation(name="arena_diversity_more_depth", params=ArenaOptimizeParams(depth_weight=2048)))
               vars.append(ArenaReorderVariation(name="arena_diversity_less_overlap_penalty", params=ArenaOptimizeParams(penalty_llm_overlap=256, penalty_state_overlap=128)))
-              vars.append(GlobalCutoffVariation(name="drastic_cutoff5_approx", edge_budget=5, approx_fill=True))
               return vars
 
           def get_benchmark_config(self) -> Dict:
@@ -4025,11 +3105,6 @@ messages:
               stats.start('get_mask')
               stats.inc('get_mask.initial_tokenizer_states', len(self.state))
 
-              # Global "drastic" edge budget (optional, controlled by variation).
-              # None means no cutoff (default/baseline). When set, we stop early after N edges.
-              remaining_global_edge_budget = None if self.gm_global_edge_budget is None else int(self.gm_global_edge_budget)
-              cutoff_triggered = False
-
               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
               work_heap = []
 
@@ -4047,41 +3122,6 @@ messages:
                       pop_cache=pop_cache if pop_cache is not None else {}
                   )
                   heapq.heappush(work_heap, item)
-
-              def maybe_trigger_cutoff(current_node: Optional[NodeID], current_gss: Optional[GSS], current_gss_acc: Optional[PyAcc]) -> None:
-                  # When the global cutoff triggers, we optionally perform a cheap approximation
-                  # over the current frontier to avoid returning a severely under-approximated mask.
-                  nonlocal cutoff_triggered, final_mask, work_heap, remaining_mask
-                  if cutoff_triggered:
-                      return
-                  if self.gm_approx_on_cutoff:
-                      # Include potential from the current node being processed.
-                      if current_node is not None and current_gss is not None:
-                          a_node_local = self.arena.get(current_node)
-                          if a_node_local is not None:
-                              acc_local = current_gss_acc if current_gss_acc is not None else current_gss.reduce_acc()
-                              if acc_local:
-                                  pot = a_node_local.llm_bv_union.intersection(acc_local.llm_mask)
-                                  # Only add what's not already in final_mask
-                                  pot = pot.intersection(remaining_mask)
-                                  if not pot.is_empty():
-                                      final_mask |= pot
-                                      remaining_mask = all_ones.difference(final_mask)
-                      # Include potential from all items still in the heap
-                      for item in work_heap:
-                          a_node_heap = self.arena.get(item.node_id)
-                          if a_node_heap is None:
-                              continue
-                          acc_heap = item.gss.reduce_acc()
-                          if not acc_heap:
-                              continue
-                          pot = a_node_heap.llm_bv_union.intersection(acc_heap.llm_mask)
-                          pot = pot.intersection(remaining_mask)
-                          if not pot.is_empty():
-                              final_mask |= pot
-                              remaining_mask = all_ones.difference(final_mask)
-                  work_heap.clear()
-                  cutoff_triggered = True
 
               def dequeue() -> Tuple[NodeID, GSS, int, int, Dict]:
                   item = heapq.heappop(work_heap)
@@ -4117,9 +3157,6 @@ messages:
                   gss_acc = gss_node.reduce_acc()
                   stats.stop('get_mask.main_loop.node.reduce_acc')
                   gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
-
-                  if cutoff_triggered:
-                      break
 
                   if self.is_end(node) and gss_acc and not final_mask.issuperset(gss_acc.llm_mask):
                       stats.inc('get_mask.traversal.end_nodes')
@@ -4160,15 +3197,6 @@ messages:
                           if edge.dest_states_union.isdisjoint(peek0_rs):
                               stats.inc('get_mask.main_loop.edge.dest_union_pruned_pop0')
                               continue
-
-                      # Count traversal of this edge and apply global cutoff if configured
-                      stats.inc('get_mask.traversal.edges_traversed')
-                      stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
-                      if remaining_global_edge_budget is not None:
-                          remaining_global_edge_budget -= 1
-                          if remaining_global_edge_budget <= 0:
-                              maybe_trigger_cutoff(node, gss_node, gss_acc)
-                              break
 
                       stats.inc('get_mask.traversal.edges_traversed')
                       stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
@@ -4247,9 +3275,6 @@ messages:
                           enqueue(d, child_gss)
                           dests_proc += 1
 
-                      if cutoff_triggered:
-                          break
-
                       if edges_proc >= max_edges: break
                       edges_proc += 1
 
@@ -4258,9 +3283,6 @@ messages:
                           enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
                           stats.inc('get_mask.traversal.node_requeued_for_more_edges')
                           break
-
-                  if cutoff_triggered:
-                      break
               stats.stop('get_mask.main_loop')
 
               stats.start('get_mask.final_conversion')
@@ -4298,426 +3320,145 @@ messages:
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_opt3.py
   - user: |-
-      ```python 'python/aug25/stats.py'
-      import time
-      import inspect
-      from collections import defaultdict
-      from typing import Dict, Iterable, List, Tuple, Optional
-
-
-      class Stats:
-          """A simple singleton class for collecting performance stats with grouping.
-
-          Features:
-          - Counters via inc(key).
-          - Timers via start(key)/stop(key) with duration totals AND hit counts.
-          - Optional groups defined by key prefixes, e.g. "get_mask" or "get_mask.seeding".
-            Each group reports:
-              * All timed members whose keys are equal to the group prefix or start with "prefix.".
-              * The group's "hit count": if there is a timer count for the exact group key, use it;
-                otherwise, use the maximum timer count among descendant members.
-              * For each member: total ms, hits, avg ms per hit, and ms per group hit.
-            Notes:
-              - Defining nested groups (e.g. "get_mask" and "get_mask.seeding") is supported.
-                A key may appear in multiple groups independently. Each group computes its own
-                per-group-hit normalization using its own group hit count.
-              - Group totals are simple sums of member totals and may double-count if some timers
-                are nested within others. These totals are provided to aid quick inspection rather
-                than to guarantee exclusivity.
-          """
-          _instance = None
-
-          def __init__(self):
-              # General counters (manual via inc()).
-              self.counts: Dict[str, int] = defaultdict(int)
-
-              # Timings: total duration (seconds) per key.
-              self.times: Dict[str, float] = defaultdict(float)
-
-              # Timings: hit counts per key (number of successful stop() calls).
-              self.time_counts: Dict[str, int] = defaultdict(int)
-
-              # Location of first call for each key: key -> (file, line)
-              self.key_positions: Dict[str, Tuple[str, int]] = {}
-
-              # Active timers: key -> start_time
-              self.timers: Dict[str, float] = {}
-
-              # Enabled flag lets callers noop the collection if needed.
-              self.enabled = True
-
-              # Optional group prefixes (strings).
-              self.groups = set()
-
-          @staticmethod
-          def get():
-              """Get the singleton instance."""
-              if Stats._instance is None:
-                  Stats._instance = Stats()
-              return Stats._instance
-
-          def reset(self):
-              """Clear all collected stats."""
-              self.counts.clear()
-              self.times.clear()
-              self.time_counts.clear()
-              self.timers.clear()
-              self.key_positions.clear()
-
-          def inc(self, key: str, value: int = 1):
-              """Increment a counter."""
-              if not self.enabled:
-                  return
-              self._record_key_position(key)
-              self.counts[key] += value
-
-          def start(self, key: str):
-              """Start a timer."""
-              if not self.enabled:
-                  return
-              self._record_key_position(key)
-              self.timers[key] = time.perf_counter()
-
-          def stop(self, key: str):
-              """Stop a timer and record the duration and hit count."""
-              if not self.enabled:
-                  return
-              if key in self.timers:
-                  self.times[key] += time.perf_counter() - self.timers[key]
-                  self.time_counts[key] += 1
-                  del self.timers[key]
-
-          def _record_key_position(self, key: str):
-              """If seeing a key for the first time, record its call site (file, line)."""
-              if self.enabled and key not in self.key_positions:
-                  # Inspection is expensive. Pause all active timers while it runs.
-                  now = time.perf_counter()
-                  active_timer_keys = list(self.timers.keys())
-                  for k in active_timer_keys:
-                      self.times[k] += now - self.timers[k]
-
-                  # --- Expensive operation ---
-                  caller_frame = None
-                  try:
-                      frame = inspect.currentframe()
-                      # The call stack is:
-                      #   - model code (the one we want)
-                      #   - inc() or start() in this class
-                      #   - _record_key_position() (current frame)
-                      # So we need to go up two levels.
-                      if frame and frame.f_back and frame.f_back.f_back:
-                          caller_frame = frame.f_back.f_back
-                          info = inspect.getframeinfo(caller_frame)
-                          self.key_positions[key] = (info.filename, info.lineno)
-                      else:
-                          self.key_positions[key] = ("<unknown>", 0)
-                  finally:
-                      # Avoid reference cycles
-                      del frame
-                      if caller_frame:
-                          del caller_frame
-                  # --- End of expensive operation ---
-
-                  # Resume timers
-                  new_start_time = time.perf_counter()
-                  for k in active_timer_keys:
-                      self.timers[k] = new_start_time
-
-          # -------- Group management --------
-
-          def add_group(self, prefix: str):
-              """Register a single group prefix."""
-              self.groups.add(prefix)
-
-          def set_groups(self, prefixes: Iterable[str]):
-              """Replace current group prefixes with the provided list/iterable."""
-              self.groups = set(prefixes)
-
-          def clear_groups(self):
-              """Clear configured groups."""
-              self.groups.clear()
-
-          # -------- Reporting --------
-
-          def report(self):
-              """Print a formatted report of all collected stats."""
-              if not self.enabled:
-                  return
-
-              # --- Data Preparation Phase ---
-              # This phase gathers all data and rows for all tables before printing.
-
-              # 1. Prepare combined stats data  
-              stats_headers = ("key", "hits", "total_ms", "avg_ms")
-              stats_formats = (str, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
-              stats_rows = []
-              all_keys = self.counts.keys() | self.times.keys()
-              if all_keys:
-                  sorted_keys = sorted(all_keys, key=lambda k: self.key_positions.get(k, ("", 0)))
-                  for key in sorted_keys:
-                      # 'hits' is timer hits if available, otherwise counter value.
-                      hits = self.time_counts.get(key)
-                      if hits is None:
-                          hits = self.counts.get(key)
-
-                      total_ms = None
-                      avg_ms = None
-                      if key in self.times:
-                          total_ms = self.times[key] * 1000.0
-                          timer_hits_for_avg = self.time_counts.get(key, 0)
-                          avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
-
-                      stats_rows.append((key, hits, total_ms, avg_ms))
-
-              # 2. Prepare Groups data
-              groups_data = []
-              group_members_headers = ("member", "hits", "hits/group_hit", "total_ms", "avg_ms", "ms/group_hit")
-              group_members_formats = (str, self._fmt_int_or_blank, self._fmt_ratio_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank, self._fmt_ms_or_blank)
-              if self.groups:
-                  group_sort_keys = {}
-                  for g in self.groups:
-                      members = self._group_members(g)
-                      if members:
-                          min_pos = min(self.key_positions.get(m, ("~", float("inf"))) for m in members)
-                          group_sort_keys[g] = min_pos
-
-                  sorted_groups = sorted(self.groups, key=lambda g: group_sort_keys.get(g, ("~", float("inf"))))
-                  for g in sorted_groups:
-                      all_members = self._group_members(g)
-                      if not all_members:
-                          continue
-
-                      timing_members = [m for m in all_members if m in self.times]
-
-                      group_hits = self._group_hits(g, timing_members)
-                      group_total_ms = sum(self.times[k] for k in timing_members) * 1000.0
-                      group_avg_ms = (group_total_ms / group_hits) if group_hits else 0.0
-
-                      group_info = {
-                          "name": g,
-                          "members_count": len(all_members),
-                          "timing_members_count": len(timing_members),
-                          "hits": group_hits,
-                          "total_ms": group_total_ms,
-                          "avg_ms": group_avg_ms,
-                      }
-
-                      member_rows = []
-                      if all_members:
-                          sorted_members = sorted(all_members, key=lambda k: self.key_positions.get(k, ("", 0)))
-                          for k in sorted_members:
-                              # 'hits' is timer hits if available, otherwise counter value.
-                              hits = self.time_counts.get(k)
-                              if hits is None:
-                                  hits = self.counts.get(k)
-
-                              hits_per_group_hit = None
-                              if hits is not None and group_hits > 0:
-                                  hits_per_group_hit = hits / group_hits
-
-                              total_ms = None
-                              avg_ms = None
-                              per_group_ms = None
-                              if k in self.times:
-                                  total_ms = self.times[k] * 1000.0
-                                  timer_hits_for_avg = self.time_counts.get(k, 0)
-                                  avg_ms = (total_ms / timer_hits_for_avg) if timer_hits_for_avg else 0.0
-                                  per_group_ms = (total_ms / group_hits) if group_hits else 0.0
-
-                              member_rows.append((k, hits, hits_per_group_hit, total_ms, avg_ms, per_group_ms))
-
-                      groups_data.append({"info": group_info, "member_rows": member_rows})
-
-              # --- Width Calculation Phase ---
-              # This phase determines the max width for each column across all tables.
-
-              max_widths = defaultdict(int)
-
-              def update_widths(headers, rows, formats):
-                  fmts = formats if formats is not None else tuple([str] * len(headers))
-                  for i, h in enumerate(headers):
-                      max_widths[h] = max(max_widths[h], len(h))
-                  for r in rows:
-                      for i, h in enumerate(headers):
-                          val = r[i]
-                          cell_str = fmts[i](val) if callable(fmts[i]) else str(val)
-                          max_widths[h] = max(max_widths[h], len(cell_str))
-
-              if stats_rows: update_widths(stats_headers, stats_rows, stats_formats)
-              if groups_data:
-                  for group in groups_data:
-                      if group["member_rows"]:
-                          update_widths(group_members_headers, group["member_rows"], group_members_formats)
-
-              # Unify 'key' and 'member' widths for consistent alignment
-              if 'key' in max_widths or 'member' in max_widths:
-                  unified_width = max(max_widths.get('key', 0), max_widths.get('member', 0))
-                  max_widths['key'] = unified_width
-                  max_widths['member'] = unified_width
-
-              # --- Printing Phase ---
-              # This phase prints all the tables using the pre-calculated widths.
-
-              print("\n═══ Performance Stats ═══")
-
-              if stats_rows:
-                  print("\n▶ All Stats")
-                  self._print_table(headers=stats_headers, rows=stats_rows, formats=stats_formats, indent="  ", widths=max_widths)
-
-              if self.groups and groups_data:
-                  print("\n▶ Groups")
-                  for group in groups_data:
-                      info = group["info"]
-                      print(f"\n  [{info['name']}]")
-                      summary_parts = []
-                      if info['timing_members_count'] > 0:
-                          summary_parts.append(f"{info['members_count']} members")
-                          summary_parts.append(f"{self._fmt_int(info['hits'])} hits")
-                          summary_parts.append(f"{self._fmt_ms(info['total_ms'])}ms total")
-                          summary_parts.append(f"{self._fmt_ms(info['avg_ms'])}ms/hit")
-                      print(f"    {' · '.join(summary_parts)}")
-
-                      if group["member_rows"]:
-                          self._print_table(headers=group_members_headers, rows=group["member_rows"], formats=group_members_formats, indent="    ", widths=max_widths)
-
-              print("\n═════════════════════════\n")
-
-          # -------- Helpers --------
-
-          @staticmethod
-          def _fmt_int(value: int) -> str:
-              """Format integer with thousands separator."""
-              return f"{value:,}"
-
-          @staticmethod
-          def _fmt_ms(value: float) -> str:
-              """Format milliseconds with 3 decimals and thousands separator."""
-              return f"{value:,.3f}"
-
-          @staticmethod
-          def _fmt_int_or_blank(value: Optional[int]) -> str:
-              """Format integer with thousands separator, or return blank string if None."""
-              if value is None:
-                  return ""
-              return f"{value:,}"
-
-          @staticmethod
-          def _fmt_ms_or_blank(value: Optional[float]) -> str:
-              """Format ms with 3 decimals and thousands separator, or return blank string if None."""
-              if value is None:
-                  return ""
-              return f"{value:,.3f}"
-
-          @staticmethod
-          def _fmt_ratio_or_blank(value: Optional[float]) -> str:
-              """Format a ratio with 2 decimals, or return blank string if None."""
-              if value is None:
-                  return ""
-              return f"{value:.2f}"
-
-          def _print_table(
-              self,
-              headers: Tuple[str, ...],
-              rows: List[Tuple],
-              formats: Tuple = None,
-              indent: str = "",
-              widths: Dict[str, int] = None,
-          ):
-              """Print a simple aligned table.
-
-              headers: tuple of column names.
-              rows: list of tuples aligned with headers.
-              formats: tuple of formatter callables (len == len(headers)), applied to each cell.
-                       If None, str() is used.
-              indent: left indentation for each printed row.
-              widths: optional dict of {header: width} to enforce column widths.
-              """
-              if not rows:
-                  return
-
-              ncols = len(headers)
-              fmts = formats if formats is not None else tuple([str] * ncols)
-
-              # Determine which columns are numeric (should be right-aligned)
-              # Check against the static formatters defined in the class.
-              numeric_formatters = (self._fmt_int, self._fmt_ms, self._fmt_int_or_blank, self._fmt_ms_or_blank, self._fmt_ratio_or_blank)
-              is_numeric_col = [f in numeric_formatters for f in fmts]
-
-              # Convert cells to strings using provided formatters
-              str_rows: List[List[str]] = []
-              for r in rows:
-                  str_row = []
-                  for i in range(ncols):
-                      val = r[i]
-                      str_row.append(fmts[i](val) if callable(fmts[i]) else str(val))
-                  str_rows.append(str_row)
-
-              # Compute column widths
-              if widths:
-                  col_widths = [widths[h] for h in headers]
-              else:
-                  col_widths = [len(h) for h in headers]
-                  for r in str_rows:
-                      for i, cell in enumerate(r):
-                          col_widths[i] = max(col_widths[i], len(cell))
-
-              # Print header
-              header_line = indent + " | ".join(
-                  h.rjust(col_widths[i]) if is_numeric_col[i] else h.ljust(col_widths[i])
-                  for i, h in enumerate(headers)
-              )
-              sep_line = indent + "-+-".join("-" * col_widths[i] for i in range(ncols))
-              print(header_line)
-              print(sep_line)
-
-              # Print rows
-              for r in str_rows:
-                  print(
-                      indent + " | ".join(
-                          r[i].rjust(col_widths[i]) if is_numeric_col[i] else r[i].ljust(col_widths[i])
-                          for i in range(ncols)
-                      )
-                  )
-
-          def _group_members(self, prefix: str) -> List[str]:
-              """Return all timing and count keys that belong to the group 'prefix'.
-
-              A key belongs if key == prefix or key.startswith(prefix + ".").
-              """
-              pfx_dot = prefix + "."
-              all_keys = self.times.keys() | self.counts.keys()
-              members = [k for k in all_keys if k == prefix or k.startswith(pfx_dot)]
-              return members
-
-          def _group_hits(self, prefix: str, members: List[str]) -> int:
-              """Determine the 'group hit count' for a group.
-
-              Rule:
-              - If the exact group key has a timing hit count, use that.
-              - Else use the maximum timing hit count among its members (descendants).
-              This approximates "how many times the group ran" even if the root itself
-              wasn't timed explicitly.
-              """
-              direct = self.time_counts.get(prefix, 0)
-              if direct > 0:
-                  return direct
-              max_desc = 0
-              for k in members:
-                  max_desc = max(max_desc, self.time_counts.get(k, 0))
-              return max_desc
-
-          def __enter__(self):
-              self.reset()
-              return self
-
-          def __exit__(self, exc_type, exc_val, exc_tb):
-              self.report()
-
-      ```
+      REPEAT=2 AGG_METHOD="min" SKIP_CPP_BUILD=1 CONSTRAINT_FILE="./.cache/test_vocabs/js_grammar_constraint js js x=10000 3 (faster).json.gz" CODE_FILE=./src/example_code7.js bash python/run_variations.sh python/aug25/models/precompute3_model_pure_python_opt3.py
+      Optimization coordinator
+      ---
+      Model: python/aug25/models/precompute3_model_pure_python_opt3.py
+      Constraint File: ./.cache/test_vocabs/js_grammar_constraint js js x=10000 3 (faster).json.gz
+      Code: ./src/example_code7.js
+      Detect repeats: 3
+      Eval repeats: 10
+      Agg method: min
+      Metric: edges_traversed
+      Hot steps: 1
+      ---
+      Skipping C++ extension build (SKIP_CPP_BUILD=1).
+      ---
+      Starting optimization coordination...
+      python -m python.aug25.optimization_coordinator --constraint-file ./.cache/test_vocabs/js_grammar_constraint js js x=10000 3 (faster).json.gz --code ./src/example_code7.js --model python/aug25/models/precompute3_model_pure_python_opt3.py --detect-repeat 3 --eval-repeat 10 --agg-method min --metric edges_traversed --hot-steps 1 --output variations_results/2025-10-04_12-00-52
+      Stage 1: Loading and flattening arena: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22499/22499 [00:00<00:00, 94010.13it/s]
+      Optimizing intermediate arena: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22499/22499 [00:01<00:00, 11308.51it/s]
+      Stage 2: Merging and converting arena: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22499/22499 [00:01<00:00, 14074.74it/s]
+      Input tokens: 929
+      Detection repeats: 3, Aggregation: min, Metric: edges_traversed
+      --- Detection pass 1/3 ---
+      --- Detection pass 2/3 ---
+      --- Detection pass 3/3 ---
+
+      === Hot step detection summary ===
+        Step    0 agg=2.000
+        Step    1 agg=7.000
+        Step    2 agg=7.000
+        Step    3 agg=0.000
+        Step    4 agg=0.000
+        ...
+        Top hot steps (by aggregated metric): [523]
+
+      >>> Chosen hot step: 523 (aggregated edges_traversed=28.000)
+
+      === Evaluating variations at chosen step ===
+
+      ----------------------------------------
+      [Coordinator] Variation: baseline
+      [Variation] baseline: set get_mask traversal budgets to max_edges=1, max_dests=1
+      [Coordinator] Stored baseline mask for comparison.
+        Results for: baseline
+          get_mask                                :      3.098 ms (min of 10)
+          get_mask.main_loop                      :      2.020 ms (min of 10)
+          get_mask.traversal.edges_traversed      :     28.000  (mean of 10)
+          get_mask.traversal.nodes_processed      :     41.000  (mean of 10)
+
+      ----------------------------------------
+      [Coordinator] Variation: budget_1x
+      [Variation] budget_1x: set get_mask traversal budgets to max_edges=1, max_dests=1
+        Results for: budget_1x
+          get_mask                                :      3.069 ms (min of 10)
+          get_mask.main_loop                      :      1.953 ms (min of 10)
+          get_mask.traversal.edges_traversed      :     28.000  (mean of 10)
+          get_mask.traversal.nodes_processed      :     41.000  (mean of 10)
+
+      ----------------------------------------
+      [Coordinator] Variation: budget_4x
+      [Variation] budget_4x: set get_mask traversal budgets to max_edges=4, max_dests=256
+        Results for: budget_4x
+          get_mask                                :      3.391 ms (min of 10)
+          get_mask.main_loop                      :      2.164 ms (min of 10)
+          get_mask.traversal.edges_traversed      :     31.000  (mean of 10)
+          get_mask.traversal.nodes_processed      :     41.000  (mean of 10)
+
+      ----------------------------------------
+      [Coordinator] Variation: budget_8x
+      [Variation] budget_8x: set get_mask traversal budgets to max_edges=8, max_dests=1024
+        Results for: budget_8x
+          get_mask                                :      3.623 ms (min of 10)
+          get_mask.main_loop                      :      2.496 ms (min of 10)
+          get_mask.traversal.edges_traversed      :     34.000  (mean of 10)
+          get_mask.traversal.nodes_processed      :     43.000  (mean of 10)
+
+      ----------------------------------------
+      [Coordinator] Variation: budget_16x
+      [Variation] budget_16x: set get_mask traversal budgets to max_edges=16, max_dests=4096
+        Results for: budget_16x
+          get_mask                                :      3.984 ms (min of 10)
+          get_mask.main_loop                      :      2.901 ms (min of 10)
+          get_mask.traversal.edges_traversed      :     42.000  (mean of 10)
+          get_mask.traversal.nodes_processed      :     51.000  (mean of 10)
+
+      ----------------------------------------
+      [Coordinator] Variation: arena_diversity_default
+      [Variation] arena_diversity_default: re-optimizing arena with params=ArenaOptimizeParams(depth_weight=1024, pop_weight=1, penalty_llm_overlap=512, penalty_state_overlap=256, penalty_same_dest=192, fallback_fanout_threshold=256)
+      Optimizing intermediate arena: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22499/22499 [00:02<00:00, 10027.26it/s]
+      Stage 2: Merging and converting arena: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22499/22499 [00:00<00:00, 33166.85it/s]
+        Results for: arena_diversity_default
+          get_mask                                :      2.861 ms (min of 10)
+          get_mask.main_loop                      :      1.879 ms (min of 10)
+          get_mask.traversal.edges_traversed      :     28.000  (mean of 10)
+          get_mask.traversal.nodes_processed      :     41.000  (mean of 10)
+
+      ----------------------------------------
+      [Coordinator] Variation: arena_diversity_more_depth
+      [Variation] arena_diversity_more_depth: re-optimizing arena with params=ArenaOptimizeParams(depth_weight=2048, pop_weight=1, penalty_llm_overlap=512, penalty_state_overlap=256, penalty_same_dest=192, fallback_fanout_threshold=256)
+      Optimizing intermediate arena: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22499/22499 [00:01<00:00, 11695.51it/s]
+      Stage 2: Merging and converting arena: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22499/22499 [00:00<00:00, 39428.91it/s]
+        Results for: arena_diversity_more_depth
+          get_mask                                :      2.834 ms (min of 10)
+          get_mask.main_loop                      :      1.860 ms (min of 10)
+          get_mask.traversal.edges_traversed      :     28.000  (mean of 10)
+          get_mask.traversal.nodes_processed      :     41.000  (mean of 10)
+
+      ----------------------------------------
+      [Coordinator] Variation: arena_diversity_less_overlap_penalty
+      [Variation] arena_diversity_less_overlap_penalty: re-optimizing arena with params=ArenaOptimizeParams(depth_weight=1024, pop_weight=1, penalty_llm_overlap=256, penalty_state_overlap=128, penalty_same_dest=192, fallback_fanout_threshold=256)
+      Optimizing intermediate arena: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22499/22499 [00:01<00:00, 11959.30it/s]
+      Stage 2: Merging and converting arena: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22499/22499 [00:01<00:00, 12844.18it/s]
+        Results for: arena_diversity_less_overlap_penalty
+          get_mask                                :      2.824 ms (min of 10)
+          get_mask.main_loop                      :      1.859 ms (min of 10)
+          get_mask.traversal.edges_traversed      :     28.000  (mean of 10)
+          get_mask.traversal.nodes_processed      :     41.000  (mean of 10)
+
+      ----------------------------------------
+      [Coordinator] Variation: arena_diversity_pop_penalty
+      [Variation] arena_diversity_pop_penalty: re-optimizing arena with params=ArenaOptimizeParams(depth_weight=1024, pop_weight=64, penalty_llm_overlap=512, penalty_state_overlap=256, penalty_same_dest=192, fallback_fanout_threshold=256)
+      Optimizing intermediate arena: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22499/22499 [00:01<00:00, 11701.04it/s]
+      Stage 2: Merging and converting arena: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22499/22499 [00:01<00:00, 12391.82it/s]
+        Results for: arena_diversity_pop_penalty
+          get_mask                                :      2.807 ms (min of 10)
+          get_mask.main_loop                      :      1.844 ms (min of 10)
+          get_mask.traversal.edges_traversed      :     28.000  (mean of 10)
+          get_mask.traversal.nodes_processed      :     41.000  (mean of 10)
+
+      === Optimization evaluation complete ===
+      Results saved to: variations_results/2025-10-04_12-00-52/variations_results.json
+
+      ---
+      Optimization coordination complete. Results in: variations_results/2025-10-04_12-00-52
     metadata:
-      filename: python/aug25/stats.py
-  - user: chatllm send --init --code-completion-model cp --attach python/aug25/models/precompute3_model_pure_python_opt3.py
-      python/aug25/stats.py --apply git-llm --model gp --paste
+  - user: |-
+      We really want to get down to under 5 edges traversed, or at most 10, and main loop time around 0.1 ms. Right now we're at edges_traversed=28.000 and 1 ms.
+      Try something drastic.
+      Do it as a variation, though.
+      A variation can be anything.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4736,89 +3477,210 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to apply the changes, followed by the git diffs for each file.
+      Below are concrete, step-by-step edits and a patch that adds a drastic “global cutoff” variation. This variation stops get_mask early after a small global edge budget (e.g., 5 edges) and, if configured, fills the remainder with a cheap approximation so you get both very small edges_traversed and very low runtime. You can enable it from the optimization coordinator as a standard variation.
 
-      ### Step-by-Step Instructions
+      Step-by-step instructions
 
-      #### File: `python/aug25/models/precompute3_model_pure_python_opt3.py`
+      1) File to edit
+      - python/aug25/models/precompute3_model_pure_python_opt3.py
 
-      1.  Open the file `python/aug25/models/precompute3_model_pure_python_opt3.py`.
-      2.  Navigate to the `get_mask` method inside the `Model` class.
-      3.  Within the main `for` loop (`for edge_i in range(start_edge, len(a_node.children)):`), locate the following block of code which appears twice:
-          ```python
-          stats.inc('get_mask.traversal.edges_traversed')
-          stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
-          ```
-      4.  Delete the second occurrence of this two-line block. This will correct the double-counting of edge traversal statistics. The block to be removed is located immediately after the `if remaining_global_edge_budget is not None:` block and before the `if edge.pop in pop_cache:` line.
+      2) Add a new Variation to enable a global edge cutoff
+      - Right after the existing ArenaReorderVariation class, add a new dataclass GlobalCutoffVariation that sets:
+        - model.gm_global_edge_budget (e.g., 5)
+        - model.gm_approx_on_cutoff (True/False)
+      - This gives you a “drastic” variant that can be invoked by the optimization coordinator.
 
-      #### File: `python/aug25/stats.py`
+      3) Extend Model with two new attributes
+      - In the Model dataclass fields, add:
+        - gm_global_edge_budget: Optional[int] = None
+        - gm_approx_on_cutoff: bool = False
+      - In clone_sharing_structure, copy these attributes over to the new clone to ensure consistency for repeated runs.
 
-      1.  Open the file `python/aug25/stats.py`.
-      2.  Go to the `report` method in the `Stats` class.
-      3.  Find the loop where group summary statistics are prepared (`for group in groups_data:`).
-      4.  Locate this line:
-          ```python
-          summary_parts.append(f"{info['members_count']} members")
-          ```
-      5.  Replace it with the following line to make the summary report clearer by distinguishing between the total number of keys and the number of timed keys in a group:
-          ```python
-          summary_parts.append(f"{info['members_count']} keys ({info['timing_members_count']} timed)")
-          ```
+      4) Add the new variation to default_variations()
+      - Append a new GlobalCutoffVariation at the end of default_variations(), e.g.:
+        - name="drastic_cutoff5_approx", edge_budget=5, approx_fill=True
+      - This one should drastically reduce edges_traversed to ≤5 and bring main loop time closer to ~0.1 ms.
 
-      ### Git Diffs
+      5) Implement the early cutoff inside get_mask()
+      - Introduce a small global budget counter at the start of get_mask() and a cutoff flag.
+      - After incrementing edges_traversed for each edge, decrement the budget and, if it reaches zero:
+        - If approx mode is on, compute a quick upper-bound mask from the work heap and current node using the union of:
+          - each pending node’s arena[node_id].llm_bv_union
+          - intersected with each pending GSS’s current llm_mask
+          - intersected with remaining_mask
+        - Clear the heap to exit immediately and finish.
+      - This ensures minimal edges_traversed and very low runtime for get_mask() when this variation is applied.
 
-      Here are the corresponding git diffs to apply these changes.
+      6) Notes
+      - Baseline behavior remains unchanged if gm_global_edge_budget is None (default).
+      - The “approx_fill” mode attempts to avoid a severe under-approximation by filling with a cheap upper bound; it may produce a superset of the exact mask. This is intentional for the “drastic” mode.
+      - If you want a strict cutoff without approximation, set approx_fill=False in the variation.
+
+      Git diff patch
 
       ```diff
       diff --git a/python/aug25/models/precompute3_model_pure_python_opt3.py b/python/aug25/models/precompute3_model_pure_python_opt3.py
-      index 455474a..0499e4f 100644
+      index 7f7b3f3..a5a6e85 100644
       --- a/python/aug25/models/precompute3_model_pure_python_opt3.py
       +++ b/python/aug25/models/precompute3_model_pure_python_opt3.py
-      @@ -1071,10 +1071,6 @@
-                               maybe_trigger_cutoff(node, gss_node, gss_acc)
-                               break
+      @@ -71,6 +71,19 @@ class ArenaReorderVariation(VariationBase):
+           def __call__(self, model: "Model") -> None:
+               print(f"[Variation] {self.name}: re-optimizing arena with params={self.params}")
+               model.optimize_arena(self.params)
+      +
+      +@dataclass
+      +class GlobalCutoffVariation(VariationBase):
+      +    edge_budget: int = 5
+      +    approx_fill: bool = True
+      +
+      +    def __call__(self, model: "Model") -> None:
+      +        # Drastic: enforce a global edge traversal cutoff inside get_mask.
+      +        # If approx_fill is True, we add a cheap upper-bound approximation
+      +        # from the remaining frontier to avoid returning a severely under-approximated mask.
+      +        print(f"[Variation] {self.name}: enabling global edge cutoff at {self.edge_budget} edges (approx_fill={self.approx_fill})")
+      +        model.gm_global_edge_budget = int(self.edge_budget)
+      +        model.gm_approx_on_cutoff = bool(self.approx_fill)
        
-      -                stats.inc('get_mask.traversal.edges_traversed')
-      -                stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
-      -
-                       if edge.pop in pop_cache:
-                           popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
-                           stats.inc('get_mask.main_loop.edge.pop_cache_hits')
-
-      ```
-
-      ```diff
-      diff --git a/python/aug25/stats.py b/python/aug25/stats.py
-      index 9226879..8572115 100644
-      --- a/python/aug25/stats.py
-      +++ b/python/aug25/stats.py
-      @@ -262,7 +262,7 @@
-                       print(f"\n  [{info['name']}]")
-                       summary_parts = []
-                       if info['timing_members_count'] > 0:
-      -                    summary_parts.append(f"{info['members_count']} members")
-      +                    summary_parts.append(f"{info['members_count']} keys ({info['timing_members_count']} timed)")
-                           summary_parts.append(f"{self._fmt_int(info['hits'])} hits")
-                           summary_parts.append(f"{self._fmt_ms(info['total_ms'])}ms total")
-                           summary_parts.append(f"{self._fmt_ms(info['avg_ms'])}ms/hit")
-
+       # Type Aliases
+       NodeID = int
+      @@ -376,6 +389,8 @@ class Model(GraphProvider):
+           last_get_mask_cost: int = 0
+           last_get_mask_metrics: Dict[str, float] = field(default_factory=dict)
+           suppress_stats_report: bool = True
+      +    gm_global_edge_budget: Optional[int] = None
+      +    gm_approx_on_cutoff: bool = False
+       
+           # ------------- Construction and structure management -------------
+       
+      @@ -481,6 +496,8 @@ class Model(GraphProvider):
+                   state=self.make_initial_state(),
+                   gm_max_edges=self.gm_max_edges,
+                   gm_max_dests=self.gm_max_dests,
+      +            gm_global_edge_budget=self.gm_global_edge_budget,
+      +            gm_approx_on_cutoff=self.gm_approx_on_cutoff,
+                   suppress_stats_report=self.suppress_stats_report,
+               )
+       
+      @@ -545,6 +562,7 @@ class Model(GraphProvider):
+               vars.append(ArenaReorderVariation(name="arena_diversity_default", params=ArenaOptimizeParams()))
+               vars.append(ArenaReorderVariation(name="arena_diversity_more_depth", params=ArenaOptimizeParams(depth_weight=2048)))
+               vars.append(ArenaReorderVariation(name="arena_diversity_less_overlap_penalty", params=ArenaOptimizeParams(penalty_llm_overlap=256, penalty_state_overlap=128)))
+      +        vars.append(GlobalCutoffVariation(name="drastic_cutoff5_approx", edge_budget=5, approx_fill=True))
+               return vars
+       
+           def get_benchmark_config(self) -> Dict:
+      @@ -840,6 +858,11 @@ class Model(GraphProvider):
+               stats = Stats.get()
+               stats.start('get_mask')
+               stats.inc('get_mask.initial_tokenizer_states', len(self.state))
+      +
+      +        # Global "drastic" edge budget (optional, controlled by variation).
+      +        # None means no cutoff (default/baseline). When set, we stop early after N edges.
+      +        remaining_global_edge_budget = None if self.gm_global_edge_budget is None else int(self.gm_global_edge_budget)
+      +        cutoff_triggered = False
+       
+               all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
+               work_heap = []
+      @@ -854,6 +877,40 @@ class Model(GraphProvider):
+                   )
+                   heapq.heappush(work_heap, item)
+       
+      +        def maybe_trigger_cutoff(current_node: Optional[NodeID], current_gss: Optional[GSS], current_gss_acc: Optional[PyAcc]) -> None:
+      +            # When the global cutoff triggers, we optionally perform a cheap approximation
+      +            # over the current frontier to avoid returning a severely under-approximated mask.
+      +            nonlocal cutoff_triggered, final_mask, work_heap, remaining_mask
+      +            if cutoff_triggered:
+      +                return
+      +            if self.gm_approx_on_cutoff:
+      +                # Include potential from the current node being processed.
+      +                if current_node is not None and current_gss is not None:
+      +                    a_node_local = self.arena.get(current_node)
+      +                    if a_node_local is not None:
+      +                        acc_local = current_gss_acc if current_gss_acc is not None else current_gss.reduce_acc()
+      +                        if acc_local:
+      +                            pot = a_node_local.llm_bv_union.intersection(acc_local.llm_mask)
+      +                            # Only add what's not already in final_mask
+      +                            pot = pot.intersection(remaining_mask)
+      +                            if not pot.is_empty():
+      +                                final_mask |= pot
+      +                                remaining_mask = all_ones.difference(final_mask)
+      +                # Include potential from all items still in the heap
+      +                for item in work_heap:
+      +                    a_node_heap = self.arena.get(item.node_id)
+      +                    if a_node_heap is None:
+      +                        continue
+      +                    acc_heap = item.gss.reduce_acc()
+      +                    if not acc_heap:
+      +                        continue
+      +                    pot = a_node_heap.llm_bv_union.intersection(acc_heap.llm_mask)
+      +                    pot = pot.intersection(remaining_mask)
+      +                    if not pot.is_empty():
+      +                        final_mask |= pot
+      +                        remaining_mask = all_ones.difference(final_mask)
+      +            work_heap.clear()
+      +            cutoff_triggered = True
+      +
+               def dequeue() -> Tuple[NodeID, GSS, int, int, Dict]:
+                   item = heapq.heappop(work_heap)
+                   return item.node_id, item.gss, item.edge_idx, item.dest_idx, item.pop_cache
+      @@ -892,6 +949,9 @@ class Model(GraphProvider):
+                   stats.stop('get_mask.main_loop.node.reduce_acc')
+                   gss_mask = gss_acc.llm_mask if gss_acc else RangeSet.empty()
+       
+      +            if cutoff_triggered:
+      +                break
+      +
+                   if self.is_end(node) and gss_acc and not final_mask.issuperset(gss_acc.llm_mask):
+                       stats.inc('get_mask.traversal.end_nodes')
+                       stats.start('get_mask.main_loop.end_node.final_mask_union')
+      @@ -918,6 +978,15 @@ class Model(GraphProvider):
+                               stats.inc('get_mask.main_loop.edge.dest_union_pruned_pop0')
+                               continue
+       
+      +                # Count traversal of this edge and apply global cutoff if configured
+      +                stats.inc('get_mask.traversal.edges_traversed')
+      +                stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
+      +                if remaining_global_edge_budget is not None:
+      +                    remaining_global_edge_budget -= 1
+      +                    if remaining_global_edge_budget <= 0:
+      +                        maybe_trigger_cutoff(node, gss_node, gss_acc)
+      +                        break
+      +
+                       stats.inc('get_mask.traversal.edges_traversed')
+                       stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
+       
+      @@ -976,6 +1045,10 @@ class Model(GraphProvider):
+                           enqueue(d, child_gss)
+                           dests_proc += 1
+       
+      +                if cutoff_triggered:
+      +                    break
+      +
+                       if edges_proc >= max_edges: break
+                       edges_proc += 1
+       
+      @@ -984,6 +1057,9 @@ class Model(GraphProvider):
+                           enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
+                           stats.inc('get_mask.traversal.node_requeued_for_more_edges')
+                           break
+      +
+      +            if cutoff_triggered:
+      +                break
+               stats.stop('get_mask.main_loop')
+       
+               stats.start('get_mask.final_conversion')
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/models/precompute3_model_pure_python_opt3.py
       Applying patch to 'python/aug25/models/precompute3_model_pure_python_opt3.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/models/precompute3_model_pure_python_opt3.py.
-
-      --- Processing Diff Block 2 ---
-      Identified target file: python/aug25/stats.py
-      Applying patch to 'python/aug25/stats.py' using custom patcher...
-      Successfully applied patch and wrote to python/aug25/stats.py.
     metadata:
-  - user: 'Changes committed with message: "Fix double-counting of edge traversal
-      stats in get_mask and improve group summary reporting in Stats"'
+  - user: 'Changes committed with message: "Add GlobalCutoffVariation for drastic
+      early exit in get_mask with optional cheap approximation"'
     metadata:
 ...

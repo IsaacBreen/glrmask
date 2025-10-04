@@ -270,7 +270,7 @@ class Stats:
                 print(f"\n  [{info['name']}]")
                 summary_parts = []
                 if info['timing_members_count'] > 0:
-                    summary_parts.append(f"{info['members_count']} keys ({info['timing_members_count']} timed)")
+                    summary_parts.append(f"{info['members_count']} members")
                     summary_parts.append(f"{self._fmt_int(info['hits'])} hits")
                     summary_parts.append(f"{self._fmt_ms(info['total_ms'])}ms total")
                     summary_parts.append(f"{self._fmt_ms(info['avg_ms'])}ms/hit")
