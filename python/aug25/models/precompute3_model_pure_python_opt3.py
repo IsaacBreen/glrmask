@@ -15,9 +15,10 @@ import numpy as np
 import _sep1 as ffi
 from tqdm import tqdm
 
-from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
+# from python.gss_tester.implementations.leveled_impl import LeveledGSS as GSS
 # from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
 # from python.gss_tester.implementations.leveled_per_acc_standalone_impl import LeveledPerAccGSS as GSS
+from python.gss_tester.implementations.leveled_rs_impl import LeveledRSGSS as GSS
 from ..common_interface import GraphProvider
 from ..stats import Stats
 from ..range_set import FFIRangeSet as RangeSet
