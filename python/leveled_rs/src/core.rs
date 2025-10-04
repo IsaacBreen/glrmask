@@ -363,10 +363,18 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
 
         // Build a trie: map value -> { end: Option<A>, sub: Trie }
-        #[derive(Default)]
         struct Entry<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
             end: Option<A>,
             sub: StdHashMap<T, Entry<T, A>>,
+        }
+
+        impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Default for Entry<T, A> {
+            fn default() -> Self {
+                Self {
+                    end: None,
+                    sub: StdHashMap::new(),
+                }
+            }
         }
 
         let mut trie: StdHashMap<T, Entry<T, A>> = StdHashMap::new();
@@ -1105,7 +1113,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
 
         let res_inner_opt = transform::<T, A, B, M>(&self.inner, &mut acc_memo, &mut mutator);
-        res_inner_opt.map_or_else(Self::empty, |inner| LeveledGSS { inner })
+        res_inner_opt.map_or_else(LeveledGSS::<T, B>::empty, |inner| LeveledGSS::<T, B> { inner })
     }
 
     pub fn merge(&self, other: &Self) -> Self {
