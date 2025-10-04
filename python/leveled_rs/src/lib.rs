@@ -1,1050 +1,158 @@
+use pyo3::basic::CompareOp;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PySet, PyTuple, PyType};
-use pyo3::basic::CompareOp;
-use std::sync::Arc;
-use im::{HashMap, OrdMap};
+
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::collections::VecDeque;
 
-// Wrapper for PyObject to be used as a key in HashMap
+use crate::core::{LeveledGSS as CoreLeveledGSS, Merge};
+
+mod core;
+
+// Wrapper types for Python interop used only in this binding layer.
+
 #[derive(Clone)]
-struct PyObjectWrapper(PyObject);
+struct PyKey(PyObject);
 
-impl PartialEq for PyObjectWrapper {
+impl PartialEq for PyKey {
     fn eq(&self, other: &Self) -> bool {
         Python::with_gil(|py| {
             match self.0.as_ref(py).rich_compare(other.0.as_ref(py), CompareOp::Eq) {
                 Ok(res) => res.is_true().unwrap_or(false),
-                Err(_) => self.0.as_ref(py).is(other.0.as_ref(py)), // Fallback to pointer comparison
+                Err(_) => self.0.as_ref(py).is(other.0.as_ref(py)),
             }
         })
     }
 }
+impl Eq for PyKey {}
 
-impl Eq for PyObjectWrapper {}
-
-impl Hash for PyObjectWrapper {
+impl Hash for PyKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        Python::with_gil(|py| match self.0.as_ref(py).hash() {
+            Ok(h) => h.hash(state),
+            Err(_) => 0.hash(state),
+        });
+    }
+}
+
+#[derive(Clone)]
+struct PyAcc(PyObject);
+
+impl PartialEq for PyAcc {
+    fn eq(&self, other: &Self) -> bool {
         Python::with_gil(|py| {
-            match self.0.as_ref(py).hash() {
-                Ok(hash_val) => hash_val.hash(state),
-                Err(_) => 0.hash(state), // Fallback for unhashable types
+            match self.0.as_ref(py).rich_compare(other.0.as_ref(py), CompareOp::Eq) {
+                Ok(res) => res.is_true().unwrap_or(false),
+                Err(_) => self.0.as_ref(py).is(other.0.as_ref(py)),
             }
-        });
+        })
     }
 }
+impl Eq for PyAcc {}
 
-type Children<N> = HashMap<PyObjectWrapper, OrdMap<isize, Arc<N>>>;
-
-#[derive(Clone)]
-struct Lower {
-    children: Children<Lower>,
-    empty: bool,
-    max_depth: isize,
-}
-
-impl PartialEq for Lower {
-    fn eq(&self, other: &Self) -> bool {
-        self.empty == other.empty && self.max_depth == other.max_depth && self.children.ptr_eq(&other.children)
-    }
-}
-impl Eq for Lower {}
-
-impl Hash for Lower {
+impl Hash for PyAcc {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.empty.hash(state);
-        // self.max_depth.hash(state); // max_depth is derived, shouldn't be part of hash
-        self.children.iter().for_each(|(k, v)| {
-            k.hash(state);
-            v.iter().for_each(|(d, n)| {
-                d.hash(state);
-                Arc::as_ptr(n).hash(state);
-            });
+        Python::with_gil(|py| match self.0.as_ref(py).hash() {
+            Ok(h) => h.hash(state),
+            Err(_) => 0.hash(state),
         });
     }
 }
 
-fn py_obj_eq(a: &Option<PyObject>, b: &Option<PyObject>) -> bool {
-    Python::with_gil(|py| match (a, b) {
-        (Some(a_obj), Some(b_obj)) => a_obj.as_ref(py).rich_compare(b_obj.as_ref(py), CompareOp::Eq).map_or(false, |c| c.is_true().unwrap_or(false)),
-        (None, None) => true,
-        _ => false,
-    })
+impl Merge for PyAcc {
+    fn merge(&self, other: &Self) -> Self {
+        Python::with_gil(|py| {
+            let merged = self
+                .0
+                .call_method1(py, "merge", (other.0.clone_ref(py),))
+                .expect("Accumulator merge failed in Python");
+            PyAcc(merged)
+        })
+    }
 }
 
+#[pyclass(name = "LeveledGSS", module = "leveled_gss_rs", unsendable)]
 #[derive(Clone)]
-struct Interface {
-    children: Children<Lower>,
-    acc: PyObject,
-    empty: Option<PyObject>,
-    max_depth: isize,
-}
-
-impl PartialEq for Interface {
-    fn eq(&self, other: &Self) -> bool {
-        Python::with_gil(|py| {
-            self.acc.as_ref(py).eq(other.acc.as_ref(py)).unwrap_or(false) &&
-            py_obj_eq(&self.empty, &other.empty) &&
-            self.max_depth == other.max_depth &&
-            self.children.ptr_eq(&other.children)
-        })
-    }
-}
-impl Eq for Interface {}
-
-impl Hash for Interface {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        Python::with_gil(|py| {
-            self.acc.as_ref(py).hash().unwrap_or(0).hash(state);
-            self.empty.as_ref().and_then(|e| e.as_ref(py).hash().ok()).hash(state);
-        });
-        // self.max_depth.hash(state);
-        self.children.iter().for_each(|(k, v)| {
-            k.hash(state);
-            v.iter().for_each(|(d, n)| {
-                d.hash(state);
-                Arc::as_ptr(n).hash(state);
-            });
-        });
-    }
-}
-
-#[derive(Clone)]
-struct UpperBranch {
-    children: Children<Upper>,
-    empty: Option<PyObject>,
-    max_depth: isize,
-}
-
-impl PartialEq for UpperBranch {
-    fn eq(&self, other: &Self) -> bool {
-        Python::with_gil(|py| {
-            py_obj_eq(&self.empty, &other.empty) &&
-            self.max_depth == other.max_depth &&
-            self.children.ptr_eq(&other.children)
-        })
-    }
-}
-impl Eq for UpperBranch {}
-
-impl Hash for UpperBranch {
-     fn hash<H: Hasher>(&self, state: &mut H) {
-        Python::with_gil(|py| {
-            self.empty.as_ref().and_then(|e| e.as_ref(py).hash().ok()).hash(state);
-        });
-        // self.max_depth.hash(state);
-        self.children.iter().for_each(|(k, v)| {
-            k.hash(state);
-            v.iter().for_each(|(d, n)| {
-                d.hash(state);
-                Arc::as_ptr(n).hash(state);
-            });
-        });
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-enum Upper {
-    Branch(Arc<UpperBranch>),
-    Interface(Arc<Interface>),
-}
-
-impl Upper {
-    fn max_depth(&self) -> isize {
-        match self {
-            Upper::Branch(b) => b.max_depth,
-            Upper::Interface(i) => i.max_depth,
-        }
-    }
-
-    fn children(&self) -> PyResult<Vec<PyObject>> {
-        Python::with_gil(|py| {
-            let keys: Vec<PyObject> = match self {
-                Upper::Branch(b) => b.children.keys().map(|k| k.0.clone_ref(py)).collect(),
-                Upper::Interface(i) => i.children.keys().map(|k| k.0.clone_ref(py)).collect(),
-            };
-            Ok(keys)
-        })
-    }
-}
-
-#[pyclass(name = "LeveledGSS", module="leveled_gss_rs", unsendable)]
-#[derive(Clone, PartialEq, Eq, Hash)]
 struct LeveledGSS {
-    inner: Arc<Upper>,
-}
-
-fn get_max_depth_lower(children: &Children<Lower>) -> isize {
-    children.values().flat_map(|kids| kids.values()).map(|c| c.max_depth).max().map_or(0, |d| d + 1)
-}
-
-fn get_max_depth_upper(children: &Children<Upper>) -> isize {
-    children.values().flat_map(|kids| kids.values()).map(|c| c.max_depth()).max().map_or(0, |d| d + 1)
-}
-
-impl LeveledGSS {
-    fn _empty() -> Self {
-        let inner = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-            children: HashMap::new(),
-            empty: None,
-            max_depth: 0,
-        })));
-        LeveledGSS { inner }
-    }
-
-    fn _merge_optional_acc(py: Python, a: &Option<PyObject>, b: &Option<PyObject>) -> PyResult<Option<PyObject>> {
-        match (a, b) {
-            (None, Some(b_val)) => Ok(Some(b_val.clone())),
-            (Some(a_val), None) => Ok(Some(a_val.clone())),
-            (Some(a_val), Some(b_val)) => {
-                let merged = a_val.call_method1(py, "merge", (b_val.clone(),))?;
-                Ok(Some(merged))
-            }
-            (None, None) => Ok(None),
-        }
-    }
-
-    fn merge_children_lower(py: Python, c1: &Children<Lower>, c2: &Children<Lower>) -> PyResult<Children<Lower>> {
-        if c1.ptr_eq(c2) {
-            return Ok(c1.clone());
-        }
-        let mut merged = c1.clone();
-        for (k, v2_map) in c2.iter() {
-            if let Some(v1_map) = merged.get(k) {
-                let mut new_map = v1_map.clone();
-                for (depth, child2) in v2_map.iter() {
-                    if let Some(child1) = new_map.get(depth) {
-                        let merged_child = LeveledGSS::merge_lower(py, child1, child2)?;
-                        new_map.insert(*depth, merged_child);
-                    } else {
-                        new_map.insert(*depth, child2.clone());
-                    }
-                }
-                merged.insert(k.clone(), new_map);
-            } else {
-                merged.insert(k.clone(), v2_map.clone());
-            }
-        }
-        Ok(merged)
-    }
-
-    fn merge_lower(py: Python, l1: &Arc<Lower>, l2: &Arc<Lower>) -> PyResult<Arc<Lower>> {
-        if Arc::ptr_eq(l1, l2) {
-            return Ok(l1.clone());
-        }
-        let new_empty = l1.empty || l2.empty;
-        let merged_children = LeveledGSS::merge_children_lower(py, &l1.children, &l2.children)?;
-        let max_depth = get_max_depth_lower(&merged_children);
-        Ok(Arc::new(Lower {
-            children: merged_children,
-            empty: new_empty,
-            max_depth,
-        }))
-    }
-
-    fn merge_children_upper(py: Python, c1: &Children<Upper>, c2: &Children<Upper>) -> PyResult<Children<Upper>> {
-        if c1.ptr_eq(c2) {
-            return Ok(c1.clone());
-        }
-        let mut merged = c1.clone();
-        for (k, v2_map) in c2.iter() {
-            if let Some(v1_map) = merged.get(k) {
-                let mut new_map = v1_map.clone();
-                for (depth, child2) in v2_map.iter() {
-                    if let Some(child1) = new_map.get(depth) {
-                        let merged_child = LeveledGSS::merge_upper(py, child1, child2)?;
-                        new_map.insert(*depth, merged_child);
-                    } else {
-                        new_map.insert(*depth, child2.clone());
-                    }
-                }
-                merged.insert(k.clone(), new_map);
-            } else {
-                merged.insert(k.clone(), v2_map.clone());
-            }
-        }
-        Ok(merged)
-    }
-
-    fn merge_upperbranches(py: Python, a: &Arc<UpperBranch>, b: &Arc<UpperBranch>) -> PyResult<Arc<Upper>> {
-        if Arc::ptr_eq(a, b) {
-            return Ok(Arc::new(Upper::Branch(a.clone())));
-        }
-        let new_empty = LeveledGSS::_merge_optional_acc(py, &a.empty, &b.empty)?;
-        let merged_children = LeveledGSS::merge_children_upper(py, &a.children, &b.children)?;
-        let max_depth = get_max_depth_upper(&merged_children);
-        let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-            children: merged_children,
-            empty: new_empty,
-            max_depth,
-        })));
-        LeveledGSS::try_promote(py, &new_b)
-    }
-
-    fn merge_interfaces(py: Python, a: &Arc<Interface>, b: &Arc<Interface>) -> PyResult<Arc<Upper>> {
-        let acc_eq = a.acc.as_ref(py).rich_compare(b.acc.as_ref(py), CompareOp::Eq)?.is_true()?;
-        if acc_eq || a.children.ptr_eq(&b.children) {
-            let merged_children = LeveledGSS::merge_children_lower(py, &a.children, &b.children)?;
-            let new_acc = a.acc.call_method1(py, "merge", (b.acc.clone(),))?;
-            let new_empty = LeveledGSS::_merge_optional_acc(py, &a.empty, &b.empty)?;
-            let max_depth = get_max_depth_lower(&merged_children);
-            Ok(Arc::new(Upper::Interface(Arc::new(Interface {
-                children: merged_children,
-                acc: new_acc,
-                empty: new_empty,
-                max_depth,
-            }))))
-        } else {
-            let ub1 = LeveledGSS::interface_to_upperbranch(py, a)?;
-            let ub2 = LeveledGSS::interface_to_upperbranch(py, b)?;
-            LeveledGSS::merge_upperbranches(py, &ub1, &ub2)
-        }
-    }
-
-    fn merge_upper(py: Python, u1: &Arc<Upper>, u2: &Arc<Upper>) -> PyResult<Arc<Upper>> {
-        if Arc::ptr_eq(u1, u2) {
-            return Ok(u1.clone());
-        }
-        match (&**u1, &**u2) {
-            (Upper::Interface(i1), Upper::Interface(i2)) => LeveledGSS::merge_interfaces(py, i1, i2),
-            (Upper::Branch(b1), Upper::Branch(b2)) => LeveledGSS::merge_upperbranches(py, b1, b2),
-            (Upper::Branch(b), Upper::Interface(i)) | (Upper::Interface(i), Upper::Branch(b)) => {
-                let ub = LeveledGSS::interface_to_upperbranch(py, i)?;
-                LeveledGSS::merge_upperbranches(py, b, &ub)
-            }
-        }
-    }
-
-    fn interface_to_upperbranch(py: Python, it: &Arc<Interface>) -> PyResult<Arc<UpperBranch>> {
-        let mut children = Children::new();
-        for (v, kids) in it.children.iter() {
-            let mut v_map = OrdMap::new();
-            for lchild in kids.values() {
-                let empty = if lchild.empty { Some(it.acc.clone()) } else { None };
-                let max_depth = get_max_depth_lower(&lchild.children);
-                let ci = Arc::new(Upper::Interface(Arc::new(Interface {
-                    children: lchild.children.clone(),
-                    acc: it.acc.clone(),
-                    empty,
-                    max_depth,
-                })));
-                v_map.insert(ci.max_depth(), ci);
-            }
-            if !v_map.is_empty() {
-                children.insert(v.clone(), v_map);
-            }
-        }
-        let new_empty = if it.children.is_empty() && it.empty.is_none() { Some(it.acc.clone()) } else { it.empty.clone() };
-        let max_depth = get_max_depth_upper(&children);
-        Ok(Arc::new(UpperBranch { children, empty: new_empty, max_depth }))
-    }
-
-    fn try_promote(py: Python, node: &Arc<Upper>) -> PyResult<Arc<Upper>> {
-        if let Upper::Branch(b) = &**node {
-            let all_children: Vec<_> = b.children.values().flat_map(|kids| kids.values()).collect();
-            if all_children.is_empty() {
-                if let Some(empty) = &b.empty {
-                    return Ok(Arc::new(Upper::Interface(Arc::new(Interface {
-                        children: HashMap::new(),
-                        acc: empty.clone(),
-                        empty: Some(empty.clone()),
-                        max_depth: 0,
-                    }))));
-                }
-                return Ok(node.clone());
-            }
-
-            if !all_children.iter().all(|c| matches!(&***c, Upper::Interface(_))) {
-                return Ok(node.clone());
-            }
-
-            let mut accs = std::collections::HashSet::new();
-            if let Some(empty) = &b.empty {
-                accs.insert(PyObjectWrapper(empty.clone()));
-            }
-            for c in all_children {
-                if let Upper::Interface(ic) = &**c {
-                    accs.insert(PyObjectWrapper(ic.acc.clone()));
-                    if let Some(empty) = &ic.empty {
-                        accs.insert(PyObjectWrapper(empty.clone()));
-                    }
-                }
-            }
-
-            if accs.len() <= 1 {
-                if let Some(the_acc) = accs.into_iter().next() {
-                    let mut l_children = Children::new();
-                    for (v, kids) in b.children.iter() {
-                        let mut v_map = OrdMap::new();
-                        for child in kids.values() {
-                            if let Upper::Interface(ci) = &**child {
-                                let empty = ci.empty.is_some();
-                                let max_depth = get_max_depth_lower(&ci.children);
-                                let lower = Arc::new(Lower { children: ci.children.clone(), empty, max_depth });
-                                v_map.insert(lower.max_depth, lower);
-                            }
-                        }
-                        if !v_map.is_empty() {
-                            l_children.insert(v.clone(), v_map);
-                        }
-                    }
-                    let max_depth = get_max_depth_lower(&l_children);
-                    return Ok(Arc::new(Upper::Interface(Arc::new(Interface {
-                        children: l_children,
-                        acc: the_acc.0,
-                        empty: b.empty.clone(),
-                        max_depth,
-                    }))));
-                } else {
-                    return Ok(LeveledGSS::_empty().inner);
-                }
-            }
-        }
-        Ok(node.clone())
-    }
+    inner: CoreLeveledGSS<PyKey, PyAcc>,
 }
 
 #[pymethods]
 impl LeveledGSS {
     #[new]
     fn new() -> Self {
-        LeveledGSS::_empty()
+        LeveledGSS {
+            inner: CoreLeveledGSS::empty(),
+        }
     }
 
     #[classmethod]
     fn empty(_cls: &PyType) -> Self {
-        LeveledGSS::_empty()
+        LeveledGSS {
+            inner: CoreLeveledGSS::empty(),
+        }
+    }
+
+    #[classmethod]
+    fn from_stacks(_cls: &PyType, stacks: &PyList) -> PyResult<Self> {
+        Python::with_gil(|py| {
+            // Canonicalize via ReferenceGSS to match Python semantics exactly
+            let reference_gss_module = py.import("gss_tester.implementations.reference_impl")?;
+            let ref_gss_class = reference_gss_module.getattr("ReferenceGSS")?;
+            let gss_instance = ref_gss_class.call1((stacks,))?;
+            let canonical_stacks: &PyList = gss_instance.getattr("_stacks")?.downcast()?;
+
+            let mut rust_stacks: Vec<(Vec<PyKey>, PyAcc)> = Vec::with_capacity(canonical_stacks.len());
+            for item in canonical_stacks {
+                let tuple: &PyTuple = item.downcast()?;
+                let vals: &PyList = tuple.get_item(0)?.downcast()?;
+                let acc: PyObject = tuple.get_item(1)?.to_object(py);
+
+                let vec_vals: Vec<PyKey> = vals.iter().map(|v| PyKey(v.to_object(py))).collect();
+                rust_stacks.push((vec_vals, PyAcc(acc)));
+            }
+
+            Ok(LeveledGSS {
+                inner: CoreLeveledGSS::from_stacks(&rust_stacks),
+            })
+        })
     }
 
     fn to_stacks(&self) -> PyResult<PyObject> {
         Python::with_gil(|py| {
+            let stacks = self.inner.to_stacks();
             let res = PyList::empty(py);
-
-            fn dfs_lower(l: &Lower, pref: &mut Vec<PyObject>, acc: &PyObject, res: &PyList, py: Python) -> PyResult<()> {
-                if l.empty {
-                    let stack = PyList::new(py, pref.iter().rev());
-                    res.append(PyTuple::new(py, &[stack.to_object(py), acc.clone_ref(py)]))?;
-                }
-                for (v, kids) in l.children.iter() {
-                    for child in kids.values() {
-                        pref.push(v.0.clone_ref(py));
-                        dfs_lower(child, pref, acc, res, py)?;
-                        pref.pop();
-                    }
-                }
-                Ok(())
+            for (vals, acc) in stacks {
+                let py_vals = PyList::new(py, vals.into_iter().map(|k| k.0));
+                res.append(PyTuple::new(py, &[py_vals.to_object(py), acc.0]))?;
             }
 
-            fn dfs_upper(u: &Upper, pref: &mut Vec<PyObject>, res: &PyList, py: Python) -> PyResult<()> {
-                match u {
-                    Upper::Branch(b) => {
-                        if let Some(empty_acc) = &b.empty {
-                            let stack = PyList::new(py, pref.iter().rev());
-                            res.append(PyTuple::new(py, &[stack.to_object(py), empty_acc.clone_ref(py)]))?;
-                        }
-                        for (v, kids) in b.children.iter() {
-                            for child in kids.values() {
-                                pref.push(v.0.clone_ref(py));
-                                dfs_upper(child, pref, res, py)?;
-                                pref.pop();
-                            }
-                        }
-                    }
-                    Upper::Interface(i) => {
-                        if let Some(empty_acc) = &i.empty {
-                             let stack = PyList::new(py, pref.iter().rev());
-                            res.append(PyTuple::new(py, &[stack.to_object(py), empty_acc.clone_ref(py)]))?;
-                        }
-
-                        if i.children.is_empty() && i.empty.is_none() {
-                            let stack = PyList::new(py, pref.iter().rev());
-                            res.append(PyTuple::new(py, &[stack.to_object(py), i.acc.clone_ref(py)]))?;
-                        } else {
-                            for (v, kids) in i.children.iter() {
-                                for child in kids.values() {
-                                    pref.push(v.0.clone_ref(py));
-                                    dfs_lower(child, pref, &i.acc, res, py)?;
-                                    pref.pop();
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            }
-
-            dfs_upper(&self.inner, &mut vec![], res, py)?;
-            
+            // Canonicalize and sort via ReferenceGSS
             let reference_gss_module = py.import("gss_tester.implementations.reference_impl")?;
             let ref_gss_class = reference_gss_module.getattr("ReferenceGSS")?;
             let gss_instance = ref_gss_class.call1((res.to_object(py),))?;
-            gss_instance.call_method0("to_stacks").map(|any| any.to_object(py))
+            gss_instance
+                .call_method0("to_stacks")
+                .map(|any| any.to_object(py))
         })
     }
 
     fn push(&self, value: PyObject) -> PyResult<Self> {
-        if self.is_empty()? {
-            return Ok(self.clone());
-        }
-        let new_inner = Python::with_gil(|py| {
-            match &*self.inner {
-                Upper::Interface(i) => {
-                    let lower_node = Arc::new(Lower {
-                        children: i.children.clone(),
-                        empty: i.empty.is_some(),
-                        max_depth: get_max_depth_lower(&i.children),
-                    });
-                    let mut new_children = Children::new();
-                    new_children.insert(PyObjectWrapper(value), OrdMap::unit(lower_node.max_depth, lower_node));
-                    let max_depth = get_max_depth_lower(&new_children);
-                    Arc::new(Upper::Interface(Arc::new(Interface {
-                        children: new_children,
-                        acc: i.acc.clone_ref(py),
-                        empty: None,
-                        max_depth,
-                    })))
-                }
-                Upper::Branch(_) => {
-                    let mut new_children = Children::new();
-                    new_children.insert(PyObjectWrapper(value), OrdMap::unit(self.inner.max_depth(), self.inner.clone()));
-                    let max_depth = get_max_depth_upper(&new_children);
-                    Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                        children: new_children,
-                        empty: None,
-                        max_depth,
-                    })))
-                }
-            }
-        });
-        Ok(LeveledGSS { inner: new_inner })
-    }
-
-    fn popn(&self, n: isize) -> PyResult<Self> {
-        if n <= 0 {
-            return Ok(self.clone());
-        }
-        if self.is_empty()? {
-            return Ok(self.clone());
-        }
-
-        Python::with_gil(|py| {
-            let mut memo_upper: HashMap<usize, Arc<Upper>> = HashMap::new();
-            let mut memo_lower: HashMap<usize, Arc<Lower>> = HashMap::new();
-
-            fn popn_lower(py: Python, node: &Arc<Lower>, k: isize, memo_lower: &mut HashMap<usize, Arc<Lower>>) -> PyResult<Arc<Lower>> {
-                if k == 0 {
-                    return Ok(node.clone());
-                }
-                let key = Arc::as_ptr(node) as usize;
-                if let Some(cached) = memo_lower.get(&key) {
-                    return Ok(cached.clone());
-                }
-
-                let all_children: Vec<_> = node.children.values().flat_map(|kids| kids.values()).cloned().collect();
-                if all_children.is_empty() {
-                    let res = Arc::new(Lower { children: HashMap::new(), empty: false, max_depth: 0 });
-                    memo_lower.insert(key, res.clone());
-                    return Ok(res);
-                }
-
-                let mut popped_children = Vec::new();
-                for child in all_children {
-                    popped_children.push(popn_lower(py, &child, k - 1, memo_lower)?);
-                }
-
-                let mut it = popped_children.into_iter();
-                let first = it.next().unwrap();
-                let res = it.try_fold(first, |acc, next| LeveledGSS::merge_lower(py, &acc, &next))?;
-                memo_lower.insert(key, res.clone());
-                Ok(res)
-            }
-
-            fn popn_upper(py: Python, node: &Arc<Upper>, k: isize, memo_upper: &mut HashMap<usize, Arc<Upper>>, memo_lower: &mut HashMap<usize, Arc<Lower>>) -> PyResult<Arc<Upper>> {
-                if k == 0 {
-                    return Ok(node.clone());
-                }
-                let key = Arc::as_ptr(node) as usize;
-                if let Some(cached) = memo_upper.get(&key) {
-                    return Ok(cached.clone());
-                }
-
-                let res = match &**node {
-                    Upper::Branch(b) => {
-                        let all_children: Vec<_> = b.children.values().flat_map(|kids| kids.values()).cloned().collect();
-                        if all_children.is_empty() {
-                            return Ok(LeveledGSS::_empty().inner);
-                        }
-                        let mut popped_children = Vec::new();
-                        for child in all_children {
-                            popped_children.push(popn_upper(py, &child, k - 1, memo_upper, memo_lower)?);
-                        }
-                        let mut it = popped_children.into_iter();
-                        let first = it.next().unwrap();
-                        let merged = it.try_fold(first, |acc, next| LeveledGSS::merge_upper(py, &acc, &next))?;
-                        LeveledGSS::try_promote(py, &merged)?
-                    }
-                    Upper::Interface(i) => {
-                        let all_children: Vec<_> = i.children.values().flat_map(|kids| kids.values()).cloned().collect();
-                         if all_children.is_empty() {
-                            return Ok(LeveledGSS::_empty().inner);
-                        }
-                        let mut popped_children = Vec::new();
-                        for child in all_children {
-                            popped_children.push(popn_lower(py, &child, k - 1, memo_lower)?);
-                        }
-                        let mut it = popped_children.into_iter();
-                        let first = it.next().unwrap();
-                        let merged = it.try_fold(first, |acc, next| LeveledGSS::merge_lower(py, &acc, &next))?;
-
-                        let new_empty = if merged.empty { Some(i.acc.clone()) } else { None };
-                        if merged.children.is_empty() && new_empty.is_none() {
-                            LeveledGSS::_empty().inner
-                        } else {
-                            let max_depth = get_max_depth_lower(&merged.children);
-                            Arc::new(Upper::Interface(Arc::new(Interface {
-                                children: merged.children.clone(),
-                                acc: i.acc.clone(),
-                                empty: new_empty,
-                                max_depth,
-                            })))
-                        }
-                    }
-                };
-
-                memo_upper.insert(key, res.clone());
-                Ok(res)
-            }
-
-            let new_inner = popn_upper(py, &self.inner, n, &mut memo_upper, &mut memo_lower)?;
-            Ok(LeveledGSS { inner: new_inner })
+        Ok(LeveledGSS {
+            inner: self.inner.push(PyKey(value)),
         })
-    }
-
-    fn pop(&self) -> PyResult<Self> {
-        self.popn(1)
-    }
-
-    fn is_empty(&self) -> PyResult<bool> {
-        Ok(match &*self.inner {
-            Upper::Branch(b) => b.children.is_empty() && b.empty.is_none(),
-            Upper::Interface(_) => false,
-        })
-    }
-
-    #[pyo3(signature = (func, memo = None))]
-    fn apply(&self, func: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
-        Python::with_gil(|py| {
-            let memo_dict = memo.unwrap_or_else(|| PyDict::new(py));
-
-            fn transform(py: Python, node: &Arc<Upper>, func: &PyObject, memo: &PyDict) -> PyResult<Arc<Upper>> {
-                let key = Arc::as_ptr(node) as usize;
-                if let Some(cached_obj) = memo.get_item(key)? {
-                    let cached_gss: PyRef<LeveledGSS> = cached_obj.extract()?;
-                    return Ok(cached_gss.inner.clone());
-                }
-
-                let res = match &**node {
-                    Upper::Interface(i) => {
-                        let new_acc = func.call1(py, (i.acc.clone(),))?;
-                        let new_empty = if let Some(empty) = &i.empty {
-                            Some(func.call1(py, (empty.clone(),))?)
-                        } else {
-                            None
-                        };
-                        let new_i = Arc::new(Upper::Interface(Arc::new(Interface {
-                            children: i.children.clone(),
-                            acc: new_acc,
-                            empty: new_empty,
-                            max_depth: i.max_depth,
-                        })));
-                        LeveledGSS::try_promote(py, &new_i)?
-                    }
-                    Upper::Branch(b) => {
-                        let new_empty = if let Some(empty) = &b.empty {
-                            Some(func.call1(py, (empty.clone(),))?)
-                        } else {
-                            None
-                        };
-                        let mut new_children = Children::new();
-                        for (v, kids) in b.children.iter() {
-                            let mut new_kids_for_v = OrdMap::new();
-                            for child in kids.values() {
-                                let new_child = transform(py, child, func, memo)?;
-                                new_kids_for_v.insert(new_child.max_depth(), new_child);
-                            }
-                            new_children.insert(v.clone(), new_kids_for_v);
-                        }
-                        let max_depth = get_max_depth_upper(&new_children);
-                        let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                            children: new_children,
-                            empty: new_empty,
-                            max_depth,
-                        })));
-                        LeveledGSS::try_promote(py, &new_b)?
-                    }
-                };
-
-                let res_gss = LeveledGSS { inner: res.clone() };
-                memo.set_item(key, res_gss.into_py(py))?;
-                Ok(res)
-            }
-
-            let new_inner = transform(py, &self.inner, &func, memo_dict)?;
-            Ok(LeveledGSS { inner: new_inner })
-        })
-    }
-
-    #[pyo3(signature = (predicate, memo = None))]
-    fn prune(&self, predicate: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
-        Python::with_gil(|py| {
-            let memo_dict = memo.unwrap_or_else(|| PyDict::new(py));
-
-            fn transform(py: Python, node: &Arc<Upper>, predicate: &PyObject, memo: &PyDict) -> PyResult<Option<Arc<Upper>>> {
-                let key = Arc::as_ptr(node) as usize;
-                if let Some(cached_obj) = memo.get_item(key)? {
-                    if cached_obj.is_none(py) {
-                        return Ok(None);
-                    }
-                    let cached_gss: PyRef<LeveledGSS> = cached_obj.extract()?;
-                    return Ok(Some(cached_gss.inner.clone()));
-                }
-
-                let res_opt = match &**node {
-                    Upper::Interface(i) => {
-                        let keep_acc = predicate.call1(py, (i.acc.clone(),))?.is_true(py)?;
-                        let keep_empty = if let Some(empty) = &i.empty {
-                            predicate.call1(py, (empty.clone(),))?.is_true(py)?
-                        } else {
-                            false
-                        };
-
-                        if !keep_acc && !keep_empty {
-                            None
-                        } else if !keep_acc && keep_empty {
-                            let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                                children: HashMap::new(),
-                                empty: i.empty.clone(),
-                                max_depth: 0,
-                            })));
-                            Some(LeveledGSS::try_promote(py, &new_b)?)
-                        } else { // keep_acc is true
-                            let new_empty = if keep_empty { i.empty.clone() } else { None };
-                            let new_i = Arc::new(Upper::Interface(Arc::new(Interface {
-                                children: i.children.clone(),
-                                acc: i.acc.clone(),
-                                empty: new_empty,
-                                max_depth: i.max_depth,
-                            })));
-                            Some(LeveledGSS::try_promote(py, &new_i)?)
-                        }
-                    }
-                    Upper::Branch(b) => {
-                        let new_empty = if let Some(empty) = &b.empty {
-                            if predicate.call1(py, (empty.clone(),))?.is_true(py)? {
-                                Some(empty.clone())
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-
-                        let mut new_children = Children::new();
-                        for (v, kids) in b.children.iter() {
-                            let mut new_kids_for_v = OrdMap::new();
-                            for child in kids.values() {
-                                if let Some(new_child) = transform(py, child, predicate, memo)? {
-                                    new_kids_for_v.insert(new_child.max_depth(), new_child);
-                                }
-                            }
-                            if !new_kids_for_v.is_empty() {
-                                new_children.insert(v.clone(), new_kids_for_v);
-                            }
-                        }
-
-                        if new_children.is_empty() && new_empty.is_none() {
-                            None
-                        } else {
-                            let max_depth = get_max_depth_upper(&new_children);
-                            let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                                children: new_children,
-                                empty: new_empty,
-                                max_depth,
-                            })));
-                            Some(LeveledGSS::try_promote(py, &new_b)?)
-                        }
-                    }
-                };
-
-                let value_to_cache = if let Some(res_inner) = &res_opt {
-                    let res_gss = LeveledGSS { inner: res_inner.clone() };
-                    res_gss.into_py(py)
-                } else {
-                    py.None()
-                };
-                memo.set_item(key, value_to_cache)?;
-
-                Ok(res_opt)
-            }
-
-            let new_inner_opt = transform(py, &self.inner, &predicate, memo_dict)?;
-            Ok(new_inner_opt.map_or_else(LeveledGSS::_empty, |inner| LeveledGSS { inner }))
-        })
-    }
-
-    fn isolate(&self, value: Option<PyObject>) -> PyResult<Self> {
-        Python::with_gil(|py| {
-            let new_inner = if let Some(val) = value {
-                // Keep stacks with `value` at the top.
-                match &*self.inner {
-                    Upper::Branch(b) => {
-                        let filtered_children = b.children.get(&PyObjectWrapper(val.clone()))
-                            .map(|kids| HashMap::unit(PyObjectWrapper(val), kids.clone()))
-                            .unwrap_or_else(HashMap::new);
-                        let max_depth = get_max_depth_upper(&filtered_children);
-                        let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                            children: filtered_children,
-                            empty: None,
-                            max_depth,
-                        })));
-                        LeveledGSS::try_promote(py, &new_b)?
-                    }
-                    Upper::Interface(i) => {
-                        if let Some(kids) = i.children.get(&PyObjectWrapper(val.clone())) {
-                            let filtered_children = HashMap::unit(PyObjectWrapper(val), kids.clone());
-                            let max_depth = get_max_depth_lower(&filtered_children);
-                             Arc::new(Upper::Interface(Arc::new(Interface {
-                                children: filtered_children,
-                                acc: i.acc.clone(),
-                                empty: None,
-                                max_depth,
-                            })))
-                        } else {
-                            LeveledGSS::_empty().inner
-                        }
-                    }
-                }
-            } else {
-                // Keep only empty stacks.
-                let empty_acc = match &*self.inner {
-                    Upper::Branch(b) => b.empty.clone(),
-                    Upper::Interface(i) => i.empty.clone(),
-                };
-                let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                    children: HashMap::new(),
-                    empty: empty_acc,
-                    max_depth: 0,
-                })));
-                LeveledGSS::try_promote(py, &new_b)?
-            };
-            Ok(LeveledGSS { inner: new_inner })
-        })
-    }
-
-
-    fn isolate_many(&self, values: &PySet) -> PyResult<Self> {
-        let (new_empty, new_children_upper, new_children_lower) = Python::with_gil(|py| -> PyResult<_> {
-            let mut new_empty = None;
-            if values.contains(py.None())? {
-                new_empty = match &*self.inner {
-                    Upper::Branch(b) => b.empty.clone(),
-                    Upper::Interface(i) => i.empty.clone(),
-                };
-            }
-
-            let mut new_children_upper = HashMap::new();
-            let mut new_children_lower = HashMap::new();
-
-            match &*self.inner {
-                Upper::Branch(b) => {
-                    for (v, kids) in b.children.iter() {
-                        if values.contains(&v.0)? {
-                            new_children_upper.insert(v.clone(), kids.clone());
-                        }
-                    }
-                }
-                Upper::Interface(i) => {
-                     for (v, kids) in i.children.iter() {
-                        if values.contains(&v.0)? {
-                            new_children_lower.insert(v.clone(), kids.clone());
-                        }
-                    }
-                }
-            }
-            Ok((new_empty, new_children_upper, new_children_lower))
-        })?;
-
-        let new_inner = match &*self.inner {
-            Upper::Branch(_) => {
-                let max_depth = get_max_depth_upper(&new_children_upper);
-                Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                    children: new_children_upper,
-                    empty: new_empty,
-                    max_depth,
-                })))
-            }
-            Upper::Interface(i) => {
-                if !new_children_lower.is_empty() {
-                    let max_depth = get_max_depth_lower(&new_children_lower);
-                    Arc::new(Upper::Interface(Arc::new(Interface {
-                        children: new_children_lower,
-                        acc: i.acc.clone(),
-                        empty: new_empty,
-                        max_depth,
-                    })))
-                } else {
-                    Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                        children: HashMap::new(),
-                        empty: new_empty,
-                        max_depth: 0,
-                    })))
-                }
-            }
-        };
-
-        Ok(LeveledGSS { inner: new_inner })
-    }
-
-    #[pyo3(signature = (mutator, memo = None))]
-    fn apply_and_prune(&self, mutator: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
-        Python::with_gil(|py| {
-            let memo_dict = memo.unwrap_or_else(|| PyDict::new(py));
-            let acc_cache = PyDict::new(py);
-
-            fn mutate_acc<'p>(py: Python<'p>, a: &PyObject, mutator: &PyObject, acc_cache: &'p PyDict) -> PyResult<Option<PyObject>> {
-                let k = a.as_ref(py).as_ptr() as usize;
-                if let Some(cached) = acc_cache.get_item(k)? {
-                    if cached.is_none(py) {
-                        return Ok(None);
-                    }
-                    return Ok(Some(cached.to_object(py)));
-                }
-                let r = mutator.call1(py, (a.clone(),))?;
-                acc_cache.set_item(k, r.clone_ref(py))?;
-                if r.is_none(py) {
-                    Ok(None)
-                } else {
-                    Ok(Some(r))
-                }
-            }
-
-            fn transform(py: Python, node: &Arc<Upper>, mutator: &PyObject, memo: &PyDict, acc_cache: &PyDict) -> PyResult<Option<Arc<Upper>>> {
-                let key = Arc::as_ptr(node) as usize;
-                if let Some(cached_obj) = memo.get_item(key)? {
-                    if cached_obj.is_none(py) {
-                        return Ok(None);
-                    }
-                    let cached_gss: PyRef<LeveledGSS> = cached_obj.extract()?;
-                    return Ok(Some(cached_gss.inner.clone()));
-                }
-
-                let res_opt: Option<Arc<Upper>> = match &**node {
-                    Upper::Interface(i) => {
-                        let new_acc_opt = mutate_acc(py, &i.acc, mutator, acc_cache)?;
-                        let new_empty_opt = if let Some(empty) = &i.empty {
-                            mutate_acc(py, empty, mutator, acc_cache)?
-                        } else {
-                            None
-                        };
-
-                        let keep_acc = new_acc_opt.is_some();
-                        let keep_empty = new_empty_opt.is_some();
-
-                        if !keep_acc && !keep_empty {
-                            None
-                        } else if !keep_acc && keep_empty {
-                            let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                                children: HashMap::new(),
-                                empty: new_empty_opt,
-                                max_depth: 0,
-                            })));
-                            Some(LeveledGSS::try_promote(py, &new_b)?)
-                        } else { // keep_acc is true
-                            let new_i = Arc::new(Upper::Interface(Arc::new(Interface {
-                                children: i.children.clone(),
-                                acc: new_acc_opt.unwrap(),
-                                empty: new_empty_opt,
-                                max_depth: i.max_depth,
-                            })));
-                            Some(LeveledGSS::try_promote(py, &new_i)?)
-                        }
-                    }
-                    Upper::Branch(b) => {
-                        let new_empty_opt = if let Some(empty) = &b.empty {
-                            mutate_acc(py, empty, mutator, acc_cache)?
-                        } else {
-                            None
-                        };
-
-                        let mut new_children = Children::new();
-                        for (v, kids) in b.children.iter() {
-                            let mut new_kids_for_v = OrdMap::new();
-                            for child in kids.values() {
-                                if let Some(new_child) = transform(py, child, mutator, memo, acc_cache)? {
-                                    new_kids_for_v.insert(new_child.max_depth(), new_child);
-                                }
-                            }
-                            if !new_kids_for_v.is_empty() {
-                                new_children.insert(v.clone(), new_kids_for_v);
-                            }
-                        }
-
-                        if new_children.is_empty() && new_empty_opt.is_none() {
-                            None
-                        } else {
-                            let max_depth = get_max_depth_upper(&new_children);
-                            let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                                children: new_children,
-                                empty: new_empty_opt,
-                                max_depth,
-                            })));
-                            Some(LeveledGSS::try_promote(py, &new_b)?)
-                        }
-                    }
-                };
-
-                let value_to_cache = if let Some(res_inner) = &res_opt {
-                    let res_gss = LeveledGSS { inner: res_inner.clone() };
-                    res_gss.into_py(py)
-                } else {
-                    py.None()
-                };
-                memo.set_item(key, value_to_cache)?;
-
-                Ok(res_opt)
-            }
-
-            let new_inner_opt = transform(py, &self.inner, &mutator, memo_dict, acc_cache)?;
-            Ok(new_inner_opt.map_or_else(LeveledGSS::_empty, |inner| LeveledGSS { inner }))
-        })
-    }
-
-    fn merge(&self, other: &Self) -> PyResult<Self> {
-        Python::with_gil(|py| {
-            let merged_inner = LeveledGSS::merge_upper(py, &self.inner, &other.inner)?;
-            Ok(LeveledGSS { inner: merged_inner })
-        })
-    }
-
-    #[classmethod]
-    fn merge_many(_cls: &PyType, gss_list: &PyList) -> PyResult<Self> {
-        let mut accumulator = LeveledGSS::_empty();
-        for item in gss_list.iter() {
-            let gss: PyRef<LeveledGSS> = item.extract()?;
-            accumulator = accumulator.merge(&gss)?;
-        }
-        Ok(accumulator)
     }
 
     #[classmethod]
     fn push_many(_cls: &PyType, items: &PyList) -> PyResult<Self> {
         Python::with_gil(|py| {
-            let mut dest = LeveledGSS::_empty();
+            let mut dest = LeveledGSS {
+                inner: CoreLeveledGSS::empty(),
+            };
             for item in items.iter() {
                 let tuple: &PyTuple = item.downcast()?;
                 let gss_item: PyRef<LeveledGSS> = tuple.get_item(0)?.extract()?;
                 let value: PyObject = tuple.get_item(1)?.to_object(py);
-
                 let pushed = gss_item.push(value)?;
                 dest = dest.merge(&pushed)?;
             }
@@ -1052,61 +160,124 @@ impl LeveledGSS {
         })
     }
 
+    fn pop(&self) -> PyResult<Self> {
+        Ok(LeveledGSS {
+            inner: self.inner.pop(),
+        })
+    }
+
+    fn popn(&self, n: isize) -> PyResult<Self> {
+        Ok(LeveledGSS {
+            inner: self.inner.popn(n),
+        })
+    }
+
+    fn is_empty(&self) -> PyResult<bool> {
+        Ok(self.inner.is_empty())
+    }
+
+    fn isolate(&self, value: Option<PyObject>) -> PyResult<Self> {
+        Ok(LeveledGSS {
+            inner: self.inner.isolate(value.map(PyKey)),
+        })
+    }
+
+    fn isolate_many(&self, values: &PySet) -> PyResult<Self> {
+        Python::with_gil(|py| {
+            let mut set: HashSet<Option<PyKey>> = HashSet::new();
+            for v in values.iter() {
+                if v.is_none() {
+                    set.insert(None);
+                } else {
+                    set.insert(Some(PyKey(v.to_object(py))));
+                }
+            }
+            Ok(LeveledGSS {
+                inner: self.inner.isolate_many(set.into_iter()),
+            })
+        })
+    }
+
+    #[pyo3(signature = (func, memo = None))]
+    fn apply(&self, func: PyObject, _memo: Option<&PyDict>) -> PyResult<Self> {
+        // We ignore the external memo and rely on internal per-accumulator memoization.
+        let mut func_object = func.clone();
+        let new_inner = self.inner.apply::<PyAcc, _>(move |acc: &PyAcc| {
+            Python::with_gil(|py| {
+                let out = func_object
+                    .call1(py, (acc.0.clone_ref(py),))
+                    .expect("apply() callback raised");
+                PyAcc(out)
+            })
+        });
+        Ok(LeveledGSS { inner: new_inner })
+    }
+
+    #[pyo3(signature = (predicate, memo = None))]
+    fn prune(&self, predicate: PyObject, _memo: Option<&PyDict>) -> PyResult<Self> {
+        let mut pred_object = predicate.clone();
+        let new_inner = self.inner.prune(move |acc: &PyAcc| {
+            Python::with_gil(|py| {
+                pred_object
+                    .call1(py, (acc.0.clone_ref(py),))
+                    .expect("prune() callback raised")
+                    .is_true(py)
+                    .expect("predicate.__bool__ failed")
+            })
+        });
+        Ok(LeveledGSS { inner: new_inner })
+    }
+
+    #[pyo3(signature = (mutator, memo = None))]
+    fn apply_and_prune(&self, mutator: PyObject, _memo: Option<&PyDict>) -> PyResult<Self> {
+        let mut mutator_obj = mutator.clone();
+        let new_inner = self.inner.apply_and_prune::<PyAcc, _>(move |acc: &PyAcc| {
+            Python::with_gil(|py| {
+                let r = mutator_obj
+                    .call1(py, (acc.0.clone_ref(py),))
+                    .expect("apply_and_prune() callback raised");
+                if r.is_none(py) {
+                    None
+                } else {
+                    Some(PyAcc(r))
+                }
+            })
+        });
+        Ok(LeveledGSS { inner: new_inner })
+    }
+
+    fn merge(&self, other: &Self) -> PyResult<Self> {
+        Ok(LeveledGSS {
+            inner: self.inner.merge(&other.inner),
+        })
+    }
+
+    #[classmethod]
+    fn merge_many(_cls: &PyType, gss_list: &PyList) -> PyResult<Self> {
+        let mut accumulator = LeveledGSS {
+            inner: CoreLeveledGSS::empty(),
+        };
+        for item in gss_list.iter() {
+            let gss: PyRef<LeveledGSS> = item.extract()?;
+            accumulator = accumulator.merge(&gss)?;
+        }
+        Ok(accumulator)
+    }
+
     fn peek(&self) -> PyResult<PyObject> {
         Python::with_gil(|py| {
-            let keys = self.inner.children()?;
+            let keys: Vec<PyObject> = self
+                .inner
+                .peek()
+                .into_iter()
+                .map(|k| k.0)
+                .collect();
             Ok(PySet::new(py, &keys)?.to_object(py))
         })
     }
 
     fn reduce_acc(&self) -> PyResult<Option<PyObject>> {
-        Python::with_gil(|py| {
-            let mut unique_accs = std::collections::HashMap::new();
-            let mut queue = VecDeque::new();
-            queue.push_back(self.inner.clone());
-            let mut visited = std::collections::HashSet::new();
-
-            while let Some(node) = queue.pop_front() {
-                let ptr = Arc::as_ptr(&node);
-                if !visited.insert(ptr) {
-                    continue;
-                }
-
-                match &*node {
-                    Upper::Branch(b) => {
-                        if let Some(acc) = &b.empty {
-                            unique_accs.insert(acc.as_ref(py).as_ptr() as usize, acc.clone());
-                        }
-                        for kids in b.children.values() {
-                            for child in kids.values() {
-                                queue.push_back(child.clone());
-                            }
-                        }
-                    }
-                    Upper::Interface(i) => {
-                        unique_accs.insert(i.acc.as_ref(py).as_ptr() as usize, i.acc.clone());
-                        if let Some(acc) = &i.empty {
-                            unique_accs.insert(acc.as_ref(py).as_ptr() as usize, acc.clone());
-                        }
-                    }
-                }
-            }
-
-            let accs: Vec<PyObject> = unique_accs.values().cloned().collect();
-            if accs.is_empty() {
-                return Ok(None);
-            }
-
-            let mut it = accs.into_iter();
-            let first = it.next().unwrap();
-            let mut reduced = first;
-
-            for next_acc in it {
-                reduced = reduced.call_method1(py, "merge", (next_acc,))?;
-            }
-
-            Ok(Some(reduced))
-        })
+        Ok(self.inner.reduce_acc().map(|a| a.0))
     }
 
     fn to_reference_impl(&self) -> PyResult<PyObject> {
@@ -1114,7 +285,9 @@ impl LeveledGSS {
             let stacks = self.to_stacks()?;
             let reference_gss_module = py.import("gss_tester.implementations.reference_impl")?;
             let ref_gss_class = reference_gss_module.getattr("ReferenceGSS")?;
-            ref_gss_class.call_method1("from_stacks", (stacks,)).map(|any| any.to_object(py))
+            ref_gss_class
+                .call_method1("from_stacks", (stacks, ))
+                .map(|any| any.to_object(py))
         })
     }
 
@@ -1128,150 +301,6 @@ impl LeveledGSS {
         Python::with_gil(|py| {
             let repr = stacks.as_ref(py).repr()?.to_str()?;
             Ok(format!("LeveledGSS({})", repr))
-        })
-    }
-
-    #[classmethod]
-    fn from_stacks(_cls: &PyType, stacks: &PyList) -> PyResult<Self> {
-        Python::with_gil(|py| {
-            let reference_gss_module = py.import("gss_tester.implementations.reference_impl")?;
-            let ref_gss_class = reference_gss_module.getattr("ReferenceGSS")?;
-            let gss_instance = ref_gss_class.call1((stacks,))?;
-            let canonical_stacks: &PyList = gss_instance.getattr("_stacks")?.downcast()?;
-
-            let mut empty_acc = None;
-            let trie = PyDict::new(py);
-
-            for item in canonical_stacks {
-                let tuple: &PyTuple = item.downcast()?;
-                let vals: &PyList = tuple.get_item(0)?.downcast()?;
-                let acc: PyObject = tuple.get_item(1)?.to_object(py);
-
-                if vals.is_empty() {
-                    empty_acc = Some(acc);
-                    continue;
-                }
-
-                let mut node = trie;
-                let mut reversed_vals: Vec<PyObject> = vals.iter().map(|i| i.to_object(py)).collect();
-                reversed_vals.reverse();
-
-                for (i, v) in reversed_vals.iter().enumerate() {
-                    let entry = if let Some(e) = node.get_item(v)? {
-                        e.downcast()?
-                    } else {
-                        let new_entry = PyDict::new(py);
-                        new_entry.set_item("end", py.None())?;
-                        new_entry.set_item("sub", PyDict::new(py))?;
-                        node.set_item(v, new_entry)?;
-                        new_entry
-                    };
-
-                    if i == reversed_vals.len() - 1 {
-                        entry.set_item("end", acc.clone_ref(py))?;
-                    } else {
-                        node = entry.get_item("sub")?.unwrap().downcast()?;
-                    }
-                }
-            }
-
-            fn build_lower(py: Python, d: &PyDict) -> PyResult<Arc<Lower>> {
-                let mut l_children = Children::new();
-                for (v_obj, e_obj) in d.iter() {
-                    let e: &PyDict = e_obj.downcast()?;
-                    let sub_l_dict: &PyDict = e.get_item("sub")?.unwrap().downcast()?;
-                    let has_end = !e.get_item("end")?.unwrap().is_none();
-
-                    let sub_lower = if sub_l_dict.is_empty() {
-                        Arc::new(Lower { children: HashMap::new(), empty: false, max_depth: 0 })
-                    } else {
-                        build_lower(py, sub_l_dict)?
-                    };
-
-                    let node_for_v = Arc::new(Lower {
-                        children: sub_lower.children.clone(),
-                        empty: has_end,
-                        max_depth: get_max_depth_lower(&sub_lower.children),
-                    });
-                    l_children.insert(PyObjectWrapper(v_obj.to_object(py)), OrdMap::unit(node_for_v.max_depth, node_for_v));
-                }
-                let max_depth = get_max_depth_lower(&l_children);
-                Ok(Arc::new(Lower { children: l_children, empty: false, max_depth }))
-            }
-
-            fn build(py: Python, d: &PyDict, root_empty: Option<PyObject>) -> PyResult<Arc<Upper>> {
-                let mut children = Children::new();
-                let mut all_child_nodes = Vec::new();
-
-                for (v_obj, e_obj) in d.iter() {
-                    let e: &PyDict = e_obj.downcast()?;
-                    let mut nodes_for_v = Vec::new();
-                    let end_acc = e.get_item("end")?.unwrap();
-                    let sub_dict: &PyDict = e.get_item("sub")?.unwrap().downcast()?;
-
-                    if !end_acc.is_none() {
-                        let leaf = Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                            children: HashMap::new(),
-                            empty: Some(end_acc.to_object(py)),
-                            max_depth: 0,
-                        })));
-                        nodes_for_v.push(LeveledGSS::try_promote(py, &leaf)?);
-                    }
-                    if !sub_dict.is_empty() {
-                        nodes_for_v.push(build(py, sub_dict, None)?);
-                    }
-                    if !nodes_for_v.is_empty() {
-                        let mut kids_map = OrdMap::new();
-                        for n in &nodes_for_v {
-                            kids_map.insert(n.max_depth(), n.clone());
-                        }
-                        children.insert(PyObjectWrapper(v_obj.to_object(py)), kids_map);
-                        all_child_nodes.extend(nodes_for_v);
-                    }
-                }
-
-                let all_interfaces = all_child_nodes.iter().all(|c| matches!(&**c, Upper::Interface(_)));
-
-                if all_interfaces {
-                    let mut accs = std::collections::HashSet::new();
-                    for node in &all_child_nodes {
-                        if let Upper::Interface(i) = &**node {
-                            accs.insert(PyObjectWrapper(i.acc.clone()));
-                            if let Some(empty) = &i.empty {
-                                accs.insert(PyObjectWrapper(empty.clone()));
-                            }
-                        }
-                    }
-                    if let Some(empty) = &root_empty {
-                        accs.insert(PyObjectWrapper(empty.clone()));
-                    }
-
-                    if accs.len() <= 1 {
-                        if let Some(the_acc_wrapper) = accs.into_iter().next() {
-                            let lower_tree = build_lower(py, d)?;
-                            let max_depth = get_max_depth_lower(&lower_tree.children);
-                            return Ok(Arc::new(Upper::Interface(Arc::new(Interface {
-                                children: lower_tree.children.clone(),
-                                acc: the_acc_wrapper.0,
-                                empty: root_empty,
-                                max_depth,
-                            }))));
-                        } else {
-                             return Ok(LeveledGSS::_empty().inner);
-                        }
-                    }
-                }
-
-                let max_depth = get_max_depth_upper(&children);
-                Ok(Arc::new(Upper::Branch(Arc::new(UpperBranch {
-                    children,
-                    empty: root_empty,
-                    max_depth,
-                }))))
-            }
-
-            let inner = build(py, trie, empty_acc)?;
-            Ok(LeveledGSS { inner })
         })
     }
 }
