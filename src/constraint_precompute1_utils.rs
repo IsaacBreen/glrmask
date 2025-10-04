@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::cmp::Reverse;
 use std::ops::BitOrAssign;
 use std::sync::Arc;
 use bitvec::macros::internal::funty::Fundamental;
@@ -152,6 +153,7 @@ pub fn optimize_trie1_size(
     crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
     crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
 
+    // Pre-simplifications of None edges.
     simplify_none_edges_to_former_end_nodes_trie1(
         precomputed1,
         trie1_god,
@@ -169,9 +171,19 @@ pub fn optimize_trie1_size(
     Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
     factor_common_destinations_trie1(precomputed1, trie1_god);
     aggressive_merge_nodes_trie1(precomputed1, trie1_god);
+
+    // Aggressively remove all None edges via full epsilon-closure flattening.
+    // This collapses intermediate "factored" nodes and any other epsilon bridges,
+    // keeping correctness by intersecting masks along None chains and pushing
+    // only keyed edges up to the current node.
+    flatten_all_none_edges_trie1(precomputed1, trie1_god);
+
+    // Normalize/coalesce immediately, then recompute and aggressively merge again.
+    optimize_state_masks_and_edges_trie1(precomputed1, trie1_god);
+    Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+    aggressive_merge_nodes_trie1(precomputed1, trie1_god);
     prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
     Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
-
     Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
 
     if config.optimize_trie1_merge_equivalent_llm_tokens {
@@ -1107,6 +1119,131 @@ fn factor_common_destinations_trie1(
         }
     }
     crate::debug!(2, "Finished factoring common destinations in Trie1.");
+}
+
+/// Fully flattens all None edges (epsilon edges) by computing a per-node epsilon-closure
+/// and replacing every node's outgoing edges with keyed edges only.
+///
+/// For a node A:
+/// - Start from A's existing keyed edges (Some(t) -> {dst -> bv}).
+/// - For each None-edge A -(None, bv1)-> B, compose B's already-flattened keyed edges
+///   with bv1 via intersection: bv_final = bv1 & bv_child_edge, and union into A's map.
+/// - Replace A's children with this new keyed-only map, recompute live_tokens.
+///
+/// Notes:
+/// - We never turn A into an end node via None-closure. That would be unsound for partial masks.
+///   End detection remains tied to explicit keyed paths to leaf/end nodes, which is how get_mask1 uses it.
+/// - We process nodes in descending max_depth so children are flattened before parents.
+fn flatten_all_none_edges_trie1(
+    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+    trie1_god: &Trie1GodWrapper,
+) {
+    crate::debug!(2, "Flattening None edges in Trie1 via epsilon-closure (keyed-only rewrite)...");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    Trie::recompute_all_max_depths(trie1_god, &roots_vec);
+
+    let mut all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
+    // Sort by descending depth so that children are processed (flattened) first.
+    all_nodes.sort_by_key(|idx| {
+        idx.read(trie1_god).expect("read").max_depth
+    });
+    all_nodes.reverse();
+
+    // Cache of flattened keyed edges per node (None edges removed).
+    // Key: node index -> map: Some(terminal) -> OrderedHashMap<dst, bv>
+    let mut flat_cache: HashMap<
+        PrecomputeNode1Index,
+        BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>>
+    > = HashMap::new();
+
+    // Work backwards from deepest leaves
+    for node_idx in &all_nodes {
+        // Snapshot current children to avoid lock re-entrancy
+        let children_snapshot: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = {
+            let g = node_idx.read(trie1_god).expect("read");
+            g.children().clone()
+        };
+
+        // Start with direct keyed edges
+        let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
+        for (ek, dm) in &children_snapshot {
+            if ek.is_some() {
+                let dest_map = new_children.entry(ek.clone()).or_default();
+                for (dst, bv) in dm {
+                    dest_map.entry(*dst)
+                        .and_modify(|e| *e |= bv)
+                        .or_insert(bv.clone());
+                }
+            }
+        }
+
+        // Compose None edges with child's flattened keyed edges (if any)
+        if let Some(none_dest_map) = children_snapshot.get(&None) {
+            for (child_idx, bv_none_edge) in none_dest_map {
+                if bv_none_edge.is_empty() { continue; }
+
+                // Child should have been flattened already given descending order
+                if let Some(child_flat) = flat_cache.get(child_idx) {
+                    for (ek2, dm2) in child_flat {
+                        // Only keyed edges should exist in child_flat, but guard anyway.
+                        if ek2.is_none() { continue; }
+                        let dest_map = new_children.entry(ek2.clone()).or_default();
+                        for (dst2, bv_child) in dm2 {
+                            let mut composed = bv_none_edge.clone();
+                            composed &= bv_child;
+                            if composed.is_empty() { continue; }
+                            dest_map.entry(*dst2)
+                                .and_modify(|e| *e |= &composed)
+                                .or_insert(composed);
+                        }
+                    }
+                } else {
+                    // In well-ordered DAG, this should not happen. Fall back to using child's immediate keyed edges (unflattened).
+                    let child_children_snapshot: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = {
+                        let cg = child_idx.read(trie1_god).expect("read");
+                        cg.children().clone()
+                    };
+                    for (ek2, dm2) in child_children_snapshot {
+                        if ek2.is_none() { continue; }
+                        let dest_map = new_children.entry(ek2.clone()).or_default();
+                        for (dst2, bv_child) in dm2 {
+                            let mut composed = bv_none_edge.clone();
+                            composed &= &bv_child;
+                            if composed.is_empty() { continue; }
+                            dest_map.entry(dst2)
+                                .and_modify(|e| *e |= &composed)
+                                .or_insert(composed);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Write back: replace children with keyed-only map and recompute live_tokens
+        {
+            let mut w = node_idx.write(trie1_god).expect("write");
+            *w.children_mut() = new_children.clone();
+            // Recompute live_tokens as union of all edge masks
+            let mut lt = LLMTokenBV::zeros();
+            for dm in w.children().values() {
+                for bv in dm.values() {
+                    lt |= bv;
+                }
+            }
+            w.value.live_tokens = lt;
+            // Do NOT change w.value.end here. End detection remains via keyed paths.
+        }
+
+        flat_cache.insert(*node_idx, new_children);
+    }
+
+    // Cleanup: recompute depths and GC to drop eliminated intermediates
+    let roots_vec2: Vec<_> = roots.values().cloned().collect();
+    Trie::recompute_all_max_depths(trie1_god, &roots_vec2);
+    Trie::gc(trie1_god, &roots_vec2);
+    Trie::recompute_all_max_depths(trie1_god, &roots_vec2);
+
+    crate::debug!(2, "Done flattening None edges in Trie1.");
 }
 
 fn merge_nodes_trie1(
