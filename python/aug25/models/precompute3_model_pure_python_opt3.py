@@ -653,7 +653,6 @@ class Model(GraphProvider):
         vars.append(ArenaReorderVariation(name="arena_diversity_default", params=ArenaOptimizeParams()))
         vars.append(ArenaReorderVariation(name="arena_diversity_more_depth", params=ArenaOptimizeParams(depth_weight=2048)))
         vars.append(ArenaReorderVariation(name="arena_diversity_less_overlap_penalty", params=ArenaOptimizeParams(penalty_llm_overlap=256, penalty_state_overlap=128)))
-        vars.append(ArenaReorderVariation(name="arena_diversity_pop_penalty", params=ArenaOptimizeParams(pop_weight=64)))
         return vars
 
     def get_benchmark_config(self) -> Dict:
@@ -945,6 +944,9 @@ class Model(GraphProvider):
                         stats.inc('get_mask.main_loop.edge.dest_union_pruned_pop0')
                         continue
 
+                stats.inc('get_mask.traversal.edges_traversed')
+                stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
+
                 if edge.pop in pop_cache:
                     popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
                     stats.inc('get_mask.main_loop.edge.pop_cache_hits')
@@ -971,9 +973,6 @@ class Model(GraphProvider):
                 if not popped_acc or edge.dest_states_union.isdisjoint(peek_rs):
                     if popped_acc: stats.inc('get_mask.main_loop.edge.dest_union_pruned_after_pop')
                     continue
-
-                stats.inc('get_mask.traversal.edges_traversed')
-                stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
 
                 if not (edge.llm_bv_not and popped_acc.llm_mask.isdisjoint(edge.llm_bv_not)):
                     stats.inc('get_mask.main_loop.edge.popped_mask_subset_fastpath')
