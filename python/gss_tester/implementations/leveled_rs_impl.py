@@ -33,8 +33,15 @@ class LeveledRSGSS(GSS[T, Acc], Generic[T, Acc]):
 
     @classmethod
     def push_many(cls, items: Iterable[Tuple[GSS[T, Acc], T]]) -> LeveledRSGSS[T, Acc]:
-        # Assuming items are LeveledRSGSS instances for unwrapping
-        inner_items = [(item[0]._inner, item[1]) for item in items]  # type: ignore
+        # Accept any GSS implementation: convert non-native ones to LeveledRSGSS via to_stacks()
+        inner_items = []
+        for gss_item, value in items:
+            if isinstance(gss_item, LeveledRSGSS):
+                inner = gss_item._inner
+            else:
+                # Convert via stacks to the native Rust-backed implementation
+                inner = _LeveledRSGSS.from_stacks(gss_item.to_stacks())
+            inner_items.append((inner, value))
         return cls(_LeveledRSGSS.push_many(inner_items))
 
     def pop(self) -> LeveledRSGSS[T, Acc]:
@@ -64,14 +71,21 @@ class LeveledRSGSS(GSS[T, Acc], Generic[T, Acc]):
         return LeveledRSGSS(self._inner.apply_and_prune(mutator, memo=memo))
 
     def merge(self, other: GSS[T, Acc]) -> LeveledRSGSS[T, Acc]:
-        if not isinstance(other, LeveledRSGSS):
-            raise TypeError(f"Can only merge LeveledRSGSS with another LeveledRSGSS, not {type(other)}")
-        return LeveledRSGSS(self._inner.merge(other._inner))
+        # Allow merging with any GSS by converting non-native implementations through their stacks.
+        if isinstance(other, LeveledRSGSS):
+            return LeveledRSGSS(self._inner.merge(other._inner))
+        converted = _LeveledRSGSS.from_stacks(other.to_stacks())
+        return LeveledRSGSS(self._inner.merge(converted))
 
     @classmethod
     def merge_many(cls, gss_list: Iterable[GSS[T, Acc]]) -> LeveledRSGSS[T, Acc]:
-        # We need to unwrap the inner objects for the Rust implementation.
-        inner_list = [gss._inner for gss in gss_list]  # type: ignore
+        # Accept a heterogeneous iterable of GSS implementations by converting non-native ones.
+        inner_list = []
+        for gss in gss_list:
+            if isinstance(gss, LeveledRSGSS):
+                inner_list.append(gss._inner)
+            else:
+                inner_list.append(_LeveledRSGSS.from_stacks(gss.to_stacks()))
         return cls(_LeveledRSGSS.merge_many(inner_list))
 
     def peek(self) -> Set[T]:

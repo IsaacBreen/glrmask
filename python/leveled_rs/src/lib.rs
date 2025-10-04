@@ -198,8 +198,8 @@ impl LeveledGSS {
         })
     }
 
-    #[pyo3(signature = (func, _memo = None))]
-    fn apply(&self, func: PyObject, _memo: Option<&PyDict>) -> PyResult<Self> {
+    #[pyo3(signature = (func, memo = None))]
+    fn apply(&self, func: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
         // We ignore the external memo and rely on internal per-accumulator memoization.
         let func_object = func.clone();
         let new_inner = self.inner.apply::<PyAcc, _>(move |acc: &PyAcc| {
@@ -213,8 +213,8 @@ impl LeveledGSS {
         Ok(LeveledGSS { inner: new_inner })
     }
 
-    #[pyo3(signature = (predicate, _memo = None))]
-    fn prune(&self, predicate: PyObject, _memo: Option<&PyDict>) -> PyResult<Self> {
+    #[pyo3(signature = (predicate, memo = None))]
+    fn prune(&self, predicate: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
         let pred_object = predicate.clone();
         let new_inner = self.inner.prune(move |acc: &PyAcc| {
             Python::with_gil(|py| {
@@ -228,8 +228,8 @@ impl LeveledGSS {
         Ok(LeveledGSS { inner: new_inner })
     }
 
-    #[pyo3(signature = (mutator, _memo = None))]
-    fn apply_and_prune(&self, mutator: PyObject, _memo: Option<&PyDict>) -> PyResult<Self> {
+    #[pyo3(signature = (mutator, memo = None))]
+    fn apply_and_prune(&self, mutator: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
         let mutator_obj = mutator.clone();
         let new_inner = self.inner.apply_and_prune::<PyAcc, _>(move |acc: &PyAcc| {
             Python::with_gil(|py| {
