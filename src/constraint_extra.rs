@@ -1133,52 +1133,52 @@ pub fn print_precompute_stats0(
 
     grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by KeyUse (key_usages_count)
 
-    println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
-    println!(
-        "  {:<25} {:<5} {:<8} {:<8} {:<10} {:<10} {:<10} {:<12} {:<10} {:<10}",
-        "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild",
-        "AvgKeyToks", "SumToks", "AvgToks", "MedToks"
-    );
-    println!(
-        "  {:-<25} {:-<5} {:-<8} {:-<8} {:-<10} {:-<10} {:-<10} {:-<12} {:-<10} {:-<10}",
-        "", "", "", "", "", "", "", "", "", ""
-    );
-
-    for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
-        let name = token_name_map
-            .get_by_right(&gtid.0) // gtid is GrammarTokenID
-            .cloned()
-            .map_or(
-                format!("ID:{}", gtid.0),
-                |t| t.to_string()
-            );
-
-        let (sum_child, avg_child, med_child) = child_stats;
-        let (sum_toks, avg_toks, med_toks) = toks_stats;
-        let avg_key_toks = if key_usages > 0 {
-            Some(sum_toks as f64 / key_usages as f64)
-        } else {
-            None
-        };
-
-
-        let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
-
-        println!(
-            "  {:<25} {:>5} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>10} {:>10}",
-            name,
-            gtid.0,
-            key_usages,
-            sum_child,
-            format_opt_f64(avg_child),
-            format_opt_f64(med_child),
-            format_opt_f64(avg_key_toks),
-            sum_toks,
-            format_opt_f64(avg_toks),
-            format_opt_f64(med_toks)
-        );
-    }
-    println!("---------------------------------");
+    // println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+    // println!(
+    //     "  {:<25} {:<5} {:<8} {:<8} {:<10} {:<10} {:<10} {:<12} {:<10} {:<10}",
+    //     "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild",
+    //     "AvgKeyToks", "SumToks", "AvgToks", "MedToks"
+    // );
+    // println!(
+    //     "  {:-<25} {:-<5} {:-<8} {:-<8} {:-<10} {:-<10} {:-<10} {:-<12} {:-<10} {:-<10}",
+    //     "", "", "", "", "", "", "", "", "", ""
+    // );
+    //
+    // for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
+    //     let name = token_name_map
+    //         .get_by_right(&gtid.0) // gtid is GrammarTokenID
+    //         .cloned()
+    //         .map_or(
+    //             format!("ID:{}", gtid.0),
+    //             |t| t.to_string()
+    //         );
+    //
+    //     let (sum_child, avg_child, med_child) = child_stats;
+    //     let (sum_toks, avg_toks, med_toks) = toks_stats;
+    //     let avg_key_toks = if key_usages > 0 {
+    //         Some(sum_toks as f64 / key_usages as f64)
+    //     } else {
+    //         None
+    //     };
+    //
+    //
+    //     let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
+    //
+    //     println!(
+    //         "  {:<25} {:>5} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>10} {:>10}",
+    //         name,
+    //         gtid.0,
+    //         key_usages,
+    //         sum_child,
+    //         format_opt_f64(avg_child),
+    //         format_opt_f64(med_child),
+    //         format_opt_f64(avg_key_toks),
+    //         sum_toks,
+    //         format_opt_f64(avg_toks),
+    //         format_opt_f64(med_toks)
+    //     );
+    // }
+    // println!("---------------------------------");
 }
 
 pub fn print_precompute_stats1(
@@ -1240,52 +1240,52 @@ pub fn print_precompute_stats1(
 
     grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by KeyUse (key_usages_count)
 
-    println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
-    println!(
-        "  {:<25} {:<5} {:<8} {:<8} {:<10} {:<10} {:<10} {:<12} {:<10} {:<10}",
-        "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild",
-        "AvgKeyToks", "SumToks", "AvgToks", "MedToks"
-    );
-    println!(
-        "  {:-<25} {:-<5} {:-<8} {:-<8} {:-<10} {:-<10} {:-<10} {:-<12} {:-<10} {:-<10}",
-        "", "", "", "", "", "", "", "", "", ""
-    );
-
-    for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
-        let name = token_name_map
-            .get_by_right(&gtid.0) // gtid is GrammarTokenID
-            .cloned()
-            .map_or(
-                format!("ID:{}", gtid.0),
-                |t| t.to_string()
-            );
-
-        let (sum_child, avg_child, med_child) = child_stats;
-        let (sum_toks, avg_toks, med_toks) = toks_stats;
-        let avg_key_toks = if key_usages > 0 {
-            Some(sum_toks as f64 / key_usages as f64)
-        } else {
-            None
-        };
-
-
-        let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
-
-        println!(
-            "  {:<25} {:>5} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>10} {:>10}",
-            name,
-            gtid.0,
-            key_usages,
-            sum_child,
-            format_opt_f64(avg_child),
-            format_opt_f64(med_child),
-            format_opt_f64(avg_key_toks),
-            sum_toks,
-            format_opt_f64(avg_toks),
-            format_opt_f64(med_toks)
-        );
-    }
-    println!("---------------------------------");
+    // println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+    // println!(
+    //     "  {:<25} {:<5} {:<8} {:<8} {:<10} {:<10} {:<10} {:<12} {:<10} {:<10}",
+    //     "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild",
+    //     "AvgKeyToks", "SumToks", "AvgToks", "MedToks"
+    // );
+    // println!(
+    //     "  {:-<25} {:-<5} {:-<8} {:-<8} {:-<10} {:-<10} {:-<10} {:-<12} {:-<10} {:-<10}",
+    //     "", "", "", "", "", "", "", "", "", ""
+    // );
+    //
+    // for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
+    //     let name = token_name_map
+    //         .get_by_right(&gtid.0) // gtid is GrammarTokenID
+    //         .cloned()
+    //         .map_or(
+    //             format!("ID:{}", gtid.0),
+    //             |t| t.to_string()
+    //         );
+    //
+    //     let (sum_child, avg_child, med_child) = child_stats;
+    //     let (sum_toks, avg_toks, med_toks) = toks_stats;
+    //     let avg_key_toks = if key_usages > 0 {
+    //         Some(sum_toks as f64 / key_usages as f64)
+    //     } else {
+    //         None
+    //     };
+    //
+    //
+    //     let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
+    //
+    //     println!(
+    //         "  {:<25} {:>5} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>10} {:>10}",
+    //         name,
+    //         gtid.0,
+    //         key_usages,
+    //         sum_child,
+    //         format_opt_f64(avg_child),
+    //         format_opt_f64(med_child),
+    //         format_opt_f64(avg_key_toks),
+    //         sum_toks,
+    //         format_opt_f64(avg_toks),
+    //         format_opt_f64(med_toks)
+    //     );
+    // }
+    // println!("---------------------------------");
 }
 
 pub fn print_precompute_stats2(
