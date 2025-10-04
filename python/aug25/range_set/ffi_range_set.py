@@ -186,6 +186,14 @@ class FFIRangeSet(RangeSet[int]):
         record_metric('FFIRangeSet.__hash__', 1)
         return h
 
+    def __getstate__(self):
+        """Return a pickleable representation of the RangeSet."""
+        return self.to_ranges()
+
+    def __setstate__(self, state):
+        """Restore the RangeSet from its pickleable representation."""
+        self._bitset = ffi.Bitset.from_ranges(state)
+
     @staticmethod
     def _merge_unsorted(ranges: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
         """
