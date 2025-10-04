@@ -27,7 +27,13 @@ struct MergeKey {
 impl Hash for MergeKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.end.hash(state);
-        self.children.hash(state);
+        for (ek, dm) in &self.children {
+            ek.hash(state);
+            for (dst, bv) in dm {
+                dst.hash(state);
+                bv.hash(state);
+            }
+        }
     }
 }
 
