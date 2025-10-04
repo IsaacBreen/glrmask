@@ -7,4 +7,6 @@ except ImportError as e:
         "Please build the native module by running `maturin develop` in `python/leveled_rs/`"
     ) from e
 
+# Alias for test runner discovery
+Leveled_rsGSS = LeveledRSGSS
 Leveled_rsGSS = LeveledRSGSS
