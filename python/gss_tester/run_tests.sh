@@ -88,6 +88,24 @@ else
   echo "---"
 fi
 
+# --- Automated Rust Build Process ---
+if [ "${SKIP_RUST:-0}" == "1" ]; then
+  echo "SKIP_RUST is set. Skipping Rust module build."
+  echo "---"
+else
+  echo "Automating Rust module build..."
+  RUST_PROJECT_DIR="$PYTHON_SRC_ROOT/leveled_rs"
+  if [ -d "$RUST_PROJECT_DIR" ]; then
+    echo "  Building Rust modules with maturin..."
+    # Assuming maturin is installed in the environment. 'maturin develop' builds and installs the wheel in the current venv.
+    (cd "$RUST_PROJECT_DIR" && maturin develop)
+    echo "Rust module build complete."
+  else
+    echo "Rust project directory not found at $RUST_PROJECT_DIR. Skipping build."
+  fi
+  echo "---"
+fi
+
 # --- Run Tests ---
 echo "Starting test runs..."
 REFERENCE_IMPL_CANONICAL="" # Will be set to the canonical name of the reference impl

@@ -1,0 +1,12 @@
+[package]
+name = "leveled_gss_rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "leveled_gss_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.20.0", features = ["extension-module", "generate-import-lib"] }
+im-rc = "15.1.0"
