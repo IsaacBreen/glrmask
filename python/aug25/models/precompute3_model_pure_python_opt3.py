@@ -1014,9 +1014,6 @@ class Model(GraphProvider):
                         maybe_trigger_cutoff(node, gss_node, gss_acc)
                         break
 
-                stats.inc('get_mask.traversal.edges_traversed')
-                stats.inc(f'get_mask.traversal.edge_pop_val.{edge.pop}')
-
                 if edge.pop in pop_cache:
                     popped, popped_acc, peeked, peek_rs = pop_cache[edge.pop]
                     stats.inc('get_mask.main_loop.edge.pop_cache_hits')
