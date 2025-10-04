@@ -23,7 +23,7 @@ use bimap::BiBTreeMap;
 use bitvec::prelude::*;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
-use crate::constraint_extra::{calculate_final_stats, dump_precompute_trie_recursive, print_precompute_stats, PrecomputeStats};
+use crate::constraint_extra::{calculate_final_stats2, dump_precompute_trie_recursive, print_precompute_stats2, PrecomputeStats};
 use crate::constraint_precompute0_utils;
 use crate::constraint_precompute1_utils;
 use crate::constraint_precompute2_utils;
