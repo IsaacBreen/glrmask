@@ -45,22 +45,30 @@ fn format_hybrid_bitset_neatly(bv: &HybridBitset) -> String {
 /// and a sample of the corresponding LLM tokens.
 fn format_bv_with_tokens(
     bv: &LLMTokenBV,
-    original_internal_bimap: Option<&BTreeMap<usize, usize>>,
+    internal_to_original_map: Option<&BTreeMap<usize, LLMTokenBV>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     limit: usize,
 ) -> String {
     let bv_neat_str = format_hybrid_bitset_neatly(bv);
 
-    let (bimap, token_map) = match (original_internal_bimap, llm_token_map) {
-        (Some(b), Some(t)) => (b, t),
+    let (i2o_map, token_map) = match (internal_to_original_map, llm_token_map) {
+        (Some(i), Some(t)) => (i, t),
         _ => return bv_neat_str, // If we don't have maps, just return the neat string.
     };
 
     let mut token_samples = Vec::new();
-    for internal_id in bv.iter().take(limit) {
-        if let Some(original_id) = bimap.get(&internal_id) {
-            if let Some(token_bytes) = token_map.get_by_right(&LLMTokenID(*original_id)) {
-                token_samples.push(format!("{:?}", String::from_utf8_lossy(token_bytes)));
+    let mut total_original_tokens = 0;
+
+    'outer: for internal_id in bv.iter() {
+        if let Some(original_ids_bv) = i2o_map.get(&internal_id) {
+            total_original_tokens += original_ids_bv.len();
+            for original_id in original_ids_bv.iter() {
+                if token_samples.len() >= limit {
+                    break 'outer;
+                }
+                if let Some(token_bytes) = token_map.get_by_right(&LLMTokenID(original_id)) {
+                    token_samples.push(format!("{:?}", String::from_utf8_lossy(token_bytes)));
+                }
             }
         }
     }
@@ -70,7 +78,7 @@ fn format_bv_with_tokens(
     }
 
     let samples_str = token_samples.join(", ");
-    let ellipsis = if bv.len() > limit { ", ..." } else { "" };
+    let ellipsis = if total_original_tokens > token_samples.len() { ", ..." } else { "" };
 
     format!("{} (e.g., [{}]{})", bv_neat_str, samples_str, ellipsis)
 }
@@ -80,7 +88,7 @@ pub fn dump_precompute_trie0_recursive(
     node_arc: &PrecomputeNode0Index,
     prefix: String,
     visited: &mut HashSet<PrecomputeNode0Index>,
-    original_internal_bimap: Option<&BTreeMap<usize, usize>>,
+    internal_to_original_map: Option<&BTreeMap<usize, LLMTokenBV>>,
     token_name_map: Option<&BiBTreeMap<Terminal, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     trie0_god: &Trie0GodWrapper,
@@ -125,7 +133,7 @@ pub fn dump_precompute_trie0_recursive(
             None => "ε".to_string(),
         };
 
-        let tokens_display = format_bv_with_tokens(&edge_val_bv, original_internal_bimap, llm_token_map, 5);
+        let tokens_display = format_bv_with_tokens(&edge_val_bv, internal_to_original_map, llm_token_map, 5);
 
         let child_ptr;
         let child_info;
@@ -136,7 +144,7 @@ pub fn dump_precompute_trie0_recursive(
             child_ptr = child_arc;
             is_visited = visited.contains(&child_ptr);
             is_end_node = child_node.value.final_tokenizer_state.is_some();
-            let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, original_internal_bimap, llm_token_map, 5);
+            let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, internal_to_original_map, llm_token_map, 5);
             let end_str = if is_end_node {
                 if let Some(sid) = child_node.value.final_tokenizer_state {
                     format!(" [END -> S{}]", sid.0)
@@ -161,7 +169,7 @@ pub fn dump_precompute_trie0_recursive(
                 } else {
                     format!("{}│  ", prefix)
                 };
-                dump_precompute_trie0_recursive(child_arc, child_prefix, visited, original_internal_bimap, token_name_map, llm_token_map, trie0_god);
+                dump_precompute_trie0_recursive(child_arc, child_prefix, visited, internal_to_original_map, token_name_map, llm_token_map, trie0_god);
             }
         }
     }
@@ -172,7 +180,7 @@ pub fn dump_precompute_trie_recursive(
     node_arc: &PrecomputeNode1Index,
     prefix: String,
     visited: &mut HashSet<PrecomputeNode1Index>,
-    original_internal_bimap: Option<&BTreeMap<usize, usize>>,
+    internal_to_original_map: Option<&BTreeMap<usize, LLMTokenBV>>,
     token_name_map: Option<&BiBTreeMap<Terminal, usize>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     trie1_god: &Trie1GodWrapper,
@@ -211,7 +219,7 @@ pub fn dump_precompute_trie_recursive(
             None => "ε".to_string(),
         };
 
-        let tokens_display = format_bv_with_tokens(&edge_val_bv, original_internal_bimap, llm_token_map, 5);
+        let tokens_display = format_bv_with_tokens(&edge_val_bv, internal_to_original_map, llm_token_map, 5);
 
         let child_ptr;
         let child_info;
@@ -222,7 +230,7 @@ pub fn dump_precompute_trie_recursive(
             child_ptr = child_arc;
             is_visited = visited.contains(&child_ptr);
             is_end_node = child_node.value.end;
-            let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, original_internal_bimap, llm_token_map, 5);
+            let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, internal_to_original_map, llm_token_map, 5);
             child_info = format!("Node {} (MaxDepth: {}){} [Live: {}]", child_ptr, child_node.max_depth, if is_end_node { " [END]" } else { "" }, live_tokens_str);
         }
 
@@ -243,7 +251,7 @@ pub fn dump_precompute_trie_recursive(
                 } else {
                     format!("{}│  ", prefix)
                 };
-                dump_precompute_trie_recursive(child_arc, child_prefix, visited, original_internal_bimap, token_name_map, llm_token_map, trie1_god);
+                dump_precompute_trie_recursive(child_arc, child_prefix, visited, internal_to_original_map, token_name_map, llm_token_map, trie1_god);
             }
         }
     }
@@ -254,7 +262,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
     pub fn dump_precomputed0(&self) {
         GrammarConstraint::_dump_precomputed0(
             &self.precomputed0,
-            &self.precompute0_vocab.original_to_internal,
+            &self.precompute0_vocab.internal_to_original,
             &self.token_name_map,
             &self.llm_vocab.llm_token_map,
             &self.trie0_god,
@@ -265,7 +273,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
     pub fn dump_precomputed1(&self) {
         GrammarConstraint::_dump_precomputed(
             &self.precomputed1,
-            &self.precompute_vocab1.original_to_internal,
+            &self.precompute_vocab1.internal_to_original,
             &self.token_name_map,
             &self.llm_vocab.llm_token_map,
             &self.trie1_god,
@@ -274,7 +282,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
 
     pub fn _dump_precomputed0(
         precomputed0: &BTreeMap<TokenizerStateID, PrecomputeNode0Index>,
-        original_to_internal_id_bimap: &BTreeMap<usize, usize>,
+        internal_to_original_map: &BTreeMap<usize, LLMTokenBV>,
         token_name_map: &BiBTreeMap<Terminal, usize>,
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         trie0_god: &Trie0GodWrapper,
@@ -291,7 +299,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
             {
                 let root_node = root_node_trie.read(trie0_god).unwrap();
                 root_ptr = root_node_trie;
-                let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(original_to_internal_id_bimap), Some(llm_token_map), 5);
+                let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(internal_to_original_map), Some(llm_token_map), 5);
                 let end_str = if root_node.value.final_tokenizer_state.is_some() {
                     if let Some(sid) = root_node.value.final_tokenizer_state {
                         format!(" [END -> S{}]", sid.0)
@@ -309,7 +317,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
                 println!("  (Root already visited)");
             } else {
                 visited.insert(*root_ptr);
-                dump_precompute_trie0_recursive(root_node_trie, "".to_string(), &mut visited, Some(original_to_internal_id_bimap), Some(token_name_map), Some(llm_token_map), trie0_god);
+                dump_precompute_trie0_recursive(root_node_trie, "".to_string(), &mut visited, Some(internal_to_original_map), Some(token_name_map), Some(llm_token_map), trie0_god);
             }
         }
         println!("\n===================================");
@@ -318,7 +326,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
 
     pub fn _dump_precomputed(
         precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-        original_to_internal_id_bimap: &BTreeMap<usize, usize>,
+        internal_to_original_map: &BTreeMap<usize, LLMTokenBV>,
         token_name_map: &BiBTreeMap<Terminal, usize>,
         llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
         trie1_god: &Trie1GodWrapper,
@@ -335,7 +343,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
             {
                 let root_node = root_node_trie.read(trie1_god).unwrap();
                 root_ptr = root_node_trie;
-                let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(original_to_internal_id_bimap), Some(llm_token_map), 5);
+                let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(internal_to_original_map), Some(llm_token_map), 5);
                 root_info = format!("Root Node {} (MaxDepth: {}){} [Live: {}]", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" }, live_tokens_str);
             }
             println!("{}", root_info);
@@ -344,7 +352,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
                 println!("  (Root already visited)");
             } else {
                 visited.insert(*root_ptr);
-                dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(original_to_internal_id_bimap), Some(token_name_map), Some(llm_token_map), trie1_god);
+                dump_precompute_trie_recursive(root_node_trie, "".to_string(), &mut visited, Some(internal_to_original_map), Some(token_name_map), Some(llm_token_map), trie1_god);
             }
         }
         println!("\n===================================");
@@ -355,13 +363,13 @@ impl GrammarConstraint { // This is in constraint_extra.rs
     pub fn dump_precomputed2(&self) {
         GrammarConstraint::_dump_precomputed2(
             &self.precomputed2,
-            &self.precompute2_vocab.original_to_internal,
+            &self.precompute2_vocab.internal_to_original,
             &self.llm_vocab.llm_token_map,
             &self.trie2_god,
         );
     }
 
-    pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, PrecomputeNode2Index>, original_to_internal_id_bimap: &BTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, trie2_god: &Trie2GodWrapper) {
+    pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, PrecomputeNode2Index>, internal_to_original_map: &BTreeMap<usize, LLMTokenBV>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, trie2_god: &Trie2GodWrapper) {
         println!("Dumping Precomputed Trie 2 Structure (showing original LLM Token IDs):");
         println!("===================================");
 
@@ -374,7 +382,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
             {
                 let root_node = root_node_trie.read(trie2_god).unwrap();
                 root_ptr = root_node_trie;
-                let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(original_to_internal_id_bimap), Some(llm_token_map), 5);
+                let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(internal_to_original_map), Some(llm_token_map), 5);
                 root_info = format!("Root Node {} (MaxDepth: {}){} [Live: {}]", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" }, live_tokens_str);
             }
             println!("{}", root_info);
@@ -387,8 +395,8 @@ impl GrammarConstraint { // This is in constraint_extra.rs
                     root_node_trie,
                     "".to_string(),
                     &mut visited,
-                    Some(&original_to_internal_id_bimap),
-                    Some(&llm_token_map),
+                    Some(internal_to_original_map),
+                    Some(llm_token_map),
                     trie2_god,
                 );
             }
@@ -401,7 +409,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
     pub fn dump_precomputed3(&self) {
         GrammarConstraint::_dump_precomputed3(
             &self.precomputed3,
-            &self.precompute3_vocab.original_to_internal,
+            &self.precompute3_vocab.internal_to_original,
             &self.llm_vocab.llm_token_map,
             &self.trie3_god,
         );
@@ -413,7 +421,7 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         print_precompute_stats3(&stats, &self.trie3_god);
     }
 
-    pub fn _dump_precomputed3(precomputed3: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>, original_to_internal_id_bimap: &BTreeMap<usize, usize>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, trie3_god: &Trie3GodWrapper) {
+    pub fn _dump_precomputed3(precomputed3: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>, internal_to_original_map: &BTreeMap<usize, LLMTokenBV>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, trie3_god: &Trie3GodWrapper) {
         println!("Dumping Precomputed Trie 3 Structure (showing original LLM Token IDs):");
         println!("===================================");
 
@@ -443,8 +451,8 @@ impl GrammarConstraint { // This is in constraint_extra.rs
                     root_node_trie,
                     "".to_string(),
                     &mut visited,
-                    Some(&original_to_internal_id_bimap),
-                    Some(&llm_token_map),
+                    Some(internal_to_original_map),
+                    Some(llm_token_map),
                     trie3_god,
                 );
             }
@@ -458,7 +466,7 @@ pub fn dump_precompute_trie2_recursive(
     node_arc: &Trie2Index,
     prefix: String,
     visited: &mut HashSet<PrecomputeNode2Index>,
-    original_internal_bimap: Option<&BTreeMap<usize, usize>>,
+    internal_to_original_map: Option<&BTreeMap<usize, LLMTokenBV>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     trie2_god: &Trie2GodWrapper,
 ) {
@@ -478,11 +486,11 @@ pub fn dump_precompute_trie2_recursive(
     for (i, (edge_key, edge_val_bv, child_arc)) in children_to_visit.iter().enumerate() {
         let is_last = i == children_to_visit.len() - 1;
         let connector = if is_last { "└──" } else { "├──" };
-        let (pop_len, state_id_opt) = edge_key; let edge_key_display = format!("(pop: {}, state: {})", pop_len, state_id_opt.map_or("None".to_string(), |sid| sid.0.to_string())); let tokens_display = format_bv_with_tokens(edge_val_bv, original_internal_bimap, llm_token_map, 5);
+        let (pop_len, state_id_opt) = edge_key; let edge_key_display = format!("(pop: {}, state: {})", pop_len, state_id_opt.map_or("None".to_string(), |sid| sid.0.to_string())); let tokens_display = format_bv_with_tokens(edge_val_bv, internal_to_original_map, llm_token_map, 5);
         let (child_ptr, child_info, is_visited, is_end_node) = {
             let child_node = child_arc.read(trie2_god).unwrap();
             let ptr = child_arc;
-            let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, original_internal_bimap, llm_token_map, 5);
+            let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, internal_to_original_map, llm_token_map, 5);
             (ptr, format!("Node {} (MaxDepth: {}){} [Live: {}]", ptr, child_node.max_depth, if child_node.value.end { " [END]" } else { "" }, live_tokens_str), visited.contains(&ptr), child_node.value.end)
         };
 
@@ -493,7 +501,7 @@ pub fn dump_precompute_trie2_recursive(
             if !is_visited {
                 visited.insert(*child_ptr);
                 let child_prefix = if is_last { format!("{}   ", prefix) } else { format!("{}│  ", prefix) };
-                dump_precompute_trie2_recursive(child_arc, child_prefix, visited, original_internal_bimap, llm_token_map, trie2_god);
+                dump_precompute_trie2_recursive(child_arc, child_prefix, visited, internal_to_original_map, llm_token_map, trie2_god);
             }
         }
     }
@@ -503,7 +511,7 @@ pub fn dump_precompute_trie3_recursive(
     node_arc: &Trie2Index,
     prefix: String,
     visited: &mut HashSet<Trie2Index>,
-    original_internal_bimap: Option<&BTreeMap<usize, usize>>,
+    internal_to_original_map: Option<&BTreeMap<usize, LLMTokenBV>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     trie3_god: &Trie3GodWrapper,
 ) {
@@ -527,7 +535,7 @@ pub fn dump_precompute_trie3_recursive(
 
         let mut edge_parts = vec![format!("pop: {}", pop_len)];
         if *llm_bv != LLMTokenBV::max_ones() {
-            let llm_tokens_display = format_bv_with_tokens(llm_bv, original_internal_bimap, llm_token_map, 5);
+            let llm_tokens_display = format_bv_with_tokens(llm_bv, internal_to_original_map, llm_token_map, 5);
             edge_parts.push(format!("tokens: {}", llm_tokens_display));
         }
         let edge_key_display = format!("({})", edge_parts.join(", "));
@@ -556,7 +564,7 @@ pub fn dump_precompute_trie3_recursive(
             if !is_visited {
                 visited.insert(*child_ptr);
                 let child_prefix = if is_last { format!("{}   ", prefix) } else { format!("{}│  ", prefix) };
-                dump_precompute_trie3_recursive(child_arc, child_prefix, visited, original_internal_bimap, llm_token_map, trie3_god);
+                dump_precompute_trie3_recursive(child_arc, child_prefix, visited, internal_to_original_map, llm_token_map, trie3_god);
             }
         }
     }
