@@ -576,34 +576,30 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
 
     let max_tok = stage_vocab.internal_max_llm_token;
 
-    // Count frequencies
-    let mut freq: Vec<usize> = vec![0; max_tok + 1];
-    for n in tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Freq)", total = all_nodes.len()) {
+    // Count occurrences of each unique LLMTokenBV
+    let mut bv_counts: HashMap<LLMTokenBV, usize> = HashMap::new();
+    for n in tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Collect BVs)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
         let g = n.read(trie1_god).expect("read");
-        let live_tokens = &g.value.live_tokens;
-        if live_tokens.is_all() {
-            for t in 0..=max_tok {
-                freq[t] += 1;
-            }
-        } else {
-            for t in live_tokens.iter() {
-                if t <= max_tok {
-                    freq[t] += 1;
-                }
-            }
-        }
+        *bv_counts.entry(g.value.live_tokens.clone()).or_default() += 1;
         for (_ek, dm) in g.children() {
             for (_dst, bv) in dm {
-                if bv.is_all() {
-                    for t in 0..=max_tok {
-                        freq[t] += 1;
-                    }
-                } else {
-                    for t in bv.iter() {
-                        if t <= max_tok {
-                            freq[t] += 1;
-                        }
-                    }
+                *bv_counts.entry(bv.clone()).or_default() += 1;
+            }
+        }
+    }
+
+    // Count frequencies from unique BVs and their counts
+    let mut freq: Vec<usize> = vec![0; max_tok + 1];
+    for (bv, count) in tqdm!(bv_counts.iter(), desc = "Trie1 Reorder (Freq)", total = bv_counts.len(), disable = !PROGRESS_BAR_ENABLED, leave = false) {
+        if bv.is_empty() { continue; }
+        if bv.is_all() {
+            for t in 0..=max_tok {
+                freq[t] += count;
+            }
+        } else {
+            for t in bv.iter() {
+                if t <= max_tok {
+                    freq[t] += count;
                 }
             }
         }

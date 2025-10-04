@@ -382,35 +382,35 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
     let ranges_before = count_total_ranges_trie3(&all_nodes, trie3_god);
 
     let max_tok = stage_vocab.internal_max_llm_token;
-    let mut freq: Vec<usize> = vec![0; max_tok + 1];
 
+    // Count occurrences of each unique LLMTokenBV
+    let mut bv_counts: HashMap<LLMTokenBV, usize> = HashMap::new();
     #[cfg(not(rustrover))]
-    let it = tqdm!(all_nodes.iter(), desc = "Trie3 Reorder (Freq)", total=all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+    let it = tqdm!(all_nodes.iter(), desc = "Trie3 Reorder (Collect BVs)", total=all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
     #[cfg(rustrover)] let it = all_nodes.iter();
     for n in it {
         let g = n.read(trie3_god).expect("read");
-        let live_tokens = &g.value.live_tokens;
-        if live_tokens.is_all() {
+        *bv_counts.entry(g.value.live_tokens.clone()).or_default() += 1;
+        for ((_, llm_bv), _dm) in g.children() {
+            *bv_counts.entry(llm_bv.clone()).or_default() += 1;
+        }
+    }
+
+    // Count frequencies from unique BVs and their counts
+    let mut freq: Vec<usize> = vec![0; max_tok + 1];
+    #[cfg(not(rustrover))]
+    let it2 = tqdm!(bv_counts.iter(), desc = "Trie3 Reorder (Freq)", total=bv_counts.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+    #[cfg(rustrover)] let it2 = bv_counts.iter();
+    for (bv, count) in it2 {
+        if bv.is_empty() { continue; }
+        if bv.is_all() {
             for t in 0..=max_tok {
-                freq[t] += 1;
+                freq[t] += count;
             }
         } else {
-            for t in live_tokens.iter() {
+            for t in bv.iter() {
                 if t <= max_tok {
-                    freq[t] += 1;
-                }
-            }
-        }
-        for ((_, llm_bv), _dm) in g.children() {
-            if llm_bv.is_all() {
-                for t in 0..=max_tok {
-                    freq[t] += 1;
-                }
-            } else {
-                for t in llm_bv.iter() {
-                    if t <= max_tok {
-                        freq[t] += 1;
-                    }
+                    freq[t] += count;
                 }
             }
         }
