@@ -459,6 +459,7 @@ class WorkItem:
     edge_idx: int
     dest_idx: int
     pop_cache: Dict
+    depth: int
 
     def __lt__(self, other: 'WorkItem') -> bool:
         if not isinstance(other, WorkItem):
@@ -657,7 +658,7 @@ class Model(GraphProvider):
 
     def get_benchmark_config(self) -> Dict:
         """Provides configuration to the optimizer script for benchmarking variations."""
-        stats_to_collect = ['get_mask', 'get_mask.main_loop', 'get_mask.traversal.edges_traversed', 'get_mask.traversal.nodes_processed']
+        stats_to_collect = ['get_mask', 'get_mask.main_loop', 'get_mask.traversal.edges_traversed', 'get_mask.traversal.nodes_processed', 'get_mask.traversal.max_depth']
 
         def print_report(variation_name: str, results: Dict[str, List[float]]):
             print(f"  Results for: {variation_name}")
@@ -849,12 +850,13 @@ class Model(GraphProvider):
     def get_mask(self) -> LLMTokenSet:
         stats = Stats.get()
         stats.start('get_mask')
+        stats.counts['get_mask.traversal.max_depth'] = 0
         stats.inc('get_mask.initial_tokenizer_states', len(self.state))
 
         all_ones, final_mask = self.all_internal_llm_tokens_bitset, RangeSet.empty()
         work_heap = []
 
-        def enqueue(node_id: NodeID, gss: GSS, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
+        def enqueue(node_id: NodeID, gss: GSS, depth: int, edge_idx: int = 0, dest_idx: int = 0, pop_cache: Optional[Dict] = None):
             if gss.is_empty():
                 return
             stats.inc('get_mask.traversal.enqueues')
@@ -865,13 +867,14 @@ class Model(GraphProvider):
                 gss=gss,
                 edge_idx=edge_idx,
                 dest_idx=dest_idx,
-                pop_cache=pop_cache if pop_cache is not None else {}
+                pop_cache=pop_cache if pop_cache is not None else {},
+                depth=depth,
             )
             heapq.heappush(work_heap, item)
 
-        def dequeue() -> Tuple[NodeID, GSS, int, int, Dict]:
+        def dequeue() -> Tuple[NodeID, GSS, int, int, Dict, int]:
             item = heapq.heappop(work_heap)
-            return item.node_id, item.gss, item.edge_idx, item.dest_idx, item.pop_cache
+            return item.node_id, item.gss, item.edge_idx, item.dest_idx, item.pop_cache, item.depth
 
         stats.start('get_mask.seeding')
         @_acc_memoize(use_value_cache=False)
@@ -888,7 +891,7 @@ class Model(GraphProvider):
         for sid, gss in self.state.items():
             r = self.roots_map[int(sid)]
             gss_init = gss.apply(initialize_acc, init_cache)
-            enqueue(r, gss_init)
+            enqueue(r, gss_init, 0)
         stats.stop('get_mask.seeding')
 
         stats.start('get_mask.main_loop')
@@ -896,7 +899,8 @@ class Model(GraphProvider):
         while work_heap:
             stats.inc('get_mask.traversal.depth_heap.pops')
             stats.inc('get_mask.traversal.nodes_processed')
-            node, gss_node, start_edge, start_dest, pop_cache = dequeue()
+            node, gss_node, start_edge, start_dest, pop_cache, depth = dequeue()
+            stats.counts['get_mask.traversal.max_depth'] = max(stats.counts.get('get_mask.traversal.max_depth', 0), depth)
             stats.inc('get_mask.gss.at_node.accs.sum', len(getattr(gss_node, 'get_all_accs', lambda: [])()))
 
             stats.start('get_mask.main_loop.node.reduce_acc')
@@ -1003,7 +1007,7 @@ class Model(GraphProvider):
                 # Iterate grouped dests in ascending order for locality
                 for dest_j in sorted(grouped.keys()):
                     if dests_proc >= max_dests:
-                        enqueue(node, gss_node, edge_i, dest_j, pop_cache)
+                        enqueue(node, gss_node, depth, edge_i, dest_j, pop_cache)
                         stats.inc('get_mask.traversal.node_requeued_for_more_edges')
                         edges_proc = max_edges
                         break
@@ -1018,7 +1022,7 @@ class Model(GraphProvider):
                         stats.stop('get_mask.main_loop.edge.isolate_many')
                     if child_gss.is_empty(): continue
                     d: NodeID = int(dest.dest_idx)
-                    enqueue(d, child_gss)
+                    enqueue(d, child_gss, depth + 1)
                     dests_proc += 1
 
                 if edges_proc >= max_edges: break
@@ -1026,7 +1030,7 @@ class Model(GraphProvider):
 
 
                 if edges_proc >= max_edges and edge_i + 1 < len(a_node.children):
-                    enqueue(node, gss_node, edge_i + 1, 0, pop_cache)
+                    enqueue(node, gss_node, depth, edge_i + 1, 0, pop_cache)
                     stats.inc('get_mask.traversal.node_requeued_for_more_edges')
                     break
         stats.stop('get_mask.main_loop')
@@ -1048,6 +1052,7 @@ class Model(GraphProvider):
             "end_nodes": float(Stats.get().counts.get('get_mask.traversal.end_nodes', 0)),
             "main_loop_ms": float(Stats.get().times.get('get_mask.main_loop', 0.0) * 1000.0),
             "total_ms": float(Stats.get().times.get('get_mask', 0.0) * 1000.0),
+            "max_depth": float(Stats.get().counts.get('get_mask.traversal.max_depth', 0)),
         }
 
         # Optional internal stats printout (suppressed by default)
