@@ -56,7 +56,15 @@ pub fn optimize_trie3_size(
         merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
     }
 
-    crate::debug!(2, "Step 1.5: Pruning dead paths...");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
+
+    crate::debug!(2, "Step 1.1: Constraining bitvectors...");
+    if config.optimize_trie3_constrain_bitvecs {
+        constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
+    }
+
+    crate::debug!(2, "Step 1.2: Pruning dead paths...");
     if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
         prune_dead_paths_trie3(roots, &trie3_god);
     }
