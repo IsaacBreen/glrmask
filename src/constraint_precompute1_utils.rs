@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::hash::{Hash, Hasher, DefaultHasher};
 use std::cmp::Reverse;
 use std::ops::BitOrAssign;
 use std::sync::Arc;
@@ -11,6 +11,7 @@ use crate::constraint::{GrammarConstraintConfig, PrecomputeNode0Index, Precomput
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::constraint::{StageVocab, PrecomputeNode1Index, Trie1GodWrapper};
 use crate::constraint_extra::PrecomputeStats;
+use deterministic_hash::DeterministicHasher;
 use crate::datastructures::EntryApi;
 use crate::datastructures::gss::LLMTokenBV;
 use crate::datastructures::trie::Trie;
@@ -134,6 +135,196 @@ fn aggressive_merge_nodes_trie1(
     crate::debug!(2, "Finished aggressively merging subtrees in Trie1. Canonical nodes: {}", canonical_nodes.len());
 }
 
+/// Returns true iff two nodes are structurally equal for our purposes:
+/// - end flags must match
+/// - keyed edges (Some(t)) must match by:
+///     for each t: same multiset of (canonical_child_index, LLMTokenBV)
+/// - None edges are treated just like keyed edges if present (though usually flattened).
+/// - live_tokens are ignored (they are derived).
+fn nodes_equivalent_ignoring_live_tokens_using_canonical_children(
+    a: PrecomputeNode1Index,
+    b: PrecomputeNode1Index,
+    trie1_god: &Trie1GodWrapper,
+    canonical_child: &HashMap<PrecomputeNode1Index, PrecomputeNode1Index>,
+) -> bool {
+    let ag = a.read(trie1_god).expect("read");
+    let bg = b.read(trie1_god).expect("read");
+    if ag.value.end != bg.value.end {
+        return false;
+    }
+
+    if ag.children().len() != bg.children().len() {
+        return false;
+    }
+
+    for (ek, a_dm) in ag.children() {
+        let b_dm = match bg.children().get(ek) {
+            Some(x) => x,
+            None => return false,
+        };
+        if a_dm.len() != b_dm.len() {
+            return false;
+        }
+
+        // Compare as bags of (canonical_child, bv)
+        let mut a_vec: Vec<(usize, &LLMTokenBV)> = a_dm.iter().map(|(dst, bv)| {
+            let d = *canonical_child.get(dst).unwrap_or(dst);
+            (usize::from(d.as_index()), bv)
+        }).collect();
+        let mut b_vec: Vec<(usize, &LLMTokenBV)> = b_dm.iter().map(|(dst, bv)| {
+            let d = *canonical_child.get(dst).unwrap_or(dst);
+            (usize::from(d.as_index()), bv)
+        }).collect();
+
+        // Sort by (dst, bv_hash)
+        let mut hash_bv = |bv: &LLMTokenBV| {
+            let mut h = DeterministicHasher::new(DefaultHasher::new());
+            bv.hash(&mut h);
+            h.finish()
+        };
+        a_vec.sort_unstable_by_key(|(d, bv)| (*d, hash_bv(bv)));
+        b_vec.sort_unstable_by_key(|(d, bv)| (*d, hash_bv(bv)));
+
+        for ((da, bva), (db, bvb)) in a_vec.iter().zip(b_vec.iter()) {
+            if da != db { return false; }
+            if *bva != *bvb { return false; }
+        }
+    }
+    true
+}
+
+/// Bottom-up signature-based minimization for Trie1.
+/// 1) Computes canonical representatives based on a structural digest:
+///    - includes end flag
+///    - for each edge key, the multiset of (canonical_child_index, LLMTokenBV)
+///    - ignores live_tokens (derived)
+/// 2) Rewrites all edges to canonical children and coalesces duplicates (unioning masks).
+/// 3) Remaps roots, GC unreachable, recomputes depths.
+fn minimize_by_signature_trie1(
+    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+    trie1_god: &Trie1GodWrapper,
+) {
+    crate::debug!(2, "Minimizing Trie1 by structural signature...");
+    if roots.is_empty() { return; }
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    Trie::recompute_all_max_depths(trie1_god, &roots_vec);
+
+    let mut all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
+    // Process children before parents: leaves have depth 0
+    all_nodes.sort_by_key(|idx| idx.read(trie1_god).expect("read").max_depth);
+
+    // Map: node -> canonical node
+    let mut canonical: HashMap<PrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
+    // Group by digest for candidate equal nodes
+    let mut buckets: HashMap<u64, Vec<PrecomputeNode1Index>> = HashMap::new();
+
+    // Produce a stable digest that depends on:
+    //  - end flag
+    //  - per edge-key (sorted): key id, count, and for each child: (canonical_id, bv hash)
+    let mut digest_for = |node: PrecomputeNode1Index| -> u64 {
+        let g = node.read(trie1_god).expect("read");
+        let mut hasher = DeterministicHasher::new(DefaultHasher::new());
+        // end flag
+        g.value.end.hash(&mut hasher);
+        // keyed edges
+        g.children().len().hash(&mut hasher);
+        for (ek, dm) in g.children() {
+            ek.hash(&mut hasher);
+            dm.len().hash(&mut hasher);
+            // materialize as (canonical child, bv)
+            let mut entries: Vec<(usize, u64)> = Vec::with_capacity(dm.len());
+            for (dst, bv) in dm {
+                let d = *canonical.get(dst).unwrap_or(dst);
+                let mut hbv = DeterministicHasher::new(DefaultHasher::new());
+                bv.hash(&mut hbv);
+                entries.push((usize::from(d.as_index()), hbv.finish()));
+            }
+            entries.sort_unstable();
+            for (cd, hbv) in entries {
+                cd.hash(&mut hasher);
+                hbv.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    };
+
+    // Bottom-up: compute canonical id per node
+    for n in &all_nodes {
+        let d = digest_for(*n);
+        let entry = buckets.entry(d).or_default();
+        let mut rep: Option<PrecomputeNode1Index> = None;
+        for &candidate in entry.iter() {
+            if nodes_equivalent_ignoring_live_tokens_using_canonical_children(
+                *n,
+                candidate,
+                trie1_god,
+                &canonical,
+            ) {
+                rep = Some(candidate);
+                break;
+            }
+        }
+        match rep {
+            Some(r) => {
+                canonical.insert(*n, r);
+            }
+            None => {
+                entry.push(*n);
+                canonical.insert(*n, *n);
+            }
+        }
+    }
+
+    // Rewrite edges to canonical children and coalesce duplicates
+    #[cfg(not(rustrover))]
+    let it = tqdm!(all_nodes.iter(), desc = "Trie1 Signature Minimize (Rewrite)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
+    #[cfg(rustrover)]
+    let it = all_nodes.iter();
+    for n in it {
+        let children_snapshot: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = {
+            let r = n.read(trie1_god).expect("read");
+            r.children().clone()
+        };
+        let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
+        for (ek, dm) in children_snapshot {
+            let dest_map = new_children.entry(ek).or_default();
+            for (dst, bv) in dm {
+                let cdst = *canonical.get(&dst).unwrap_or(&dst);
+                dest_map.entry(cdst)
+                    .and_modify(|e| *e |= &bv)
+                    .or_insert(bv.clone());
+            }
+        }
+        // Write back + recompute live_tokens
+        {
+            let mut w = n.write(trie1_god).expect("write");
+            *w.children_mut() = new_children;
+            let mut lt = LLMTokenBV::zeros();
+            for dm in w.children().values() {
+                for bv in dm.values() {
+                    lt |= bv;
+                }
+            }
+            w.value.live_tokens = lt;
+        }
+    }
+
+    // Remap roots to canonical
+    let mut new_roots = BTreeMap::new();
+    for (sid, root) in roots.iter() {
+        let c = *canonical.get(root).unwrap_or(root);
+        new_roots.insert(*sid, c);
+    }
+    *roots = new_roots;
+
+    // Cleanup
+    let roots_vec2: Vec<_> = roots.values().cloned().collect();
+    Trie::recompute_all_max_depths(trie1_god, &roots_vec2);
+    Trie::gc(trie1_god, &roots_vec2);
+    Trie::recompute_all_max_depths(trie1_god, &roots_vec2);
+    crate::debug!(2, "Done minimizing Trie1 by structural signature.");
+}
+
 pub fn optimize_trie1_size(
     precomputed1: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
     trie1_god: &Trie1GodWrapper,
@@ -162,7 +353,11 @@ pub fn optimize_trie1_size(
     );
     replace_ignore_token_edges_with_none_edges_trie1(precomputed1, trie1_god, ignore_terminal_id);
     simplify_none_edges_trie1(precomputed1, trie1_god);
-    Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+    if config.optimize_trie1_early_flatten_epsilon {
+        // Flatten epsilon early to reduce structural variation before pruning/merging.
+        flatten_all_none_edges_trie1(precomputed1, trie1_god);
+        Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+    }
 
     prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
     prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
@@ -171,6 +366,9 @@ pub fn optimize_trie1_size(
     Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
     factor_common_destinations_trie1(precomputed1, trie1_god);
     aggressive_merge_nodes_trie1(precomputed1, trie1_god);
+    if config.optimize_trie1_minimize_by_signature {
+        minimize_by_signature_trie1(precomputed1, trie1_god);
+    }
 
     // Aggressively remove all None edges via full epsilon-closure flattening.
     // This collapses intermediate "factored" nodes and any other epsilon bridges,
@@ -182,6 +380,9 @@ pub fn optimize_trie1_size(
     optimize_state_masks_and_edges_trie1(precomputed1, trie1_god);
     Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
     aggressive_merge_nodes_trie1(precomputed1, trie1_god);
+    if config.optimize_trie1_minimize_by_signature {
+        minimize_by_signature_trie1(precomputed1, trie1_god);
+    }
     prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
     Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
     Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
@@ -201,6 +402,13 @@ pub fn optimize_trie1_size(
     optimize_state_masks_and_edges_trie1(precomputed1, trie1_god);
     if config.optimize_trie1_reorder_llm_tokens {
         reorder_llm_tokens_for_range_minimization_trie1(precomputed1, trie1_god, stage_vocab);
+    }
+    if config.optimize_trie1_minimize_by_signature {
+        // Final canonicalization pass to capture equivalences exposed by token remaps.
+        minimize_by_signature_trie1(precomputed1, trie1_god);
+        prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+        Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+        Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
     }
 
     crate::debug!(2, "Final Trie1 stats:");

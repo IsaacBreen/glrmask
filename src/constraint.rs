@@ -429,6 +429,8 @@ pub struct GrammarConstraintConfig {
     pub optimize_trie1_reorder_llm_tokens: bool,
     pub optimize_trie3_merge_equivalent_llm_tokens: bool,
     pub optimize_trie3_reorder_llm_tokens: bool,
+    pub optimize_trie1_minimize_by_signature: bool,
+    pub optimize_trie1_early_flatten_epsilon: bool,
 }
 
 impl Default for GrammarConstraintConfig {
@@ -452,6 +454,8 @@ impl Default for GrammarConstraintConfig {
             optimize_trie1_reorder_llm_tokens: true,
             optimize_trie3_merge_equivalent_llm_tokens: true,
             optimize_trie3_reorder_llm_tokens: true,
+            optimize_trie1_minimize_by_signature: true,
+            optimize_trie1_early_flatten_epsilon: true,
         }
     }
 }
