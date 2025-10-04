@@ -55,6 +55,12 @@ pub fn optimize_trie3_size(
     if config.optimize_trie3_merge_equivalent_llm_tokens {
         merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
     }
+
+    crate::debug!(2, "Step 1.5: Pruning dead paths...");
+    if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
+        prune_dead_paths_trie3(roots, &trie3_god);
+    }
+
     crate::debug!(2, "Step 2: Reordering LLM tokens...");
     if config.optimize_trie3_reorder_llm_tokens {
         reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
