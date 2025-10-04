@@ -852,12 +852,106 @@ fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, 
     (sum, mean, median)
 }
 
-pub fn calculate_final_stats(
+pub fn calculate_final_stats0(
+    precomputed_roots: &BTreeMap<TokenizerStateID, PrecomputeNode0Index>,
+    stats: &mut PrecomputeStats,
+    trie0_god: &Trie0GodWrapper,
+) {
+    crate::debug!(2, "Calculating final precompute0 statistics...");
+
+    let mut all_reachable_nodes: BTreeMap<PrecomputeNode0Index, PrecomputeNode0Index> = BTreeMap::new();
+    let mut queue: VecDeque<PrecomputeNode0Index> = precomputed_roots.values().cloned().collect();
+    let mut visited_data_ptrs: HashSet<PrecomputeNode0Index> = HashSet::new();
+
+    while let Some(node_arc) = queue.pop_front() {
+        let (children_to_queue, node_ptr) = {
+            let node_guard = node_arc.read(trie0_god).unwrap();
+            let ptr = node_arc;
+            let children = node_guard.children()
+                .values()
+                .flat_map(|dest_map| {
+                    dest_map.keys().map(|wrapper| wrapper.as_arc().clone())
+                })
+                .collect::<Vec<_>>();
+            (children, ptr)
+        };
+
+        if visited_data_ptrs.insert(node_ptr) {
+            all_reachable_nodes.insert(node_ptr, node_arc.clone());
+            for child_arc in children_to_queue {
+                queue.push_back(child_arc);
+            }
+        }
+    }
+
+    *stats = PrecomputeStats::default();
+    stats.final_unique_nodes_count = all_reachable_nodes.len();
+
+    let root_node_pointers: HashSet<PrecomputeNode0Index> = precomputed_roots
+        .values()
+        .map(|arc| {
+            let guard = arc.read(trie0_god).unwrap();
+            *arc
+        })
+        .collect();
+    stats.final_root_nodes_count = root_node_pointers.len();
+
+    for (node_ptr, node_arc) in &all_reachable_nodes {
+        let node_guard = node_arc.read(trie0_god).expect("RwLock poisoned during final stats calculation");
+
+        if !root_node_pointers.contains(node_ptr) {
+            if node_guard.children().is_empty() {
+                stats.final_leaf_nodes_count += 1;
+            } else {
+                stats.final_non_root_internal_nodes_count += 1;
+            }
+        }
+
+        for (edge_key_opt, dest_map) in node_guard.children() {
+            let num_edges_for_this_key_to_distinct_children = dest_map.len();
+            stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
+
+            if let Some((gtid, _)) = edge_key_opt {
+                stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
+                *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children;
+
+                stats.final_grammar_token_edge_fanouts_dist
+                    .entry(*gtid)
+                    .or_default()
+                    .push(num_edges_for_this_key_to_distinct_children);
+                for llm_token_bv_on_edge in dest_map.values() {
+                    stats.final_grammar_token_edge_token_set_sizes_dist
+                        .entry(*gtid)
+                        .or_default()
+                        .push(llm_token_bv_on_edge.len());
+                    stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
+                }
+                if num_edges_for_this_key_to_distinct_children > 0 {
+                    stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
+                    stats.final_num_occupied_some_edge_keys += 1;
+                }
+            } else {
+                stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
+                if num_edges_for_this_key_to_distinct_children > 0 {
+                    stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
+                    stats.final_num_occupied_none_edge_keys += 1;
+                }
+            }
+        }
+
+        if node_guard.value.final_tokenizer_state.is_some() {
+            stats.final_nodes_with_clean_end += 1;
+        }
+    }
+    crate::debug!(2, "Finished calculating final precompute0 statistics.");
+}
+
+pub fn calculate_final_stats1(
     precomputed_roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
     stats: &mut PrecomputeStats,
     trie1_god: &Trie1GodWrapper,
 ) {
-    crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
+    crate::debug!(2, "Calculating final precompute1 statistics...");
 
     // Custom implementation of all_nodes using PrecomputeNodeIndex for visited set
     let mut all_reachable_nodes: BTreeMap<PrecomputeNode1Index, PrecomputeNode1Index> = BTreeMap::new();
@@ -968,11 +1062,118 @@ pub fn calculate_final_stats(
             stats.final_nodes_with_clean_end += 1;
         }
     }
-    crate::debug!(2, "Finished calculating final precompute statistics (within constraint_extra).");
+    crate::debug!(2, "Finished calculating final precompute1 statistics.");
 }
 
 
-pub fn print_precompute_stats(
+pub fn print_precompute_stats0(
+    stats: &PrecomputeStats,
+    token_name_map: &BiBTreeMap<Terminal, usize>,
+    trie_god: &Trie0GodWrapper,
+) {
+    let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
+        stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
+    } else { 0.0 };
+    let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
+        stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
+    } else { 0.0 };
+
+    println!("--- Precomputation 0 Statistics ---");
+    println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
+
+    println!("\nNode Counts Breakdown:");
+    println!("  There are:");
+    println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
+    println!("    - {} are roots", stats.final_root_nodes_count);
+    let non_root_count = stats.final_unique_nodes_count.saturating_sub(stats.final_root_nodes_count); // Use saturating_sub
+    println!("    - {} are non-roots, of which", non_root_count);
+    println!("        - {} are internal (non-root, non-leaf)", stats.final_non_root_internal_nodes_count);
+    println!("        - {} are leaves (non-root)", stats.final_leaf_nodes_count);
+
+    println!("\nFinal Graph Structure (after sharing and deduplication):");
+    println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
+    println!("  Total Edges: {}", stats.final_edges_count);
+    println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
+    println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
+    println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
+    println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
+    println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
+    println!("  Total ranges in all HybridBitsets: {}", stats.final_total_ranges_in_bvs);
+
+    let mut grammar_token_stats_new: Vec<(
+        GrammarTokenID,
+        usize, // key_usages (KeyUse)
+        (usize, Option<f64>, Option<f64>), // fanout_stats (SumChild, AvgChild, MedChild)
+        (usize, Option<f64>, Option<f64>)  // token_set_size_stats (SumToks, AvgToks, MedToks)
+    )> = Vec::new();
+
+    for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_counts {
+        let fanouts_for_gtid = stats.final_grammar_token_edge_fanouts_dist
+                                    .get(gtid)
+                                    .cloned()
+                                    .unwrap_or_else(Vec::new);
+        let child_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid); // Uses the helper
+
+        let token_set_sizes_for_gtid = stats.final_grammar_token_edge_token_set_sizes_dist
+                                            .get(gtid)
+                                            .cloned()
+                                            .unwrap_or_else(Vec::new);
+        let toks_stats = calculate_stats_from_vec_usize(&token_set_sizes_for_gtid); // Uses the helper
+
+        grammar_token_stats_new.push((*gtid, *key_usages_count, child_stats, toks_stats));
+    }
+
+    grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by KeyUse (key_usages_count)
+
+    println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
+    println!(
+        "  {:<25} {:<5} {:<8} {:<8} {:<10} {:<10} {:<10} {:<12} {:<10} {:<10}",
+        "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild",
+        "AvgKeyToks", "SumToks", "AvgToks", "MedToks"
+    );
+    println!(
+        "  {:-<25} {:-<5} {:-<8} {:-<8} {:-<10} {:-<10} {:-<10} {:-<12} {:-<10} {:-<10}",
+        "", "", "", "", "", "", "", "", "", ""
+    );
+
+    for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
+        let name = token_name_map
+            .get_by_right(&gtid.0) // gtid is GrammarTokenID
+            .cloned()
+            .map_or(
+                format!("ID:{}", gtid.0),
+                |t| t.to_string()
+            );
+
+        let (sum_child, avg_child, med_child) = child_stats;
+        let (sum_toks, avg_toks, med_toks) = toks_stats;
+        let avg_key_toks = if key_usages > 0 {
+            Some(sum_toks as f64 / key_usages as f64)
+        } else {
+            None
+        };
+
+
+        let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
+
+        println!(
+            "  {:<25} {:>5} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>10} {:>10}",
+            name,
+            gtid.0,
+            key_usages,
+            sum_child,
+            format_opt_f64(avg_child),
+            format_opt_f64(med_child),
+            format_opt_f64(avg_key_toks),
+            sum_toks,
+            format_opt_f64(avg_toks),
+            format_opt_f64(med_toks)
+        );
+    }
+    println!("---------------------------------");
+}
+
+pub fn print_precompute_stats1(
     stats: &PrecomputeStats,
     token_name_map: &BiBTreeMap<Terminal, usize>, // Used to get token names from GrammarTokenID
     trie_god: &Trie1GodWrapper,
@@ -984,7 +1185,7 @@ pub fn print_precompute_stats(
         stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
     } else { 0.0 };
 
-    println!("--- Precomputation Statistics ---");
+    println!("--- Precomputation 1 Statistics ---");
     println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
 
     println!("\nNode Counts Breakdown:");

@@ -16,7 +16,7 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::constraint::LLMVocab;
-use crate::constraint_extra::{PrecomputeStats};
+use crate::constraint_extra::{calculate_final_stats0, print_precompute_stats0, PrecomputeStats};
 use crate::datastructures::ordered_hash_map::Retain;
 
 const MERGE_THRESHOLD: usize = 20;
@@ -26,7 +26,7 @@ pub(crate) fn do_precompute0(
     parser:           Option<&GLRParser>,
     llm_vocab:        Option<Arc<LLMVocab>>,
     internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-    _token_name_map:   &BiBTreeMap<Terminal, usize>,
+    token_name_map:   &BiBTreeMap<Terminal, usize>,
     internal_max_llm_token: usize,
     terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     ignore_terminal_id: Option<TerminalID>,
@@ -41,6 +41,7 @@ pub(crate) fn do_precompute0(
         MERGE_THRESHOLD,
         terminal_follow_map,
         ignore_terminal_id,
+        token_name_map,
     );
 
     helper.run_dfs();
@@ -62,6 +63,7 @@ struct Precomputer0<'r> {
     stats:            PrecomputeStats,
     terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     ignore_terminal_id: Option<TerminalID>,
+    token_name_map:   &'r BiBTreeMap<Terminal, usize>,
     // Map each precompute node to the set of LLM tokens that can pass through it.
     // tags:             RefCell<HashMap<PrecomputeNodeIndex, LLMTokenBV>>, // Removed
     // One end node per final tokenizer state.
@@ -79,6 +81,7 @@ impl<'r> Precomputer0<'r> {
         merge_threshold:  usize,
         terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
+        token_name_map: &'r BiBTreeMap<Terminal, usize>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
@@ -131,6 +134,7 @@ impl<'r> Precomputer0<'r> {
             stats: PrecomputeStats::default(),
             terminal_follow_map,
             ignore_terminal_id,
+            token_name_map,
             // tags: RefCell::new(HashMap::new()), // Removed
             end_nodes,
             trie0_god,
@@ -138,6 +142,11 @@ impl<'r> Precomputer0<'r> {
     }
 
     fn optimize(&mut self) {
+        crate::debug!(2, "Initial Trie0 stats:");
+        let mut stats = PrecomputeStats::default();
+        calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
+        print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
+
         self.replace_ignore_token_edges_with_none_edges();
         self.simplify_none_edges(); // This can invalidate max_depth.
 
@@ -155,6 +164,11 @@ impl<'r> Precomputer0<'r> {
         // self.merge_nodes_basic();
         self.gc();
         Trie::recompute_all_max_depths(&self.trie0_god, &self.roots.values().cloned().collect::<Vec<_>>());
+
+        crate::debug!(2, "Final Trie0 stats:");
+        let mut stats = PrecomputeStats::default();
+        calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
+        print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
     }
 
     fn get_end_node(&self, final_sid: TokenizerStateID) -> PrecomputeNode0Index {
@@ -759,10 +773,6 @@ impl<'r> Precomputer0<'r> {
     fn finish(
         self,
     ) -> (BTreeMap<TokenizerStateID, PrecomputeNode0Index>, Trie0GodWrapper) {
-
-        // calculate_final_stats(&self.roots, &mut self.stats, &self.trie0_god);
-        // print_precompute_stats(&self.stats, token_name_map, &self.trie0_god);
-
         (self.roots, self.trie0_god)
     }
 

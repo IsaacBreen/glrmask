@@ -27,8 +27,15 @@ pub fn optimize_trie1_size(
     terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
     config: &GrammarConstraintConfig,
     stage_vocab: &mut StageVocab,
+    token_name_map: &bimap::BiBTreeMap<crate::glr::grammar::Terminal, usize>,
 ) {
     crate::debug!(2, "Starting Trie1 size optimization...");
+
+    crate::debug!(2, "Initial Trie1 stats:");
+    let mut stats = PrecomputeStats::default();
+    crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
+    crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
+
     simplify_none_edges_to_former_end_nodes_trie1(
         precomputed1,
         trie1_god,
@@ -66,6 +73,11 @@ pub fn optimize_trie1_size(
     if config.optimize_trie1_reorder_llm_tokens {
         reorder_llm_tokens_for_range_minimization_trie1(precomputed1, trie1_god, stage_vocab);
     }
+
+    crate::debug!(2, "Final Trie1 stats:");
+    let mut stats = PrecomputeStats::default();
+    crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
+    crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
 }
 
 fn simplify_none_edges_to_former_end_nodes_trie1(

@@ -860,6 +860,7 @@ impl GrammarConstraint {
             &terminal_follow_map,
             &mut precompute_vocab,
             config,
+            &token_name_map,
         );
 
         // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
@@ -969,6 +970,7 @@ impl GrammarConstraint {
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         stage_vocab: &mut StageVocab,
         config: &GrammarConstraintConfig,
+        token_name_map: &BiBTreeMap<Terminal, usize>,
     ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
         let trie1_god = Trie1GodWrapper::new();
         let mut precomputed1: BTreeMap<TokenizerStateID, PrecomputeNode1Index> = BTreeMap::new();
@@ -1065,6 +1067,7 @@ impl GrammarConstraint {
             terminal_follow_map,
             config,
             stage_vocab,
+            token_name_map,
         );
 
         (precomputed1, trie1_god)
