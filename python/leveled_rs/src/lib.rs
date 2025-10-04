@@ -775,6 +775,56 @@ impl LeveledGSS {
         })
     }
 
+    fn isolate(&self, value: Option<PyObject>) -> PyResult<Self> {
+        Python::with_gil(|py| {
+            let new_inner = if let Some(val) = value {
+                // Keep stacks with `value` at the top.
+                match &*self.inner {
+                    Upper::Branch(b) => {
+                        let filtered_children = b.children.get(&PyObjectWrapper(val.clone()))
+                            .map(|kids| HashMap::unit(PyObjectWrapper(val), kids.clone()))
+                            .unwrap_or_else(HashMap::new);
+                        let max_depth = get_max_depth_upper(&filtered_children);
+                        let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
+                            children: filtered_children,
+                            empty: None,
+                            max_depth,
+                        })));
+                        LeveledGSS::try_promote(py, &new_b)?
+                    }
+                    Upper::Interface(i) => {
+                        if let Some(kids) = i.children.get(&PyObjectWrapper(val.clone())) {
+                            let filtered_children = HashMap::unit(PyObjectWrapper(val), kids.clone());
+                            let max_depth = get_max_depth_lower(&filtered_children);
+                             Arc::new(Upper::Interface(Arc::new(Interface {
+                                children: filtered_children,
+                                acc: i.acc.clone(),
+                                empty: None,
+                                max_depth,
+                            })))
+                        } else {
+                            LeveledGSS::_empty().inner
+                        }
+                    }
+                }
+            } else {
+                // Keep only empty stacks.
+                let empty_acc = match &*self.inner {
+                    Upper::Branch(b) => b.empty.clone(),
+                    Upper::Interface(i) => i.empty.clone(),
+                };
+                let new_b = Arc::new(Upper::Branch(Arc::new(UpperBranch {
+                    children: HashMap::new(),
+                    empty: empty_acc,
+                    max_depth: 0,
+                })));
+                LeveledGSS::try_promote(py, &new_b)?
+            };
+            Ok(LeveledGSS { inner: new_inner })
+        })
+    }
+
+
     fn isolate_many(&self, values: &PySet) -> PyResult<Self> {
         let (new_empty, new_children_upper, new_children_lower) = Python::with_gil(|py| -> PyResult<_> {
             let mut new_empty = None;
