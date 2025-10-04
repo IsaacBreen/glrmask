@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 use std::collections::VecDeque;
 
 // Wrapper for PyObject to be used as a key in HashMap
-#[derive(Clone, Eq)]
+#[derive(Clone)]
 struct PyObjectWrapper(PyObject);
 
 impl PartialEq for PyObjectWrapper {
@@ -21,6 +21,8 @@ impl PartialEq for PyObjectWrapper {
         })
     }
 }
+
+impl Eq for PyObjectWrapper {}
 
 impl Hash for PyObjectWrapper {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -181,7 +183,6 @@ fn get_max_depth_upper(children: &Children<Upper>) -> isize {
     children.values().flat_map(|kids| kids.values()).map(|c| c.max_depth()).max().map_or(0, |d| d + 1)
 }
 
-#[pymethods]
 impl LeveledGSS {
     fn _empty() -> Self {
         let inner = Arc::new(Upper::Branch(Arc::new(UpperBranch {
@@ -191,7 +192,10 @@ impl LeveledGSS {
         })));
         LeveledGSS { inner }
     }
+}
 
+#[pymethods]
+impl LeveledGSS {
     #[new]
     fn new() -> Self {
         LeveledGSS::_empty()
@@ -375,7 +379,7 @@ impl LeveledGSS {
     }
 
     fn isolate_many(&self, values: &PySet) -> PyResult<Self> {
-        let (new_empty, new_children_upper, new_children_lower) = Python::with_gil(|py| {
+        let (new_empty, new_children_upper, new_children_lower) = Python::with_gil(|py| -> PyResult<_> {
             let mut new_empty = None;
             if values.contains(py.None())? {
                 new_empty = match &*self.inner {
