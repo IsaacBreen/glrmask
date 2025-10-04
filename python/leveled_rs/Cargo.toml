@@ -9,4 +9,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.20.0", features = ["extension-module", "generate-import-lib"] }
-im-rc = "15.1.0"
+im = "15.1.0"

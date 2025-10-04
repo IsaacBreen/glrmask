@@ -1,13 +1,41 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple, PySet};
+use pyo3::types::{PyDict, PyList, PySet, PyTuple, PyType};
 use pyo3::exceptions::PyValueError;
+use pyo3::basic::CompareOp;
 use std::sync::Arc;
-use im_rc::{HashMap, OrdMap};
+use im::{HashMap, OrdMap};
 use std::hash::{Hash, Hasher};
+use std::collections::VecDeque;
 
-type Children<N> = HashMap<PyObject, OrdMap<isize, Arc<N>>>;
+// Wrapper for PyObject to be used as a key in HashMap
+#[derive(Clone, Eq)]
+struct PyObjectWrapper(PyObject);
 
-#[derive(Clone, Debug)]
+impl PartialEq for PyObjectWrapper {
+    fn eq(&self, other: &Self) -> bool {
+        Python::with_gil(|py| {
+            match self.0.as_ref(py).rich_compare(other.0.as_ref(py), CompareOp::Eq) {
+                Ok(res) => res.is_true().unwrap_or(false),
+                Err(_) => self.0.as_ref(py).is(other.0.as_ref(py)), // Fallback to pointer comparison
+            }
+        })
+    }
+}
+
+impl Hash for PyObjectWrapper {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Python::with_gil(|py| {
+            match self.0.as_ref(py).hash() {
+                Ok(hash_val) => hash_val.hash(state),
+                Err(_) => 0.hash(state), // Fallback for unhashable types
+            }
+        });
+    }
+}
+
+type Children<N> = HashMap<PyObjectWrapper, OrdMap<isize, Arc<N>>>;
+
+#[derive(Clone)]
 struct Lower {
     children: Children<Lower>,
     empty: bool,
@@ -24,7 +52,7 @@ impl Eq for Lower {}
 impl Hash for Lower {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.empty.hash(state);
-        self.max_depth.hash(state);
+        // self.max_depth.hash(state); // max_depth is derived, shouldn't be part of hash
         self.children.iter().for_each(|(k, v)| {
             k.hash(state);
             v.iter().for_each(|(d, n)| {
@@ -35,8 +63,15 @@ impl Hash for Lower {
     }
 }
 
+fn py_obj_eq(a: &Option<PyObject>, b: &Option<PyObject>) -> bool {
+    Python::with_gil(|py| match (a, b) {
+        (Some(a_obj), Some(b_obj)) => a_obj.as_ref(py).rich_compare(b_obj.as_ref(py), CompareOp::Eq).map_or(false, |c| c.is_true().unwrap_or(false)),
+        (None, None) => true,
+        _ => false,
+    })
+}
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Interface {
     children: Children<Lower>,
     acc: PyObject,
@@ -48,8 +83,7 @@ impl PartialEq for Interface {
     fn eq(&self, other: &Self) -> bool {
         Python::with_gil(|py| {
             self.acc.as_ref(py).eq(other.acc.as_ref(py)).unwrap_or(false) &&
-            self.empty.as_ref().map(|s| s.as_ref(py))
-                .eq(&other.empty.as_ref().map(|o| o.as_ref(py))) &&
+            py_obj_eq(&self.empty, &other.empty) &&
             self.max_depth == other.max_depth &&
             self.children.ptr_eq(&other.children)
         })
@@ -63,7 +97,7 @@ impl Hash for Interface {
             self.acc.as_ref(py).hash().unwrap_or(0).hash(state);
             self.empty.as_ref().and_then(|e| e.as_ref(py).hash().ok()).hash(state);
         });
-        self.max_depth.hash(state);
+        // self.max_depth.hash(state);
         self.children.iter().for_each(|(k, v)| {
             k.hash(state);
             v.iter().for_each(|(d, n)| {
@@ -74,7 +108,7 @@ impl Hash for Interface {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct UpperBranch {
     children: Children<Upper>,
     empty: Option<PyObject>,
@@ -84,8 +118,7 @@ struct UpperBranch {
 impl PartialEq for UpperBranch {
     fn eq(&self, other: &Self) -> bool {
         Python::with_gil(|py| {
-            self.empty.as_ref().map(|s| s.as_ref(py))
-                .eq(&other.empty.as_ref().map(|o| o.as_ref(py))) &&
+            py_obj_eq(&self.empty, &other.empty) &&
             self.max_depth == other.max_depth &&
             self.children.ptr_eq(&other.children)
         })
@@ -98,7 +131,7 @@ impl Hash for UpperBranch {
         Python::with_gil(|py| {
             self.empty.as_ref().and_then(|e| e.as_ref(py).hash().ok()).hash(state);
         });
-        self.max_depth.hash(state);
+        // self.max_depth.hash(state);
         self.children.iter().for_each(|(k, v)| {
             k.hash(state);
             v.iter().for_each(|(d, n)| {
@@ -109,7 +142,7 @@ impl Hash for UpperBranch {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum Upper {
     Branch(Arc<UpperBranch>),
     Interface(Arc<Interface>),
@@ -125,17 +158,17 @@ impl Upper {
 
     fn children(&self) -> PyResult<Vec<PyObject>> {
         Python::with_gil(|py| {
-            let keys = match self {
-                Upper::Branch(b) => b.children.keys().cloned().collect(),
-                Upper::Interface(i) => i.children.keys().cloned().collect(),
+            let keys: Vec<PyObject> = match self {
+                Upper::Branch(b) => b.children.keys().map(|k| k.0.clone_ref(py)).collect(),
+                Upper::Interface(i) => i.children.keys().map(|k| k.0.clone_ref(py)).collect(),
             };
             Ok(keys)
         })
     }
 }
 
-#[pyclass(name = "LeveledGSS", module="leveled_gss_rs")]
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[pyclass(name = "LeveledGSS", module="leveled_gss_rs", unsendable)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct LeveledGSS {
     inner: Arc<Upper>,
 }
@@ -150,19 +183,23 @@ fn get_max_depth_upper(children: &Children<Upper>) -> isize {
 
 #[pymethods]
 impl LeveledGSS {
-    #[new]
-    fn new() -> Self {
-        LeveledGSS::empty()
-    }
-
-    #[classmethod]
-    fn empty(_cls: &PyType) -> Self {
+    fn _empty() -> Self {
         let inner = Arc::new(Upper::Branch(Arc::new(UpperBranch {
             children: HashMap::new(),
             empty: None,
             max_depth: 0,
         })));
         LeveledGSS { inner }
+    }
+
+    #[new]
+    fn new() -> Self {
+        LeveledGSS::_empty()
+    }
+
+    #[classmethod]
+    fn empty(_cls: &PyType) -> Self {
+        LeveledGSS::_empty()
     }
 
     fn to_stacks(&self) -> PyResult<PyObject> {
@@ -174,9 +211,9 @@ impl LeveledGSS {
                     let stack = PyList::new(py, pref.iter().rev());
                     res.append(PyTuple::new(py, &[stack.to_object(py), acc.clone_ref(py)]))?;
                 }
-                for (v, kids) in &l.children {
+                for (v, kids) in l.children.iter() {
                     for child in kids.values() {
-                        pref.push(v.clone_ref(py));
+                        pref.push(v.0.clone_ref(py));
                         dfs_lower(child, pref, acc, res, py)?;
                         pref.pop();
                     }
@@ -191,9 +228,9 @@ impl LeveledGSS {
                             let stack = PyList::new(py, pref.iter().rev());
                             res.append(PyTuple::new(py, &[stack.to_object(py), empty_acc.clone_ref(py)]))?;
                         }
-                        for (v, kids) in &b.children {
+                        for (v, kids) in b.children.iter() {
                             for child in kids.values() {
-                                pref.push(v.clone_ref(py));
+                                pref.push(v.0.clone_ref(py));
                                 dfs_upper(child, pref, res, py)?;
                                 pref.pop();
                             }
@@ -209,9 +246,9 @@ impl LeveledGSS {
                             let stack = PyList::new(py, pref.iter().rev());
                             res.append(PyTuple::new(py, &[stack.to_object(py), i.acc.clone_ref(py)]))?;
                         } else {
-                            for (v, kids) in &i.children {
+                            for (v, kids) in i.children.iter() {
                                 for child in kids.values() {
-                                    pref.push(v.clone_ref(py));
+                                    pref.push(v.0.clone_ref(py));
                                     dfs_lower(child, pref, &i.acc, res, py)?;
                                     pref.pop();
                                 }
@@ -227,7 +264,7 @@ impl LeveledGSS {
             let reference_gss_module = py.import("gss_tester.implementations.reference_impl")?;
             let ref_gss_class = reference_gss_module.getattr("ReferenceGSS")?;
             let gss_instance = ref_gss_class.call1((res.to_object(py),))?;
-            gss_instance.call_method0("to_stacks")
+            gss_instance.call_method0("to_stacks").map(|any| any.to_object(py))
         })
     }
 
@@ -244,7 +281,7 @@ impl LeveledGSS {
                         max_depth: get_max_depth_lower(&i.children),
                     });
                     let mut new_children = Children::new();
-                    new_children.insert(value, OrdMap::unit(lower_node.max_depth, lower_node));
+                    new_children.insert(PyObjectWrapper(value), OrdMap::unit(lower_node.max_depth, lower_node));
                     let max_depth = get_max_depth_lower(&new_children);
                     Arc::new(Upper::Interface(Arc::new(Interface {
                         children: new_children,
@@ -255,7 +292,7 @@ impl LeveledGSS {
                 }
                 Upper::Branch(_) => {
                     let mut new_children = Children::new();
-                    new_children.insert(value, OrdMap::unit(self.inner.max_depth(), self.inner.clone()));
+                    new_children.insert(PyObjectWrapper(value), OrdMap::unit(self.inner.max_depth(), self.inner.clone()));
                     let max_depth = get_max_depth_upper(&new_children);
                     Arc::new(Upper::Branch(Arc::new(UpperBranch {
                         children: new_children,
@@ -293,8 +330,8 @@ impl LeveledGSS {
             // Keep stacks with `value` at the top.
             match &*self.inner {
                 Upper::Branch(b) => {
-                    let filtered_children = b.children.get(&val)
-                        .map(|kids| HashMap::unit(val.clone(), kids.clone()))
+                    let filtered_children = b.children.get(&PyObjectWrapper(val.clone()))
+                        .map(|kids| HashMap::unit(PyObjectWrapper(val), kids.clone()))
                         .unwrap_or_else(HashMap::new);
                     let max_depth = get_max_depth_upper(&filtered_children);
                     Arc::new(Upper::Branch(Arc::new(UpperBranch {
@@ -304,8 +341,8 @@ impl LeveledGSS {
                     })))
                 }
                 Upper::Interface(i) => {
-                    if let Some(kids) = i.children.get(&val) {
-                        let filtered_children = HashMap::unit(val.clone(), kids.clone());
+                    if let Some(kids) = i.children.get(&PyObjectWrapper(val.clone())) {
+                        let filtered_children = HashMap::unit(PyObjectWrapper(val), kids.clone());
                         let max_depth = get_max_depth_lower(&filtered_children);
                          Arc::new(Upper::Interface(Arc::new(Interface {
                             children: filtered_children,
@@ -352,15 +389,15 @@ impl LeveledGSS {
 
             match &*self.inner {
                 Upper::Branch(b) => {
-                    for (v, kids) in &b.children {
-                        if values.contains(v)? {
+                    for (v, kids) in b.children.iter() {
+                        if values.contains(&v.0)? {
                             new_children_upper.insert(v.clone(), kids.clone());
                         }
                     }
                 }
                 Upper::Interface(i) => {
-                     for (v, kids) in &i.children {
-                        if values.contains(v)? {
+                     for (v, kids) in i.children.iter() {
+                        if values.contains(&v.0)? {
                             new_children_lower.insert(v.clone(), kids.clone());
                         }
                     }
@@ -478,7 +515,7 @@ impl LeveledGSS {
             let stacks = self.to_stacks()?;
             let reference_gss_module = py.import("gss_tester.implementations.reference_impl")?;
             let ref_gss_class = reference_gss_module.getattr("ReferenceGSS")?;
-            ref_gss_class.call_method1("from_stacks", (stacks,))
+            ref_gss_class.call_method1("from_stacks", (stacks,)).map(|any| any.to_object(py))
         })
     }
 
@@ -517,7 +554,7 @@ impl LeveledGSS {
                 }
 
                 let mut node = trie;
-                let mut reversed_vals = vals.to_vec();
+                let mut reversed_vals: Vec<PyObject> = vals.iter().map(|i| i.to_object(py)).collect();
                 reversed_vals.reverse();
 
                 for (i, v) in reversed_vals.iter().enumerate() {
@@ -546,7 +583,7 @@ impl LeveledGSS {
                  return Err(PyValueError::new_err("from_stacks is not fully implemented in Rust yet: trie building is incomplete"));
             }
 
-            Ok(LeveledGSS::empty())
+            Ok(LeveledGSS::_empty())
         })
     }
 }
