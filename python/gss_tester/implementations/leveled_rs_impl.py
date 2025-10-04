@@ -9,4 +9,3 @@ except ImportError as e:
 
 # Alias for test runner discovery
 Leveled_rsGSS = LeveledRSGSS
-Leveled_rsGSS = LeveledRSGSS
