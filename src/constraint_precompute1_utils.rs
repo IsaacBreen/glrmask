@@ -17,6 +17,108 @@ use crate::tokenizer::TokenizerStateID;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::ordered_hash_map::Retain;
 
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+struct MergeKey {
+    end: bool,
+    children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>>,
+}
+
+fn aggressive_deduplicate_recursive_trie1(
+    node_arc: PrecomputeNode1Index,
+    canonical_nodes: &mut HashMap<MergeKey, PrecomputeNode1Index>,
+    visited: &mut HashMap<PrecomputeNode1Index, PrecomputeNode1Index>,
+    trie1_god: &Trie1GodWrapper,
+) -> PrecomputeNode1Index {
+    if let Some(canonical_arc) = visited.get(&node_arc) {
+        return canonical_arc.clone();
+    }
+
+    // Recurse on children first to canonicalize them.
+    let (is_end, children_snapshot) = {
+        let g = node_arc.read(trie1_god).unwrap();
+        (g.value.end, g.children().clone())
+    };
+
+    let mut new_children_map = BTreeMap::new();
+    let mut children_changed = false;
+    for (edge_key, entries) in children_snapshot {
+        let mut new_dest_map = OrderedHashMap::new();
+        for (child_arc, edge_val) in entries {
+            let canonical_child_arc = aggressive_deduplicate_recursive_trie1(
+                child_arc,
+                canonical_nodes,
+                visited,
+                trie1_god,
+            );
+            if child_arc != canonical_child_arc {
+                children_changed = true;
+            }
+            // Coalesce if the same canonical child appears multiple times for one edge key
+            new_dest_map.entry(canonical_child_arc)
+                .and_modify(|ev: &mut LLMTokenBV| *ev |= &edge_val)
+                .or_insert(edge_val);
+        }
+        if !new_dest_map.is_empty() {
+            new_children_map.insert(edge_key, new_dest_map);
+        }
+    }
+
+    let key = MergeKey {
+        end: is_end,
+        children: new_children_map.clone(),
+    };
+
+    if let Some(canonical_arc) = canonical_nodes.get(&key) {
+        // Found a canonical node. Merge self into it.
+        let live_tokens_to_merge = {
+            // No need to re-read if children haven't changed, but this is safer
+            let g = node_arc.read(trie1_god).unwrap();
+            g.value.live_tokens.clone()
+        };
+        if !live_tokens_to_merge.is_empty() {
+            let mut canonical_g = canonical_arc.write(trie1_god).unwrap();
+            canonical_g.value.live_tokens |= &live_tokens_to_merge;
+        }
+        visited.insert(node_arc, canonical_arc.clone());
+        canonical_arc.clone()
+    } else {
+        // This node becomes the canonical representative for this key.
+        if children_changed {
+            let mut g = node_arc.write(trie1_god).unwrap();
+            *g.children_mut() = new_children_map;
+        }
+        
+        // We might not need to re-read here if we are careful. But let's be safe.
+        // The key was built with canonicalized children. If we updated the node, its children are now canonical.
+        // So the key is correct.
+        canonical_nodes.insert(key, node_arc.clone());
+        visited.insert(node_arc, node_arc.clone());
+        node_arc.clone()
+    }
+}
+
+fn aggressive_merge_nodes_trie1(
+    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+    trie1_god: &Trie1GodWrapper,
+) {
+    crate::debug!(2, "Aggressively merging identical subtrees in Trie1.");
+    let mut canonical_nodes: HashMap<MergeKey, PrecomputeNode1Index> = HashMap::new();
+    let mut visited: HashMap<PrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
+
+    let mut new_roots = BTreeMap::new();
+    for (sid, root_arc) in roots.iter() {
+        let canonical_root = aggressive_deduplicate_recursive_trie1(
+            root_arc.clone(),
+            &mut canonical_nodes,
+            &mut visited,
+            trie1_god,
+        );
+        new_roots.insert(*sid, canonical_root);
+    }
+    *roots = new_roots;
+    crate::debug!(2, "Finished aggressively merging subtrees in Trie1. Canonical nodes: {}", canonical_nodes.len());
+}
+
 pub fn optimize_trie1_size(
     precomputed1: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
     trie1_god: &Trie1GodWrapper,
@@ -52,7 +154,8 @@ pub fn optimize_trie1_size(
 
     Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
     factor_common_destinations_trie1(precomputed1, trie1_god);
-    merge_nodes_trie1(precomputed1, trie1_god);
+    aggressive_merge_nodes_trie1(precomputed1, trie1_god);
+    prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
     Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
 
     Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
