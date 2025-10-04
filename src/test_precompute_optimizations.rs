@@ -20,6 +20,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
 use bimap::{BiBTreeMap};
+use crate::datastructures::gss::LLMTokenBV;
 use crate::constraint_extra::PrecomputeStats;
 use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
 use crate::json_serialization::JSONConvertible;
@@ -68,9 +69,13 @@ fn assert_optimized_equivalent(
     crate::constraint_extra::print_precompute_stats2(&stats_optimized, &trie2_god);
 
     println!("\n--- Dumping Optimized Precompute2 Tree ---");
+    let mut internal_to_original_map: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+    for (original, internal) in original_to_internal_id_bimap {
+        internal_to_original_map.entry(*internal).or_default().insert(*original);
+    }
     GrammarConstraint::_dump_precomputed2(
         &optimized_precomputed2,
-        original_to_internal_id_bimap,
+        &internal_to_original_map,
         llm_token_map,
         &trie2_god,
     );

@@ -1368,29 +1368,29 @@ mod tests {
     #[test]
     fn test_format_bv_with_tokens_with_maps() {
         let bv = HybridBitset::from_iter(vec![0, 1]); // internal IDs
-        let mut bimap = BTreeMap::new();
-        bimap.insert(10, 0); // original 10 -> internal 0
-        bimap.insert(20, 1); // original 20 -> internal 1
+        let mut i2o_map = BTreeMap::new();
+        i2o_map.insert(0, LLMTokenBV::from_iter(vec![10])); // internal 0 -> original {10}
+        i2o_map.insert(1, LLMTokenBV::from_iter(vec![20])); // internal 1 -> original {20}
         let mut llm_map = BiBTreeMap::new();
         llm_map.insert(b"ten".to_vec(), LLMTokenID(10));
         llm_map.insert(b"twenty".to_vec(), LLMTokenID(20));
 
         let expected = "[0..=1] (e.g., [\"ten\", \"twenty\"])";
-        assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 5), expected);
+        assert_eq!(format_bv_with_tokens(&bv, Some(&i2o_map), Some(&llm_map), 5), expected);
     }
 
     #[test]
     fn test_format_bv_with_tokens_limit_and_ellipsis() {
         let bv = HybridBitset::from_iter(0..10); // internal IDs 0-9
-        let mut bimap = BTreeMap::new();
+        let mut i2o_map = BTreeMap::new();
         let mut llm_map = BiBTreeMap::new();
         for i in 0..10 {
-            bimap.insert(100 + i, i);
+            i2o_map.insert(i, LLMTokenBV::from_iter(vec![100 + i]));
             llm_map.insert(format!("{}", 100 + i).into_bytes(), LLMTokenID(100 + i));
         }
 
         let expected = "[0..=9] (e.g., [\"100\", \"101\", \"102\"], ...)";
-        assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 3), expected);
+        assert_eq!(format_bv_with_tokens(&bv, Some(&i2o_map), Some(&llm_map), 3), expected);
     }
 
     // Helper function to create a minimal constraint for testing dump

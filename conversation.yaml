@@ -5,7 +5,8 @@ local_system:
     - src/constraint_precompute0_utils.rs
     - src/constraint_precompute3_utils.rs
     - src/constraint_extra.rs
-  conversation_file:
+    - src/test_precompute_optimizations.rs
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/constraint.rs: |
@@ -7521,6 +7522,515 @@ local_system:
               constraint.dump_precomputed2(); // Just ensure it runs without panic
               println!("--- Finished dump_precomputed2 test output ---");
           }
+      }
+    src/test_precompute_optimizations.rs: |-
+      //! Precompute2 optimization equivalence tests.
+      //!
+      //! This suite verifies that applying optimization passes to the Precompute2
+      //! trie graph preserves its semantics by comparing the optimized result
+      //! against an unoptimized baseline using are_precompute2_trees_equivalent.
+      //!
+      //! We keep tests compact by:
+      //! - Defining grammars via inline EBNF strings.
+      //! - Using small, explicit LLM vocabularies.
+      //! - Factoring common logic into small helpers.
+
+      use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, Precomputed2, Trie2GodWrapper};
+      use crate::interface::{CompiledGrammar, GrammarDefinition};
+      use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+      use reqwest::blocking;
+      use std::collections::BTreeMap;
+      use std::error::Error;
+      use std::fs::{self, File};
+      use std::io::{BufReader, BufWriter, Write};
+      use std::path::Path;
+      use std::sync::Arc;
+      use bimap::{BiBTreeMap};
+      use crate::constraint_extra::PrecomputeStats;
+      use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
+      use crate::json_serialization::JSONConvertible;
+      //
+      // -------------------------------
+      // Common helpers
+      // -------------------------------
+      //
+
+      fn compiled_from_ebnf_str(ebnf: &str) -> Result<CompiledGrammar, Box<dyn Error>> {
+          let def = GrammarDefinition::from_ebnf(ebnf)?;
+          Ok(CompiledGrammar::from_definition(Arc::new(def)))
+      }
+
+      fn make_llm_token_map(tokens: &[&str]) -> (LLMTokenMap, usize) {
+          let mut map = LLMTokenMap::new();
+          let mut max_id = 0usize;
+          for (i, t) in tokens.iter().enumerate() {
+              map.insert(t.as_bytes().to_vec(), LLMTokenID(i));
+              max_id = max_id.max(i);
+          }
+          (map, max_id)
+      }
+
+      fn assert_optimized_equivalent(
+          original_precomputed2: &Precomputed2,
+          original_to_internal_id_bimap: &BTreeMap<usize, usize>,
+          llm_token_map: &LLMTokenMap,
+          trie2_god: Trie2GodWrapper,
+      ) {
+          // Deep clone the original precomputed2 tree(s)
+          let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
+          for (sid, root_arc) in original_precomputed2.iter() {
+              let (cloned_root, _map) = clone_trie2_graph(root_arc, &trie2_god);
+              optimized_precomputed2.insert(*sid, cloned_root);
+          }
+
+          // Apply optimization passes
+          let mut optimization_config = GrammarConstraintConfig::default();
+          optimization_config.optimize_trie2_gc = false;
+          optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config);
+
+          println!("\n--- Stats for Optimized Precompute2 Tree ---");
+          let mut stats_optimized = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized, &trie2_god);
+
+          println!("\n--- Dumping Optimized Precompute2 Tree ---");
+          GrammarConstraint::_dump_precomputed2(
+              &optimized_precomputed2,
+              original_to_internal_id_bimap,
+              llm_token_map,
+              &trie2_god,
+          );
+
+          println!("\n--- Final Stats Comparison ---");
+          println!("\n--- Stats for Original Precompute2 Tree ---");
+          let mut stats_original = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_original, &trie2_god);
+
+          println!("\n--- Stats for Optimized Precompute2 Tree (re-calculated) ---");
+          let mut stats_optimized_final = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized_final, &trie2_god);
+          println!("--- Finished Dumping Optimized Tree ---\n");
+
+          // Compare the original and optimized trees for semantic equivalence
+          assert_eq!(
+              original_precomputed2.len(),
+              optimized_precomputed2.len(),
+              "Number of tokenizer states with trees differs."
+          );
+
+          for sid in original_precomputed2.keys() {
+              let original_root = original_precomputed2.get(sid).unwrap();
+              let optimized_root = optimized_precomputed2.get(sid).unwrap();
+              if !are_precompute2_trees_equivalent(original_root, &trie2_god, optimized_root, &trie2_god) {
+                  // Detailed info is now printed inside are_precompute2_trees_equivalent
+                  panic!(
+                      "Optimized and original Precompute2 trees are not equivalent for tokenizer state ID: {}. See details above.",
+                      sid.0);
+              }
+          }
+      }
+
+      fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn Error>> {
+          let compiled = compiled_from_ebnf_str(ebnf)?;
+          let (llm_token_map, max_original_llm_token_id) = make_llm_token_map(llm_tokens);
+
+          // Create with optimizations OFF to get the baseline
+          let no_opt_config = GrammarConstraintConfig {
+              optimize_trie2_prune_dead_paths: false,
+              optimize_trie2_merge_nodes: false,
+              optimize_trie2_factor_common_destinations: false,
+              optimize_trie2_compress_edges: false,
+              optimize_trie2_gc: true,
+              skip_precomputation: false,
+              optimize_trie3_constrain_bitvecs: true,
+              optimize_trie1_merge_equivalent_llm_tokens: false,
+              optimize_trie1_reorder_llm_tokens: false,
+              optimize_trie3_merge_equivalent_llm_tokens: false,
+              optimize_trie3_reorder_llm_tokens: false,
+          };
+          let gc = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled,
+              llm_token_map,
+              LLMTokenID(0), // dummy EOF placeholder
+              max_original_llm_token_id,
+              &no_opt_config,
+          );
+          assert_optimized_equivalent(
+              &gc.precomputed2,
+              &gc.precompute_vocab1.original_to_internal,
+              &gc.llm_vocab.llm_token_map,
+              gc.trie2_god.clone(),
+          );
+          Ok(())
+      }
+
+      //
+      // -------------------------------
+      // Specialized JS test (large grammar + GPT-2 subset vocab)
+      // -------------------------------
+      //
+
+      fn load_or_download_gpt2_vocab(
+          cache_dir: &Path,
+          file_name: &str,
+          url: &str,
+      ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+          fs::create_dir_all(cache_dir)?;
+          let cache_path = cache_dir.join(file_name);
+
+          let vocab_map: BTreeMap<String, u32> = if cache_path.exists() {
+              println!("Loading GPT-2 vocab from cache: {:?}", cache_path);
+              let file = File::open(cache_path)?;
+              let reader = BufReader::new(file);
+              serde_json::from_reader(reader)?
+          } else {
+              println!("Downloading GPT-2 vocab from: {}", url);
+              let response = blocking::get(url)?.error_for_status()?;
+              let content = response.text()?;
+
+              let mut file = File::create(&cache_path)?;
+              file.write_all(content.as_bytes())?;
+              println!("Saved GPT-2 vocab to cache: {:?}", cache_path);
+
+              serde_json::from_str(&content)?
+          };
+          Ok(vocab_map.into_keys().collect())
+      }
+
+      #[test]
+      fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn std::error::Error>> {
+          if cfg!(rustrover) {
+              println!("Skipping test_precompute2_optimizations_are_equivalent_for_js in rustrover mode.");
+              return Ok(());
+          }
+
+          // --- Setup Phase ---
+          println!("--- Setting up for Precompute2 Optimization Equivalence Test (JS) ---");
+
+          const FORCE_RECOMPUTE: bool = true;
+          const SAVE_TO_CACHE: bool = true;
+          use crate::{constraint, json_serialization};
+          use flate2::read::GzDecoder;
+          use flate2::write::GzEncoder;
+          use flate2::Compression;
+
+          let cache_dir = Path::new(".cache/test_precompute2");
+          fs::create_dir_all(cache_dir)?;
+          let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json.gz");
+
+          // 1. Load and compile the JavaScript grammar.
+          let grammar_path = "src/js_simplified2.ebnf";
+          let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+          println!("Compiling GrammarDefinition into CompiledGrammar...");
+          let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+          println!("Successfully compiled GrammarDefinition.");
+          println!("{}", compiled_grammar);
+
+          // 2. Load a small, representative vocabulary.
+          println!("\nLoading GPT-2 vocabulary...");
+          let vocab_cache_dir = Path::new(".cache/test_vocabs");
+          let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
+          let vocab_file_name = "gpt2_vocab.json";
+          let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(vocab_cache_dir, vocab_file_name, vocab_url)?;
+          // Keep a smaller subset to speed up the test
+          gpt2_raw_vocab.retain(|s| s.len() < 5);
+          println!("Using a subset of {} tokens for the test.", gpt2_raw_vocab.len());
+
+          let mut llm_token_map = LLMTokenMap::new();
+          let mut max_original_llm_token_id_val: usize = 0;
+          for (i, token_str) in gpt2_raw_vocab.iter().enumerate() {
+              let id_val = i;
+              let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+              let token_bytes = processed_token_str.as_bytes().to_vec();
+              llm_token_map.insert(token_bytes, LLMTokenID(id_val));
+              max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
+          }
+
+          // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
+          let original_precomputed2: Precomputed2;
+          let original_god;
+          let llm_vocab;
+
+          if !FORCE_RECOMPUTE && precomputed2_cache_path.exists() {
+              println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
+              let file = File::open(&precomputed2_cache_path)?;
+              let decompressor = GzDecoder::new(BufReader::new(file));
+              (original_precomputed2, original_god) = <(Precomputed2, Trie2GodWrapper)>::from_reader(decompressor)?;
+              // This path is problematic as the cached version is likely optimized.
+              // We'll proceed assuming it's unoptimized for now, but FORCE_RECOMPUTE=true is recommended.
+              let gc_for_vocab = GrammarConstraint::from_compiled_grammar(compiled_grammar.clone(), llm_token_map.clone(), LLMTokenID(0), max_original_llm_token_id_val);
+              llm_vocab = gc_for_vocab.precompute_vocab1;
+              println!("Successfully loaded Precomputed2 from cache.");
+          } else {
+              println!("\nConstructing GrammarConstraint with optimizations OFF (will generate Precomputed2)...");
+              let no_opt_config = GrammarConstraintConfig {
+                  optimize_trie2_prune_dead_paths: false,
+                  optimize_trie2_merge_nodes: false,
+                  optimize_trie2_factor_common_destinations: false,
+                  optimize_trie2_compress_edges: false,
+                  optimize_trie2_gc: true,
+                  skip_precomputation: false,
+                  optimize_trie3_constrain_bitvecs: true,
+                  optimize_trie1_merge_equivalent_llm_tokens: false,
+                  optimize_trie1_reorder_llm_tokens: false,
+                  optimize_trie3_merge_equivalent_llm_tokens: false,
+                  optimize_trie3_reorder_llm_tokens: false,
+              };
+              let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
+                  compiled_grammar.clone(),
+                  llm_token_map.clone(),
+                  LLMTokenID(0), // dummy_eof_placeholder
+                  max_original_llm_token_id_val,
+                  &no_opt_config,
+              );
+              println!("GrammarConstraint constructed successfully.");
+              original_precomputed2 = grammar_constraint.precomputed2;
+              original_god = grammar_constraint.trie2_god;
+              llm_vocab = grammar_constraint.precompute_vocab1;
+
+              if SAVE_TO_CACHE {
+                  println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
+                  let file = File::create(&precomputed2_cache_path)?;
+                  let writer = BufWriter::new(file);
+                  let mut encoder = GzEncoder::new(writer, Compression::default());
+                  (original_precomputed2.clone(), original_god.clone()).to_writer(&mut encoder)?;
+                  println!("Successfully saved Precomputed2 to cache.");
+              }
+          }
+
+          // 4. Assert that the optimized result is equivalent to the baseline.
+          assert_optimized_equivalent(
+              &original_precomputed2,
+              &llm_vocab.original_to_internal,
+              &llm_token_map,
+              original_god,
+          );
+
+          println!("\nEquivalence test passed: All trees are semantically equivalent after optimization (JS).");
+
+          Ok(())
+      }
+
+      //
+      // -------------------------------
+      // Compact tests using inline EBNF
+      // (based on grammars in test_constraint_basic.rs)
+      // -------------------------------
+      //
+
+      // Trivial: s -> A EOF; A -> 'a'; EOF -> '$'
+      #[test]
+      fn test_p_opt_trivial_a_eof() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A EOF;
+              A ::= 'a';
+              EOF ::= '$';
+          "#;
+          let llm = ["a", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Simple choice: s -> x EOF; x -> A B_OR_C | AB
+      #[test]
+      fn test_p_opt_simple_choice_ab_or_ac() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= x EOF;
+              x ::= A B_OR_C | AB;
+              A ::= 'a';
+              B_OR_C ::= 'b' | 'c';
+              AB ::= 'ab';
+              EOF ::= '$';
+          "#;
+          let llm = ["ab", "ac", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression grammar (e -> e + t | t; t -> t * f | f; f -> (e) | i)
+      #[test]
+      fn test_p_opt_expression_full() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= e PLUS t | t;
+              t ::= t TIMES f | f;
+              f ::= LPAREN e RPAREN | I;
+
+              PLUS ::= '+';
+              TIMES ::= '*';
+              LPAREN ::= '(';
+              RPAREN ::= ')';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "+", "*", "(", ")", "(i", "+i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression (no '*'): e -> e + t | t; t -> f; f -> (e) | i
+      #[test]
+      fn test_p_opt_expression_no_times() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= e PLUS t | t;
+              t ::= f;
+              f ::= LPAREN e RPAREN | I;
+
+              PLUS ::= '+';
+              LPAREN ::= '(';
+              RPAREN ::= ')';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "+", "(", ")", "(i", "+i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression (no parens): e -> e + t | t; t -> t * f | f; f -> i
+      #[test]
+      fn test_p_opt_expression_no_parens() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= e PLUS t | t;
+              t ::= t TIMES f | f;
+              f ::= I;
+
+              PLUS ::= '+';
+              TIMES ::= '*';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "+", "*", "+i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression (no '+' or '*'): e -> t; t -> f; f -> (e) | i
+      #[test]
+      fn test_p_opt_expression_no_plus_times() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= t;
+              t ::= f;
+              f ::= LPAREN e RPAREN | I;
+
+              LPAREN ::= '(';
+              RPAREN ::= ')';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "(", ")", "(i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Direct recursion: e -> '(' e | 'i'; s -> e EOF
+      #[test]
+      fn test_p_opt_expression_trivial_direct() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= LPAREN e | I;
+
+              LPAREN ::= '(';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "(", "(i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Same as above, but limited vocab: only "(i" (to exercise multi-grammar-token LLM token)
+      #[test]
+      fn test_p_opt_expression_trivial_direct_limited_vocab() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= LPAREN e | I;
+
+              LPAREN ::= '(';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["(i"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Unbalanced parens variant (f -> '(' e | 'i')
+      #[test]
+      fn test_p_opt_expression_unbalanced_parens() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= t;
+              t ::= f;
+              f ::= LPAREN e | I;
+
+              LPAREN ::= '(';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "(", "(i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Indirect recursion simplified: s -> 'a' e | 'b'; e -> s
+      #[test]
+      fn test_p_opt_indirect_recursion_simplified() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A e | B;
+              e ::= s;
+
+              A ::= 'a';
+              B ::= 'b';
+          "#;
+          let llm = ["a", "b"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Repetition: s ::= A*, A ::= 'a'
+      #[test]
+      fn test_p_opt_repetition_a_star() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A*;
+              A ::= 'a';
+          "#;
+          let llm = ["a"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // a+ token: s ::= A_PLUS; A_PLUS ::= 'a'+
+      #[test]
+      fn test_p_opt_a_plus_terminal() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A_PLUS;
+              A_PLUS ::= 'a'+;
+          "#;
+          let llm = ["a", "aaa"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Ignore whitespace: WS ignored between tokens. s ::= A B; A='a'; B='b'; WS=' '
+      // LLM tokens include "a", " ", "b", "a b"
+      #[test]
+      fn test_p_opt_ignore_whitespace() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              #![ignore(WS)]
+              s ::= A B;
+              A ::= 'a';
+              B ::= 'b';
+              WS ::= ' '+;
+          "#;
+          let llm = ["a", " ", "b", "a b"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // 'x' SPACE+ '=' pattern (compact variant of x_eq)
+      #[test]
+      fn test_p_opt_x_space_equals() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= X SPACE EQUALS;
+              X ::= 'x';
+              SPACE ::= ' '+;
+              EQUALS ::= '=';
+          "#;
+          let llm = ["x", " ="];
+          run_equivalence_test(ebnf, &llm)
       }
   prev_file_contents:
     src/constraint.rs: |
@@ -15044,6 +15554,520 @@ local_system:
               constraint.dump_precomputed2(); // Just ensure it runs without panic
               println!("--- Finished dump_precomputed2 test output ---");
           }
+      }
+    src/test_precompute_optimizations.rs: |-
+      //! Precompute2 optimization equivalence tests.
+      //!
+      //! This suite verifies that applying optimization passes to the Precompute2
+      //! trie graph preserves its semantics by comparing the optimized result
+      //! against an unoptimized baseline using are_precompute2_trees_equivalent.
+      //!
+      //! We keep tests compact by:
+      //! - Defining grammars via inline EBNF strings.
+      //! - Using small, explicit LLM vocabularies.
+      //! - Factoring common logic into small helpers.
+
+      use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, Precomputed2, Trie2GodWrapper};
+      use crate::interface::{CompiledGrammar, GrammarDefinition};
+      use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+      use reqwest::blocking;
+      use std::collections::BTreeMap;
+      use std::error::Error;
+      use std::fs::{self, File};
+      use std::io::{BufReader, BufWriter, Write};
+      use std::path::Path;
+      use std::sync::Arc;
+      use bimap::{BiBTreeMap};
+      use crate::datastructures::gss::LLMTokenBV;
+      use crate::constraint_extra::PrecomputeStats;
+      use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
+      use crate::json_serialization::JSONConvertible;
+      //
+      // -------------------------------
+      // Common helpers
+      // -------------------------------
+      //
+
+      fn compiled_from_ebnf_str(ebnf: &str) -> Result<CompiledGrammar, Box<dyn Error>> {
+          let def = GrammarDefinition::from_ebnf(ebnf)?;
+          Ok(CompiledGrammar::from_definition(Arc::new(def)))
+      }
+
+      fn make_llm_token_map(tokens: &[&str]) -> (LLMTokenMap, usize) {
+          let mut map = LLMTokenMap::new();
+          let mut max_id = 0usize;
+          for (i, t) in tokens.iter().enumerate() {
+              map.insert(t.as_bytes().to_vec(), LLMTokenID(i));
+              max_id = max_id.max(i);
+          }
+          (map, max_id)
+      }
+
+      fn assert_optimized_equivalent(
+          original_precomputed2: &Precomputed2,
+          original_to_internal_id_bimap: &BTreeMap<usize, usize>,
+          llm_token_map: &LLMTokenMap,
+          trie2_god: Trie2GodWrapper,
+      ) {
+          // Deep clone the original precomputed2 tree(s)
+          let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
+          for (sid, root_arc) in original_precomputed2.iter() {
+              let (cloned_root, _map) = clone_trie2_graph(root_arc, &trie2_god);
+              optimized_precomputed2.insert(*sid, cloned_root);
+          }
+
+          // Apply optimization passes
+          let mut optimization_config = GrammarConstraintConfig::default();
+          optimization_config.optimize_trie2_gc = false;
+          optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config);
+
+          println!("\n--- Stats for Optimized Precompute2 Tree ---");
+          let mut stats_optimized = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized, &trie2_god);
+
+          println!("\n--- Dumping Optimized Precompute2 Tree ---");
+          let mut internal_to_original_map: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+          for (original, internal) in original_to_internal_id_bimap {
+              internal_to_original_map.entry(*internal).or_default().insert(*original);
+          }
+          GrammarConstraint::_dump_precomputed2(
+              &optimized_precomputed2,
+              &internal_to_original_map,
+              llm_token_map,
+              &trie2_god,
+          );
+
+          println!("\n--- Final Stats Comparison ---");
+          println!("\n--- Stats for Original Precompute2 Tree ---");
+          let mut stats_original = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_original, &trie2_god);
+
+          println!("\n--- Stats for Optimized Precompute2 Tree (re-calculated) ---");
+          let mut stats_optimized_final = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized_final, &trie2_god);
+          println!("--- Finished Dumping Optimized Tree ---\n");
+
+          // Compare the original and optimized trees for semantic equivalence
+          assert_eq!(
+              original_precomputed2.len(),
+              optimized_precomputed2.len(),
+              "Number of tokenizer states with trees differs."
+          );
+
+          for sid in original_precomputed2.keys() {
+              let original_root = original_precomputed2.get(sid).unwrap();
+              let optimized_root = optimized_precomputed2.get(sid).unwrap();
+              if !are_precompute2_trees_equivalent(original_root, &trie2_god, optimized_root, &trie2_god) {
+                  // Detailed info is now printed inside are_precompute2_trees_equivalent
+                  panic!(
+                      "Optimized and original Precompute2 trees are not equivalent for tokenizer state ID: {}. See details above.",
+                      sid.0);
+              }
+          }
+      }
+
+      fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn Error>> {
+          let compiled = compiled_from_ebnf_str(ebnf)?;
+          let (llm_token_map, max_original_llm_token_id) = make_llm_token_map(llm_tokens);
+
+          // Create with optimizations OFF to get the baseline
+          let no_opt_config = GrammarConstraintConfig {
+              optimize_trie2_prune_dead_paths: false,
+              optimize_trie2_merge_nodes: false,
+              optimize_trie2_factor_common_destinations: false,
+              optimize_trie2_compress_edges: false,
+              optimize_trie2_gc: true,
+              skip_precomputation: false,
+              optimize_trie3_constrain_bitvecs: true,
+              optimize_trie1_merge_equivalent_llm_tokens: false,
+              optimize_trie1_reorder_llm_tokens: false,
+              optimize_trie3_merge_equivalent_llm_tokens: false,
+              optimize_trie3_reorder_llm_tokens: false,
+          };
+          let gc = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled,
+              llm_token_map,
+              LLMTokenID(0), // dummy EOF placeholder
+              max_original_llm_token_id,
+              &no_opt_config,
+          );
+          assert_optimized_equivalent(
+              &gc.precomputed2,
+              &gc.precompute_vocab1.original_to_internal,
+              &gc.llm_vocab.llm_token_map,
+              gc.trie2_god.clone(),
+          );
+          Ok(())
+      }
+
+      //
+      // -------------------------------
+      // Specialized JS test (large grammar + GPT-2 subset vocab)
+      // -------------------------------
+      //
+
+      fn load_or_download_gpt2_vocab(
+          cache_dir: &Path,
+          file_name: &str,
+          url: &str,
+      ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+          fs::create_dir_all(cache_dir)?;
+          let cache_path = cache_dir.join(file_name);
+
+          let vocab_map: BTreeMap<String, u32> = if cache_path.exists() {
+              println!("Loading GPT-2 vocab from cache: {:?}", cache_path);
+              let file = File::open(cache_path)?;
+              let reader = BufReader::new(file);
+              serde_json::from_reader(reader)?
+          } else {
+              println!("Downloading GPT-2 vocab from: {}", url);
+              let response = blocking::get(url)?.error_for_status()?;
+              let content = response.text()?;
+
+              let mut file = File::create(&cache_path)?;
+              file.write_all(content.as_bytes())?;
+              println!("Saved GPT-2 vocab to cache: {:?}", cache_path);
+
+              serde_json::from_str(&content)?
+          };
+          Ok(vocab_map.into_keys().collect())
+      }
+
+      #[test]
+      fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn std::error::Error>> {
+          if cfg!(rustrover) {
+              println!("Skipping test_precompute2_optimizations_are_equivalent_for_js in rustrover mode.");
+              return Ok(());
+          }
+
+          // --- Setup Phase ---
+          println!("--- Setting up for Precompute2 Optimization Equivalence Test (JS) ---");
+
+          const FORCE_RECOMPUTE: bool = true;
+          const SAVE_TO_CACHE: bool = true;
+          use crate::{constraint, json_serialization};
+          use flate2::read::GzDecoder;
+          use flate2::write::GzEncoder;
+          use flate2::Compression;
+
+          let cache_dir = Path::new(".cache/test_precompute2");
+          fs::create_dir_all(cache_dir)?;
+          let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json.gz");
+
+          // 1. Load and compile the JavaScript grammar.
+          let grammar_path = "src/js_simplified2.ebnf";
+          let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+          println!("Compiling GrammarDefinition into CompiledGrammar...");
+          let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+          println!("Successfully compiled GrammarDefinition.");
+          println!("{}", compiled_grammar);
+
+          // 2. Load a small, representative vocabulary.
+          println!("\nLoading GPT-2 vocabulary...");
+          let vocab_cache_dir = Path::new(".cache/test_vocabs");
+          let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
+          let vocab_file_name = "gpt2_vocab.json";
+          let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(vocab_cache_dir, vocab_file_name, vocab_url)?;
+          // Keep a smaller subset to speed up the test
+          gpt2_raw_vocab.retain(|s| s.len() < 5);
+          println!("Using a subset of {} tokens for the test.", gpt2_raw_vocab.len());
+
+          let mut llm_token_map = LLMTokenMap::new();
+          let mut max_original_llm_token_id_val: usize = 0;
+          for (i, token_str) in gpt2_raw_vocab.iter().enumerate() {
+              let id_val = i;
+              let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+              let token_bytes = processed_token_str.as_bytes().to_vec();
+              llm_token_map.insert(token_bytes, LLMTokenID(id_val));
+              max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
+          }
+
+          // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
+          let original_precomputed2: Precomputed2;
+          let original_god;
+          let llm_vocab;
+
+          if !FORCE_RECOMPUTE && precomputed2_cache_path.exists() {
+              println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
+              let file = File::open(&precomputed2_cache_path)?;
+              let decompressor = GzDecoder::new(BufReader::new(file));
+              (original_precomputed2, original_god) = <(Precomputed2, Trie2GodWrapper)>::from_reader(decompressor)?;
+              // This path is problematic as the cached version is likely optimized.
+              // We'll proceed assuming it's unoptimized for now, but FORCE_RECOMPUTE=true is recommended.
+              let gc_for_vocab = GrammarConstraint::from_compiled_grammar(compiled_grammar.clone(), llm_token_map.clone(), LLMTokenID(0), max_original_llm_token_id_val);
+              llm_vocab = gc_for_vocab.precompute_vocab1;
+              println!("Successfully loaded Precomputed2 from cache.");
+          } else {
+              println!("\nConstructing GrammarConstraint with optimizations OFF (will generate Precomputed2)...");
+              let no_opt_config = GrammarConstraintConfig {
+                  optimize_trie2_prune_dead_paths: false,
+                  optimize_trie2_merge_nodes: false,
+                  optimize_trie2_factor_common_destinations: false,
+                  optimize_trie2_compress_edges: false,
+                  optimize_trie2_gc: true,
+                  skip_precomputation: false,
+                  optimize_trie3_constrain_bitvecs: true,
+                  optimize_trie1_merge_equivalent_llm_tokens: false,
+                  optimize_trie1_reorder_llm_tokens: false,
+                  optimize_trie3_merge_equivalent_llm_tokens: false,
+                  optimize_trie3_reorder_llm_tokens: false,
+              };
+              let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
+                  compiled_grammar.clone(),
+                  llm_token_map.clone(),
+                  LLMTokenID(0), // dummy_eof_placeholder
+                  max_original_llm_token_id_val,
+                  &no_opt_config,
+              );
+              println!("GrammarConstraint constructed successfully.");
+              original_precomputed2 = grammar_constraint.precomputed2;
+              original_god = grammar_constraint.trie2_god;
+              llm_vocab = grammar_constraint.precompute_vocab1;
+
+              if SAVE_TO_CACHE {
+                  println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
+                  let file = File::create(&precomputed2_cache_path)?;
+                  let writer = BufWriter::new(file);
+                  let mut encoder = GzEncoder::new(writer, Compression::default());
+                  (original_precomputed2.clone(), original_god.clone()).to_writer(&mut encoder)?;
+                  println!("Successfully saved Precomputed2 to cache.");
+              }
+          }
+
+          // 4. Assert that the optimized result is equivalent to the baseline.
+          assert_optimized_equivalent(
+              &original_precomputed2,
+              &llm_vocab.original_to_internal,
+              &llm_token_map,
+              original_god,
+          );
+
+          println!("\nEquivalence test passed: All trees are semantically equivalent after optimization (JS).");
+
+          Ok(())
+      }
+
+      //
+      // -------------------------------
+      // Compact tests using inline EBNF
+      // (based on grammars in test_constraint_basic.rs)
+      // -------------------------------
+      //
+
+      // Trivial: s -> A EOF; A -> 'a'; EOF -> '$'
+      #[test]
+      fn test_p_opt_trivial_a_eof() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A EOF;
+              A ::= 'a';
+              EOF ::= '$';
+          "#;
+          let llm = ["a", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Simple choice: s -> x EOF; x -> A B_OR_C | AB
+      #[test]
+      fn test_p_opt_simple_choice_ab_or_ac() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= x EOF;
+              x ::= A B_OR_C | AB;
+              A ::= 'a';
+              B_OR_C ::= 'b' | 'c';
+              AB ::= 'ab';
+              EOF ::= '$';
+          "#;
+          let llm = ["ab", "ac", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression grammar (e -> e + t | t; t -> t * f | f; f -> (e) | i)
+      #[test]
+      fn test_p_opt_expression_full() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= e PLUS t | t;
+              t ::= t TIMES f | f;
+              f ::= LPAREN e RPAREN | I;
+
+              PLUS ::= '+';
+              TIMES ::= '*';
+              LPAREN ::= '(';
+              RPAREN ::= ')';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "+", "*", "(", ")", "(i", "+i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression (no '*'): e -> e + t | t; t -> f; f -> (e) | i
+      #[test]
+      fn test_p_opt_expression_no_times() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= e PLUS t | t;
+              t ::= f;
+              f ::= LPAREN e RPAREN | I;
+
+              PLUS ::= '+';
+              LPAREN ::= '(';
+              RPAREN ::= ')';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "+", "(", ")", "(i", "+i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression (no parens): e -> e + t | t; t -> t * f | f; f -> i
+      #[test]
+      fn test_p_opt_expression_no_parens() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= e PLUS t | t;
+              t ::= t TIMES f | f;
+              f ::= I;
+
+              PLUS ::= '+';
+              TIMES ::= '*';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "+", "*", "+i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression (no '+' or '*'): e -> t; t -> f; f -> (e) | i
+      #[test]
+      fn test_p_opt_expression_no_plus_times() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= t;
+              t ::= f;
+              f ::= LPAREN e RPAREN | I;
+
+              LPAREN ::= '(';
+              RPAREN ::= ')';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "(", ")", "(i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Direct recursion: e -> '(' e | 'i'; s -> e EOF
+      #[test]
+      fn test_p_opt_expression_trivial_direct() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= LPAREN e | I;
+
+              LPAREN ::= '(';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "(", "(i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Same as above, but limited vocab: only "(i" (to exercise multi-grammar-token LLM token)
+      #[test]
+      fn test_p_opt_expression_trivial_direct_limited_vocab() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= LPAREN e | I;
+
+              LPAREN ::= '(';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["(i"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Unbalanced parens variant (f -> '(' e | 'i')
+      #[test]
+      fn test_p_opt_expression_unbalanced_parens() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= t;
+              t ::= f;
+              f ::= LPAREN e | I;
+
+              LPAREN ::= '(';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "(", "(i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Indirect recursion simplified: s -> 'a' e | 'b'; e -> s
+      #[test]
+      fn test_p_opt_indirect_recursion_simplified() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A e | B;
+              e ::= s;
+
+              A ::= 'a';
+              B ::= 'b';
+          "#;
+          let llm = ["a", "b"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Repetition: s ::= A*, A ::= 'a'
+      #[test]
+      fn test_p_opt_repetition_a_star() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A*;
+              A ::= 'a';
+          "#;
+          let llm = ["a"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // a+ token: s ::= A_PLUS; A_PLUS ::= 'a'+
+      #[test]
+      fn test_p_opt_a_plus_terminal() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A_PLUS;
+              A_PLUS ::= 'a'+;
+          "#;
+          let llm = ["a", "aaa"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Ignore whitespace: WS ignored between tokens. s ::= A B; A='a'; B='b'; WS=' '
+      // LLM tokens include "a", " ", "b", "a b"
+      #[test]
+      fn test_p_opt_ignore_whitespace() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              #![ignore(WS)]
+              s ::= A B;
+              A ::= 'a';
+              B ::= 'b';
+              WS ::= ' '+;
+          "#;
+          let llm = ["a", " ", "b", "a b"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // 'x' SPACE+ '=' pattern (compact variant of x_eq)
+      #[test]
+      fn test_p_opt_x_space_equals() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= X SPACE EQUALS;
+              X ::= 'x';
+              SPACE ::= ' '+;
+              EQUALS ::= '=';
+          "#;
+          let llm = ["x", " ="];
+          run_equivalence_test(ebnf, &llm)
       }
   diffs_applied_this_send: true
   core_guidance_inserted: true
@@ -23043,5 +24067,1420 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Fix: Correct LLM token sampling in precompute
       trie dump functions by using internal_to_original map"'
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute1_utils.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute0_utils.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_utils.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint_extra.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      ```rust 'src/test_precompute_optimizations.rs'
+      //! Precompute2 optimization equivalence tests.
+      //!
+      //! This suite verifies that applying optimization passes to the Precompute2
+      //! trie graph preserves its semantics by comparing the optimized result
+      //! against an unoptimized baseline using are_precompute2_trees_equivalent.
+      //!
+      //! We keep tests compact by:
+      //! - Defining grammars via inline EBNF strings.
+      //! - Using small, explicit LLM vocabularies.
+      //! - Factoring common logic into small helpers.
+
+      use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, Precomputed2, Trie2GodWrapper};
+      use crate::interface::{CompiledGrammar, GrammarDefinition};
+      use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+      use reqwest::blocking;
+      use std::collections::BTreeMap;
+      use std::error::Error;
+      use std::fs::{self, File};
+      use std::io::{BufReader, BufWriter, Write};
+      use std::path::Path;
+      use std::sync::Arc;
+      use bimap::{BiBTreeMap};
+      use crate::constraint_extra::PrecomputeStats;
+      use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
+      use crate::json_serialization::JSONConvertible;
+      //
+      // -------------------------------
+      // Common helpers
+      // -------------------------------
+      //
+
+      fn compiled_from_ebnf_str(ebnf: &str) -> Result<CompiledGrammar, Box<dyn Error>> {
+          let def = GrammarDefinition::from_ebnf(ebnf)?;
+          Ok(CompiledGrammar::from_definition(Arc::new(def)))
+      }
+
+      fn make_llm_token_map(tokens: &[&str]) -> (LLMTokenMap, usize) {
+          let mut map = LLMTokenMap::new();
+          let mut max_id = 0usize;
+          for (i, t) in tokens.iter().enumerate() {
+              map.insert(t.as_bytes().to_vec(), LLMTokenID(i));
+              max_id = max_id.max(i);
+          }
+          (map, max_id)
+      }
+
+      fn assert_optimized_equivalent(
+          original_precomputed2: &Precomputed2,
+          original_to_internal_id_bimap: &BTreeMap<usize, usize>,
+          llm_token_map: &LLMTokenMap,
+          trie2_god: Trie2GodWrapper,
+      ) {
+          // Deep clone the original precomputed2 tree(s)
+          let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
+          for (sid, root_arc) in original_precomputed2.iter() {
+              let (cloned_root, _map) = clone_trie2_graph(root_arc, &trie2_god);
+              optimized_precomputed2.insert(*sid, cloned_root);
+          }
+
+          // Apply optimization passes
+          let mut optimization_config = GrammarConstraintConfig::default();
+          optimization_config.optimize_trie2_gc = false;
+          optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config);
+
+          println!("\n--- Stats for Optimized Precompute2 Tree ---");
+          let mut stats_optimized = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized, &trie2_god);
+
+          println!("\n--- Dumping Optimized Precompute2 Tree ---");
+          GrammarConstraint::_dump_precomputed2(
+              &optimized_precomputed2,
+              original_to_internal_id_bimap,
+              llm_token_map,
+              &trie2_god,
+          );
+
+          println!("\n--- Final Stats Comparison ---");
+          println!("\n--- Stats for Original Precompute2 Tree ---");
+          let mut stats_original = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_original, &trie2_god);
+
+          println!("\n--- Stats for Optimized Precompute2 Tree (re-calculated) ---");
+          let mut stats_optimized_final = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized_final, &trie2_god);
+          println!("--- Finished Dumping Optimized Tree ---\n");
+
+          // Compare the original and optimized trees for semantic equivalence
+          assert_eq!(
+              original_precomputed2.len(),
+              optimized_precomputed2.len(),
+              "Number of tokenizer states with trees differs."
+          );
+
+          for sid in original_precomputed2.keys() {
+              let original_root = original_precomputed2.get(sid).unwrap();
+              let optimized_root = optimized_precomputed2.get(sid).unwrap();
+              if !are_precompute2_trees_equivalent(original_root, &trie2_god, optimized_root, &trie2_god) {
+                  // Detailed info is now printed inside are_precompute2_trees_equivalent
+                  panic!(
+                      "Optimized and original Precompute2 trees are not equivalent for tokenizer state ID: {}. See details above.",
+                      sid.0);
+              }
+          }
+      }
+
+      fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn Error>> {
+          let compiled = compiled_from_ebnf_str(ebnf)?;
+          let (llm_token_map, max_original_llm_token_id) = make_llm_token_map(llm_tokens);
+
+          // Create with optimizations OFF to get the baseline
+          let no_opt_config = GrammarConstraintConfig {
+              optimize_trie2_prune_dead_paths: false,
+              optimize_trie2_merge_nodes: false,
+              optimize_trie2_factor_common_destinations: false,
+              optimize_trie2_compress_edges: false,
+              optimize_trie2_gc: true,
+              skip_precomputation: false,
+              optimize_trie3_constrain_bitvecs: true,
+              optimize_trie1_merge_equivalent_llm_tokens: false,
+              optimize_trie1_reorder_llm_tokens: false,
+              optimize_trie3_merge_equivalent_llm_tokens: false,
+              optimize_trie3_reorder_llm_tokens: false,
+          };
+          let gc = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled,
+              llm_token_map,
+              LLMTokenID(0), // dummy EOF placeholder
+              max_original_llm_token_id,
+              &no_opt_config,
+          );
+          assert_optimized_equivalent(
+              &gc.precomputed2,
+              &gc.precompute_vocab1.original_to_internal,
+              &gc.llm_vocab.llm_token_map,
+              gc.trie2_god.clone(),
+          );
+          Ok(())
+      }
+
+      //
+      // -------------------------------
+      // Specialized JS test (large grammar + GPT-2 subset vocab)
+      // -------------------------------
+      //
+
+      fn load_or_download_gpt2_vocab(
+          cache_dir: &Path,
+          file_name: &str,
+          url: &str,
+      ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+          fs::create_dir_all(cache_dir)?;
+          let cache_path = cache_dir.join(file_name);
+
+          let vocab_map: BTreeMap<String, u32> = if cache_path.exists() {
+              println!("Loading GPT-2 vocab from cache: {:?}", cache_path);
+              let file = File::open(cache_path)?;
+              let reader = BufReader::new(file);
+              serde_json::from_reader(reader)?
+          } else {
+              println!("Downloading GPT-2 vocab from: {}", url);
+              let response = blocking::get(url)?.error_for_status()?;
+              let content = response.text()?;
+
+              let mut file = File::create(&cache_path)?;
+              file.write_all(content.as_bytes())?;
+              println!("Saved GPT-2 vocab to cache: {:?}", cache_path);
+
+              serde_json::from_str(&content)?
+          };
+          Ok(vocab_map.into_keys().collect())
+      }
+
+      #[test]
+      fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn std::error::Error>> {
+          if cfg!(rustrover) {
+              println!("Skipping test_precompute2_optimizations_are_equivalent_for_js in rustrover mode.");
+              return Ok(());
+          }
+
+          // --- Setup Phase ---
+          println!("--- Setting up for Precompute2 Optimization Equivalence Test (JS) ---");
+
+          const FORCE_RECOMPUTE: bool = true;
+          const SAVE_TO_CACHE: bool = true;
+          use crate::{constraint, json_serialization};
+          use flate2::read::GzDecoder;
+          use flate2::write::GzEncoder;
+          use flate2::Compression;
+
+          let cache_dir = Path::new(".cache/test_precompute2");
+          fs::create_dir_all(cache_dir)?;
+          let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json.gz");
+
+          // 1. Load and compile the JavaScript grammar.
+          let grammar_path = "src/js_simplified2.ebnf";
+          let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+          println!("Compiling GrammarDefinition into CompiledGrammar...");
+          let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+          println!("Successfully compiled GrammarDefinition.");
+          println!("{}", compiled_grammar);
+
+          // 2. Load a small, representative vocabulary.
+          println!("\nLoading GPT-2 vocabulary...");
+          let vocab_cache_dir = Path::new(".cache/test_vocabs");
+          let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
+          let vocab_file_name = "gpt2_vocab.json";
+          let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(vocab_cache_dir, vocab_file_name, vocab_url)?;
+          // Keep a smaller subset to speed up the test
+          gpt2_raw_vocab.retain(|s| s.len() < 5);
+          println!("Using a subset of {} tokens for the test.", gpt2_raw_vocab.len());
+
+          let mut llm_token_map = LLMTokenMap::new();
+          let mut max_original_llm_token_id_val: usize = 0;
+          for (i, token_str) in gpt2_raw_vocab.iter().enumerate() {
+              let id_val = i;
+              let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+              let token_bytes = processed_token_str.as_bytes().to_vec();
+              llm_token_map.insert(token_bytes, LLMTokenID(id_val));
+              max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
+          }
+
+          // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
+          let original_precomputed2: Precomputed2;
+          let original_god;
+          let llm_vocab;
+
+          if !FORCE_RECOMPUTE && precomputed2_cache_path.exists() {
+              println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
+              let file = File::open(&precomputed2_cache_path)?;
+              let decompressor = GzDecoder::new(BufReader::new(file));
+              (original_precomputed2, original_god) = <(Precomputed2, Trie2GodWrapper)>::from_reader(decompressor)?;
+              // This path is problematic as the cached version is likely optimized.
+              // We'll proceed assuming it's unoptimized for now, but FORCE_RECOMPUTE=true is recommended.
+              let gc_for_vocab = GrammarConstraint::from_compiled_grammar(compiled_grammar.clone(), llm_token_map.clone(), LLMTokenID(0), max_original_llm_token_id_val);
+              llm_vocab = gc_for_vocab.precompute_vocab1;
+              println!("Successfully loaded Precomputed2 from cache.");
+          } else {
+              println!("\nConstructing GrammarConstraint with optimizations OFF (will generate Precomputed2)...");
+              let no_opt_config = GrammarConstraintConfig {
+                  optimize_trie2_prune_dead_paths: false,
+                  optimize_trie2_merge_nodes: false,
+                  optimize_trie2_factor_common_destinations: false,
+                  optimize_trie2_compress_edges: false,
+                  optimize_trie2_gc: true,
+                  skip_precomputation: false,
+                  optimize_trie3_constrain_bitvecs: true,
+                  optimize_trie1_merge_equivalent_llm_tokens: false,
+                  optimize_trie1_reorder_llm_tokens: false,
+                  optimize_trie3_merge_equivalent_llm_tokens: false,
+                  optimize_trie3_reorder_llm_tokens: false,
+              };
+              let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
+                  compiled_grammar.clone(),
+                  llm_token_map.clone(),
+                  LLMTokenID(0), // dummy_eof_placeholder
+                  max_original_llm_token_id_val,
+                  &no_opt_config,
+              );
+              println!("GrammarConstraint constructed successfully.");
+              original_precomputed2 = grammar_constraint.precomputed2;
+              original_god = grammar_constraint.trie2_god;
+              llm_vocab = grammar_constraint.precompute_vocab1;
+
+              if SAVE_TO_CACHE {
+                  println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
+                  let file = File::create(&precomputed2_cache_path)?;
+                  let writer = BufWriter::new(file);
+                  let mut encoder = GzEncoder::new(writer, Compression::default());
+                  (original_precomputed2.clone(), original_god.clone()).to_writer(&mut encoder)?;
+                  println!("Successfully saved Precomputed2 to cache.");
+              }
+          }
+
+          // 4. Assert that the optimized result is equivalent to the baseline.
+          assert_optimized_equivalent(
+              &original_precomputed2,
+              &llm_vocab.original_to_internal,
+              &llm_token_map,
+              original_god,
+          );
+
+          println!("\nEquivalence test passed: All trees are semantically equivalent after optimization (JS).");
+
+          Ok(())
+      }
+
+      //
+      // -------------------------------
+      // Compact tests using inline EBNF
+      // (based on grammars in test_constraint_basic.rs)
+      // -------------------------------
+      //
+
+      // Trivial: s -> A EOF; A -> 'a'; EOF -> '$'
+      #[test]
+      fn test_p_opt_trivial_a_eof() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A EOF;
+              A ::= 'a';
+              EOF ::= '$';
+          "#;
+          let llm = ["a", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Simple choice: s -> x EOF; x -> A B_OR_C | AB
+      #[test]
+      fn test_p_opt_simple_choice_ab_or_ac() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= x EOF;
+              x ::= A B_OR_C | AB;
+              A ::= 'a';
+              B_OR_C ::= 'b' | 'c';
+              AB ::= 'ab';
+              EOF ::= '$';
+          "#;
+          let llm = ["ab", "ac", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression grammar (e -> e + t | t; t -> t * f | f; f -> (e) | i)
+      #[test]
+      fn test_p_opt_expression_full() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= e PLUS t | t;
+              t ::= t TIMES f | f;
+              f ::= LPAREN e RPAREN | I;
+
+              PLUS ::= '+';
+              TIMES ::= '*';
+              LPAREN ::= '(';
+              RPAREN ::= ')';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "+", "*", "(", ")", "(i", "+i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression (no '*'): e -> e + t | t; t -> f; f -> (e) | i
+      #[test]
+      fn test_p_opt_expression_no_times() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= e PLUS t | t;
+              t ::= f;
+              f ::= LPAREN e RPAREN | I;
+
+              PLUS ::= '+';
+              LPAREN ::= '(';
+              RPAREN ::= ')';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "+", "(", ")", "(i", "+i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression (no parens): e -> e + t | t; t -> t * f | f; f -> i
+      #[test]
+      fn test_p_opt_expression_no_parens() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= e PLUS t | t;
+              t ::= t TIMES f | f;
+              f ::= I;
+
+              PLUS ::= '+';
+              TIMES ::= '*';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "+", "*", "+i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression (no '+' or '*'): e -> t; t -> f; f -> (e) | i
+      #[test]
+      fn test_p_opt_expression_no_plus_times() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= t;
+              t ::= f;
+              f ::= LPAREN e RPAREN | I;
+
+              LPAREN ::= '(';
+              RPAREN ::= ')';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "(", ")", "(i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Direct recursion: e -> '(' e | 'i'; s -> e EOF
+      #[test]
+      fn test_p_opt_expression_trivial_direct() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= LPAREN e | I;
+
+              LPAREN ::= '(';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "(", "(i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Same as above, but limited vocab: only "(i" (to exercise multi-grammar-token LLM token)
+      #[test]
+      fn test_p_opt_expression_trivial_direct_limited_vocab() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= LPAREN e | I;
+
+              LPAREN ::= '(';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["(i"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Unbalanced parens variant (f -> '(' e | 'i')
+      #[test]
+      fn test_p_opt_expression_unbalanced_parens() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= t;
+              t ::= f;
+              f ::= LPAREN e | I;
+
+              LPAREN ::= '(';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "(", "(i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Indirect recursion simplified: s -> 'a' e | 'b'; e -> s
+      #[test]
+      fn test_p_opt_indirect_recursion_simplified() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A e | B;
+              e ::= s;
+
+              A ::= 'a';
+              B ::= 'b';
+          "#;
+          let llm = ["a", "b"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Repetition: s ::= A*, A ::= 'a'
+      #[test]
+      fn test_p_opt_repetition_a_star() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A*;
+              A ::= 'a';
+          "#;
+          let llm = ["a"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // a+ token: s ::= A_PLUS; A_PLUS ::= 'a'+
+      #[test]
+      fn test_p_opt_a_plus_terminal() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A_PLUS;
+              A_PLUS ::= 'a'+;
+          "#;
+          let llm = ["a", "aaa"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Ignore whitespace: WS ignored between tokens. s ::= A B; A='a'; B='b'; WS=' '
+      // LLM tokens include "a", " ", "b", "a b"
+      #[test]
+      fn test_p_opt_ignore_whitespace() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              #![ignore(WS)]
+              s ::= A B;
+              A ::= 'a';
+              B ::= 'b';
+              WS ::= ' '+;
+          "#;
+          let llm = ["a", " ", "b", "a b"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // 'x' SPACE+ '=' pattern (compact variant of x_eq)
+      #[test]
+      fn test_p_opt_x_space_equals() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= X SPACE EQUALS;
+              X ::= 'x';
+              SPACE ::= ' '+;
+              EQUALS ::= '=';
+          "#;
+          let llm = ["x", " ="];
+          run_equivalence_test(ebnf, &llm)
+      }
+      ```
+    metadata:
+      filename: src/test_precompute_optimizations.rs
+  - user: |-
+      RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=1 CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib test_js_constraint_integration --profile test -- --nocapture
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error[E0308]: mismatched types
+          --> src/constraint_extra.rs:1379:52
+           |
+      1379 |         assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 5), expected);
+           |                                               ---- ^^^^^^ expected `&BTreeMap<usize, HybridBitset>`, found `&BTreeMap<{integer}, {integer}>`
+           |                                               |
+           |                                               arguments to this enum variant are incorrect
+           |
+           = note: expected reference `&std::collections::BTreeMap<usize, hybrid_bitset::HybridBitset>`
+                      found reference `&std::collections::BTreeMap<{integer}, {integer}>`
+      help: the type constructed contains `&std::collections::BTreeMap<{integer}, {integer}>` due to the type of the argument passed
+          --> src/constraint_extra.rs:1379:47
+           |
+      1379 |         assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 5), expected);
+           |                                               ^^^^^------^
+           |                                                    |
+           |                                                    this argument influences the type of `Some`
+      note: tuple variant defined here
+          --> /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:601:5
+           |
+       601 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
+           |     ^^^^
+
+      error[E0308]: mismatched types
+          --> src/constraint_extra.rs:1393:52
+           |
+      1393 |         assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 3), expected);
+           |                                               ---- ^^^^^^ expected `&BTreeMap<usize, HybridBitset>`, found `&BTreeMap<usize, usize>`
+           |                                               |
+           |                                               arguments to this enum variant are incorrect
+           |
+           = note: expected reference `&std::collections::BTreeMap<_, hybrid_bitset::HybridBitset>`
+                      found reference `&std::collections::BTreeMap<_, usize>`
+      help: the type constructed contains `&std::collections::BTreeMap<usize, usize>` due to the type of the argument passed
+          --> src/constraint_extra.rs:1393:47
+           |
+      1393 |         assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 3), expected);
+           |                                               ^^^^^------^
+           |                                                    |
+           |                                                    this argument influences the type of `Some`
+      note: tuple variant defined here
+          --> /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:601:5
+           |
+       601 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
+           |     ^^^^
+
+      error[E0308]: mismatched types
+         --> src/test_precompute_optimizations.rs:73:9
+          |
+       71 |     GrammarConstraint::_dump_precomputed2(
+          |     ------------------------------------- arguments to this function are incorrect
+       72 |         &optimized_precomputed2,
+       73 |         original_to_internal_id_bimap,
+          |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `&BTreeMap<usize, HybridBitset>`, found `&BTreeMap<usize, usize>`
+          |
+          = note: expected reference `&std::collections::BTreeMap<_, hybrid_bitset::HybridBitset>`
+                     found reference `&std::collections::BTreeMap<_, usize>`
+      note: associated function defined here
+         --> src/constraint_extra.rs:372:12
+          |
+      372 |     pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, PrecomputeNode2Index>, internal_to_original_map: &BTreeMap<usize, LLMTokenBV>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, t...
+          |            ^^^^^^^^^^^^^^^^^^                                                                  ------------------------------------------------------
+
+      For more information about this error, try `rustc --explain E0308`.
+      error: could not compile `sep1` (lib test) due to 3 previous errors
+
+
+      Code in test_precompute_optimizations.rs
+      ```rust
+      fn assert_optimized_equivalent(
+          original_precomputed2: &Precomputed2,
+          original_to_internal_id_bimap: &BTreeMap<usize, usize>,
+          llm_token_map: &LLMTokenMap,
+          trie2_god: Trie2GodWrapper,
+      ) {
+          // Deep clone the original precomputed2 tree(s)
+          let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
+          for (sid, root_arc) in original_precomputed2.iter() {
+              let (cloned_root, _map) = clone_trie2_graph(root_arc, &trie2_god);
+              optimized_precomputed2.insert(*sid, cloned_root);
+          }
+
+          // Apply optimization passes
+          let mut optimization_config = GrammarConstraintConfig::default();
+          optimization_config.optimize_trie2_gc = false;
+          optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config);
+
+          println!("\n--- Stats for Optimized Precompute2 Tree ---");
+          let mut stats_optimized = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized, &trie2_god);
+
+          println!("\n--- Dumping Optimized Precompute2 Tree ---");
+          GrammarConstraint::_dump_precomputed2(
+              &optimized_precomputed2,
+              original_to_internal_id_bimap,
+              llm_token_map,
+              &trie2_god,
+          );
+
+          println!("\n--- Final Stats Comparison ---");
+          println!("\n--- Stats for Original Precompute2 Tree ---");
+          let mut stats_original = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_original, &trie2_god);
+
+          println!("\n--- Stats for Optimized Precompute2 Tree (re-calculated) ---");
+          let mut stats_optimized_final = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized_final, &trie2_god);
+          println!("--- Finished Dumping Optimized Tree ---\n");
+
+          // Compare the original and optimized trees for semantic equivalence
+          assert_eq!(
+              original_precomputed2.len(),
+              optimized_precomputed2.len(),
+              "Number of tokenizer states with trees differs."
+          );
+
+          for sid in original_precomputed2.keys() {
+              let original_root = original_precomputed2.get(sid).unwrap();
+              let optimized_root = optimized_precomputed2.get(sid).unwrap();
+              if !are_precompute2_trees_equivalent(original_root, &trie2_god, optimized_root, &trie2_god) {
+                  // Detailed info is now printed inside are_precompute2_trees_equivalent
+                  panic!(
+                      "Optimized and original Precompute2 trees are not equivalent for tokenizer state ID: {}. See details above.",
+                      sid.0);
+              }
+          }
+      }
+      ```
+
+      Fix these
+    metadata:
+  - assistant: |-
+      You've run into a few compiler errors after the recent changes. The type signature for functions that display LLM tokens was updated to handle more complex token mappings, but the tests and some test helper functions were not updated accordingly.
+
+      Here are the steps to fix the compilation errors:
+
+      ### Step-by-step Instructions
+
+      #### 1. Update Tests in `src/constraint_extra.rs`
+
+      The tests for `format_bv_with_tokens` are still creating the old map type (`BTreeMap<usize, usize>`) instead of the new one (`BTreeMap<usize, LLMTokenBV>`).
+
+      1.  **Open the file `src/constraint_extra.rs`**.
+      2.  Navigate to the `mod tests` block at the end of the file.
+      3.  In the test function `test_format_bv_with_tokens_with_maps`, replace the `bimap` creation and the `assert_eq!` call. The new map should be of type `BTreeMap<usize, LLMTokenBV>` and named `i2o_map`.
+      4.  Similarly, in `test_format_bv_with_tokens_limit_and_ellipsis`, update the map creation and the `assert_eq!` call.
+
+      Here is the code to replace the two test functions:
+
+      ```rust
+          #[test]
+          fn test_format_bv_with_tokens_with_maps() {
+              let bv = HybridBitset::from_iter(vec![0, 1]); // internal IDs
+              let mut i2o_map = BTreeMap::new();
+              i2o_map.insert(0, LLMTokenBV::from_iter(vec![10])); // internal 0 -> original {10}
+              i2o_map.insert(1, LLMTokenBV::from_iter(vec![20])); // internal 1 -> original {20}
+              let mut llm_map = BiBTreeMap::new();
+              llm_map.insert(b"ten".to_vec(), LLMTokenID(10));
+              llm_map.insert(b"twenty".to_vec(), LLMTokenID(20));
+
+              let expected = "[0..=1] (e.g., [\"ten\", \"twenty\"])";
+              assert_eq!(format_bv_with_tokens(&bv, Some(&i2o_map), Some(&llm_map), 5), expected);
+          }
+
+          #[test]
+          fn test_format_bv_with_tokens_limit_and_ellipsis() {
+              let bv = HybridBitset::from_iter(0..10); // internal IDs 0-9
+              let mut i2o_map = BTreeMap::new();
+              let mut llm_map = BiBTreeMap::new();
+              for i in 0..10 {
+                  i2o_map.insert(i, LLMTokenBV::from_iter(vec![100 + i]));
+                  llm_map.insert(format!("{}", 100 + i).into_bytes(), LLMTokenID(100 + i));
+              }
+
+              let expected = "[0..=9] (e.g., [\"100\", \"101\", \"102\"], ...)";
+              assert_eq!(format_bv_with_tokens(&bv, Some(&i2o_map), Some(&llm_map), 3), expected);
+          }
+      ```
+
+      #### 2. Update Test Helper in `src/test_precompute_optimizations.rs`
+
+      The test helper function `assert_optimized_equivalent` is passing a map with the wrong type to `_dump_precomputed2`. You need to convert the `original_to_internal` map into the required `internal_to_original` map.
+
+      1.  **Open the file `src/test_precompute_optimizations.rs`**.
+      2.  Add the following `use` statement at the top of the file:
+          ```rust
+          use crate::datastructures::gss::LLMTokenBV;
+          ```
+      3.  Locate the function `assert_optimized_equivalent`.
+      4.  Inside this function, just before the call to `GrammarConstraint::_dump_precomputed2`, insert the following code to create the correct map:
+          ```rust
+          let mut internal_to_original_map: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+          for (original, internal) in original_to_internal_id_bimap {
+              internal_to_original_map.entry(*internal).or_default().insert(*original);
+          }
+          ```
+      5.  Modify the call to `GrammarConstraint::_dump_precomputed2` to pass this new `&internal_to_original_map` instead of `original_to_internal_id_bimap`.
+
+      ### Git Diffs
+
+      Here are the git diffs to apply the fixes automatically.
+
+      ```diff
+      diff --git a/src/constraint_extra.rs b/src/constraint_extra.rs
+      index 1111111..2222222 100644
+      --- a/src/constraint_extra.rs
+      +++ b/src/constraint_extra.rs
+      @@ -1372,34 +1372,34 @@
+           #[test]
+           fn test_format_bv_with_tokens_with_maps() {
+               let bv = HybridBitset::from_iter(vec![0, 1]); // internal IDs
+      -        let mut bimap = BTreeMap::new();
+      -        bimap.insert(10, 0); // original 10 -> internal 0
+      -        bimap.insert(20, 1); // original 20 -> internal 1
+      +        let mut i2o_map = BTreeMap::new();
+      +        i2o_map.insert(0, LLMTokenBV::from_iter(vec![10])); // internal 0 -> original {10}
+      +        i2o_map.insert(1, LLMTokenBV::from_iter(vec![20])); // internal 1 -> original {20}
+               let mut llm_map = BiBTreeMap::new();
+               llm_map.insert(b"ten".to_vec(), LLMTokenID(10));
+               llm_map.insert(b"twenty".to_vec(), LLMTokenID(20));
+       
+               let expected = "[0..=1] (e.g., [\"ten\", \"twenty\"])";
+      -        assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 5), expected);
+      +        assert_eq!(format_bv_with_tokens(&bv, Some(&i2o_map), Some(&llm_map), 5), expected);
+           }
+       
+           #[test]
+           fn test_format_bv_with_tokens_limit_and_ellipsis() {
+               let bv = HybridBitset::from_iter(0..10); // internal IDs 0-9
+      -        let mut bimap = BTreeMap::new();
+      +        let mut i2o_map = BTreeMap::new();
+               let mut llm_map = BiBTreeMap::new();
+               for i in 0..10 {
+      -            bimap.insert(100 + i, i);
+      +            i2o_map.insert(i, LLMTokenBV::from_iter(vec![100 + i]));
+                   llm_map.insert(format!("{}", 100 + i).into_bytes(), LLMTokenID(100 + i));
+               }
+       
+               let expected = "[0..=9] (e.g., [\"100\", \"101\", \"102\"], ...)";
+      -        assert_eq!(format_bv_with_tokens(&bv, Some(&bimap), Some(&llm_map), 3), expected);
+      +        assert_eq!(format_bv_with_tokens(&bv, Some(&i2o_map), Some(&llm_map), 3), expected);
+           }
+       
+           // Helper function to create a minimal constraint for testing dump
+
+      ```
+      ```diff
+      diff --git a/src/test_precompute_optimizations.rs b/src/test_precompute_optimizations.rs
+      index 3333333..4444444 100644
+      --- a/src/test_precompute_optimizations.rs
+      +++ b/src/test_precompute_optimizations.rs
+      @@ -2,6 +2,7 @@
+       use crate::constraint_precompute2_utils::{clone_trie2_graph, optimize_trie2_size, are_precompute2_trees_equivalent};
+       use crate::constraint_extra::PrecomputeStats;
+       use crate::tokenizer::LLMTokenMap;
+      +use crate::datastructures::gss::LLMTokenBV;
+       use std::collections::BTreeMap;
+       
+       fn assert_optimized_equivalent(
+      @@ -24,9 +25,14 @@
+           crate::constraint_extra::print_precompute_stats2(&stats_optimized, &trie2_god);
+       
+           println!("\n--- Dumping Optimized Precompute2 Tree ---");
+      +    let mut internal_to_original_map: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+      +    for (original, internal) in original_to_internal_id_bimap {
+      +        internal_to_original_map.entry(*internal).or_default().insert(*original);
+      +    }
+           GrammarConstraint::_dump_precomputed2(
+               &optimized_precomputed2,
+      -        original_to_internal_id_bimap,
+      +        &internal_to_original_map,
+               llm_token_map,
+               &trie2_god,
+           );
+
+      ```
+    metadata:
+  - user: |-
+      Full content of `src/test_precompute_optimizations.rs`:
+
+      ```rust
+      //! Precompute2 optimization equivalence tests.
+      //!
+      //! This suite verifies that applying optimization passes to the Precompute2
+      //! trie graph preserves its semantics by comparing the optimized result
+      //! against an unoptimized baseline using are_precompute2_trees_equivalent.
+      //!
+      //! We keep tests compact by:
+      //! - Defining grammars via inline EBNF strings.
+      //! - Using small, explicit LLM vocabularies.
+      //! - Factoring common logic into small helpers.
+
+      use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, Precomputed2, Trie2GodWrapper};
+      use crate::interface::{CompiledGrammar, GrammarDefinition};
+      use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+      use reqwest::blocking;
+      use std::collections::BTreeMap;
+      use std::error::Error;
+      use std::fs::{self, File};
+      use std::io::{BufReader, BufWriter, Write};
+      use std::path::Path;
+      use std::sync::Arc;
+      use bimap::{BiBTreeMap};
+      use crate::constraint_extra::PrecomputeStats;
+      use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
+      use crate::json_serialization::JSONConvertible;
+      //
+      // -------------------------------
+      // Common helpers
+      // -------------------------------
+      //
+
+      fn compiled_from_ebnf_str(ebnf: &str) -> Result<CompiledGrammar, Box<dyn Error>> {
+          let def = GrammarDefinition::from_ebnf(ebnf)?;
+          Ok(CompiledGrammar::from_definition(Arc::new(def)))
+      }
+
+      fn make_llm_token_map(tokens: &[&str]) -> (LLMTokenMap, usize) {
+          let mut map = LLMTokenMap::new();
+          let mut max_id = 0usize;
+          for (i, t) in tokens.iter().enumerate() {
+              map.insert(t.as_bytes().to_vec(), LLMTokenID(i));
+              max_id = max_id.max(i);
+          }
+          (map, max_id)
+      }
+
+      fn assert_optimized_equivalent(
+          original_precomputed2: &Precomputed2,
+          original_to_internal_id_bimap: &BTreeMap<usize, usize>,
+          llm_token_map: &LLMTokenMap,
+          trie2_god: Trie2GodWrapper,
+      ) {
+          // Deep clone the original precomputed2 tree(s)
+          let mut optimized_precomputed2: Precomputed2 = BTreeMap::new();
+          for (sid, root_arc) in original_precomputed2.iter() {
+              let (cloned_root, _map) = clone_trie2_graph(root_arc, &trie2_god);
+              optimized_precomputed2.insert(*sid, cloned_root);
+          }
+
+          // Apply optimization passes
+          let mut optimization_config = GrammarConstraintConfig::default();
+          optimization_config.optimize_trie2_gc = false;
+          optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config);
+
+          println!("\n--- Stats for Optimized Precompute2 Tree ---");
+          let mut stats_optimized = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized, &trie2_god);
+
+          println!("\n--- Dumping Optimized Precompute2 Tree ---");
+          GrammarConstraint::_dump_precomputed2(
+              &optimized_precomputed2,
+              original_to_internal_id_bimap,
+              llm_token_map,
+              &trie2_god,
+          );
+
+          println!("\n--- Final Stats Comparison ---");
+          println!("\n--- Stats for Original Precompute2 Tree ---");
+          let mut stats_original = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(original_precomputed2, &mut stats_original, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_original, &trie2_god);
+
+          println!("\n--- Stats for Optimized Precompute2 Tree (re-calculated) ---");
+          let mut stats_optimized_final = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats2(&optimized_precomputed2, &mut stats_optimized_final, &trie2_god);
+          crate::constraint_extra::print_precompute_stats2(&stats_optimized_final, &trie2_god);
+          println!("--- Finished Dumping Optimized Tree ---\n");
+
+          // Compare the original and optimized trees for semantic equivalence
+          assert_eq!(
+              original_precomputed2.len(),
+              optimized_precomputed2.len(),
+              "Number of tokenizer states with trees differs."
+          );
+
+          for sid in original_precomputed2.keys() {
+              let original_root = original_precomputed2.get(sid).unwrap();
+              let optimized_root = optimized_precomputed2.get(sid).unwrap();
+              if !are_precompute2_trees_equivalent(original_root, &trie2_god, optimized_root, &trie2_god) {
+                  // Detailed info is now printed inside are_precompute2_trees_equivalent
+                  panic!(
+                      "Optimized and original Precompute2 trees are not equivalent for tokenizer state ID: {}. See details above.",
+                      sid.0);
+              }
+          }
+      }
+
+      fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn Error>> {
+          let compiled = compiled_from_ebnf_str(ebnf)?;
+          let (llm_token_map, max_original_llm_token_id) = make_llm_token_map(llm_tokens);
+
+          // Create with optimizations OFF to get the baseline
+          let no_opt_config = GrammarConstraintConfig {
+              optimize_trie2_prune_dead_paths: false,
+              optimize_trie2_merge_nodes: false,
+              optimize_trie2_factor_common_destinations: false,
+              optimize_trie2_compress_edges: false,
+              optimize_trie2_gc: true,
+              skip_precomputation: false,
+              optimize_trie3_constrain_bitvecs: true,
+              optimize_trie1_merge_equivalent_llm_tokens: false,
+              optimize_trie1_reorder_llm_tokens: false,
+              optimize_trie3_merge_equivalent_llm_tokens: false,
+              optimize_trie3_reorder_llm_tokens: false,
+          };
+          let gc = GrammarConstraint::from_compiled_grammar_with_config(
+              compiled,
+              llm_token_map,
+              LLMTokenID(0), // dummy EOF placeholder
+              max_original_llm_token_id,
+              &no_opt_config,
+          );
+          assert_optimized_equivalent(
+              &gc.precomputed2,
+              &gc.precompute_vocab1.original_to_internal,
+              &gc.llm_vocab.llm_token_map,
+              gc.trie2_god.clone(),
+          );
+          Ok(())
+      }
+
+      //
+      // -------------------------------
+      // Specialized JS test (large grammar + GPT-2 subset vocab)
+      // -------------------------------
+      //
+
+      fn load_or_download_gpt2_vocab(
+          cache_dir: &Path,
+          file_name: &str,
+          url: &str,
+      ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+          fs::create_dir_all(cache_dir)?;
+          let cache_path = cache_dir.join(file_name);
+
+          let vocab_map: BTreeMap<String, u32> = if cache_path.exists() {
+              println!("Loading GPT-2 vocab from cache: {:?}", cache_path);
+              let file = File::open(cache_path)?;
+              let reader = BufReader::new(file);
+              serde_json::from_reader(reader)?
+          } else {
+              println!("Downloading GPT-2 vocab from: {}", url);
+              let response = blocking::get(url)?.error_for_status()?;
+              let content = response.text()?;
+
+              let mut file = File::create(&cache_path)?;
+              file.write_all(content.as_bytes())?;
+              println!("Saved GPT-2 vocab to cache: {:?}", cache_path);
+
+              serde_json::from_str(&content)?
+          };
+          Ok(vocab_map.into_keys().collect())
+      }
+
+      #[test]
+      fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn std::error::Error>> {
+          if cfg!(rustrover) {
+              println!("Skipping test_precompute2_optimizations_are_equivalent_for_js in rustrover mode.");
+              return Ok(());
+          }
+
+          // --- Setup Phase ---
+          println!("--- Setting up for Precompute2 Optimization Equivalence Test (JS) ---");
+
+          const FORCE_RECOMPUTE: bool = true;
+          const SAVE_TO_CACHE: bool = true;
+          use crate::{constraint, json_serialization};
+          use flate2::read::GzDecoder;
+          use flate2::write::GzEncoder;
+          use flate2::Compression;
+
+          let cache_dir = Path::new(".cache/test_precompute2");
+          fs::create_dir_all(cache_dir)?;
+          let precomputed2_cache_path = cache_dir.join("precomputed2_js_gpt2_small.json.gz");
+
+          // 1. Load and compile the JavaScript grammar.
+          let grammar_path = "src/js_simplified2.ebnf";
+          let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path)?;
+          println!("Compiling GrammarDefinition into CompiledGrammar...");
+          let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+          println!("Successfully compiled GrammarDefinition.");
+          println!("{}", compiled_grammar);
+
+          // 2. Load a small, representative vocabulary.
+          println!("\nLoading GPT-2 vocabulary...");
+          let vocab_cache_dir = Path::new(".cache/test_vocabs");
+          let vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json";
+          let vocab_file_name = "gpt2_vocab.json";
+          let mut gpt2_raw_vocab = load_or_download_gpt2_vocab(vocab_cache_dir, vocab_file_name, vocab_url)?;
+          // Keep a smaller subset to speed up the test
+          gpt2_raw_vocab.retain(|s| s.len() < 5);
+          println!("Using a subset of {} tokens for the test.", gpt2_raw_vocab.len());
+
+          let mut llm_token_map = LLMTokenMap::new();
+          let mut max_original_llm_token_id_val: usize = 0;
+          for (i, token_str) in gpt2_raw_vocab.iter().enumerate() {
+              let id_val = i;
+              let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+              let token_bytes = processed_token_str.as_bytes().to_vec();
+              llm_token_map.insert(token_bytes, LLMTokenID(id_val));
+              max_original_llm_token_id_val = max_original_llm_token_id_val.max(id_val);
+          }
+
+          // 3. Construct the GrammarConstraint to get the baseline precomputed2 tree.
+          let original_precomputed2: Precomputed2;
+          let original_god;
+          let llm_vocab;
+
+          if !FORCE_RECOMPUTE && precomputed2_cache_path.exists() {
+              println!("\nLoading Precomputed2 from cache: {:?}", precomputed2_cache_path);
+              let file = File::open(&precomputed2_cache_path)?;
+              let decompressor = GzDecoder::new(BufReader::new(file));
+              (original_precomputed2, original_god) = <(Precomputed2, Trie2GodWrapper)>::from_reader(decompressor)?;
+              // This path is problematic as the cached version is likely optimized.
+              // We'll proceed assuming it's unoptimized for now, but FORCE_RECOMPUTE=true is recommended.
+              let gc_for_vocab = GrammarConstraint::from_compiled_grammar(compiled_grammar.clone(), llm_token_map.clone(), LLMTokenID(0), max_original_llm_token_id_val);
+              llm_vocab = gc_for_vocab.precompute_vocab1;
+              println!("Successfully loaded Precomputed2 from cache.");
+          } else {
+              println!("\nConstructing GrammarConstraint with optimizations OFF (will generate Precomputed2)...");
+              let no_opt_config = GrammarConstraintConfig {
+                  optimize_trie2_prune_dead_paths: false,
+                  optimize_trie2_merge_nodes: false,
+                  optimize_trie2_factor_common_destinations: false,
+                  optimize_trie2_compress_edges: false,
+                  optimize_trie2_gc: true,
+                  skip_precomputation: false,
+                  optimize_trie3_constrain_bitvecs: true,
+                  optimize_trie1_merge_equivalent_llm_tokens: false,
+                  optimize_trie1_reorder_llm_tokens: false,
+                  optimize_trie3_merge_equivalent_llm_tokens: false,
+                  optimize_trie3_reorder_llm_tokens: false,
+              };
+              let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
+                  compiled_grammar.clone(),
+                  llm_token_map.clone(),
+                  LLMTokenID(0), // dummy_eof_placeholder
+                  max_original_llm_token_id_val,
+                  &no_opt_config,
+              );
+              println!("GrammarConstraint constructed successfully.");
+              original_precomputed2 = grammar_constraint.precomputed2;
+              original_god = grammar_constraint.trie2_god;
+              llm_vocab = grammar_constraint.precompute_vocab1;
+
+              if SAVE_TO_CACHE {
+                  println!("\nSerializing and saving Precomputed2 to cache: {:?}", precomputed2_cache_path);
+                  let file = File::create(&precomputed2_cache_path)?;
+                  let writer = BufWriter::new(file);
+                  let mut encoder = GzEncoder::new(writer, Compression::default());
+                  (original_precomputed2.clone(), original_god.clone()).to_writer(&mut encoder)?;
+                  println!("Successfully saved Precomputed2 to cache.");
+              }
+          }
+
+          // 4. Assert that the optimized result is equivalent to the baseline.
+          assert_optimized_equivalent(
+              &original_precomputed2,
+              &llm_vocab.original_to_internal,
+              &llm_token_map,
+              original_god,
+          );
+
+          println!("\nEquivalence test passed: All trees are semantically equivalent after optimization (JS).");
+
+          Ok(())
+      }
+
+      //
+      // -------------------------------
+      // Compact tests using inline EBNF
+      // (based on grammars in test_constraint_basic.rs)
+      // -------------------------------
+      //
+
+      // Trivial: s -> A EOF; A -> 'a'; EOF -> '$'
+      #[test]
+      fn test_p_opt_trivial_a_eof() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A EOF;
+              A ::= 'a';
+              EOF ::= '$';
+          "#;
+          let llm = ["a", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Simple choice: s -> x EOF; x -> A B_OR_C | AB
+      #[test]
+      fn test_p_opt_simple_choice_ab_or_ac() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= x EOF;
+              x ::= A B_OR_C | AB;
+              A ::= 'a';
+              B_OR_C ::= 'b' | 'c';
+              AB ::= 'ab';
+              EOF ::= '$';
+          "#;
+          let llm = ["ab", "ac", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression grammar (e -> e + t | t; t -> t * f | f; f -> (e) | i)
+      #[test]
+      fn test_p_opt_expression_full() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= e PLUS t | t;
+              t ::= t TIMES f | f;
+              f ::= LPAREN e RPAREN | I;
+
+              PLUS ::= '+';
+              TIMES ::= '*';
+              LPAREN ::= '(';
+              RPAREN ::= ')';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "+", "*", "(", ")", "(i", "+i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression (no '*'): e -> e + t | t; t -> f; f -> (e) | i
+      #[test]
+      fn test_p_opt_expression_no_times() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= e PLUS t | t;
+              t ::= f;
+              f ::= LPAREN e RPAREN | I;
+
+              PLUS ::= '+';
+              LPAREN ::= '(';
+              RPAREN ::= ')';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "+", "(", ")", "(i", "+i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression (no parens): e -> e + t | t; t -> t * f | f; f -> i
+      #[test]
+      fn test_p_opt_expression_no_parens() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= e PLUS t | t;
+              t ::= t TIMES f | f;
+              f ::= I;
+
+              PLUS ::= '+';
+              TIMES ::= '*';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "+", "*", "+i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Expression (no '+' or '*'): e -> t; t -> f; f -> (e) | i
+      #[test]
+      fn test_p_opt_expression_no_plus_times() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= t;
+              t ::= f;
+              f ::= LPAREN e RPAREN | I;
+
+              LPAREN ::= '(';
+              RPAREN ::= ')';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "(", ")", "(i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Direct recursion: e -> '(' e | 'i'; s -> e EOF
+      #[test]
+      fn test_p_opt_expression_trivial_direct() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= LPAREN e | I;
+
+              LPAREN ::= '(';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "(", "(i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Same as above, but limited vocab: only "(i" (to exercise multi-grammar-token LLM token)
+      #[test]
+      fn test_p_opt_expression_trivial_direct_limited_vocab() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= LPAREN e | I;
+
+              LPAREN ::= '(';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["(i"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Unbalanced parens variant (f -> '(' e | 'i')
+      #[test]
+      fn test_p_opt_expression_unbalanced_parens() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= e EOF;
+              e ::= t;
+              t ::= f;
+              f ::= LPAREN e | I;
+
+              LPAREN ::= '(';
+              I ::= 'i';
+              EOF ::= '$';
+          "#;
+          let llm = ["i", "(", "(i", "$"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Indirect recursion simplified: s -> 'a' e | 'b'; e -> s
+      #[test]
+      fn test_p_opt_indirect_recursion_simplified() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A e | B;
+              e ::= s;
+
+              A ::= 'a';
+              B ::= 'b';
+          "#;
+          let llm = ["a", "b"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Repetition: s ::= A*, A ::= 'a'
+      #[test]
+      fn test_p_opt_repetition_a_star() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A*;
+              A ::= 'a';
+          "#;
+          let llm = ["a"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // a+ token: s ::= A_PLUS; A_PLUS ::= 'a'+
+      #[test]
+      fn test_p_opt_a_plus_terminal() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= A_PLUS;
+              A_PLUS ::= 'a'+;
+          "#;
+          let llm = ["a", "aaa"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // Ignore whitespace: WS ignored between tokens. s ::= A B; A='a'; B='b'; WS=' '
+      // LLM tokens include "a", " ", "b", "a b"
+      #[test]
+      fn test_p_opt_ignore_whitespace() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              #![ignore(WS)]
+              s ::= A B;
+              A ::= 'a';
+              B ::= 'b';
+              WS ::= ' '+;
+          "#;
+          let llm = ["a", " ", "b", "a b"];
+          run_equivalence_test(ebnf, &llm)
+      }
+
+      // 'x' SPACE+ '=' pattern (compact variant of x_eq)
+      #[test]
+      fn test_p_opt_x_space_equals() -> Result<(), Box<dyn Error>> {
+          let ebnf = r#"
+              s ::= X SPACE EQUALS;
+              X ::= 'x';
+              SPACE ::= ' '+;
+              EQUALS ::= '=';
+          "#;
+          let llm = ["x", " ="];
+          run_equivalence_test(ebnf, &llm)
+      }
+      ```
+
+      Failed Hunk:
+
+      ```diff
+      @@ -2,6 +2,7 @@
+       use crate::constraint_precompute2_utils::{clone_trie2_graph, optimize_trie2_size, are_precompute2_trees_equivalent};
+       use crate::constraint_extra::PrecomputeStats;
+       use crate::tokenizer::LLMTokenMap;
+      +use crate::datastructures::gss::LLMTokenBV;
+       use std::collections::BTreeMap;
+       
+       fn assert_optimized_equivalent(
+      ```
+
+      Expected Context (from patch):
+
+      ```diff
+      use crate::constraint_precompute2_utils::{clone_trie2_graph, optimize_trie2_size, are_precompute2_trees_equivalent};
+      use crate::constraint_extra::PrecomputeStats;
+      use crate::tokenizer::LLMTokenMap;
+      use std::collections::BTreeMap;
+
+      fn assert_optimized_equivalent(
+      ```
+
+      No close match (>= 50% similarity) was found in the file `src/test_precompute_optimizations.rs`.
+
+      The git diff hunk above failed to apply to the file `src/test_precompute_optimizations.rs`. Based on the detailed analysis, please provide a corrected version of *only this hunk* that will apply cleanly. Your response must contain only the corrected hunk inside a ```diff code block. The hunk must start with its `@@ ... @@` header and include all context, added, and removed lines.
+      Do not include any other text or explanation outside the code block.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/src/test_precompute_optimizations.rs b/src/test_precompute_optimizations.rs
+      index 3333333..4444444 100644
+      --- a/src/test_precompute_optimizations.rs
+      +++ b/src/test_precompute_optimizations.rs
+      @@ -24,9 +24,10 @@
+       use std::path::Path;
+       use std::sync::Arc;
+       use bimap::{BiBTreeMap};
+      +use crate::datastructures::gss::LLMTokenBV;
+       use crate::constraint_extra::PrecomputeStats;
+       use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
+       use crate::json_serialization::JSONConvertible;
+       //
+       // -------------------------------
+      @@ -24,9 +25,14 @@
+           crate::constraint_extra::print_precompute_stats2(&stats_optimized, &trie2_god);
+       
+           println!("\n--- Dumping Optimized Precompute2 Tree ---");
+      +    let mut internal_to_original_map: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+      +    for (original, internal) in original_to_internal_id_bimap {
+      +        internal_to_original_map.entry(*internal).or_default().insert(*original);
+      +    }
+           GrammarConstraint::_dump_precomputed2(
+               &optimized_precomputed2,
+      -        original_to_internal_id_bimap,
+      +        &internal_to_original_map,
+               llm_token_map,
+               &trie2_god,
+           );
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_precompute_optimizations.rs
+      Applying patch to 'src/test_precompute_optimizations.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_precompute_optimizations.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Update test helper to pass internal_to_original_map
+      to _dump_precomputed2"'
     metadata:
 ...
