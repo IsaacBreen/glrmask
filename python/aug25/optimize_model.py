@@ -1,7 +1,25 @@
+#!/usr/bin/env python3
+"""
+Model Optimization Framework
+
+This script runs a model through input text to identify expensive get_mask() calls,
+then tries different optimization variations to improve performance on those steps.
+
+Usage:
+  python -m python.aug25.optimize_model \\
+    --model python/aug25/models/precompute3_model_pure_python_opt3.py \\
+    --code ./src/example_code7.js \\
+    --constraint-file ./.cache/test_vocabs/js_grammar_constraint.json.gz \\
+    --warmup-reps 2 \\
+    --test-reps 10 \\
+    --num-steps 1 \\
+    --agg-method min
+"""
+
 import sys
 from pathlib import Path
 
-# Add project root to sys.path to resolve imports when running as a script
+# Add project root to sys.path
 _project_root = Path(__file__).resolve().parents[2]
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
@@ -9,186 +27,212 @@ if str(_project_root) not in sys.path:
 import argparse
 import json
 import gzip
-import copy
-from collections import defaultdict
-import numpy as np
-from tqdm import tqdm
-
-from python.aug25.benchmark_runner import load_model_class, greedy_tokenizer
-from python.aug25.stats import Stats
+import time
+import importlib.util
+from typing import Dict, List
 
 
-def find_expensive_steps(model, token_ids, args):
-    """
-    Run the model through the token sequence multiple times to identify the
-    most expensive get_mask calls based on the model's cost metric.
-    """
-    print(f"--- Phase 1: Finding up to {args.num_steps_to_find} most expensive step(s) ---")
-    print(f"Running {args.find_steps_repeat} repetitions to gather costs...")
+def load_model_class(model_path: Path):
+    """Dynamically loads the 'Model' class from a Python file."""
+    module_path_for_name = model_path
+    if module_path_for_name.is_absolute():
+        try:
+            module_path_for_name = module_path_for_name.relative_to(_project_root)
+        except ValueError:
+            pass
 
-    costs_per_step = defaultdict(list)
-    initial_model_state = model.state
-
-    for i in range(args.find_steps_repeat):
-        model.state = copy.deepcopy(initial_model_state) # Reset state for each run
-        progress_bar = tqdm(
-            enumerate(token_ids),
-            total=len(token_ids),
-            desc=f"Finding steps (run {i+1}/{args.find_steps_repeat})",
-            leave=False
-        )
-        for step_idx, token_id in progress_bar:
-            Stats.get().reset()
-            model.get_mask()
-            costs_per_step[step_idx].append(model.last_get_mask_cost)
-            model.commit(token_id)
-
-    # Aggregate costs
-    agg_costs = {}
-    agg_func = {
-        'min': np.min,
-        'max': np.max,
-        'mean': np.mean,
-        'median': np.median,
-    }.get(args.agg_method)
-
-    if not agg_func:
-        raise ValueError(f"Invalid aggregation method: {args.agg_method}")
-
-    for step, costs in costs_per_step.items():
-        if costs:
-            agg_costs[step] = agg_func(costs)
-
-    # Find top N steps
-    sorted_steps = sorted(agg_costs.items(), key=lambda item: item[1], reverse=True)
-    top_steps = [
-        {"step_index": step, "cost": cost}
-        for step, cost in sorted_steps[:args.num_steps_to_find]
-    ]
-
-    print("\nMost expensive steps found:")
-    for item in top_steps:
-        print(f"  - Step {item['step_index']:<5}: Aggregated cost = {item['cost']:,.2f} (using '{args.agg_method}')")
-    print("-" * 20)
-
-    return top_steps
+    module_name = ".".join(module_path_for_name.with_suffix('').parts)
+    spec = importlib.util.spec_from_file_location(module_name, model_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load spec for module at {model_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    
+    if not hasattr(module, 'Model'):
+        raise AttributeError(f"Model script {model_path} must define a 'Model' class.")
+    
+    return getattr(module, 'Model')
 
 
-def benchmark_variations_at_step(initial_model, token_ids, step_info, args):
-    """
-    For a given expensive step, advance the model to that state and then
-    benchmark all defined variations.
-    """
-    step_index = step_info['step_index']
-    print(f"\n--- Phase 2: Benchmarking variations for step {step_index} ---")
+def greedy_tokenizer(text_bytes, id_to_token):
+    """Greedy tokenizer using a trie."""
+    trie_root = {}
+    for token_id, token_bytes in id_to_token.items():
+        node = trie_root
+        for byte_val in token_bytes:
+            node = node.setdefault(byte_val, {})
+        node['<ID>'] = token_id
 
-    # 1. Get model to the state *before* the expensive get_mask call
-    print(f"Advancing model to step {step_index}...")
-    model_at_step = copy.deepcopy(initial_model)
-    for i in tqdm(range(step_index), desc="Committing tokens"):
-        model_at_step.commit(token_ids[i])
-
-    # 2. Get variations and benchmark configuration from the model
-    variations = model_at_step.get_optimization_variations()
-    config = model_at_step.get_benchmark_config()
-    stats_to_collect = config['stats_to_collect']
-    print_report = config['print_report']
-
-    print(f"Found {len(variations)} variations to test.")
-
-    # 3. Run benchmarks for each variation
-    for var in variations:
-        all_run_stats = defaultdict(list)
-
-        # Apply variation to a deep copy to ensure isolation
-        model_variant = copy.deepcopy(model_at_step)
-        var.apply(model_variant) # This should print variation details
-
-        # Run the benchmark multiple times
-        for i in range(args.benchmark_repeat):
-            Stats.get().reset()
-            model_variant.get_mask()
-
-            # Collect specified stats
-            stats = Stats.get()
-            for key in stats_to_collect:
-                if key in stats.times:
-                    all_run_stats[key].append(stats.times[key])
-                elif key in stats.counts:
-                    all_run_stats[key].append(float(stats.counts[key]))
-
-        # 4. Report aggregated results for this variation
-        print_report(str(var), all_run_stats)
+    token_ids = []
+    pos = 0
+    while pos < len(text_bytes):
+        node = trie_root
+        longest_match_id = -1
+        longest_match_len = 0
+        
+        for i in range(len(text_bytes) - pos):
+            current_byte = text_bytes[pos + i]
+            if current_byte in node:
+                node = node[current_byte]
+                if '<ID>' in node:
+                    longest_match_id = node['<ID>']
+                    longest_match_len = i + 1
+            else:
+                break
+        
+        if longest_match_len > 0:
+            token_ids.append(longest_match_id)
+            pos += longest_match_len
+        else:
+            raise ValueError(f"Failed to tokenize at position {pos}")
+    return token_ids
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Find expensive steps in a model and benchmark optimization variations.")
-    parser.add_argument("-m", "--model", type=Path, required=True, help="Path to the model .py file.")
-    parser.add_argument("-c", "--code", type=Path, required=True, help="Path to the code file to use as input.")
-    parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to the pre-compiled .json.gz grammar constraint file.")
-    parser.add_argument('--find-steps-repeat', type=int, default=2, help="Number of repetitions to find expensive steps.")
-    parser.add_argument('--benchmark-repeat', type=int, default=5, help="Number of repetitions for benchmarking each variation.")
-    parser.add_argument('--num-steps-to-find', type=int, default=1, help="Number of top expensive steps to analyze.")
-    parser.add_argument('--agg-method', choices=['min', 'max', 'mean', 'median'], default='min', help="Aggregation method for finding expensive steps.")
-
+    parser = argparse.ArgumentParser(description="Optimize model performance on expensive get_mask calls.")
+    parser.add_argument("-m", "--model", type=Path, required=True, help="Path to model .py file")
+    parser.add_argument("-c", "--code", type=Path, required=True, help="Path to input code file")
+    parser.add_argument("-f", "--constraint-file", type=Path, required=True, help="Path to constraint .json.gz file")
+    parser.add_argument("--warmup-reps", type=int, default=2, help="Repetitions for warmup phase")
+    parser.add_argument("--test-reps", type=int, default=10, help="Repetitions for testing each variation")
+    parser.add_argument("--num-steps", type=int, default=1, help="Number of expensive steps to select")
+    parser.add_argument("--agg-method", default="mean", choices=['mean', 'median', 'min', 'max'],
+                        help="Aggregation method for selecting expensive steps")
+    
     args = parser.parse_args()
 
+    # Validate files
     for p in [args.model, args.code, args.constraint_file]:
         if not p.exists():
             parser.error(f"File not found: {p}")
 
-    # --- Setup ---
-    print("--- Setting up analysis environment ---")
+    print("=" * 80)
+    print("MODEL OPTIMIZATION FRAMEWORK")
+    print("=" * 80)
+    print(f"Model: {args.model}")
+    print(f"Code: {args.code}")
+    print(f"Constraint: {args.constraint_file}")
+    print(f"Warmup repetitions: {args.warmup_reps}")
+    print(f"Test repetitions: {args.test_reps}")
+    print(f"Number of steps to select: {args.num_steps}")
+    print(f"Aggregation method: {args.agg_method}")
+    print("=" * 80)
 
-    # 1. Load constraint file
-    print(f"Loading grammar constraint from: {args.constraint_file}")
-    p_str = str(args.constraint_file)
-    if p_str.endswith('.gz'):
-        with gzip.open(p_str, 'rt', encoding='utf-8') as f:
+    # Load constraint and extract vocabulary
+    print("\n[1/6] Loading constraint and vocabulary...")
+    if str(args.constraint_file).endswith('.gz'):
+        with gzip.open(args.constraint_file, 'rt', encoding='utf-8') as f:
             constraint_json_str = f.read()
     else:
         constraint_json_str = args.constraint_file.read_text(encoding='utf-8')
-
-    # 2. Load model
-    print(f"Loading model from: {args.model}")
-    ModelClass = load_model_class(args.model)
-    initial_model = ModelClass.from_json_string(constraint_json_str)
-    print("Model loaded.")
-
-    # Check for required methods on the model
-    required_methods = [
-        'get_optimization_variations',
-        'get_benchmark_config',
-        'last_get_mask_cost'
-    ]
-    for method in required_methods:
-        if not hasattr(initial_model, method):
-            parser.error(f"Model class in {args.model} must have a '{method}' attribute/method for optimization analysis.")
-
-    # 3. Tokenize input code
-    print(f"Loading and tokenizing code from: {args.code}")
+    
     constraint_json = json.loads(constraint_json_str)
     llm_token_map = constraint_json['llm_token_map']
-    id_to_token = {token_id: bytes(token_bytes) for token_bytes, token_id in llm_token_map}
+    id_to_token: Dict[int, bytes] = {token_id: bytes(token_bytes) for token_bytes, token_id in llm_token_map}
+
+    # Tokenize input
+    print("[2/6] Tokenizing input...")
     code_bytes = args.code.read_bytes()
     token_ids = greedy_tokenizer(code_bytes, id_to_token)
-    print(f"Tokenized into {len(token_ids)} tokens.")
-    print("-" * 20)
+    print(f"  Tokenized into {len(token_ids)} tokens.")
 
-    # --- Run Analysis ---
+    # Load model class
+    print("[3/6] Loading model class...")
+    ModelClass = load_model_class(args.model)
 
-    # Phase 1: Find the most expensive steps
-    expensive_steps = find_expensive_steps(initial_model, token_ids, args)
+    # Warmup phase: identify expensive steps
+    print(f"\n[4/6] Warmup phase: running {args.warmup_reps} repetitions to identify expensive steps...")
+    all_costs: List[List[float]] = []
+    state_checkpoints: List[Dict] = []
+    
+    for rep in range(args.warmup_reps):
+        print(f"  Repetition {rep + 1}/{args.warmup_reps}...")
+        model = ModelClass.from_json_string(constraint_json_str)
+        costs = []
+        checkpoints = []
+        
+        for i, token_id in enumerate(token_ids):
+            # Checkpoint state before get_mask
+            if rep == 0:  # Only need to save checkpoints once
+                checkpoints.append(model.checkpoint())
+            
+            # Run get_mask and track cost
+            model.get_mask()
+            costs.append(model.last_get_mask_cost)
+            
+            # Commit token
+            model.commit(token_id)
+        
+        all_costs.append(costs)
+        if rep == 0:
+            state_checkpoints = checkpoints
+        
+        print(f"    Total cost across all steps: {sum(costs):.0f}")
+    
+    # Select expensive steps
+    expensive_steps = ModelClass.select_expensive_steps(all_costs, args.num_steps, args.agg_method)
+    print(f"\n  Selected {len(expensive_steps)} expensive step(s):")
+    for step_idx in expensive_steps:
+        step_costs = [costs[step_idx] for costs in all_costs]
+        print(f"    Step {step_idx}: costs={step_costs}, {args.agg_method}={sum(step_costs)/len(step_costs) if args.agg_method=='mean' else min(step_costs):.0f}")
 
-    if not expensive_steps:
-        print("No expensive steps found or no costs were recorded. Exiting.")
-        return
+    # Get variations from model
+    print("\n[5/6] Loading variations from model...")
+    temp_model = ModelClass.from_json_string(constraint_json_str)
+    variations = temp_model.get_variations()
+    print(f"  Found {len(variations)} variation(s) to test.")
+    del temp_model
 
-    # Phase 2: Benchmark variations for each expensive step
-    for step_info in expensive_steps:
-        benchmark_variations_at_step(initial_model, token_ids, step_info, args)
-
-    print("\n--- Optimization analysis finished ---")
+    # Test each variation
+    print(f"\n[6/6] Testing variations (running get_mask {args.test_reps} times per step)...")
+    print("=" * 80)
+    
+    for var_idx, variation in enumerate(variations):
+        print(f"\nVARIATION {var_idx + 1}/{len(variations)}")
+        print("-" * 80)
+        
+        # Load fresh model and apply variation
+        model = ModelClass.from_json_string(constraint_json_str)
+        variation(model)
+        
+        # Test on each expensive step
+        all_step_results = []
+        for step_idx in expensive_steps:
+            print(f"\n  Testing on step {step_idx}...")
+            
+            # Restore to state before this step
+            model.restore(state_checkpoints[step_idx])
+            
+            # Run get_mask multiple times
+            results = []
+            for rep in range(args.test_reps):
+                start_time = time.perf_counter()
+                model.get_mask()
+                elapsed = time.perf_counter() - start_time
+                cost = model.last_get_mask_cost
+                results.append({'time': elapsed, 'cost': cost})
+            
+            # Aggregate results for this step
+            agg = ModelClass.aggregate_results(results)
+            all_step_results.append(agg)
+            
+            print(f"    Time:  min={agg['time_min']*1000:.3f}ms, mean={agg['time_mean']*1000:.3f}ms, "
+                  f"median={agg['time_median']*1000:.3f}ms, max={agg['time_max']*1000:.3f}ms")
+            print(f"    Cost:  min={agg['cost_min']:.0f}, mean={agg['cost_mean']:.0f}, "
+                  f"median={agg['cost_median']:.0f}, max={agg['cost_max']:.0f}")
+        
+        # Summary across all steps for this variation
+        if len(all_step_results) > 1:
+            print(f"\n  Summary across {len(expensive_steps)} steps:")
+            avg_time_mean = sum(r['time_mean'] for r in all_step_results) / len(all_step_results)
+            avg_cost_mean = sum(r['cost_mean'] for r in all_step_results) / len(all_step_results)
+            print(f"    Average time (mean): {avg_time_mean*1000:.3f}ms")
+            print(f"    Average cost (mean): {avg_cost_mean:.0f}")
+    
+    print("\n" + "=" * 80)
+    print("OPTIMIZATION COMPLETE")
+    print("=" * 80)
 
 
 if __name__ == "__main__":

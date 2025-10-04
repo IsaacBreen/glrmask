@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import abc
 import collections
+import copy
 import heapq
 import itertools
 import json
@@ -9,6 +9,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union, Set, NamedTuple
+import numpy as np
 
 import _sep1 as ffi
 from tqdm import tqdm
@@ -232,14 +233,18 @@ class ArenaNode:
 def _optimize_intermediate_arena(
     intermediate_arena: Dict[NodeID, IntermediateArenaNode],
     max_depth: Dict[NodeID, int],
-    **kwargs,
+    DEPTH_WEIGHT: int = 1024,
+    POP_WEIGHT: int = 1,
+    PENALTY_LLM_OVERLAP: int = 512,
+    PENALTY_STATE_OVERLAP: int = 256,
+    PENALTY_SAME_DEST: int = 192,
 ):
     for node in tqdm(intermediate_arena.values(), desc="Optimizing intermediate arena"):
         if not node.children:
             continue
         # Greedy "diversity-first" ordering:
         # - Build the order one edge at a time.
-        # - Score candidates by a combination of destination depth and
+        # - Score candidates by a combination of destination depth and  
         #   similarity penalties against already-chosen edges.
         # - Similarity is measured via overlaps in LLM token set, state set,
         #   and destination id reuse.
@@ -254,13 +259,6 @@ def _optimize_intermediate_arena(
             edges.sort(key=lambda e: (-max_depth.get(int(e.dests.dest_idx), 0), e.pop))
             continue
 
-        # Tunable weights (chosen so that depth is a major factor, but
-        # overlap penalties are also significant).
-        DEPTH_WEIGHT = kwargs.get('DEPTH_WEIGHT', 1024)
-        POP_WEIGHT = kwargs.get('POP_WEIGHT', 1)
-        PENALTY_LLM_OVERLAP = kwargs.get('PENALTY_LLM_OVERLAP', 512)
-        PENALTY_STATE_OVERLAP = kwargs.get('PENALTY_STATE_OVERLAP', 256)
-        PENALTY_SAME_DEST = kwargs.get('PENALTY_SAME_DEST', 192)
 
         # Precompute depth and base score for each edge
         depths = [max_depth.get(int(e.dests.dest_idx), 0) for e in edges]
@@ -375,45 +373,9 @@ def _merge_and_finalize_arena(intermediate_arena: Dict[NodeID, IntermediateArena
 def _convert_arena(loaded_arena: Dict[NodeID, LoadedArenaNode], max_depth: Dict[NodeID, int]) -> Dict[NodeID, ArenaNode]:
     """Orchestrates the full conversion from loaded data to the final arena format."""
     intermediate_arena = _load_and_flatten_arena(loaded_arena)
-    _optimize_intermediate_arena(intermediate_arena, max_depth) # Uses default weights
+    _optimize_intermediate_arena(intermediate_arena, max_depth)
     final_arena = _merge_and_finalize_arena(intermediate_arena)
     return final_arena
-
-class Variation(abc.ABC):
-    @abc.abstractmethod
-    def apply(self, model: 'Model') -> None:
-        ...
-    def __str__(self) -> str:
-        return self.__class__.__name__
-
-@dataclass
-class BaselineVariation(Variation):
-    def apply(self, model: 'Model') -> None:
-        print("--- Applying Variation: Baseline (no changes) ---")
-
-@dataclass
-class ReoptimizeArenaVariation(Variation):
-    depth_weight: int
-    pop_weight: int
-    penalty_llm_overlap: int
-    penalty_state_overlap: int
-    penalty_same_dest: int
-
-    def apply(self, model: 'Model') -> None:
-        print(f"--- Applying Variation: {self} ---")
-        model.reoptimize_arena(
-            DEPTH_WEIGHT=self.depth_weight,
-            POP_WEIGHT=self.pop_weight,
-            PENALTY_LLM_OVERLAP=self.penalty_llm_overlap,
-            PENALTY_STATE_OVERLAP=self.penalty_state_overlap,
-            PENALTY_SAME_DEST=self.penalty_same_dest,
-        )
-
-    def __str__(self) -> str:
-        return (f"ReoptimizeArena(D={self.depth_weight}, P={self.pop_weight}, "
-                f"LLM_OV={self.penalty_llm_overlap}, ST_OV={self.penalty_state_overlap}, "
-                f"DEST_OV={self.penalty_same_dest})")
-
 
 @dataclass(frozen=True, eq=False)
 class PyAcc:
@@ -443,6 +405,28 @@ class PyAcc:
 
     def is_empty(self):
         return self.llm_mask.is_empty()
+
+
+@dataclass
+class ArenaOptimizationVariation:
+    """A variation that re-optimizes the arena with different hyperparameters."""
+    name: str
+    params: Dict
+    
+    def __call__(self, model: 'Model'):
+        print(f"  Applying variation: {self.name}")
+        if self.params:
+            params_str = ", ".join(f"{k}={v}" for k, v in sorted(self.params.items()))
+            print(f"    Parameters: {params_str}")
+        else:
+            print(f"    (No parameter changes - baseline)")
+        
+        # Re-optimize the arena with the provided parameters
+        model.reoptimize_arena(**self.params)
+        
+        # Report some basic stats about the result
+        total_edges = sum(len(node.children) for node in model.arena.values())
+        print(f"    Result: {len(model.arena)} nodes, {total_edges} edges")
 
 @dataclass
 class WorkItem:
@@ -476,7 +460,8 @@ class Model(GraphProvider):
     all_internal_llm_tokens_bitset: LLMTokenSet
     ignore_terminal_id: Optional[int]
     state: Dict[int, GSS]
-    last_get_mask_cost: int = 0
+    last_get_mask_cost: float = 0.0
+    _optimization_metric: str = 'get_mask.traversal.edges_traversed'
 
     @staticmethod
     def from_json_string(s: str) -> 'Model':
@@ -547,8 +532,8 @@ class Model(GraphProvider):
             internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
             all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
             ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
+            last_get_mask_cost=0.0,
             state={tokenizer.initial_state_id(): initial_gss},
-            last_get_mask_cost=0,
         )
         model._compute_edge_accelerators()
         model.optimize_traversal()
@@ -568,78 +553,6 @@ class Model(GraphProvider):
             for edge in node.children:
                 edge.ensure_index()
 
-    def arena_to_intermediate(self) -> Dict[NodeID, IntermediateArenaNode]:
-        """Converts the current final arena back to the intermediate, flattened format."""
-        intermediate_arena: Dict[NodeID, IntermediateArenaNode] = {}
-        for uid, node in self.arena.items():
-            intermediate_children: List[IntermediateArenaEdge] = []
-            for edge in node.children:
-                for d in edge.dests:
-                    intermediate_children.append(IntermediateArenaEdge(
-                        pop=edge.pop,
-                        llm_bv=edge.llm_bv,
-                        dests=IntermediateArenaEdgeDest(d.dest_idx, d.state_bv),
-                    ))
-            intermediate_arena[uid] = IntermediateArenaNode(
-                children=intermediate_children,
-                clean_end=node.clean_end,
-            )
-        return intermediate_arena
-
-    def reoptimize_arena(self, **kwargs) -> None:
-        """Re-runs the arena optimization process with new parameters."""
-        stats = Stats.get()
-        print("Re-optimizing arena...")
-        stats.start('reoptimize_arena')
-
-        stats.start('reoptimize_arena.to_intermediate')
-        intermediate_arena = self.arena_to_intermediate()
-        stats.stop('reoptimize_arena.to_intermediate')
-
-        stats.start('reoptimize_arena.optimize')
-        _optimize_intermediate_arena(intermediate_arena, self.max_depth, **kwargs)
-        stats.stop('reoptimize_arena.optimize')
-
-        stats.start('reoptimize_arena.merge_finalize')
-        self.arena = _merge_and_finalize_arena(intermediate_arena)
-        stats.stop('reoptimize_arena.merge_finalize')
-
-        stats.start('reoptimize_arena.accelerators')
-        self._compute_edge_accelerators()
-        self.optimize_traversal()
-        stats.stop('reoptimize_arena.accelerators')
-
-        stats.stop('reoptimize_arena')
-        print("Re-optimization complete.")
-
-    def get_optimization_variations(self) -> List[Variation]:
-        """Returns a list of optimization variations to be tested by the optimizer script."""
-        variations: List[Variation] = [BaselineVariation()]
-        # Default weights
-        variations.append(ReoptimizeArenaVariation(1024, 1, 512, 256, 192))
-        # Emphasize depth more, diversity less
-        variations.append(ReoptimizeArenaVariation(2048, 1, 256, 128, 96))
-        # Emphasize diversity more, depth less
-        variations.append(ReoptimizeArenaVariation(512, 1, 1024, 512, 384))
-        # Only depth
-        variations.append(ReoptimizeArenaVariation(1024, 1, 0, 0, 0))
-        return variations
-
-    def get_benchmark_config(self) -> Dict:
-        """Provides configuration to the optimizer script for benchmarking variations."""
-        stats_to_collect = ['get_mask', 'get_mask.main_loop', 'get_mask.traversal.edges_traversed', 'get_mask.traversal.nodes_processed']
-
-        def print_report(variation_name: str, results: Dict[str, List[float]]):
-            import numpy as np
-            print(f"  Results for: {variation_name}")
-            for key in stats_to_collect:
-                values = results.get(key, [])
-                if not values: print(f"    {key:<40}: No data"); continue
-                is_time = 'time' in key or key == 'get_mask' or key == 'get_mask.main_loop'
-                agg_val, agg_name = (np.min(values), 'min') if is_time else (np.mean(values), 'mean')
-                print(f"    {key:<40}: {agg_val*1000:10.4f} ms ({agg_name} of {len(values)})" if is_time else f"    {key:<40}: {agg_val:10,.2f} ({agg_name} of {len(values)})")
-        return {"stats_to_collect": stats_to_collect, "print_report": print_report}
-
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         term_rs = RangeSet.from_indices([terminal_id])
         @_acc_memoize(use_value_cache=False)
@@ -657,6 +570,131 @@ class Model(GraphProvider):
     def iter_edges(self, node: NodeID, token: int):
         a_node = self.arena.get(node)
         if not a_node: return
+        for edge in a_node.children:
+            if edge.llm_bv.contains(token):
+                for dest in edge.dests:
+                    for start, end in dest.state_bv.to_ranges():
+                        for sid in range(start, end + 1):
+                            yield (edge.pop, sid, dest.dest_idx)
+
+    def checkpoint(self) -> Dict:
+        """Save model runtime state for later restoration."""
+        return {
+            'state': copy.deepcopy(self.state),
+        }
+
+    def restore(self, checkpoint: Dict) -> None:
+        """Restore model to a previous checkpoint."""
+        self.state = copy.deepcopy(checkpoint['state'])
+        self.last_get_mask_cost = 0.0
+
+    def _arena_to_intermediate(self) -> Dict[NodeID, IntermediateArenaNode]:
+        """Convert final arena back to intermediate format for re-optimization."""
+        intermediate: Dict[NodeID, IntermediateArenaNode] = {}
+        for uid, node in self.arena.items():
+            children: List[IntermediateArenaEdge] = []
+            for edge in node.children:
+                for dest in edge.dests:
+                    children.append(IntermediateArenaEdge(
+                        pop=edge.pop,
+                        llm_bv=edge.llm_bv,
+                        dests=IntermediateArenaEdgeDest(dest.dest_idx, dest.state_bv)
+                    ))
+            intermediate[uid] = IntermediateArenaNode(
+                children=children,
+                clean_end=node.clean_end
+            )
+        return intermediate
+
+    def reoptimize_arena(self, **kwargs) -> None:
+        """Re-optimize the arena with new parameters."""
+        print("    Converting arena to intermediate format...")
+        intermediate = self._arena_to_intermediate()
+        print("    Re-optimizing with new parameters...")
+        _optimize_intermediate_arena(intermediate, self.max_depth, **kwargs)
+        print("    Converting back to final format...")
+        self.arena = _merge_and_finalize_arena(intermediate)
+        print("    Computing accelerators...")
+        self._compute_edge_accelerators()
+        self.optimize_traversal()
+        print("    Done.")
+
+    @staticmethod
+    def select_expensive_steps(
+        costs_per_step: List[List[float]],
+        n: int = 1,
+        agg_method: str = 'mean'
+    ) -> List[int]:
+        """Select the n most expensive steps based on aggregated costs across repetitions."""
+        if not costs_per_step or not costs_per_step[0]:
+            return []
+        
+        # Aggregate across repetitions
+        num_steps = len(costs_per_step[0])
+        aggregated = []
+        for step_idx in range(num_steps):
+            values = [costs[step_idx] for costs in costs_per_step if step_idx < len(costs)]
+            if agg_method == 'mean':
+                aggregated.append(np.mean(values))
+            elif agg_method == 'median':
+                aggregated.append(np.median(values))
+            elif agg_method == 'min':
+                aggregated.append(np.min(values))
+            elif agg_method == 'max':
+                aggregated.append(np.max(values))
+            else:
+                aggregated.append(np.mean(values))
+        
+        # Return indices of top n
+        indices = sorted(range(len(aggregated)), key=lambda i: aggregated[i], reverse=True)
+        return indices[:n]
+
+    @staticmethod
+    def aggregate_results(results: List[Dict]) -> Dict:
+        """Aggregate multiple benchmark results."""
+        if not results:
+            return {}
+        
+        times = [r['time'] for r in results]
+        costs = [r['cost'] for r in results]
+        
+        return {
+            'time_min': float(np.min(times)),
+            'time_mean': float(np.mean(times)),
+            'time_median': float(np.median(times)),
+            'time_max': float(np.max(times)),
+            'time_std': float(np.std(times)),
+            'cost_min': float(np.min(costs)),
+            'cost_mean': float(np.mean(costs)),
+            'cost_median': float(np.median(costs)),
+            'cost_max': float(np.max(costs)),
+            'cost_std': float(np.std(costs)),
+        }
+
+    def get_variations(self):
+        """Return a list of variation callables to try."""
+        return [
+            ArenaOptimizationVariation("baseline", {}),
+            ArenaOptimizationVariation("high_depth_weight", {"DEPTH_WEIGHT": 2048}),
+            ArenaOptimizationVariation("very_high_depth_weight", {"DEPTH_WEIGHT": 4096}),
+            ArenaOptimizationVariation("low_penalties", {
+                "PENALTY_LLM_OVERLAP": 256,
+                "PENALTY_STATE_OVERLAP": 128,
+                "PENALTY_SAME_DEST": 96
+            }),
+            ArenaOptimizationVariation("high_same_dest_penalty", {"PENALTY_SAME_DEST": 384}),
+            ArenaOptimizationVariation("balanced_penalties", {
+                "PENALTY_LLM_OVERLAP": 384,
+                "PENALTY_STATE_OVERLAP": 384,
+                "PENALTY_SAME_DEST": 384
+            }),
+            ArenaOptimizationVariation("pop_prioritized", {
+                "DEPTH_WEIGHT": 512,
+                "POP_WEIGHT": 10
+            }),
+        ]
+
+    def commit(self, token_id: int):
         for edge in a_node.children:
             if edge.llm_bv.contains(token):
                 for dest in edge.dests:
@@ -990,8 +1028,15 @@ class Model(GraphProvider):
                 original_indices |= self.internal_to_original_map[i]
         stats.stop('get_mask.final_conversion')
 
-        self.last_get_mask_cost = stats.counts.get('get_mask.traversal.edges_traversed', 0)
         stats.stop('get_mask')
+        
+        # Track cost for optimization framework
+        self.last_get_mask_cost = stats.counts.get(self._optimization_metric, 0)
+
+        if stats.times['get_mask.main_loop']*1000 > 1:
+            stats.report()
+        stats.reset()
+
         return original_indices
 
     def finalize(self):

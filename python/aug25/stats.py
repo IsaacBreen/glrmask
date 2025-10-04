@@ -61,7 +61,7 @@ class Stats:
         self.times.clear()
         self.time_counts.clear()
         self.timers.clear()
-        # self.key_positions.clear() # This is expensive to rebuild. Positions are static.
+        self.key_positions.clear()
 
     def inc(self, key: str, value: int = 1):
         """Increment a counter."""
