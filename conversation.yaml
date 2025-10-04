@@ -871,6 +871,7 @@ local_system:
                   &terminal_follow_map,
                   &mut precompute_vocab,
                   config,
+                  &token_name_map,
               );
 
               // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
@@ -980,6 +981,7 @@ local_system:
               terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
               stage_vocab: &mut StageVocab,
               config: &GrammarConstraintConfig,
+              token_name_map: &BiBTreeMap<Terminal, usize>,
           ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
               let trie1_god = Trie1GodWrapper::new();
               let mut precomputed1: BTreeMap<TokenizerStateID, PrecomputeNode1Index> = BTreeMap::new();
@@ -1076,6 +1078,7 @@ local_system:
                   terminal_follow_map,
                   config,
                   stage_vocab,
+                  token_name_map,
               );
 
               (precomputed1, trie1_god)
@@ -2961,8 +2964,15 @@ local_system:
           terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
           config: &GrammarConstraintConfig,
           stage_vocab: &mut StageVocab,
+          token_name_map: &bimap::BiBTreeMap<crate::glr::grammar::Terminal, usize>,
       ) {
           crate::debug!(2, "Starting Trie1 size optimization...");
+
+          crate::debug!(2, "Initial Trie1 stats:");
+          let mut stats = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
+          crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
+
           simplify_none_edges_to_former_end_nodes_trie1(
               precomputed1,
               trie1_god,
@@ -3000,6 +3010,11 @@ local_system:
           if config.optimize_trie1_reorder_llm_tokens {
               reorder_llm_tokens_for_range_minimization_trie1(precomputed1, trie1_god, stage_vocab);
           }
+
+          crate::debug!(2, "Final Trie1 stats:");
+          let mut stats = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
+          crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
       }
 
       fn simplify_none_edges_to_former_end_nodes_trie1(
@@ -4016,7 +4031,7 @@ local_system:
       use crate::tokenizer::{LLMTokenID, TokenizerStateID};
       use crate::types::{TerminalID as GrammarTokenID, TerminalID};
       use crate::constraint::LLMVocab;
-      use crate::constraint_extra::{PrecomputeStats};
+      use crate::constraint_extra::{calculate_final_stats0, print_precompute_stats0, PrecomputeStats};
       use crate::datastructures::ordered_hash_map::Retain;
 
       const MERGE_THRESHOLD: usize = 20;
@@ -4026,7 +4041,7 @@ local_system:
           parser:           Option<&GLRParser>,
           llm_vocab:        Option<Arc<LLMVocab>>,
           internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-          _token_name_map:   &BiBTreeMap<Terminal, usize>,
+          token_name_map:   &BiBTreeMap<Terminal, usize>,
           internal_max_llm_token: usize,
           terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
           ignore_terminal_id: Option<TerminalID>,
@@ -4041,6 +4056,7 @@ local_system:
               MERGE_THRESHOLD,
               terminal_follow_map,
               ignore_terminal_id,
+              token_name_map,
           );
 
           helper.run_dfs();
@@ -4062,6 +4078,7 @@ local_system:
           stats:            PrecomputeStats,
           terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
           ignore_terminal_id: Option<TerminalID>,
+          token_name_map:   &'r BiBTreeMap<Terminal, usize>,
           // Map each precompute node to the set of LLM tokens that can pass through it.
           // tags:             RefCell<HashMap<PrecomputeNodeIndex, LLMTokenBV>>, // Removed
           // One end node per final tokenizer state.
@@ -4079,6 +4096,7 @@ local_system:
               merge_threshold:  usize,
               terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
               ignore_terminal_id: Option<TerminalID>,
+              token_name_map: &'r BiBTreeMap<Terminal, usize>,
           ) -> Self {
               let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
                   .iter()
@@ -4131,6 +4149,7 @@ local_system:
                   stats: PrecomputeStats::default(),
                   terminal_follow_map,
                   ignore_terminal_id,
+                  token_name_map,
                   // tags: RefCell::new(HashMap::new()), // Removed
                   end_nodes,
                   trie0_god,
@@ -4138,6 +4157,11 @@ local_system:
           }
 
           fn optimize(&mut self) {
+              crate::debug!(2, "Initial Trie0 stats:");
+              let mut stats = PrecomputeStats::default();
+              calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
+              print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
+
               self.replace_ignore_token_edges_with_none_edges();
               self.simplify_none_edges(); // This can invalidate max_depth.
 
@@ -4155,6 +4179,11 @@ local_system:
               // self.merge_nodes_basic();
               self.gc();
               Trie::recompute_all_max_depths(&self.trie0_god, &self.roots.values().cloned().collect::<Vec<_>>());
+
+              crate::debug!(2, "Final Trie0 stats:");
+              let mut stats = PrecomputeStats::default();
+              calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
+              print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
           }
 
           fn get_end_node(&self, final_sid: TokenizerStateID) -> PrecomputeNode0Index {
@@ -4759,10 +4788,6 @@ local_system:
           fn finish(
               self,
           ) -> (BTreeMap<TokenizerStateID, PrecomputeNode0Index>, Trie0GodWrapper) {
-
-              // calculate_final_stats(&self.roots, &mut self.stats, &self.trie0_god);
-              // print_precompute_stats(&self.stats, token_name_map, &self.trie0_god);
-
               (self.roots, self.trie0_god)
           }
 
@@ -8154,6 +8179,7 @@ local_system:
                   &terminal_follow_map,
                   &mut precompute_vocab,
                   config,
+                  &token_name_map,
               );
 
               // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
@@ -8263,6 +8289,7 @@ local_system:
               terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
               stage_vocab: &mut StageVocab,
               config: &GrammarConstraintConfig,
+              token_name_map: &BiBTreeMap<Terminal, usize>,
           ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
               let trie1_god = Trie1GodWrapper::new();
               let mut precomputed1: BTreeMap<TokenizerStateID, PrecomputeNode1Index> = BTreeMap::new();
@@ -8359,6 +8386,7 @@ local_system:
                   terminal_follow_map,
                   config,
                   stage_vocab,
+                  token_name_map,
               );
 
               (precomputed1, trie1_god)
@@ -8412,7 +8440,7 @@ local_system:
               let mut initial_values_for_map: Vec<(PrecomputeNode1Index, GLRParserState)> = Vec::new();
 
               #[cfg(not(rustrover))]
-              let it = tqdm!(precomputed1.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=false);
+              let it = tqdm!(precomputed1.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=true);
               #[cfg(rustrover)]
               let it = precomputed1.iter();
               for (tokenizer_state_id, trie1_root) in it {
@@ -10244,8 +10272,15 @@ local_system:
           terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
           config: &GrammarConstraintConfig,
           stage_vocab: &mut StageVocab,
+          token_name_map: &bimap::BiBTreeMap<crate::glr::grammar::Terminal, usize>,
       ) {
           crate::debug!(2, "Starting Trie1 size optimization...");
+
+          crate::debug!(2, "Initial Trie1 stats:");
+          let mut stats = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
+          crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
+
           simplify_none_edges_to_former_end_nodes_trie1(
               precomputed1,
               trie1_god,
@@ -10283,6 +10318,11 @@ local_system:
           if config.optimize_trie1_reorder_llm_tokens {
               reorder_llm_tokens_for_range_minimization_trie1(precomputed1, trie1_god, stage_vocab);
           }
+
+          crate::debug!(2, "Final Trie1 stats:");
+          let mut stats = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
+          crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
       }
 
       fn simplify_none_edges_to_former_end_nodes_trie1(
@@ -11299,7 +11339,7 @@ local_system:
       use crate::tokenizer::{LLMTokenID, TokenizerStateID};
       use crate::types::{TerminalID as GrammarTokenID, TerminalID};
       use crate::constraint::LLMVocab;
-      use crate::constraint_extra::{PrecomputeStats};
+      use crate::constraint_extra::{calculate_final_stats0, print_precompute_stats0, PrecomputeStats};
       use crate::datastructures::ordered_hash_map::Retain;
 
       const MERGE_THRESHOLD: usize = 20;
@@ -11309,7 +11349,7 @@ local_system:
           parser:           Option<&GLRParser>,
           llm_vocab:        Option<Arc<LLMVocab>>,
           internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-          _token_name_map:   &BiBTreeMap<Terminal, usize>,
+          token_name_map:   &BiBTreeMap<Terminal, usize>,
           internal_max_llm_token: usize,
           terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
           ignore_terminal_id: Option<TerminalID>,
@@ -11324,6 +11364,7 @@ local_system:
               MERGE_THRESHOLD,
               terminal_follow_map,
               ignore_terminal_id,
+              token_name_map,
           );
 
           helper.run_dfs();
@@ -11345,6 +11386,7 @@ local_system:
           stats:            PrecomputeStats,
           terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
           ignore_terminal_id: Option<TerminalID>,
+          token_name_map:   &'r BiBTreeMap<Terminal, usize>,
           // Map each precompute node to the set of LLM tokens that can pass through it.
           // tags:             RefCell<HashMap<PrecomputeNodeIndex, LLMTokenBV>>, // Removed
           // One end node per final tokenizer state.
@@ -11362,6 +11404,7 @@ local_system:
               merge_threshold:  usize,
               terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
               ignore_terminal_id: Option<TerminalID>,
+              token_name_map: &'r BiBTreeMap<Terminal, usize>,
           ) -> Self {
               let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
                   .iter()
@@ -11414,6 +11457,7 @@ local_system:
                   stats: PrecomputeStats::default(),
                   terminal_follow_map,
                   ignore_terminal_id,
+                  token_name_map,
                   // tags: RefCell::new(HashMap::new()), // Removed
                   end_nodes,
                   trie0_god,
@@ -11421,6 +11465,11 @@ local_system:
           }
 
           fn optimize(&mut self) {
+              crate::debug!(2, "Initial Trie0 stats:");
+              let mut stats = PrecomputeStats::default();
+              calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
+              print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
+
               self.replace_ignore_token_edges_with_none_edges();
               self.simplify_none_edges(); // This can invalidate max_depth.
 
@@ -11438,6 +11487,11 @@ local_system:
               // self.merge_nodes_basic();
               self.gc();
               Trie::recompute_all_max_depths(&self.trie0_god, &self.roots.values().cloned().collect::<Vec<_>>());
+
+              crate::debug!(2, "Final Trie0 stats:");
+              let mut stats = PrecomputeStats::default();
+              calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
+              print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
           }
 
           fn get_end_node(&self, final_sid: TokenizerStateID) -> PrecomputeNode0Index {
@@ -11500,7 +11554,7 @@ local_system:
               }
               self.dfs(&self.vocab.root, assoc);
               crate::debug!(2, "Finished precompute DFS");
-              self.pb.finish_with_message("Precomputation complete");
+              self.pb.finish();
               crate::debug!(2, "Precomputation complete");
           }
 
@@ -12042,10 +12096,6 @@ local_system:
           fn finish(
               self,
           ) -> (BTreeMap<TokenizerStateID, PrecomputeNode0Index>, Trie0GodWrapper) {
-
-              // calculate_final_stats(&self.roots, &mut self.stats, &self.trie0_god);
-              // print_precompute_stats(&self.stats, token_name_map, &self.trie0_god);
-
               (self.roots, self.trie0_god)
           }
 
@@ -14186,106 +14236,12 @@ local_system:
           (sum, mean, median)
       }
 
-      pub fn calculate_final_stats0(
-          precomputed_roots: &BTreeMap<TokenizerStateID, PrecomputeNode0Index>,
-          stats: &mut PrecomputeStats,
-          trie0_god: &Trie0GodWrapper,
-      ) {
-          crate::debug!(2, "Calculating final precompute0 statistics...");
-
-          let mut all_reachable_nodes: BTreeMap<PrecomputeNode0Index, PrecomputeNode0Index> = BTreeMap::new();
-          let mut queue: VecDeque<PrecomputeNode0Index> = precomputed_roots.values().cloned().collect();
-          let mut visited_data_ptrs: HashSet<PrecomputeNode0Index> = HashSet::new();
-
-          while let Some(node_arc) = queue.pop_front() {
-              let (children_to_queue, node_ptr) = {
-                  let node_guard = node_arc.read(trie0_god).unwrap();
-                  let ptr = node_arc;
-                  let children = node_guard.children()
-                      .values()
-                      .flat_map(|dest_map| {
-                          dest_map.keys().map(|wrapper| wrapper.as_arc().clone())
-                      })
-                      .collect::<Vec<_>>();
-                  (children, ptr)
-              };
-
-              if visited_data_ptrs.insert(node_ptr) {
-                  all_reachable_nodes.insert(node_ptr, node_arc.clone());
-                  for child_arc in children_to_queue {
-                      queue.push_back(child_arc);
-                  }
-              }
-          }
-
-          *stats = PrecomputeStats::default();
-          stats.final_unique_nodes_count = all_reachable_nodes.len();
-
-          let root_node_pointers: HashSet<PrecomputeNode0Index> = precomputed_roots
-              .values()
-              .map(|arc| {
-                  let guard = arc.read(trie0_god).unwrap();
-                  *arc
-              })
-              .collect();
-          stats.final_root_nodes_count = root_node_pointers.len();
-
-          for (node_ptr, node_arc) in &all_reachable_nodes {
-              let node_guard = node_arc.read(trie0_god).expect("RwLock poisoned during final stats calculation");
-
-              if !root_node_pointers.contains(node_ptr) {
-                  if node_guard.children().is_empty() {
-                      stats.final_leaf_nodes_count += 1;
-                  } else {
-                      stats.final_non_root_internal_nodes_count += 1;
-                  }
-              }
-
-              for (edge_key_opt, dest_map) in node_guard.children() {
-                  let num_edges_for_this_key_to_distinct_children = dest_map.len();
-                  stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
-
-                  if let Some((gtid, _)) = edge_key_opt {
-                      stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
-                      *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children;
-
-                      stats.final_grammar_token_edge_fanouts_dist
-                          .entry(*gtid)
-                          .or_default()
-                          .push(num_edges_for_this_key_to_distinct_children);
-                      for llm_token_bv_on_edge in dest_map.values() {
-                          stats.final_grammar_token_edge_token_set_sizes_dist
-                              .entry(*gtid)
-                              .or_default()
-                              .push(llm_token_bv_on_edge.len());
-                          stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
-                      }
-                      if num_edges_for_this_key_to_distinct_children > 0 {
-                          stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
-                          stats.final_num_occupied_some_edge_keys += 1;
-                      }
-                  } else {
-                      stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
-                      if num_edges_for_this_key_to_distinct_children > 0 {
-                          stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
-                          stats.final_num_occupied_none_edge_keys += 1;
-                      }
-                  }
-              }
-
-              if node_guard.value.final_tokenizer_state.is_some() {
-                  stats.final_nodes_with_clean_end += 1;
-              }
-          }
-          crate::debug!(2, "Finished calculating final precompute0 statistics.");
-      }
-
-      pub fn calculate_final_stats1(
+      pub fn calculate_final_stats(
           precomputed_roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
           stats: &mut PrecomputeStats,
           trie1_god: &Trie1GodWrapper,
       ) {
-          crate::debug!(2, "Calculating final precompute1 statistics...");
+          crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
 
           // Custom implementation of all_nodes using PrecomputeNodeIndex for visited set
           let mut all_reachable_nodes: BTreeMap<PrecomputeNode1Index, PrecomputeNode1Index> = BTreeMap::new();
@@ -14396,118 +14352,11 @@ local_system:
                   stats.final_nodes_with_clean_end += 1;
               }
           }
-          crate::debug!(2, "Finished calculating final precompute1 statistics.");
+          crate::debug!(2, "Finished calculating final precompute statistics (within constraint_extra).");
       }
 
 
-      pub fn print_precompute_stats0(
-          stats: &PrecomputeStats,
-          token_name_map: &BiBTreeMap<Terminal, usize>,
-          trie_god: &Trie0GodWrapper,
-      ) {
-          let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
-              stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
-          } else { 0.0 };
-          let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
-              stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
-          } else { 0.0 };
-
-          println!("--- Precomputation 0 Statistics ---");
-          println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
-
-          println!("\nNode Counts Breakdown:");
-          println!("  There are:");
-          println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
-          println!("    - {} are roots", stats.final_root_nodes_count);
-          let non_root_count = stats.final_unique_nodes_count.saturating_sub(stats.final_root_nodes_count); // Use saturating_sub
-          println!("    - {} are non-roots, of which", non_root_count);
-          println!("        - {} are internal (non-root, non-leaf)", stats.final_non_root_internal_nodes_count);
-          println!("        - {} are leaves (non-root)", stats.final_leaf_nodes_count);
-
-          println!("\nFinal Graph Structure (after sharing and deduplication):");
-          println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
-          println!("  Total Edges: {}", stats.final_edges_count);
-          println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
-          println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
-          println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
-          println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
-          println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
-          println!("  Total ranges in all HybridBitsets: {}", stats.final_total_ranges_in_bvs);
-
-          let mut grammar_token_stats_new: Vec<(
-              GrammarTokenID,
-              usize, // key_usages (KeyUse)
-              (usize, Option<f64>, Option<f64>), // fanout_stats (SumChild, AvgChild, MedChild)
-              (usize, Option<f64>, Option<f64>)  // token_set_size_stats (SumToks, AvgToks, MedToks)
-          )> = Vec::new();
-
-          for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_counts {
-              let fanouts_for_gtid = stats.final_grammar_token_edge_fanouts_dist
-                                          .get(gtid)
-                                          .cloned()
-                                          .unwrap_or_else(Vec::new);
-              let child_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid); // Uses the helper
-
-              let token_set_sizes_for_gtid = stats.final_grammar_token_edge_token_set_sizes_dist
-                                                  .get(gtid)
-                                                  .cloned()
-                                                  .unwrap_or_else(Vec::new);
-              let toks_stats = calculate_stats_from_vec_usize(&token_set_sizes_for_gtid); // Uses the helper
-
-              grammar_token_stats_new.push((*gtid, *key_usages_count, child_stats, toks_stats));
-          }
-
-          grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by KeyUse (key_usages_count)
-
-          println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
-          println!(
-              "  {:<25} {:<5} {:<8} {:<8} {:<10} {:<10} {:<10} {:<12} {:<10} {:<10}",
-              "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild",
-              "AvgKeyToks", "SumToks", "AvgToks", "MedToks"
-          );
-          println!(
-              "  {:-<25} {:-<5} {:-<8} {:-<8} {:-<10} {:-<10} {:-<10} {:-<12} {:-<10} {:-<10}",
-              "", "", "", "", "", "", "", "", "", ""
-          );
-
-          for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
-              let name = token_name_map
-                  .get_by_right(&gtid.0) // gtid is GrammarTokenID
-                  .cloned()
-                  .map_or(
-                      format!("ID:{}", gtid.0),
-                      |t| t.to_string()
-                  );
-
-              let (sum_child, avg_child, med_child) = child_stats;
-              let (sum_toks, avg_toks, med_toks) = toks_stats;
-              let avg_key_toks = if key_usages > 0 {
-                  Some(sum_toks as f64 / key_usages as f64)
-              } else {
-                  None
-              };
-
-
-              let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
-
-              println!(
-                  "  {:<25} {:>5} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>10} {:>10}",
-                  name,
-                  gtid.0,
-                  key_usages,
-                  sum_child,
-                  format_opt_f64(avg_child),
-                  format_opt_f64(med_child),
-                  format_opt_f64(avg_key_toks),
-                  sum_toks,
-                  format_opt_f64(avg_toks),
-                  format_opt_f64(med_toks)
-              );
-          }
-          println!("---------------------------------");
-      }
-
-      pub fn print_precompute_stats1(
+      pub fn print_precompute_stats(
           stats: &PrecomputeStats,
           token_name_map: &BiBTreeMap<Terminal, usize>, // Used to get token names from GrammarTokenID
           trie_god: &Trie1GodWrapper,
@@ -14519,7 +14368,7 @@ local_system:
               stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
           } else { 0.0 };
 
-          println!("--- Precomputation 1 Statistics ---");
+          println!("--- Precomputation Statistics ---");
           println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
 
           println!("\nNode Counts Breakdown:");
@@ -15679,6 +15528,7 @@ messages:
                   &terminal_follow_map,
                   &mut precompute_vocab,
                   config,
+                  &token_name_map,
               );
 
               // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
@@ -15788,6 +15638,7 @@ messages:
               terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
               stage_vocab: &mut StageVocab,
               config: &GrammarConstraintConfig,
+              token_name_map: &BiBTreeMap<Terminal, usize>,
           ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
               let trie1_god = Trie1GodWrapper::new();
               let mut precomputed1: BTreeMap<TokenizerStateID, PrecomputeNode1Index> = BTreeMap::new();
@@ -15884,6 +15735,7 @@ messages:
                   terminal_follow_map,
                   config,
                   stage_vocab,
+                  token_name_map,
               );
 
               (precomputed1, trie1_god)
@@ -17774,8 +17626,15 @@ messages:
           terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
           config: &GrammarConstraintConfig,
           stage_vocab: &mut StageVocab,
+          token_name_map: &bimap::BiBTreeMap<crate::glr::grammar::Terminal, usize>,
       ) {
           crate::debug!(2, "Starting Trie1 size optimization...");
+
+          crate::debug!(2, "Initial Trie1 stats:");
+          let mut stats = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
+          crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
+
           simplify_none_edges_to_former_end_nodes_trie1(
               precomputed1,
               trie1_god,
@@ -17813,6 +17672,11 @@ messages:
           if config.optimize_trie1_reorder_llm_tokens {
               reorder_llm_tokens_for_range_minimization_trie1(precomputed1, trie1_god, stage_vocab);
           }
+
+          crate::debug!(2, "Final Trie1 stats:");
+          let mut stats = PrecomputeStats::default();
+          crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
+          crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
       }
 
       fn simplify_none_edges_to_former_end_nodes_trie1(
@@ -18834,7 +18698,7 @@ messages:
       use crate::tokenizer::{LLMTokenID, TokenizerStateID};
       use crate::types::{TerminalID as GrammarTokenID, TerminalID};
       use crate::constraint::LLMVocab;
-      use crate::constraint_extra::{PrecomputeStats};
+      use crate::constraint_extra::{calculate_final_stats0, print_precompute_stats0, PrecomputeStats};
       use crate::datastructures::ordered_hash_map::Retain;
 
       const MERGE_THRESHOLD: usize = 20;
@@ -18844,7 +18708,7 @@ messages:
           parser:           Option<&GLRParser>,
           llm_vocab:        Option<Arc<LLMVocab>>,
           internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-          _token_name_map:   &BiBTreeMap<Terminal, usize>,
+          token_name_map:   &BiBTreeMap<Terminal, usize>,
           internal_max_llm_token: usize,
           terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
           ignore_terminal_id: Option<TerminalID>,
@@ -18859,6 +18723,7 @@ messages:
               MERGE_THRESHOLD,
               terminal_follow_map,
               ignore_terminal_id,
+              token_name_map,
           );
 
           helper.run_dfs();
@@ -18880,6 +18745,7 @@ messages:
           stats:            PrecomputeStats,
           terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
           ignore_terminal_id: Option<TerminalID>,
+          token_name_map:   &'r BiBTreeMap<Terminal, usize>,
           // Map each precompute node to the set of LLM tokens that can pass through it.
           // tags:             RefCell<HashMap<PrecomputeNodeIndex, LLMTokenBV>>, // Removed
           // One end node per final tokenizer state.
@@ -18897,6 +18763,7 @@ messages:
               merge_threshold:  usize,
               terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
               ignore_terminal_id: Option<TerminalID>,
+              token_name_map: &'r BiBTreeMap<Terminal, usize>,
           ) -> Self {
               let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
                   .iter()
@@ -18949,6 +18816,7 @@ messages:
                   stats: PrecomputeStats::default(),
                   terminal_follow_map,
                   ignore_terminal_id,
+                  token_name_map,
                   // tags: RefCell::new(HashMap::new()), // Removed
                   end_nodes,
                   trie0_god,
@@ -18956,6 +18824,11 @@ messages:
           }
 
           fn optimize(&mut self) {
+              crate::debug!(2, "Initial Trie0 stats:");
+              let mut stats = PrecomputeStats::default();
+              calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
+              print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
+
               self.replace_ignore_token_edges_with_none_edges();
               self.simplify_none_edges(); // This can invalidate max_depth.
 
@@ -18973,6 +18846,11 @@ messages:
               // self.merge_nodes_basic();
               self.gc();
               Trie::recompute_all_max_depths(&self.trie0_god, &self.roots.values().cloned().collect::<Vec<_>>());
+
+              crate::debug!(2, "Final Trie0 stats:");
+              let mut stats = PrecomputeStats::default();
+              calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
+              print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
           }
 
           fn get_end_node(&self, final_sid: TokenizerStateID) -> PrecomputeNode0Index {
@@ -19577,10 +19455,6 @@ messages:
           fn finish(
               self,
           ) -> (BTreeMap<TokenizerStateID, PrecomputeNode0Index>, Trie0GodWrapper) {
-
-              // calculate_final_stats(&self.roots, &mut self.stats, &self.trie0_god);
-              // print_precompute_stats(&self.stats, token_name_map, &self.trie0_god);
-
               (self.roots, self.trie0_god)
           }
 
@@ -22122,8 +21996,8 @@ messages:
       ```
     metadata:
       filename: src/constraint_extra.rs
-  - user: Add precompute0 and precompute1 stats computation. Print them at the beginning
-      and end of optimize_trie0_size and optimize_trie1_size similarly to optimize_trie3_size.
+  - user: Sometimes the progress bar for a loop disappears once it finishes. Fix this.
+      (Unless it's a nested loop of course.)
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -22142,464 +22016,82 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add statistics computation for precomputation stages 0 and 1, followed by the corresponding git diffs.
+      Of course. Here are the step-by-step instructions to make the progress bars persist after completion for major tasks, followed by the corresponding git diffs.
 
-      ### Step-by-step Instructions
+      ### Instructions
 
-      1.  **File: `src/constraint_extra.rs`**
-          *   Rename the function `calculate_final_stats` to `calculate_final_stats1`. Update its debug message to refer to "precompute1".
-          *   Rename the function `print_precompute_stats` to `print_precompute_stats1`. Update the printed title to "Precomputation 1 Statistics".
-          *   Add a new function `calculate_final_stats0`. This will be a copy of `calculate_final_stats1`, but adapted for `PrecomputeNode0` types (`PrecomputeNode0Index`, `Trie0GodWrapper`). The main change is how it extracts the `GrammarTokenID` from the edge key, which is `Option<(GrammarTokenID, Option<TokenizerStateID>)>`.
-          *   Add a new function `print_precompute_stats0`. This will be a copy of `print_precompute_stats1`, but it will take a `Trie0GodWrapper` and print "Precomputation 0 Statistics" as its title.
+      I'll adjust two files to ensure the progress bars for top-level tasks remain visible after they finish, as you requested.
 
-      2.  **File: `src/constraint_precompute0_utils.rs`**
-          *   Add `use crate::constraint_extra::{calculate_final_stats0, print_precompute_stats0, PrecomputeStats};` to the imports.
-          *   In the function signature for `do_precompute0`, remove the underscore from the `_token_name_map` parameter to make it `token_name_map`.
-          *   Update the call to `Precomputer0::new` inside `do_precompute0` to pass `token_name_map` as a new argument.
-          *   In the `Precomputer0` struct definition, add a new field: `token_name_map: &'r BiBTreeMap<Terminal, usize>`.
-          *   Update `Precomputer0::new` to accept `token_name_map` as a parameter and initialize the new struct field.
-          *   In the `Precomputer0::optimize` method, insert code at the beginning to print "Initial Trie0 stats:" and call `calculate_final_stats0` and `print_precompute_stats0`.
-          *   At the end of `Precomputer0::optimize`, insert similar code to print "Final Trie0 stats:".
-          *   In the `Precomputer0::finish` method, remove the two commented-out lines related to stats calculation.
+      **1. File: `src/constraint.rs`**
 
-      3.  **File: `src/constraint.rs`**
-          *   In the `GrammarConstraint::precompute1` method signature, add a new parameter: `token_name_map: &BiBTreeMap<Terminal, usize>`.
-          *   Inside `precompute1`, update the call to `constraint_precompute1_utils::optimize_trie1_size` to pass along the new `token_name_map`.
-          *   In the `GrammarConstraint::new_with_config` method, find the call to `Self::precompute1` and pass `&token_name_map` as the new last argument.
+      In the `precompute3` function, I'll modify the `tqdm!` macro for the "Precomputing Trie 3" progress bar. By changing the `leave` parameter from `false` to `true`, the progress bar will not be cleared from the screen upon completion.
 
-      4.  **File: `src/constraint_precompute1_utils.rs`**
-          *   In the `optimize_trie1_size` function signature, add a new parameter: `token_name_map: &bimap::BiBTreeMap<crate::glr::grammar::Terminal, usize>`.
-          *   At the beginning of `optimize_trie1_size`, after the initial debug message, add code to print "Initial Trie1 stats:" and call `calculate_final_stats1` and `print_precompute_stats1`.
-          *   At the end of `optimize_trie1_size`, add similar code to print "Final Trie1 stats:".
+      -   **Location:** `src/constraint.rs`, inside the `precompute3` function.
+      -   **Change:**
+          ```rust
+          // Around line 1211
+          #[cfg(not(rustrover))]
+          let it = tqdm!(precomputed1.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=true);
+          ```
+
+      **2. File: `src/constraint_precompute0_utils.rs`**
+
+      In the `run_dfs` method, I'll change how the `indicatif` progress bar is finalized. The current `finish_with_message` method clears the bar. I will replace it with `finish()`, which stops the progress bar but leaves it on the screen in its completed state.
+
+      -   **Location:** `src/constraint_precompute0_utils.rs`, inside the `run_dfs` method.
+      -   **Change:**
+          ```rust
+          // Around line 402
+          fn run_dfs(&mut self) {
+              // ...
+              self.dfs(&self.vocab.root, assoc);
+              crate::debug!(2, "Finished precompute DFS");
+              self.pb.finish();
+              crate::debug!(2, "Precomputation complete");
+          }
+          ```
 
       ### Git Diffs
 
+      Here are the git diffs to apply these changes:
+
       ```diff
       diff --git a/src/constraint.rs b/src/constraint.rs
-      index 3111111..1111111 100644
+      index 2111111..2222222 100644
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -861,6 +861,7 @@
-                   &terminal_follow_map,
-                   &mut precompute_vocab,
-                   config,
-      +            &token_name_map,
-               );
+      @@ -1208,7 +1208,7 @@
+               let mut initial_values_for_map: Vec<(PrecomputeNode1Index, GLRParserState)> = Vec::new();
        
-               // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
-      @@ -941,6 +942,7 @@
-               terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-               stage_vocab: &mut StageVocab,
-               config: &GrammarConstraintConfig,
-      +        token_name_map: &BiBTreeMap<Terminal, usize>,
-           ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
-               let trie1_god = Trie1GodWrapper::new();
-               let mut precomputed1: BTreeMap<TokenizerStateID, PrecomputeNode1Index> = BTreeMap::new();
-      @@ -1020,6 +1022,7 @@
-                   terminal_follow_map,
-                   config,
-                   stage_vocab,
-      +            token_name_map,
-               );
-       
-               (precomputed1, trie1_god)
+               #[cfg(not(rustrover))]
+      -        let it = tqdm!(precomputed1.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=false);
+      +        let it = tqdm!(precomputed1.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=true);
+               #[cfg(rustrover)]
+               let it = precomputed1.iter();
+               for (tokenizer_state_id, trie1_root) in it {
 
       ```
-      ```diff
-      diff --git a/src/constraint_extra.rs b/src/constraint_extra.rs
-      index 1111111..2222222 100644
-      --- a/src/constraint_extra.rs
-      +++ b/src/constraint_extra.rs
-      @@ -371,12 +371,112 @@
-           }
-       }
-       
-      -pub fn calculate_final_stats(
-      +pub fn calculate_final_stats0(
-      +    precomputed_roots: &BTreeMap<TokenizerStateID, PrecomputeNode0Index>,
-      +    stats: &mut PrecomputeStats,
-      +    trie0_god: &Trie0GodWrapper,
-      +) {
-      +    crate::debug!(2, "Calculating final precompute0 statistics...");
-      +
-      +    let mut all_reachable_nodes: BTreeMap<PrecomputeNode0Index, PrecomputeNode0Index> = BTreeMap::new();
-      +    let mut queue: VecDeque<PrecomputeNode0Index> = precomputed_roots.values().cloned().collect();
-      +    let mut visited_data_ptrs: HashSet<PrecomputeNode0Index> = HashSet::new();
-      +
-      +    while let Some(node_arc) = queue.pop_front() {
-      +        let (children_to_queue, node_ptr) = {
-      +            let node_guard = node_arc.read(trie0_god).unwrap();
-      +            let ptr = node_arc;
-      +            let children = node_guard.children()
-      +                .values()
-      +                .flat_map(|dest_map| {
-      +                    dest_map.keys().map(|wrapper| wrapper.as_arc().clone())
-      +                })
-      +                .collect::<Vec<_>>();
-      +            (children, ptr)
-      +        };
-      +
-      +        if visited_data_ptrs.insert(node_ptr) {
-      +            all_reachable_nodes.insert(node_ptr, node_arc.clone());
-      +            for child_arc in children_to_queue {
-      +                queue.push_back(child_arc);
-      +            }
-      +        }
-      +    }
-      +
-      +    *stats = PrecomputeStats::default();
-      +    stats.final_unique_nodes_count = all_reachable_nodes.len();
-      +
-      +    let root_node_pointers: HashSet<PrecomputeNode0Index> = precomputed_roots
-      +        .values()
-      +        .map(|arc| {
-      +            let guard = arc.read(trie0_god).unwrap();
-      +            *arc
-      +        })
-      +        .collect();
-      +    stats.final_root_nodes_count = root_node_pointers.len();
-      +
-      +    for (node_ptr, node_arc) in &all_reachable_nodes {
-      +        let node_guard = node_arc.read(trie0_god).expect("RwLock poisoned during final stats calculation");
-      +
-      +        if !root_node_pointers.contains(node_ptr) {
-      +            if node_guard.children().is_empty() {
-      +                stats.final_leaf_nodes_count += 1;
-      +            } else {
-      +                stats.final_non_root_internal_nodes_count += 1;
-      +            }
-      +        }
-      +
-      +        for (edge_key_opt, dest_map) in node_guard.children() {
-      +            let num_edges_for_this_key_to_distinct_children = dest_map.len();
-      +            stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
-      +
-      +            if let Some((gtid, _)) = edge_key_opt {
-      +                stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
-      +                *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children;
-      +
-      +                stats.final_grammar_token_edge_fanouts_dist
-      +                    .entry(*gtid)
-      +                    .or_default()
-      +                    .push(num_edges_for_this_key_to_distinct_children);
-      +                for llm_token_bv_on_edge in dest_map.values() {
-      +                    stats.final_grammar_token_edge_token_set_sizes_dist
-      +                        .entry(*gtid)
-      +                        .or_default()
-      +                        .push(llm_token_bv_on_edge.len());
-      +                    stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
-      +                }
-      +                if num_edges_for_this_key_to_distinct_children > 0 {
-      +                    stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
-      +                    stats.final_num_occupied_some_edge_keys += 1;
-      +                }
-      +            } else {
-      +                stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
-      +                if num_edges_for_this_key_to_distinct_children > 0 {
-      +                    stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
-      +                    stats.final_num_occupied_none_edge_keys += 1;
-      +                }
-      +            }
-      +        }
-      +
-      +        if node_guard.value.final_tokenizer_state.is_some() {
-      +            stats.final_nodes_with_clean_end += 1;
-      +        }
-      +    }
-      +    crate::debug!(2, "Finished calculating final precompute0 statistics.");
-      +}
-      +
-      +pub fn calculate_final_stats1(
-           precomputed_roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-           stats: &mut PrecomputeStats,
-           trie1_god: &Trie1GodWrapper,
-       ) {
-      -    crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
-      +    crate::debug!(2, "Calculating final precompute1 statistics...");
-       
-           // Custom implementation of all_nodes using PrecomputeNodeIndex for visited set
-           let mut all_reachable_nodes: BTreeMap<PrecomputeNode1Index, PrecomputeNode1Index> = BTreeMap::new();
-      @@ -499,15 +599,15 @@
-                   stats.final_nodes_with_clean_end += 1;
-               }
-           }
-      -    crate::debug!(2, "Finished calculating final precompute statistics (within constraint_extra).");
-      -}
-      -
-      -
-      -pub fn print_precompute_stats(
-      +    crate::debug!(2, "Finished calculating final precompute1 statistics.");
-      +}
-      +
-      +
-      +pub fn print_precompute_stats0(
-           stats: &PrecomputeStats,
-      -    token_name_map: &BiBTreeMap<Terminal, usize>, // Used to get token names from GrammarTokenID
-      -    trie_god: &Trie1GodWrapper,
-      +    token_name_map: &BiBTreeMap<Terminal, usize>,
-      +    trie_god: &Trie0GodWrapper,
-       ) {
-           let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
-               stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
-      @@ -517,7 +617,7 @@
-               stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
-           } else { 0.0 };
-       
-      -    println!("--- Precomputation Statistics ---");
-      +    println!("--- Precomputation 0 Statistics ---");
-           println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
-       
-           println!("\nNode Counts Breakdown:");
-      @@ -595,6 +695,102 @@
-           println!("---------------------------------");
-       }
-       
-      +pub fn print_precompute_stats1(
-      +    stats: &PrecomputeStats,
-      +    token_name_map: &BiBTreeMap<Terminal, usize>, // Used to get token names from GrammarTokenID
-      +    trie_god: &Trie1GodWrapper,
-      +) {
-      +    let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
-      +        stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
-      +    } else { 0.0 };
-      +    let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
-      +        stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
-      +    } else { 0.0 };
-      +
-      +    println!("--- Precomputation 1 Statistics ---");
-      +    println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
-      +
-      +    println!("\nNode Counts Breakdown:");
-      +    println!("  There are:");
-      +    println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
-      +    println!("    - {} are roots", stats.final_root_nodes_count);
-      +    let non_root_count = stats.final_unique_nodes_count.saturating_sub(stats.final_root_nodes_count); // Use saturating_sub
-      +    println!("    - {} are non-roots, of which", non_root_count);
-      +    println!("        - {} are internal (non-root, non-leaf)", stats.final_non_root_internal_nodes_count);
-      +    println!("        - {} are leaves (non-root)", stats.final_leaf_nodes_count);
-      +
-      +    println!("\nFinal Graph Structure (after sharing and deduplication):");
-      +    println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
-      +    println!("  Total Edges: {}", stats.final_edges_count);
-      +    println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
-      +    println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
-      +    println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
-      +    println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
-      +    println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
-      +    println!("  Total ranges in all HybridBitsets: {}", stats.final_total_ranges_in_bvs);
-      +
-      +    let mut grammar_token_stats_new: Vec<(
-      +        GrammarTokenID,
-      +        usize, // key_usages (KeyUse)
-      +        (usize, Option<f64>, Option<f64>), // fanout_stats (SumChild, AvgChild, MedChild)
-      +        (usize, Option<f64>, Option<f64>)  // token_set_size_stats (SumToks, AvgToks, MedToks)
-      +    )> = Vec::new();
-      +
-      +    for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_counts {
-      +        let fanouts_for_gtid = stats.final_grammar_token_edge_fanouts_dist
-      +                                    .get(gtid)
-      +                                    .cloned()
-      +                                    .unwrap_or_else(Vec::new);
-      +        let child_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid); // Uses the helper
-      +
-      +        let token_set_sizes_for_gtid = stats.final_grammar_token_edge_token_set_sizes_dist
-      +                                            .get(gtid)
-      +                                            .cloned()
-      +                                            .unwrap_or_else(Vec::new);
-      +        let toks_stats = calculate_stats_from_vec_usize(&token_set_sizes_for_gtid); // Uses the helper
-      +
-      +        grammar_token_stats_new.push((*gtid, *key_usages_count, child_stats, toks_stats));
-      +    }
-      +
-      +    grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by KeyUse (key_usages_count)
-      +
-      +    println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
-      +    println!(
-      +        "  {:<25} {:<5} {:<8} {:<8} {:<10} {:<10} {:<10} {:<12} {:<10} {:<10}",
-      +        "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild",
-      +        "AvgKeyToks", "SumToks", "AvgToks", "MedToks"
-      +    );
-      +    println!(
-      +        "  {:-<25} {:-<5} {:-<8} {:-<8} {:-<10} {:-<10} {:-<10} {:-<12} {:-<10} {:-<10}",
-      +        "", "", "", "", "", "", "", "", "", ""
-      +    );
-      +
-      +    for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
-      +        let name = token_name_map
-      +            .get_by_right(&gtid.0) // gtid is GrammarTokenID
-      +            .cloned()
-      +            .map_or(
-      +                format!("ID:{}", gtid.0),
-      +                |t| t.to_string()
-      +            );
-      +
-      +        let (sum_child, avg_child, med_child) = child_stats;
-      +        let (sum_toks, avg_toks, med_toks) = toks_stats;
-      +        let avg_key_toks = if key_usages > 0 {
-      +            Some(sum_toks as f64 / key_usages as f64)
-      +        } else {
-      +            None
-      +        };
-      +
-      +
-      +        let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
-      +
-      +        println!(
-      +            "  {:<25} {:>5} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>10} {:>10}",
-      +            name,
-      +            gtid.0,
-      +            key_usages,
-      +            sum_child,
-      +            format_opt_f64(avg_child),
-      +            format_opt_f64(med_child),
-      +            format_opt_f64(avg_key_toks),
-      +            sum_toks,
-      +            format_opt_f64(avg_toks),
-      +            format_opt_f64(med_toks)
-      +        );
-      +    }
-      +    println!("---------------------------------");
-      +}
-      +
-       pub fn print_precompute_stats2(
-           stats: &PrecomputeStats,
-           trie2_god: &Trie2GodWrapper,
 
-      ```
       ```diff
       diff --git a/src/constraint_precompute0_utils.rs b/src/constraint_precompute0_utils.rs
-      index 1111111..2222222 100644
+      index 3333333..4444444 100644
       --- a/src/constraint_precompute0_utils.rs
       +++ b/src/constraint_precompute0_utils.rs
-      @@ -11,7 +11,7 @@
-       use crate::tokenizer::{LLMTokenID, TokenizerStateID};
-       use crate::types::{TerminalID as GrammarTokenID, TerminalID};
-       use crate::constraint::LLMVocab;
-      -use crate::constraint_extra::{PrecomputeStats};
-      +use crate::constraint_extra::{calculate_final_stats0, print_precompute_stats0, PrecomputeStats};
-       use crate::datastructures::ordered_hash_map::Retain;
-       
-       const MERGE_THRESHOLD: usize = 20;
-      @@ -21,7 +21,7 @@
-           parser:           Option<&GLRParser>,
-           llm_vocab:        Option<Arc<LLMVocab>>,
-           internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-      -    _token_name_map:   &BiBTreeMap<Terminal, usize>,
-      +    token_name_map:   &BiBTreeMap<Terminal, usize>,
-           internal_max_llm_token: usize,
-           terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-           ignore_terminal_id: Option<TerminalID>,
-      @@ -35,6 +35,7 @@
-               MERGE_THRESHOLD,
-               terminal_follow_map,
-               ignore_terminal_id,
-      +        token_name_map,
-           );
-       
-           helper.run_dfs();
-      @@ -54,6 +55,7 @@
-           stats:            PrecomputeStats,
-           terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-           ignore_terminal_id: Option<TerminalID>,
-      +    token_name_map:   &'r BiBTreeMap<Terminal, usize>,
-           // Map each precompute node to the set of LLM tokens that can pass through it.
-           // tags:             RefCell<HashMap<PrecomputeNodeIndex, LLMTokenBV>>, // Removed
-           // One end node per final tokenizer state.
-      @@ -70,6 +72,7 @@
-               merge_threshold:  usize,
-               terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-               ignore_terminal_id: Option<TerminalID>,
-      +        token_name_map: &'r BiBTreeMap<Terminal, usize>,
-           ) -> Self {
-               let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
-                   .iter()
-      @@ -116,6 +119,7 @@
-                   stats: PrecomputeStats::default(),
-                   terminal_follow_map,
-                   ignore_terminal_id,
-      +            token_name_map,
-                   // tags: RefCell::new(HashMap::new()), // Removed
-                   end_nodes,
-                   trie0_god,
-      @@ -123,6 +127,11 @@
+      @@ -399,7 +399,7 @@
+               }
+               self.dfs(&self.vocab.root, assoc);
+               crate::debug!(2, "Finished precompute DFS");
+      -        self.pb.finish_with_message("Precomputation complete");
+      +        self.pb.finish();
+               crate::debug!(2, "Precomputation complete");
            }
        
-           fn optimize(&mut self) {
-      +        crate::debug!(2, "Initial Trie0 stats:");
-      +        let mut stats = PrecomputeStats::default();
-      +        calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
-      +        print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
-      +
-               self.replace_ignore_token_edges_with_none_edges();
-               self.simplify_none_edges(); // This can invalidate max_depth.
-       
-      @@ -138,6 +147,11 @@
-               // self.merge_nodes_basic();
-               self.gc();
-               Trie::recompute_all_max_depths(&self.trie0_god, &self.roots.values().cloned().collect::<Vec<_>>());
-      +
-      +        crate::debug!(2, "Final Trie0 stats:");
-      +        let mut stats = PrecomputeStats::default();
-      +        calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
-      +        print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
-           }
-       
-           fn get_end_node(&self, final_sid: TokenizerStateID) -> PrecomputeNode0Index {
-      @@ -201,10 +215,7 @@
-           fn finish(
-               self,
-           ) -> (BTreeMap<TokenizerStateID, PrecomputeNode0Index>, Trie0GodWrapper) {
-      -
-      -        // calculate_final_stats(&self.roots, &mut self.stats, &self.trie0_god);
-      -        // print_precompute_stats(&self.stats, token_name_map, &self.trie0_god);
-      -
-               (self.roots, self.trie0_god)
-           }
-       
-
-      ```
-      ```diff
-      diff --git a/src/constraint_precompute1_utils.rs b/src/constraint_precompute1_utils.rs
-      index 1111111..2222222 100644
-      --- a/src/constraint_precompute1_utils.rs
-      +++ b/src/constraint_precompute1_utils.rs
-      @@ -16,9 +16,17 @@
-           internal_max_llm_token: usize,
-           terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-           config: &GrammarConstraintConfig,
-           stage_vocab: &mut StageVocab,
-      +    token_name_map: &bimap::BiBTreeMap<crate::glr::grammar::Terminal, usize>,
-       ) {
-           crate::debug!(2, "Starting Trie1 size optimization...");
-      +
-      +    crate::debug!(2, "Initial Trie1 stats:");
-      +    let mut stats = PrecomputeStats::default();
-      +    crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
-      +    crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
-      +
-           simplify_none_edges_to_former_end_nodes_trie1(
-               precomputed1,
-               trie1_god,
-      @@ -51,6 +59,11 @@
-           if config.optimize_trie1_reorder_llm_tokens {
-               reorder_llm_tokens_for_range_minimization_trie1(precomputed1, trie1_god, stage_vocab);
-           }
-      +
-      +    crate::debug!(2, "Final Trie1 stats:");
-      +    let mut stats = PrecomputeStats::default();
-      +    crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
-      +    crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
-       }
-       
-       fn simplify_none_edges_to_former_end_nodes_trie1(
 
       ```
     metadata:
-  - user: |-
-      The previous git diff failed to apply with the following error:
-
-      ```
-      Found 4 diff block(s) to process using custom patcher.
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: src/constraint.rs
@@ -22607,788 +22099,11 @@ messages:
       Successfully applied patch and wrote to src/constraint.rs.
 
       --- Processing Diff Block 2 ---
-      Identified target file: src/constraint_extra.rs
-      Applying patch to 'src/constraint_extra.rs' using custom patcher...
-      Error applying patch to src/constraint_extra.rs: Hunk #1 (header: `@@ -371,12 +371,112 @@`) failed: context not found.
-
-      --- Expected Context (from patch): ---
-          }
-      }
-
-      pub fn calculate_final_stats(
-          precomputed_roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-          stats: &mut PrecomputeStats,
-          trie1_god: &Trie1GodWrapper,
-      ) {
-          crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
-
-          // Custom implementation of all_nodes using PrecomputeNodeIndex for visited set
-          let mut all_reachable_nodes: BTreeMap<PrecomputeNode1Index, PrecomputeNode1Index> = BTreeMap::new();
-      --- End Expected Context ---
-
-      --- Nearest Match (found at line 852 with 91.67% similarity): ---
-          (sum, mean, median)
-      }
-
-      pub fn calculate_final_stats(
-          precomputed_roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-          stats: &mut PrecomputeStats,
-          trie1_god: &Trie1GodWrapper,
-      ) {
-          crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
-
-          // Custom implementation of all_nodes using PrecomputeNodeIndex for visited set
-          let mut all_reachable_nodes: BTreeMap<PrecomputeNode1Index, PrecomputeNode1Index> = BTreeMap::new();
-      --- End Nearest Match ---
-
-      --- Processing Diff Block 3 ---
       Identified target file: src/constraint_precompute0_utils.rs
       Applying patch to 'src/constraint_precompute0_utils.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute0_utils.rs.
-
-      --- Processing Diff Block 4 ---
-      Identified target file: src/constraint_precompute1_utils.rs
-      Applying patch to 'src/constraint_precompute1_utils.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint_precompute1_utils.rs.
-
-      ```
-
-      Here is the diff that failed:
-
-      Of course. Here are the step-by-step instructions to add statistics computation for precomputation stages 0 and 1, followed by the corresponding git diffs.
-
-      ### Step-by-step Instructions
-
-      1.  **File: `src/constraint_extra.rs`**
-          *   Rename the function `calculate_final_stats` to `calculate_final_stats1`. Update its debug message to refer to "precompute1".
-          *   Rename the function `print_precompute_stats` to `print_precompute_stats1`. Update the printed title to "Precomputation 1 Statistics".
-          *   Add a new function `calculate_final_stats0`. This will be a copy of `calculate_final_stats1`, but adapted for `PrecomputeNode0` types (`PrecomputeNode0Index`, `Trie0GodWrapper`). The main change is how it extracts the `GrammarTokenID` from the edge key, which is `Option<(GrammarTokenID, Option<TokenizerStateID>)>`.
-          *   Add a new function `print_precompute_stats0`. This will be a copy of `print_precompute_stats1`, but it will take a `Trie0GodWrapper` and print "Precomputation 0 Statistics" as its title.
-
-      2.  **File: `src/constraint_precompute0_utils.rs`**
-          *   Add `use crate::constraint_extra::{calculate_final_stats0, print_precompute_stats0, PrecomputeStats};` to the imports.
-          *   In the function signature for `do_precompute0`, remove the underscore from the `_token_name_map` parameter to make it `token_name_map`.
-          *   Update the call to `Precomputer0::new` inside `do_precompute0` to pass `token_name_map` as a new argument.
-          *   In the `Precomputer0` struct definition, add a new field: `token_name_map: &'r BiBTreeMap<Terminal, usize>`.
-          *   Update `Precomputer0::new` to accept `token_name_map` as a parameter and initialize the new struct field.
-          *   In the `Precomputer0::optimize` method, insert code at the beginning to print "Initial Trie0 stats:" and call `calculate_final_stats0` and `print_precompute_stats0`.
-          *   At the end of `Precomputer0::optimize`, insert similar code to print "Final Trie0 stats:".
-          *   In the `Precomputer0::finish` method, remove the two commented-out lines related to stats calculation.
-
-      3.  **File: `src/constraint.rs`**
-          *   In the `GrammarConstraint::precompute1` method signature, add a new parameter: `token_name_map: &BiBTreeMap<Terminal, usize>`.
-          *   Inside `precompute1`, update the call to `constraint_precompute1_utils::optimize_trie1_size` to pass along the new `token_name_map`.
-          *   In the `GrammarConstraint::new_with_config` method, find the call to `Self::precompute1` and pass `&token_name_map` as the new last argument.
-
-      4.  **File: `src/constraint_precompute1_utils.rs`**
-          *   In the `optimize_trie1_size` function signature, add a new parameter: `token_name_map: &bimap::BiBTreeMap<crate::glr::grammar::Terminal, usize>`.
-          *   At the beginning of `optimize_trie1_size`, after the initial debug message, add code to print "Initial Trie1 stats:" and call `calculate_final_stats1` and `print_precompute_stats1`.
-          *   At the end of `optimize_trie1_size`, add similar code to print "Final Trie1 stats:".
-
-      ### Git Diffs
-
-      ```diff
-      diff --git a/src/constraint.rs b/src/constraint.rs
-      index 3111111..1111111 100644
-      --- a/src/constraint.rs
-      +++ b/src/constraint.rs
-      @@ -861,6 +861,7 @@
-                   &terminal_follow_map,
-                   &mut precompute_vocab,
-                   config,
-      +            &token_name_map,
-               );
-       
-               // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
-      @@ -941,6 +942,7 @@
-               terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-               stage_vocab: &mut StageVocab,
-               config: &GrammarConstraintConfig,
-      +        token_name_map: &BiBTreeMap<Terminal, usize>,
-           ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
-               let trie1_god = Trie1GodWrapper::new();
-               let mut precomputed1: BTreeMap<TokenizerStateID, PrecomputeNode1Index> = BTreeMap::new();
-      @@ -1020,6 +1022,7 @@
-                   terminal_follow_map,
-                   config,
-                   stage_vocab,
-      +            token_name_map,
-               );
-       
-               (precomputed1, trie1_god)
-
-      ```
-      ```diff
-      diff --git a/src/constraint_extra.rs b/src/constraint_extra.rs
-      index 1111111..2222222 100644
-      --- a/src/constraint_extra.rs
-      +++ b/src/constraint_extra.rs
-      @@ -371,12 +371,112 @@
-           }
-       }
-       
-      -pub fn calculate_final_stats(
-      +pub fn calculate_final_stats0(
-      +    precomputed_roots: &BTreeMap<TokenizerStateID, PrecomputeNode0Index>,
-      +    stats: &mut PrecomputeStats,
-      +    trie0_god: &Trie0GodWrapper,
-      +) {
-      +    crate::debug!(2, "Calculating final precompute0 statistics...");
-      +
-      +    let mut all_reachable_nodes: BTreeMap<PrecomputeNode0Index, PrecomputeNode0Index> = BTreeMap::new();
-      +    let mut queue: VecDeque<PrecomputeNode0Index> = precomputed_roots.values().cloned().collect();
-      +    let mut visited_data_ptrs: HashSet<PrecomputeNode0Index> = HashSet::new();
-      +
-      +    while let Some(node_arc) = queue.pop_front() {
-      +        let (children_to_queue, node_ptr) = {
-      +            let node_guard = node_arc.read(trie0_god).unwrap();
-      +            let ptr = node_arc;
-      +            let children = node_guard.children()
-      +                .values()
-      +                .flat_map(|dest_map| {
-      +                    dest_map.keys().map(|wrapper| wrapper.as_arc().clone())
-      +                })
-      +                .collect::<Vec<_>>();
-      +            (children, ptr)
-      +        };
-      +
-      +        if visited_data_ptrs.insert(node_ptr) {
-      +            all_reachable_nodes.insert(node_ptr, node_arc.clone());
-      +            for child_arc in children_to_queue {
-      +                queue.push_back(child_arc);
-      +            }
-      +        }
-      +    }
-      +
-      +    *stats = PrecomputeStats::default();
-      +    stats.final_unique_nodes_count = all_reachable_nodes.len();
-      +
-      +    let root_node_pointers: HashSet<PrecomputeNode0Index> = precomputed_roots
-      +        .values()
-      +        .map(|arc| {
-      +            let guard = arc.read(trie0_god).unwrap();
-      +            *arc
-      +        })
-      +        .collect();
-      +    stats.final_root_nodes_count = root_node_pointers.len();
-      +
-      +    for (node_ptr, node_arc) in &all_reachable_nodes {
-      +        let node_guard = node_arc.read(trie0_god).expect("RwLock poisoned during final stats calculation");
-      +
-      +        if !root_node_pointers.contains(node_ptr) {
-      +            if node_guard.children().is_empty() {
-      +                stats.final_leaf_nodes_count += 1;
-      +            } else {
-      +                stats.final_non_root_internal_nodes_count += 1;
-      +            }
-      +        }
-      +
-      +        for (edge_key_opt, dest_map) in node_guard.children() {
-      +            let num_edges_for_this_key_to_distinct_children = dest_map.len();
-      +            stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
-      +
-      +            if let Some((gtid, _)) = edge_key_opt {
-      +                stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
-      +                *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children;
-      +
-      +                stats.final_grammar_token_edge_fanouts_dist
-      +                    .entry(*gtid)
-      +                    .or_default()
-      +                    .push(num_edges_for_this_key_to_distinct_children);
-      +                for llm_token_bv_on_edge in dest_map.values() {
-      +                    stats.final_grammar_token_edge_token_set_sizes_dist
-      +                        .entry(*gtid)
-      +                        .or_default()
-      +                        .push(llm_token_bv_on_edge.len());
-      +                    stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
-      +                }
-      +                if num_edges_for_this_key_to_distinct_children > 0 {
-      +                    stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
-      +                    stats.final_num_occupied_some_edge_keys += 1;
-      +                }
-      +            } else {
-      +                stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
-      +                if num_edges_for_this_key_to_distinct_children > 0 {
-      +                    stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
-      +                    stats.final_num_occupied_none_edge_keys += 1;
-      +                }
-      +            }
-      +        }
-      +
-      +        if node_guard.value.final_tokenizer_state.is_some() {
-      +            stats.final_nodes_with_clean_end += 1;
-      +        }
-      +    }
-      +    crate::debug!(2, "Finished calculating final precompute0 statistics.");
-      +}
-      +
-      +pub fn calculate_final_stats1(
-           precomputed_roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-           stats: &mut PrecomputeStats,
-           trie1_god: &Trie1GodWrapper,
-       ) {
-      -    crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
-      +    crate::debug!(2, "Calculating final precompute1 statistics...");
-       
-           // Custom implementation of all_nodes using PrecomputeNodeIndex for visited set
-           let mut all_reachable_nodes: BTreeMap<PrecomputeNode1Index, PrecomputeNode1Index> = BTreeMap::new();
-      @@ -499,15 +599,15 @@
-                   stats.final_nodes_with_clean_end += 1;
-               }
-           }
-      -    crate::debug!(2, "Finished calculating final precompute statistics (within constraint_extra).");
-      -}
-      -
-      -
-      -pub fn print_precompute_stats(
-      +    crate::debug!(2, "Finished calculating final precompute1 statistics.");
-      +}
-      +
-      +
-      +pub fn print_precompute_stats0(
-           stats: &PrecomputeStats,
-      -    token_name_map: &BiBTreeMap<Terminal, usize>, // Used to get token names from GrammarTokenID
-      -    trie_god: &Trie1GodWrapper,
-      +    token_name_map: &BiBTreeMap<Terminal, usize>,
-      +    trie_god: &Trie0GodWrapper,
-       ) {
-           let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
-               stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
-      @@ -517,7 +617,7 @@
-               stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
-           } else { 0.0 };
-       
-      -    println!("--- Precomputation Statistics ---");
-      +    println!("--- Precomputation 0 Statistics ---");
-           println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
-       
-           println!("\nNode Counts Breakdown:");
-      @@ -595,6 +695,102 @@
-           println!("---------------------------------");
-       }
-       
-      +pub fn print_precompute_stats1(
-      +    stats: &PrecomputeStats,
-      +    token_name_map: &BiBTreeMap<Terminal, usize>, // Used to get token names from GrammarTokenID
-      +    trie_god: &Trie1GodWrapper,
-      +) {
-      +    let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
-      +        stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
-      +    } else { 0.0 };
-      +    let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
-      +        stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
-      +    } else { 0.0 };
-      +
-      +    println!("--- Precomputation 1 Statistics ---");
-      +    println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
-      +
-      +    println!("\nNode Counts Breakdown:");
-      +    println!("  There are:");
-      +    println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
-      +    println!("    - {} are roots", stats.final_root_nodes_count);
-      +    let non_root_count = stats.final_unique_nodes_count.saturating_sub(stats.final_root_nodes_count); // Use saturating_sub
-      +    println!("    - {} are non-roots, of which", non_root_count);
-      +    println!("        - {} are internal (non-root, non-leaf)", stats.final_non_root_internal_nodes_count);
-      +    println!("        - {} are leaves (non-root)", stats.final_leaf_nodes_count);
-      +
-      +    println!("\nFinal Graph Structure (after sharing and deduplication):");
-      +    println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
-      +    println!("  Total Edges: {}", stats.final_edges_count);
-      +    println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
-      +    println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
-      +    println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
-      +    println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
-      +    println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
-      +    println!("  Total ranges in all HybridBitsets: {}", stats.final_total_ranges_in_bvs);
-      +
-      +    let mut grammar_token_stats_new: Vec<(
-      +        GrammarTokenID,
-      +        usize, // key_usages (KeyUse)
-      +        (usize, Option<f64>, Option<f64>), // fanout_stats (SumChild, AvgChild, MedChild)
-      +        (usize, Option<f64>, Option<f64>)  // token_set_size_stats (SumToks, AvgToks, MedToks)
-      +    )> = Vec::new();
-      +
-      +    for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_counts {
-      +        let fanouts_for_gtid = stats.final_grammar_token_edge_fanouts_dist
-      +                                    .get(gtid)
-      +                                    .cloned()
-      +                                    .unwrap_or_else(Vec::new);
-      +        let child_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid); // Uses the helper
-      +
-      +        let token_set_sizes_for_gtid = stats.final_grammar_token_edge_token_set_sizes_dist
-      +                                            .get(gtid)
-      +                                            .cloned()
-      +                                            .unwrap_or_else(Vec::new);
-      +        let toks_stats = calculate_stats_from_vec_usize(&token_set_sizes_for_gtid); // Uses the helper
-      +
-      +        grammar_token_stats_new.push((*gtid, *key_usages_count, child_stats, toks_stats));
-      +    }
-      +
-      +    grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by KeyUse (key_usages_count)
-      +
-      +    println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
-      +    println!(
-      +        "  {:<25} {:<5} {:<8} {:<8} {:<10} {:<10} {:<10} {:<12} {:<10} {:<10}",
-      +        "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild",
-      +        "AvgKeyToks", "SumToks", "AvgToks", "MedToks"
-      +    );
-      +    println!(
-      +        "  {:-<25} {:-<5} {:-<8} {:-<8} {:-<10} {:-<10} {:-<10} {:-<12} {:-<10} {:-<10}",
-      +        "", "", "", "", "", "", "", "", "", ""
-      +    );
-      +
-      +    for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
-      +        let name = token_name_map
-      +            .get_by_right(&gtid.0) // gtid is GrammarTokenID
-      +            .cloned()
-      +            .map_or(
-      +                format!("ID:{}", gtid.0),
-      +                |t| t.to_string()
-      +            );
-      +
-      +        let (sum_child, avg_child, med_child) = child_stats;
-      +        let (sum_toks, avg_toks, med_toks) = toks_stats;
-      +        let avg_key_toks = if key_usages > 0 {
-      +            Some(sum_toks as f64 / key_usages as f64)
-      +        } else {
-      +            None
-      +        };
-      +
-      +
-      +        let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
-      +
-      +        println!(
-      +            "  {:<25} {:>5} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>10} {:>10}",
-      +            name,
-      +            gtid.0,
-      +            key_usages,
-      +            sum_child,
-      +            format_opt_f64(avg_child),
-      +            format_opt_f64(med_child),
-      +            format_opt_f64(avg_key_toks),
-      +            sum_toks,
-      +            format_opt_f64(avg_toks),
-      +            format_opt_f64(med_toks)
-      +        );
-      +    }
-      +    println!("---------------------------------");
-      +}
-      +
-       pub fn print_precompute_stats2(
-           stats: &PrecomputeStats,
-           trie2_god: &Trie2GodWrapper,
-
-      ```
-      ```diff
-      diff --git a/src/constraint_precompute0_utils.rs b/src/constraint_precompute0_utils.rs
-      index 1111111..2222222 100644
-      --- a/src/constraint_precompute0_utils.rs
-      +++ b/src/constraint_precompute0_utils.rs
-      @@ -11,7 +11,7 @@
-       use crate::tokenizer::{LLMTokenID, TokenizerStateID};
-       use crate::types::{TerminalID as GrammarTokenID, TerminalID};
-       use crate::constraint::LLMVocab;
-      -use crate::constraint_extra::{PrecomputeStats};
-      +use crate::constraint_extra::{calculate_final_stats0, print_precompute_stats0, PrecomputeStats};
-       use crate::datastructures::ordered_hash_map::Retain;
-       
-       const MERGE_THRESHOLD: usize = 20;
-      @@ -21,7 +21,7 @@
-           parser:           Option<&GLRParser>,
-           llm_vocab:        Option<Arc<LLMVocab>>,
-           internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-      -    _token_name_map:   &BiBTreeMap<Terminal, usize>,
-      +    token_name_map:   &BiBTreeMap<Terminal, usize>,
-           internal_max_llm_token: usize,
-           terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-           ignore_terminal_id: Option<TerminalID>,
-      @@ -35,6 +35,7 @@
-               MERGE_THRESHOLD,
-               terminal_follow_map,
-               ignore_terminal_id,
-      +        token_name_map,
-           );
-       
-           helper.run_dfs();
-      @@ -54,6 +55,7 @@
-           stats:            PrecomputeStats,
-           terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-           ignore_terminal_id: Option<TerminalID>,
-      +    token_name_map:   &'r BiBTreeMap<Terminal, usize>,
-           // Map each precompute node to the set of LLM tokens that can pass through it.
-           // tags:             RefCell<HashMap<PrecomputeNodeIndex, LLMTokenBV>>, // Removed
-           // One end node per final tokenizer state.
-      @@ -70,6 +72,7 @@
-               merge_threshold:  usize,
-               terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-               ignore_terminal_id: Option<TerminalID>,
-      +        token_name_map: &'r BiBTreeMap<Terminal, usize>,
-           ) -> Self {
-               let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
-                   .iter()
-      @@ -116,6 +119,7 @@
-                   stats: PrecomputeStats::default(),
-                   terminal_follow_map,
-                   ignore_terminal_id,
-      +            token_name_map,
-                   // tags: RefCell::new(HashMap::new()), // Removed
-                   end_nodes,
-                   trie0_god,
-      @@ -123,6 +127,11 @@
-           }
-       
-           fn optimize(&mut self) {
-      +        crate::debug!(2, "Initial Trie0 stats:");
-      +        let mut stats = PrecomputeStats::default();
-      +        calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
-      +        print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
-      +
-               self.replace_ignore_token_edges_with_none_edges();
-               self.simplify_none_edges(); // This can invalidate max_depth.
-       
-      @@ -138,6 +147,11 @@
-               // self.merge_nodes_basic();
-               self.gc();
-               Trie::recompute_all_max_depths(&self.trie0_god, &self.roots.values().cloned().collect::<Vec<_>>());
-      +
-      +        crate::debug!(2, "Final Trie0 stats:");
-      +        let mut stats = PrecomputeStats::default();
-      +        calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
-      +        print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
-           }
-       
-           fn get_end_node(&self, final_sid: TokenizerStateID) -> PrecomputeNode0Index {
-      @@ -201,10 +215,7 @@
-           fn finish(
-               self,
-           ) -> (BTreeMap<TokenizerStateID, PrecomputeNode0Index>, Trie0GodWrapper) {
-      -
-      -        // calculate_final_stats(&self.roots, &mut self.stats, &self.trie0_god);
-      -        // print_precompute_stats(&self.stats, token_name_map, &self.trie0_god);
-      -
-               (self.roots, self.trie0_god)
-           }
-       
-
-      ```
-      ```diff
-      diff --git a/src/constraint_precompute1_utils.rs b/src/constraint_precompute1_utils.rs
-      index 1111111..2222222 100644
-      --- a/src/constraint_precompute1_utils.rs
-      +++ b/src/constraint_precompute1_utils.rs
-      @@ -16,9 +16,17 @@
-           internal_max_llm_token: usize,
-           terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-           config: &GrammarConstraintConfig,
-           stage_vocab: &mut StageVocab,
-      +    token_name_map: &bimap::BiBTreeMap<crate::glr::grammar::Terminal, usize>,
-       ) {
-           crate::debug!(2, "Starting Trie1 size optimization...");
-      +
-      +    crate::debug!(2, "Initial Trie1 stats:");
-      +    let mut stats = PrecomputeStats::default();
-      +    crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
-      +    crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
-      +
-           simplify_none_edges_to_former_end_nodes_trie1(
-               precomputed1,
-               trie1_god,
-      @@ -51,6 +59,11 @@
-           if config.optimize_trie1_reorder_llm_tokens {
-               reorder_llm_tokens_for_range_minimization_trie1(precomputed1, trie1_god, stage_vocab);
-           }
-      +
-      +    crate::debug!(2, "Final Trie1 stats:");
-      +    let mut stats = PrecomputeStats::default();
-      +    crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
-      +    crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
-       }
-       
-       fn simplify_none_edges_to_former_end_nodes_trie1(
-
-      ```
-
-      Please provide a corrected git diff that applies cleanly to the current state of the files. Remember that any changes from previous turns have already been applied. Only output the corrected diff.
-
-      ---
-      Mode instruction: For this turn, output git diff patches.
-                  - Use one fenced ```diff code block per file.
-                  - Include lines like: `diff --git a/FILE b/FILE`
-                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
-                  - Do not combine multiple files into a single diff block.
-                  Additional general constraints:
-      - Do not split your response across multiple messages.
-      - Avoid local cache/config advice; focus on actionable fixes or outputs.
-      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
     metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/src/constraint_extra.rs b/src/constraint_extra.rs
-      --- a/src/constraint_extra.rs
-      +++ b/src/constraint_extra.rs
-      @@ -851,12 +851,112 @@
-           (sum, mean, median)
-       }
-       
-      -pub fn calculate_final_stats(
-      +pub fn calculate_final_stats0(
-      +    precomputed_roots: &BTreeMap<TokenizerStateID, PrecomputeNode0Index>,
-      +    stats: &mut PrecomputeStats,
-      +    trie0_god: &Trie0GodWrapper,
-      +) {
-      +    crate::debug!(2, "Calculating final precompute0 statistics...");
-      +
-      +    let mut all_reachable_nodes: BTreeMap<PrecomputeNode0Index, PrecomputeNode0Index> = BTreeMap::new();
-      +    let mut queue: VecDeque<PrecomputeNode0Index> = precomputed_roots.values().cloned().collect();
-      +    let mut visited_data_ptrs: HashSet<PrecomputeNode0Index> = HashSet::new();
-      +
-      +    while let Some(node_arc) = queue.pop_front() {
-      +        let (children_to_queue, node_ptr) = {
-      +            let node_guard = node_arc.read(trie0_god).unwrap();
-      +            let ptr = node_arc;
-      +            let children = node_guard.children()
-      +                .values()
-      +                .flat_map(|dest_map| {
-      +                    dest_map.keys().map(|wrapper| wrapper.as_arc().clone())
-      +                })
-      +                .collect::<Vec<_>>();
-      +            (children, ptr)
-      +        };
-      +
-      +        if visited_data_ptrs.insert(node_ptr) {
-      +            all_reachable_nodes.insert(node_ptr, node_arc.clone());
-      +            for child_arc in children_to_queue {
-      +                queue.push_back(child_arc);
-      +            }
-      +        }
-      +    }
-      +
-      +    *stats = PrecomputeStats::default();
-      +    stats.final_unique_nodes_count = all_reachable_nodes.len();
-      +
-      +    let root_node_pointers: HashSet<PrecomputeNode0Index> = precomputed_roots
-      +        .values()
-      +        .map(|arc| {
-      +            let guard = arc.read(trie0_god).unwrap();
-      +            *arc
-      +        })
-      +        .collect();
-      +    stats.final_root_nodes_count = root_node_pointers.len();
-      +
-      +    for (node_ptr, node_arc) in &all_reachable_nodes {
-      +        let node_guard = node_arc.read(trie0_god).expect("RwLock poisoned during final stats calculation");
-      +
-      +        if !root_node_pointers.contains(node_ptr) {
-      +            if node_guard.children().is_empty() {
-      +                stats.final_leaf_nodes_count += 1;
-      +            } else {
-      +                stats.final_non_root_internal_nodes_count += 1;
-      +            }
-      +        }
-      +
-      +        for (edge_key_opt, dest_map) in node_guard.children() {
-      +            let num_edges_for_this_key_to_distinct_children = dest_map.len();
-      +            stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
-      +
-      +            if let Some((gtid, _)) = edge_key_opt {
-      +                stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
-      +                *stats.final_grammar_token_edge_key_counts.entry(*gtid).or_insert(0) += num_edges_for_this_key_to_distinct_children;
-      +
-      +                stats.final_grammar_token_edge_fanouts_dist
-      +                    .entry(*gtid)
-      +                    .or_default()
-      +                    .push(num_edges_for_this_key_to_distinct_children);
-      +                for llm_token_bv_on_edge in dest_map.values() {
-      +                    stats.final_grammar_token_edge_token_set_sizes_dist
-      +                        .entry(*gtid)
-      +                        .or_default()
-      +                        .push(llm_token_bv_on_edge.len());
-      +                    stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
-      +                }
-      +                if num_edges_for_this_key_to_distinct_children > 0 {
-      +                    stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key_to_distinct_children;
-      +                    stats.final_num_occupied_some_edge_keys += 1;
-      +                }
-      +            } else {
-      +                stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
-      +                if num_edges_for_this_key_to_distinct_children > 0 {
-      +                    stats.final_total_occupancy_sum_for_none_keys += num_edges_for_this_key_to_distinct_children;
-      +                    stats.final_num_occupied_none_edge_keys += 1;
-      +                }
-      +            }
-      +        }
-      +
-      +        if node_guard.value.final_tokenizer_state.is_some() {
-      +            stats.final_nodes_with_clean_end += 1;
-      +        }
-      +    }
-      +    crate::debug!(2, "Finished calculating final precompute0 statistics.");
-      +}
-      +
-      +pub fn calculate_final_stats1(
-           precomputed_roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-           stats: &mut PrecomputeStats,
-           trie1_god: &Trie1GodWrapper,
-       ) {
-      -    crate::debug!(2, "Calculating final precompute statistics (within constraint_extra)...");
-      +    crate::debug!(2, "Calculating final precompute1 statistics...");
-       
-           // Custom implementation of all_nodes using PrecomputeNodeIndex for visited set
-           let mut all_reachable_nodes: BTreeMap<PrecomputeNode1Index, PrecomputeNode1Index> = BTreeMap::new();
-      @@ -979,15 +1079,15 @@
-                   stats.final_nodes_with_clean_end += 1;
-               }
-           }
-      -    crate::debug!(2, "Finished calculating final precompute statistics (within constraint_extra).");
-      +    crate::debug!(2, "Finished calculating final precompute1 statistics.");
-       }
-       
-       
-      -pub fn print_precompute_stats(
-      +pub fn print_precompute_stats0(
-           stats: &PrecomputeStats,
-      -    token_name_map: &BiBTreeMap<Terminal, usize>, // Used to get token names from GrammarTokenID
-      -    trie_god: &Trie1GodWrapper,
-      +    token_name_map: &BiBTreeMap<Terminal, usize>,
-      +    trie_god: &Trie0GodWrapper,
-       ) {
-           let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
-               stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
-      @@ -997,7 +1097,7 @@
-               stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
-           } else { 0.0 };
-       
-      -    println!("--- Precomputation Statistics ---");
-      +    println!("--- Precomputation 0 Statistics ---");
-           println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
-       
-           println!("\nNode Counts Breakdown:");
-      @@ -1075,6 +1175,102 @@
-           println!("---------------------------------");
-       }
-       
-      +pub fn print_precompute_stats1(
-      +    stats: &PrecomputeStats,
-      +    token_name_map: &BiBTreeMap<Terminal, usize>, // Used to get token names from GrammarTokenID
-      +    trie_god: &Trie1GodWrapper,
-      +) {
-      +    let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
-      +        stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
-      +    } else { 0.0 };
-      +    let avg_none = if stats.final_num_occupied_none_edge_keys > 0 {
-      +        stats.final_total_occupancy_sum_for_none_keys as f64 / stats.final_num_occupied_none_edge_keys as f64
-      +    } else { 0.0 };
-      +
-      +    println!("--- Precomputation 1 Statistics ---");
-      +    println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
-      +
-      +    println!("\nNode Counts Breakdown:");
-      +    println!("  There are:");
-      +    println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
-      +    println!("    - {} are roots", stats.final_root_nodes_count);
-      +    let non_root_count = stats.final_unique_nodes_count.saturating_sub(stats.final_root_nodes_count); // Use saturating_sub
-      +    println!("    - {} are non-roots, of which", non_root_count);
-      +    println!("        - {} are internal (non-root, non-leaf)", stats.final_non_root_internal_nodes_count);
-      +    println!("        - {} are leaves (non-root)", stats.final_leaf_nodes_count);
-      +
-      +    println!("\nFinal Graph Structure (after sharing and deduplication):");
-      +    println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
-      +    println!("  Total Edges: {}", stats.final_edges_count);
-      +    println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
-      +    println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
-      +    println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
-      +    println!("  Average edge occupancy for Some-key edges:    {:.2}", avg_some);
-      +    println!("  Average edge occupancy for None-key edges:    {:.2}", avg_none);
-      +    println!("  Total ranges in all HybridBitsets: {}", stats.final_total_ranges_in_bvs);
-      +
-      +    let mut grammar_token_stats_new: Vec<(
-      +        GrammarTokenID,
-      +        usize, // key_usages (KeyUse)
-      +        (usize, Option<f64>, Option<f64>), // fanout_stats (SumChild, AvgChild, MedChild)
-      +        (usize, Option<f64>, Option<f64>)  // token_set_size_stats (SumToks, AvgToks, MedToks)
-      +    )> = Vec::new();
-      +
-      +    for (gtid, key_usages_count) in &stats.final_grammar_token_edge_key_counts {
-      +        let fanouts_for_gtid = stats.final_grammar_token_edge_fanouts_dist
-      +                                    .get(gtid)
-      +                                    .cloned()
-      +                                    .unwrap_or_else(Vec::new);
-      +        let child_stats = calculate_stats_from_vec_usize(&fanouts_for_gtid); // Uses the helper
-      +
-      +        let token_set_sizes_for_gtid = stats.final_grammar_token_edge_token_set_sizes_dist
-      +                                            .get(gtid)
-      +                                            .cloned()
-      +                                            .unwrap_or_else(Vec::new);
-      +        let toks_stats = calculate_stats_from_vec_usize(&token_set_sizes_for_gtid); // Uses the helper
-      +
-      +        grammar_token_stats_new.push((*gtid, *key_usages_count, child_stats, toks_stats));
-      +    }
-      +
-      +    grammar_token_stats_new.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by KeyUse (key_usages_count)
-      +
-      +    println!("\nGrammar Token Edge Key Frequencies (Most Common First):");
-      +    println!(
-      +        "  {:<25} {:<5} {:<8} {:<8} {:<10} {:<10} {:<10} {:<12} {:<10} {:<10}",
-      +        "Token Name", "ID", "KeyUse", "SumChild", "AvgChild", "MedChild",
-      +        "AvgKeyToks", "SumToks", "AvgToks", "MedToks"
-      +    );
-      +    println!(
-      +        "  {:-<25} {:-<5} {:-<8} {:-<8} {:-<10} {:-<10} {:-<10} {:-<12} {:-<10} {:-<10}",
-      +        "", "", "", "", "", "", "", "", "", ""
-      +    );
-      +
-      +    for (gtid, key_usages, child_stats, toks_stats) in grammar_token_stats_new {
-      +        let name = token_name_map
-      +            .get_by_right(&gtid.0) // gtid is GrammarTokenID
-      +            .cloned()
-      +            .map_or(
-      +                format!("ID:{}", gtid.0),
-      +                |t| t.to_string()
-      +            );
-      +
-      +        let (sum_child, avg_child, med_child) = child_stats;
-      +        let (sum_toks, avg_toks, med_toks) = toks_stats;
-      +        let avg_key_toks = if key_usages > 0 {
-      +            Some(sum_toks as f64 / key_usages as f64)
-      +        } else {
-      +            None
-      +        };
-      +
-      +
-      +        let format_opt_f64 = |val: Option<f64>| val.map_or_else(|| "N/A".to_string(), |v| format!("{:.2}", v));
-      +
-      +        println!(
-      +            "  {:<25} {:>5} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12} {:>10} {:>10}",
-      +            name,
-      +            gtid.0,
-      +            key_usages,
-      +            sum_child,
-      +            format_opt_f64(avg_child),
-      +            format_opt_f64(med_child),
-      +            format_opt_f64(avg_key_toks),
-      +            sum_toks,
-      +            format_opt_f64(avg_toks),
-      +            format_opt_f64(med_toks)
-      +        );
-      +    }
-      +    println!("---------------------------------");
-      +}
-      +
-       pub fn print_precompute_stats2(
-           stats: &PrecomputeStats,
-           trie2_god: &Trie2GodWrapper,
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/constraint_extra.rs
-      Applying patch to 'src/constraint_extra.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint_extra.rs.
-    metadata:
-  - user: 'Changes committed with message: "Feat: Add precompute 0 and 1 size optimization
-      statistics logging"'
+  - user: 'Changes committed with message: "Ensure progress bars persist after completion
+      and refactor final statistics calculation into Trie0/Trie1 specific functions"'
     metadata:
 ...

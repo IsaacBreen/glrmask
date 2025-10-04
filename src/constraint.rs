@@ -1121,7 +1121,7 @@ impl GrammarConstraint {
         let mut initial_values_for_map: Vec<(PrecomputeNode1Index, GLRParserState)> = Vec::new();
 
         #[cfg(not(rustrover))]
-        let it = tqdm!(precomputed1.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=false);
+        let it = tqdm!(precomputed1.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=true);
         #[cfg(rustrover)]
         let it = precomputed1.iter();
         for (tokenizer_state_id, trie1_root) in it {

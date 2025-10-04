@@ -231,7 +231,7 @@ impl<'r> Precomputer0<'r> {
         }
         self.dfs(&self.vocab.root, assoc);
         crate::debug!(2, "Finished precompute DFS");
-        self.pb.finish_with_message("Precomputation complete");
+        self.pb.finish();
         crate::debug!(2, "Precomputation complete");
     }
 
