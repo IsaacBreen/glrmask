@@ -390,14 +390,16 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
 
             let mut node = &mut trie;
-            let rev_vals: Vec<T> = vals.iter().cloned().rev().collect();
-            for (i, v) in rev_vals.into_iter().enumerate() {
-                let entry = node.entry(v.clone()).or_default();
-                if i == vals.len() - 1 {
-                    entry.end = Some(acc.clone());
-                } else {
-                    node = &mut entry.sub;
+            let mut rev_vals = vals;
+            rev_vals.reverse();
+
+            // The check for vals.is_empty() above ensures rev_vals is not empty here.
+            if let Some(last_val) = rev_vals.pop() {
+                for v in rev_vals {
+                    node = &mut node.entry(v).or_default().sub;
                 }
+                let final_entry = node.entry(last_val).or_default();
+                final_entry.end = Some(acc);
             }
         }
 
