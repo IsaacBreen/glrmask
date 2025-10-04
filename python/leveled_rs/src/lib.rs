@@ -902,6 +902,32 @@ impl LeveledGSS {
         })
     }
 
+    #[classmethod]
+    fn merge_many(_cls: &PyType, gss_list: &PyList) -> PyResult<Self> {
+        let mut accumulator = LeveledGSS::_empty();
+        for item in gss_list.iter() {
+            let gss: PyRef<LeveledGSS> = item.extract()?;
+            accumulator = accumulator.merge(&gss)?;
+        }
+        Ok(accumulator)
+    }
+
+    #[classmethod]
+    fn push_many(_cls: &PyType, items: &PyList) -> PyResult<Self> {
+        Python::with_gil(|py| {
+            let mut dest = LeveledGSS::_empty();
+            for item in items.iter() {
+                let tuple: &PyTuple = item.downcast()?;
+                let gss_item: PyRef<LeveledGSS> = tuple.get_item(0)?.extract()?;
+                let value: PyObject = tuple.get_item(1)?.to_object(py);
+
+                let pushed = gss_item.push(value)?;
+                dest = dest.merge(&pushed)?;
+            }
+            Ok(dest)
+        })
+    }
+
     fn peek(&self) -> PyResult<PyObject> {
         Python::with_gil(|py| {
             let keys = self.inner.children()?;
