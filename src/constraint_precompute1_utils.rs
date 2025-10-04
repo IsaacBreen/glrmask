@@ -98,6 +98,7 @@ fn simplify_none_edges_to_former_end_nodes_trie1(
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
+    let mut nodes_to_make_end: HashSet<PrecomputeNode1Index> = HashSet::new();
 
     for a_arc in all_nodes {
         let mut edges_to_add = Vec::new();
@@ -108,20 +109,26 @@ fn simplify_none_edges_to_former_end_nodes_trie1(
             if let Some(none_dest_map) = a_guard.children().get(&None) {
                 for (b_arc_wrapper, bv_ab) in none_dest_map {
                     if former_end_nodes1.contains(b_arc_wrapper) {
-                        // This is a candidate: A -(None)-> B, where B is a former end node.
-                        none_edges_to_b_to_remove.push(b_arc_wrapper.clone());
-
                         let b_arc = b_arc_wrapper.as_arc();
                         let b_guard = b_arc.read(trie1_god).unwrap();
-                        
-                        // B's children are the edges to add to A.
-                        for (term_opt, c_dest_map) in b_guard.children() {
-                            for (c_arc_wrapper, _bv_bc) in c_dest_map {
-                                // New edge: A -(term_opt)-> C
-                                // New BV is bv_ab, since bv_bc is all_tokens.
-                                let new_bv = bv_ab.clone();
-                                if !new_bv.is_empty() {
-                                    edges_to_add.push((term_opt.clone(), c_arc_wrapper.clone(), new_bv));
+
+                        if b_guard.children().is_empty() {
+                            // This former end node has no successors, so it's a valid end point.
+                            // Mark it to become a true end node. The edge is preserved.
+                            nodes_to_make_end.insert(b_arc_wrapper.clone());
+                        } else {
+                            // This is a candidate for simplification: A -(None)-> B, where B has children.
+                            none_edges_to_b_to_remove.push(b_arc_wrapper.clone());
+
+                            // B's children are the edges to add to A.
+                            for (term_opt, c_dest_map) in b_guard.children() {
+                                for (c_arc_wrapper, _bv_bc) in c_dest_map {
+                                    // New edge: A -(term_opt)-> C
+                                    // New BV is bv_ab, since bv_bc is all_tokens.
+                                    let new_bv = bv_ab.clone();
+                                    if !new_bv.is_empty() {
+                                        edges_to_add.push((term_opt.clone(), c_arc_wrapper.clone(), new_bv));
+                                    }
                                 }
                             }
                         }
@@ -132,14 +139,14 @@ fn simplify_none_edges_to_former_end_nodes_trie1(
 
         if !none_edges_to_b_to_remove.is_empty() {
             let mut a_guard = a_arc.write(trie1_god).unwrap();
-            
-            // Remove the None edges that point to former end nodes.
+
+            // Remove the None edges that point to former end nodes that we are shortcutting.
             if let Some(none_dest_map) = a_guard.children_mut().get_mut(&None) {
                 for b_to_remove in none_edges_to_b_to_remove {
                     none_dest_map.remove(&b_to_remove);
                 }
             }
-            
+
             // If the None edge map is now empty, remove it.
             if a_guard.children().get(&None).map_or(false, |m| m.is_empty()) {
                 a_guard.children_mut().remove(&None);
@@ -152,6 +159,12 @@ fn simplify_none_edges_to_former_end_nodes_trie1(
             }
         }
     }
+
+    for node_to_make_end in nodes_to_make_end {
+        let mut guard = node_to_make_end.write(trie1_god).unwrap();
+        guard.value.end = true;
+    }
+
     crate::debug!(2, "Done simplifying None edges to former end nodes in Trie1.");
 }
 
