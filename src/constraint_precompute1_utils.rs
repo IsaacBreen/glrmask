@@ -415,7 +415,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
     // 1) Collect all unique bitsets to use as splitters.
     let mut all_bvs = HashSet::new();
     #[cfg(not(rustrover))]
-    let it = tqdm!(all_nodes.iter(), desc = "Trie1 Merge Tokens (Collect BVs)", disable = !PROGRESS_BAR_ENABLED, leave = false);
+    let it = tqdm!(all_nodes.iter(), desc = "Trie1 Merge Tokens (Collect BVs)", disable = !PROGRESS_BAR_ENABLED, leave = true);
     #[cfg(rustrover)]
     let it = all_nodes.iter();
     for n in it {
@@ -441,7 +441,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
     let mut num_classes = 1;
 
     #[cfg(not(rustrover))]
-    let it = tqdm!(all_bvs.iter(), desc = "Trie1 Merge Tokens (Refine)", disable = !PROGRESS_BAR_ENABLED, leave = false);
+    let it = tqdm!(all_bvs.iter(), desc = "Trie1 Merge Tokens (Refine)", disable = !PROGRESS_BAR_ENABLED, leave = true);
     #[cfg(rustrover)]
     let it = all_bvs.iter();
     for splitter_bv in it {
@@ -512,7 +512,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
 
     // 4) Apply mapping to trie in‑place, only where needed
     #[cfg(not(rustrover))]
-    let it = tqdm!(all_nodes.iter(), desc = "Trie1 Merge (Remap In‑Place)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false);
+    let it = tqdm!(all_nodes.iter(), desc = "Trie1 Merge (Remap In‑Place)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
     #[cfg(rustrover)]
     let it = all_nodes.iter();
     for n in it {
@@ -589,7 +589,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
 	// 5) Update stage vocab
 	// Merge internal_to_original for tokens mapped into representatives
 	#[cfg(not(rustrover))]
-	let it = tqdm!(old_to_new.iter(), desc = "Trie1 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = false);
+	let it = tqdm!(old_to_new.iter(), desc = "Trie1 Merge (Update Vocab)", total = old_to_new.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
 	#[cfg(rustrover)]
 	let it = old_to_new.iter();
 	for (old, new_rep) in it {
@@ -622,7 +622,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     // Count frequencies directly to avoid slow HashMap<LLMTokenBV, ...>
     let mut freq: Vec<usize> = vec![0; max_tok + 1];
     #[cfg(not(rustrover))]
-    let it = tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Count Frequencies)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false);
+    let it = tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Count Frequencies)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
     #[cfg(rustrover)]
     let it = all_nodes.iter();
     for n in it {
@@ -670,7 +670,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     // Apply mapping to trie
     let mut new_states = Vec::with_capacity(all_nodes.len());
     #[cfg(not(rustrover))]
-    let it = tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Remap Read)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false);
+    let it = tqdm!(all_nodes.iter(), desc = "Trie1 Reorder (Remap Read)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
     #[cfg(rustrover)]
     let it = all_nodes.iter();
     for n in it {
@@ -700,7 +700,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
         new_states.push((new_live_tokens, new_children));
     }
     #[cfg(not(rustrover))]
-    let it = tqdm!(all_nodes.iter().enumerate(), desc = "Trie1 Reorder (Remap Write)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false);
+    let it = tqdm!(all_nodes.iter().enumerate(), desc = "Trie1 Reorder (Remap Write)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
     #[cfg(rustrover)]
     let it = all_nodes.iter().enumerate();
     for (i, n) in it {
@@ -714,7 +714,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
 	// Update stage vocab (pure permutation)
 	let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
 	#[cfg(not(rustrover))]
-	let it = tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie1 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = false);
+	let it = tqdm!(stage_vocab.internal_to_original.clone().into_iter(), desc = "Trie1 Reorder (Vocab 1)", disable = !PROGRESS_BAR_ENABLED, leave = true);
 	#[cfg(rustrover)]
 	let it = stage_vocab.internal_to_original.clone().into_iter();
 	for (old_id, setv) in it {
@@ -725,7 +725,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     stage_vocab.internal_to_original = new_internal_to_original;
     let mut new_original_to_internal: BTreeMap<usize, usize> = BTreeMap::new();
     #[cfg(not(rustrover))]
-    let it = tqdm!(stage_vocab.original_to_internal.clone().into_iter(), desc = "Trie1 Reorder (Vocab 2)", disable = !PROGRESS_BAR_ENABLED, leave = false);
+    let it = tqdm!(stage_vocab.original_to_internal.clone().into_iter(), desc = "Trie1 Reorder (Vocab 2)", disable = !PROGRESS_BAR_ENABLED, leave = true);
     #[cfg(rustrover)]
     let it = stage_vocab.original_to_internal.clone().into_iter();
     for (orig, old_internal) in it {
