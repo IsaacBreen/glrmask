@@ -6,10 +6,12 @@
       <sourceFolder url="file://$MODULE_DIR$/python/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/json_convertible_derive/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/python/leveled_rs/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/python/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/json_convertible_derive/target" />
       <excludeFolder url="file://$MODULE_DIR$/llm_logs" />
+      <excludeFolder url="file://$MODULE_DIR$/python/leveled_rs/target" />
     </content>
     <orderEntry type="jdk" jdkName="py312" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
