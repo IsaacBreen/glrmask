@@ -1293,7 +1293,7 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> LeveledGSS<
             memo: &mut StdHashMap<(usize, Option<isize>), Arc<Lower<T>>>,
         ) -> Arc<Lower<T>>
         where
-            T: Clone + Eq + Hash,
+            T: Clone + Eq + Hash + std::cmp::Ord,
             A: Merge + Clone + Eq + Hash,
         {
             if let Some(r) = remain {
@@ -1354,8 +1354,8 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> LeveledGSS<
             memo_lower: &mut StdHashMap<(usize, Option<isize>), Arc<Lower<T>>>,
         ) -> Arc<Upper<T, A>>
         where
-            T: Clone + Eq + Hash,
-            A: Merge + Clone + Eq + Hash,
+            T: Clone + Eq + Hash + std::cmp::Ord,
+            A: Merge + Clone + Eq + Hash + std::cmp::Ord,
         {
             if let Some(r) = remain {
                 if r == 0 {
