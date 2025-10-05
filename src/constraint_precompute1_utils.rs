@@ -20,309 +20,364 @@ use crate::tokenizer::TokenizerStateID;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::ordered_hash_map::Retain;
 
-#[derive(PartialEq, Eq, Clone, Debug)]
-struct MergeKey {
-    end: bool,
-    children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>>,
-}
-
-impl Hash for MergeKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.end.hash(state);
-        for (ek, dm) in &self.children {
-            ek.hash(state);
-            for (dst, bv) in dm {
-                dst.hash(state);
-                bv.hash(state);
-            }
-        }
-    }
-}
-
-fn aggressive_deduplicate_recursive_trie1(
-    node_arc: PrecomputeNode1Index,
-    canonical_nodes: &mut HashMap<MergeKey, PrecomputeNode1Index>,
-    visited: &mut HashMap<PrecomputeNode1Index, PrecomputeNode1Index>,
+fn constrain_bitvecs_trie1(
     trie1_god: &Trie1GodWrapper,
-) -> PrecomputeNode1Index {
-    if let Some(canonical_arc) = visited.get(&node_arc) {
-        return canonical_arc.clone();
-    }
-
-    // Recurse on children first to canonicalize them.
-    let (is_end, children_snapshot) = {
-        let g = node_arc.read(trie1_god).unwrap();
-        (g.value.end, g.children().clone())
-    };
-
-    let mut new_children_map = BTreeMap::new();
-    let mut children_changed = false;
-    for (edge_key, entries) in children_snapshot {
-        let mut new_dest_map = OrderedHashMap::new();
-        for (child_arc, edge_val) in entries {
-            let canonical_child_arc = aggressive_deduplicate_recursive_trie1(
-                child_arc,
-                canonical_nodes,
-                visited,
-                trie1_god,
-            );
-            if child_arc != canonical_child_arc {
-                children_changed = true;
-            }
-            // Coalesce if the same canonical child appears multiple times for one edge key
-            new_dest_map.entry(canonical_child_arc)
-                .and_modify(|ev: &mut LLMTokenBV| *ev |= &edge_val)
-                .or_insert(edge_val);
-        }
-        if !new_dest_map.is_empty() {
-            new_children_map.insert(edge_key, new_dest_map);
-        }
-    }
-
-    let key = MergeKey {
-        end: is_end,
-        children: new_children_map.clone(),
-    };
-
-    if let Some(canonical_arc) = canonical_nodes.get(&key) {
-        // Found a canonical node. Merge self into it.
-        let live_tokens_to_merge = {
-            // No need to re-read if children haven't changed, but this is safer
-            let g = node_arc.read(trie1_god).unwrap();
-            g.value.live_tokens.clone()
-        };
-        if !live_tokens_to_merge.is_empty() {
-            let mut canonical_g = canonical_arc.write(trie1_god).unwrap();
-            canonical_g.value.live_tokens |= &live_tokens_to_merge;
-        }
-        visited.insert(node_arc, canonical_arc.clone());
-        canonical_arc.clone()
-    } else {
-        // This node becomes the canonical representative for this key.
-        if children_changed {
-            let mut g = node_arc.write(trie1_god).unwrap();
-            *g.children_mut() = new_children_map;
-        }
-        
-        // We might not need to re-read here if we are careful. But let's be safe.
-        // The key was built with canonicalized children. If we updated the node, its children are now canonical.
-        // So the key is correct.
-        canonical_nodes.insert(key, node_arc.clone());
-        visited.insert(node_arc, node_arc.clone());
-        node_arc.clone()
-    }
-}
-
-fn aggressive_merge_nodes_trie1(
-    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-    trie1_god: &Trie1GodWrapper,
+    roots: &[PrecomputeNode1Index],
+    max_llm_token_id: usize,
 ) {
-    crate::debug!(2, "Aggressively merging identical subtrees in Trie1.");
-    let mut canonical_nodes: HashMap<MergeKey, PrecomputeNode1Index> = HashMap::new();
-    let mut visited: HashMap<PrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
-
-    let mut new_roots = BTreeMap::new();
-    for (sid, root_arc) in roots.iter() {
-        let canonical_root = aggressive_deduplicate_recursive_trie1(
-            root_arc.clone(),
-            &mut canonical_nodes,
-            &mut visited,
-            trie1_god,
-        );
-        new_roots.insert(*sid, canonical_root);
-    }
-    *roots = new_roots;
-    crate::debug!(2, "Finished aggressively merging subtrees in Trie1. Canonical nodes: {}", canonical_nodes.len());
-}
-
-/// Returns true iff two nodes are structurally equal for our purposes:
-/// - end flags must match
-/// - keyed edges (Some(t)) must match by:
-///     for each t: same multiset of (canonical_child_index, LLMTokenBV)
-/// - None edges are treated just like keyed edges if present (though usually flattened).
-/// - live_tokens are ignored (they are derived).
-fn nodes_equivalent_ignoring_live_tokens_using_canonical_children(
-    a: PrecomputeNode1Index,
-    b: PrecomputeNode1Index,
-    trie1_god: &Trie1GodWrapper,
-    canonical_child: &HashMap<PrecomputeNode1Index, PrecomputeNode1Index>,
-) -> bool {
-    let ag = a.read(trie1_god).expect("read");
-    let bg = b.read(trie1_god).expect("read");
-    if ag.value.end != bg.value.end {
-        return false;
-    }
-
-    if ag.children().len() != bg.children().len() {
-        return false;
-    }
-
-    for (ek, a_dm) in ag.children() {
-        let b_dm = match bg.children().get(ek) {
-            Some(x) => x,
-            None => return false,
-        };
-        if a_dm.len() != b_dm.len() {
-            return false;
-        }
-
-        // Compare as bags of (canonical_child, bv)
-        let mut a_vec: Vec<(usize, &LLMTokenBV)> = a_dm.iter().map(|(dst, bv)| {
-            let d = *canonical_child.get(dst).unwrap_or(dst);
-            (usize::from(d.as_index()), bv)
-        }).collect();
-        let mut b_vec: Vec<(usize, &LLMTokenBV)> = b_dm.iter().map(|(dst, bv)| {
-            let d = *canonical_child.get(dst).unwrap_or(dst);
-            (usize::from(d.as_index()), bv)
-        }).collect();
-
-        // Sort by (dst, bv_hash)
-        let mut hash_bv = |bv: &LLMTokenBV| {
-            let mut h = DeterministicHasher::new(DefaultHasher::new());
-            bv.hash(&mut h);
-            h.finish()
-        };
-        a_vec.sort_unstable_by_key(|(d, bv)| (*d, hash_bv(bv)));
-        b_vec.sort_unstable_by_key(|(d, bv)| (*d, hash_bv(bv)));
-
-        for ((da, bva), (db, bvb)) in a_vec.iter().zip(b_vec.iter()) {
-            if da != db { return false; }
-            if *bva != *bvb { return false; }
-        }
-    }
-    true
-}
-
-/// Bottom-up signature-based minimization for Trie1.
-/// 1) Computes canonical representatives based on a structural digest:
-///    - includes end flag
-///    - for each edge key, the multiset of (canonical_child_index, LLMTokenBV)
-///    - ignores live_tokens (derived)
-/// 2) Rewrites all edges to canonical children and coalesces duplicates (unioning masks).
-/// 3) Remaps roots, GC unreachable, recomputes depths.
-fn minimize_by_signature_trie1(
-    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-    trie1_god: &Trie1GodWrapper,
-) {
-    crate::debug!(2, "Minimizing Trie1 by structural signature...");
-    if roots.is_empty() { return; }
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    Trie::recompute_all_max_depths(trie1_god, &roots_vec);
-
-    let mut all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-    // Process children before parents: leaves have depth 0
-    all_nodes.sort_by_key(|idx| idx.read(trie1_god).expect("read").max_depth);
-
-    // Map: node -> canonical node
-    let mut canonical: HashMap<PrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
-    // Group by digest for candidate equal nodes
-    let mut buckets: HashMap<u64, Vec<PrecomputeNode1Index>> = HashMap::new();
-
-    // Produce a stable digest that depends on:
-    //  - end flag
-    //  - per edge-key (sorted): key id, count, and for each child: (canonical_id, bv hash)
-    let digest_for = |node: PrecomputeNode1Index, canonical: &HashMap<PrecomputeNode1Index, PrecomputeNode1Index>| -> u64 {
-        let g = node.read(trie1_god).expect("read");
-        let mut hasher = DeterministicHasher::new(DefaultHasher::new());
-        // end flag
-        g.value.end.hash(&mut hasher);
-        // keyed edges
-        g.children().len().hash(&mut hasher);
-        for (ek, dm) in g.children() {
-            ek.hash(&mut hasher);
-            dm.len().hash(&mut hasher);
-            // materialize as (canonical child, bv)
-            let mut entries: Vec<(usize, u64)> = Vec::with_capacity(dm.len());
-            for (dst, bv) in dm {
-                let d = *canonical.get(dst).unwrap_or(dst);
-                let mut hbv = DeterministicHasher::new(DefaultHasher::new());
-                bv.hash(&mut hbv);
-                entries.push((usize::from(d.as_index()), hbv.finish()));
-            }
-            entries.sort_unstable();
-            for (cd, hbv) in entries {
-                cd.hash(&mut hasher);
-                hbv.hash(&mut hasher);
-            }
-        }
-        hasher.finish()
-    };
-
-    // Bottom-up: compute canonical id per node
-    for n in &all_nodes {
-        let d = digest_for(*n, &canonical);
-        let entry = buckets.entry(d).or_default();
-        let mut rep: Option<PrecomputeNode1Index> = None;
-        for &candidate in entry.iter() {
-            if nodes_equivalent_ignoring_live_tokens_using_canonical_children(
-                *n,
-                candidate,
-                trie1_god,
-                &canonical,
-            ) {
-                rep = Some(candidate);
-                break;
-            }
-        }
-        match rep {
-            Some(r) => {
-                canonical.insert(*n, r);
-            }
-            None => {
-                entry.push(*n);
-                canonical.insert(*n, *n);
-            }
-        }
-    }
-
-    // Rewrite edges to canonical children and coalesce duplicates
-    #[cfg(not(rustrover))]
-    let it = tqdm!(all_nodes.iter(), desc = "Trie1 Signature Minimize (Rewrite)", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = true);
-    #[cfg(rustrover)]
-    let it = all_nodes.iter();
-    for n in it {
-        let children_snapshot: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = {
-            let r = n.read(trie1_god).expect("read");
-            r.children().clone()
-        };
+    crate::debug!(3, "Trie1: constraining LLM token bitvectors and removing empty edges...");
+    let all_nodes = Trie::all_nodes(trie1_god, roots);
+    for n in all_nodes {
+        let mut w = n.write(trie1_god).expect("write");
+        let old_children = std::mem::take(w.children_mut());
         let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
-        for (ek, dm) in children_snapshot {
-            let dest_map = new_children.entry(ek).or_default();
-            for (dst, bv) in dm {
-                let cdst = *canonical.get(&dst).unwrap_or(&dst);
-                dest_map.entry(cdst)
-                    .and_modify(|e| *e |= &bv)
-                    .or_insert(bv.clone());
-            }
-        }
-        // Write back + recompute live_tokens
-        {
-            let mut w = n.write(trie1_god).expect("write");
-            *w.children_mut() = new_children;
-            let mut lt = LLMTokenBV::zeros();
-            for dm in w.children().values() {
-                for bv in dm.values() {
-                    lt |= bv;
+        for (ek, dest_map) in old_children {
+            let mut new_dest_map = OrderedHashMap::new();
+            for (dst, mut bv) in dest_map {
+                bv.constrain(max_llm_token_id);
+                if !bv.is_empty() {
+                    new_dest_map.insert(dst, bv);
                 }
             }
-            w.value.live_tokens = lt;
+            if !new_dest_map.is_empty() {
+                new_children.insert(ek, new_dest_map);
+            }
+        }
+        *w.children_mut() = new_children;
+    }
+}
+
+// Flatten None-key (epsilon-like) chains when safe:
+// U --(None, B1)--> V, and V is non-end with exactly one outgoing edge (None, B2) -> W (and no other edges)
+// becomes U --(None, B1 ∩ B2)--> W
+// This is exact because None edges do not perform grammar steps (in get_mask1),
+// and we do not bypass any 'end' union points (we forbid compressing through end nodes).
+fn shortcut_none_chains_trie1(
+    trie1_god: &Trie1GodWrapper,
+    roots: &[PrecomputeNode1Index],
+) {
+    crate::debug!(3, "Trie1: shortcutting (flattening) None-key chains where safe...");
+    let nodes = Trie::all_nodes(trie1_god, roots);
+    if nodes.is_empty() { return; }
+
+    type DestList = Vec<(PrecomputeNode1Index, LLMTokenBV)>;
+    type EdgeList = Vec<(Option<GrammarTokenID>, DestList)>;
+
+    // Build summary snapshot
+    let mut summary: HashMap<PrecomputeNode1Index, (bool, EdgeList)> = HashMap::new();
+    for u in &nodes {
+        let g = u.read(trie1_god).expect("read");
+        let edges: EdgeList = g.children()
+            .iter()
+            .map(|(ek, dm)| {
+                let dests = dm.iter().map(|(d, bv)| (*d, bv.clone())).collect::<DestList>();
+                (*ek, dests)
+            })
+            .collect();
+        summary.insert(*u, (g.value.end, edges));
+    }
+
+    #[derive(Clone)]
+    struct ChainRes {
+        last: PrecomputeNode1Index,
+        llm: LLMTokenBV,
+    }
+
+    // Follow a chain of (None, B) with single outgoing None edge and non-end middle nodes.
+    fn follow_none_chain(
+        v: PrecomputeNode1Index,
+        trie1_god: &Trie1GodWrapper,
+        summary: &HashMap<PrecomputeNode1Index, (bool, EdgeList)>,
+        memo: &mut HashMap<PrecomputeNode1Index, Option<ChainRes>>,
+    ) -> Option<ChainRes> {
+        if let Some(cached) = memo.get(&v) {
+            return cached.clone();
+        }
+        let (is_end, edges) = match summary.get(&v) {
+            Some(x) => x,
+            None => {
+                memo.insert(v, None);
+                return None;
+            }
+        };
+        if *is_end { memo.insert(v, None); return None; }
+
+        // Count only None edges
+        let mut none_edges = edges.iter().filter(|(k, _)| k.is_none());
+        let next = match none_edges.next() {
+            Some(x) => x,
+            None => {
+                memo.insert(v, None);
+                return None;
+            }
+        };
+        // Must be the only outgoing edge and have exactly one destination.
+        if edges.len() != 1 || next.1.len() != 1 {
+            memo.insert(v, None);
+            return None;
+        }
+        let (dst, bv2) = &next.1[0];
+
+        let res = if let Some(tail) = follow_none_chain(*dst, trie1_god, summary, memo) {
+            Some(ChainRes { last: tail.last, llm: bv2 & &tail.llm })
+        } else {
+            Some(ChainRes { last: *dst, llm: bv2.clone() })
+        };
+        memo.insert(v, res.clone());
+        res
+    }
+
+    let mut memo: HashMap<PrecomputeNode1Index, Option<ChainRes>> = HashMap::new();
+
+    for u in &nodes {
+        // Snapshot current None edges for this node
+        let none_edges_snapshot: Vec<(PrecomputeNode1Index, LLMTokenBV)> = {
+            let g = u.read(trie1_god).expect("read");
+            match g.children().get(&None) {
+                Some(dm) => dm.iter().map(|(d, bv)| (*d, bv.clone())).collect(),
+                None => Vec::new(),
+            }
+        };
+        if none_edges_snapshot.is_empty() { continue; }
+
+        let mut w = u.write(trie1_god).expect("write");
+        for (v, b1) in none_edges_snapshot {
+            if let Some(chain) = follow_none_chain(v, trie1_god, &summary, &mut memo) {
+                // Remove U --(None)--> V
+                if let Some(dm) = w.children_mut().get_mut(&None) {
+                    dm.remove(&v);
+                }
+                // Add U --(None)--> chain.last with intersected BV
+                let new_bv = b1 & &chain.llm;
+                if !new_bv.is_empty() {
+                    w.children_mut()
+                        .entry(None)
+                        .or_default()
+                        .entry(chain.last)
+                        .and_modify(|e| *e |= &new_bv)
+                        .or_insert(new_bv);
+                }
+            }
+        }
+    }
+}
+
+// Backward liveness pruning for Trie1:
+// - Seed end nodes with ALL internal tokens (conservative upper bound).
+// - Propagate back along edges with intersection & edge BV.
+// - Remove edges with empty propagated BVs; set node.value.live_tokens to the liveness result.
+fn prune_dead_paths_trie1(
+    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+    trie1_god: &Trie1GodWrapper,
+    max_llm_token_id: usize,
+) {
+    crate::debug!(3, "Trie1: pruning dead paths (conservative, token-only)...");
+    let all_nodes = Trie::all_nodes(trie1_god, &roots.values().cloned().collect::<Vec<_>>());
+    if all_nodes.is_empty() { return; }
+
+    let all_tokens = LLMTokenBV::ones(max_llm_token_id + 1);
+    let mut live: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
+    let mut preds: HashMap<PrecomputeNode1Index, Vec<(PrecomputeNode1Index, Option<GrammarTokenID>, LLMTokenBV)>> = HashMap::new();
+    let mut worklist: VecDeque<PrecomputeNode1Index> = VecDeque::new();
+
+    // Initialize live sets and predecessors
+    for u in &all_nodes {
+        live.insert(*u, LLMTokenBV::zeros());
+        let g = u.read(trie1_god).expect("read");
+        if g.value.end {
+            live.insert(*u, all_tokens.clone()); // conservative seed
+            worklist.push_back(*u);
+        }
+        for (ek, dm) in g.children() {
+            for (v, bv) in dm {
+                preds.entry(*v).or_default().push((*u, *ek, bv.clone()));
+            }
         }
     }
 
-    // Remap roots to canonical
-    let mut new_roots = BTreeMap::new();
-    for (sid, root) in roots.iter() {
-        let c = *canonical.get(root).unwrap_or(root);
-        new_roots.insert(*sid, c);
+    // Backward propagation
+    while let Some(v) = worklist.pop_front() {
+        let live_v = live.get(&v).unwrap().clone();
+        if let Some(in_edges) = preds.get(&v) {
+            for (u, _ek, edge_bv) in in_edges {
+                let add = &live_v & edge_bv;
+                if add.is_empty() { continue; }
+                let entry = live.get_mut(u).unwrap();
+                let before = entry.len();
+                *entry |= &add;
+                if entry.len() > before {
+                    worklist.push_back(*u);
+                }
+            }
+        }
     }
-    *roots = new_roots;
 
-    // Cleanup
+    // Prune edges based on liveness intersections and write node live_tokens
+    for u in &all_nodes {
+        let mut w = u.write(trie1_god).expect("write");
+        let old_children = std::mem::take(w.children_mut());
+        let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
+        for (ek, dm) in old_children {
+            let mut new_dm = OrderedHashMap::new();
+            for (v, edge_bv) in dm {
+                let live_v = live.get(&v).unwrap();
+                let pass = &edge_bv & live_v;
+                if !pass.is_empty() {
+                    new_dm.insert(v, pass);
+                }
+            }
+            if !new_dm.is_empty() {
+                new_children.insert(ek, new_dm);
+            }
+        }
+        *w.children_mut() = new_children;
+        // Update node live tokens for diagnostics/consumers
+        if let Some(l) = live.get(u) {
+            w.value.live_tokens = l.clone();
+        }
+    }
+}
+
+// Exact signature-based DAG minimization for Trie1:
+// Two nodes are equivalent iff:
+//   - their end flags match
+//   - for each edge key and destination class, the aggregated LLMTokenBV is identical
+// We reconstruct representative nodes and redirect all references to them.
+fn merge_nodes_trie1(
+    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+    trie1_god: &Trie1GodWrapper,
+) {
+    crate::debug!(3, "Trie1: merging identical subgraphs by signature (partition refinement)...");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
+    if all_nodes.is_empty() { return; }
+
+    // Dense indexing
+    let mut dense_of: HashMap<PrecomputeNode1Index, usize> = HashMap::new();
+    let mut old_of: Vec<PrecomputeNode1Index> = Vec::with_capacity(all_nodes.len());
+    for (i, idx) in all_nodes.iter().enumerate() {
+        dense_of.insert(*idx, i);
+        old_of.push(*idx);
+    }
+    let n = old_of.len();
+
+    let mut ends: Vec<bool> = vec![false; n];
+    type RawEdge1 = (Option<GrammarTokenID>, LLMTokenBV, usize);
+    let mut raw_edges: Vec<Vec<RawEdge1>> = vec![Vec::new(); n];
+
+    for (u_dense, u_idx) in old_of.iter().enumerate() {
+        let g = u_idx.read(trie1_god).expect("read");
+        ends[u_dense] = g.value.end;
+        for (ek, dm) in g.children() {
+            for (v_idx, bv) in dm {
+                if let Some(&v_dense) = dense_of.get(v_idx) {
+                    raw_edges[u_dense].push((*ek, bv.clone(), v_dense));
+                }
+            }
+        }
+    }
+
+    // Initial partition by end flag
+    let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
+
+    const MAX_ITERS: usize = 40;
+    for _it in 0..MAX_ITERS {
+        // Signature: (end_flag, Vec<((edge_key, dest_class), llm_bv_union)>)
+        type SigEdgeKey = (Option<GrammarTokenID>, usize);
+        type Signature1 = (bool, Vec<(SigEdgeKey, LLMTokenBV)>);
+
+        let mut sig_to_id: HashMap<Signature1, usize> = HashMap::new();
+        let mut new_class = vec![0; n];
+        let mut next_id = 0;
+        let mut changes = 0;
+
+        for u in 0..n {
+            let mut aggr: BTreeMap<SigEdgeKey, LLMTokenBV> = BTreeMap::new();
+            for (ek, llm_bv, v_dense) in &raw_edges[u] {
+                let dest_class = prev_class[*v_dense];
+                let key = (*ek, dest_class);
+                aggr.entry(key)
+                    .and_modify(|e| *e |= llm_bv)
+                    .or_insert_with(|| llm_bv.clone());
+            }
+            let agg_vec: Vec<(SigEdgeKey, LLMTokenBV)> = aggr.into_iter().collect();
+            let sig: Signature1 = (ends[u], agg_vec);
+
+            let cid = *sig_to_id.entry(sig).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id
+            });
+            new_class[u] = cid;
+            if new_class[u] != prev_class[u] {
+                changes += 1;
+            }
+        }
+
+        prev_class = new_class;
+        if changes == 0 { break; }
+    }
+
+    // Representatives per class
+    let num_classes = prev_class.iter().max().map_or(0, |m| m + 1);
+    let mut rep_of_class: Vec<Option<PrecomputeNode1Index>> = vec![None; num_classes];
+    for (u_dense, &cid) in prev_class.iter().enumerate() {
+        if rep_of_class[cid].is_none() {
+            rep_of_class[cid] = Some(old_of[u_dense]);
+        }
+    }
+
+    let mut node_to_rep: HashMap<PrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
+    for (u_dense, &cid) in prev_class.iter().enumerate() {
+        node_to_rep.insert(old_of[u_dense], rep_of_class[cid].unwrap());
+    }
+
+    // Rebuild edges of representatives from aggregated signatures
+    for cid in 0..num_classes {
+        if let Some(rep_idx) = rep_of_class[cid] {
+            let sample_dense = prev_class.iter().position(|&c| c == cid).unwrap();
+            // Aggregate edges by (edge_key, dest_class)
+            let mut aggr: BTreeMap<(Option<GrammarTokenID>, usize), LLMTokenBV> = BTreeMap::new();
+            for (ek, llm_bv, v_dense) in &raw_edges[sample_dense] {
+                let dst_c = prev_class[*v_dense];
+                aggr.entry((*ek, dst_c))
+                    .and_modify(|e| *e |= llm_bv)
+                    .or_insert(llm_bv.clone());
+            }
+
+            let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
+            for ((ek, dest_class), llm_bv) in aggr {
+                if llm_bv.is_empty() { continue; }
+                let dest_rep = rep_of_class[dest_class].unwrap();
+                new_children.entry(ek)
+                    .or_default()
+                    .entry(dest_rep)
+                    .and_modify(|e| *e |= &llm_bv)
+                    .or_insert(llm_bv);
+            }
+
+            let mut w = rep_idx.write(trie1_god).expect("write");
+            *w.children_mut() = new_children;
+            // Optionally, set live_tokens to union of outgoing BVs for diagnostics.
+            let mut union_bv = LLMTokenBV::zeros();
+            for (_ek, dm) in w.children().iter() {
+                for (_dst, bv) in dm.iter() {
+                    union_bv |= bv;
+                }
+            }
+            w.value.live_tokens |= &union_bv;
+        }
+    }
+
+    // Redirect roots to representatives
+    for r in roots.values_mut() {
+        if let Some(rep) = node_to_rep.get(r) {
+            *r = *rep;
+        }
+    }
+
     let roots_vec2: Vec<_> = roots.values().cloned().collect();
     Trie::recompute_all_max_depths(trie1_god, &roots_vec2);
-    Trie::gc(trie1_god, &roots_vec2);
-    Trie::recompute_all_max_depths(trie1_god, &roots_vec2);
-    crate::debug!(2, "Done minimizing Trie1 by structural signature.");
 }
 
 pub fn optimize_trie1_size(
@@ -344,51 +399,30 @@ pub fn optimize_trie1_size(
     crate::constraint_extra::calculate_final_stats1(precomputed1, &mut stats, trie1_god);
     crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
 
-    // Pre-simplifications of None edges.
-    simplify_none_edges_to_former_end_nodes_trie1(
-        precomputed1,
-        trie1_god,
-        trie0_god,
-        node0_to_node1_map,
-    );
+    // === Pass 1: Initial Simplification and Pruning ===
+    simplify_none_edges_to_former_end_nodes_trie1(precomputed1, trie1_god, trie0_god, node0_to_node1_map);
     replace_ignore_token_edges_with_none_edges_trie1(precomputed1, trie1_god, ignore_terminal_id);
-    simplify_none_edges_trie1(precomputed1, trie1_god);
     if config.optimize_trie1_early_flatten_epsilon {
-        // Flatten epsilon early to reduce structural variation before pruning/merging.
         flatten_all_none_edges_trie1(precomputed1, trie1_god);
-        Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+    } else {
+        shortcut_none_chains_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
     }
-
-    prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+    constrain_bitvecs_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>(), internal_max_llm_token);
     prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
-    prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
-    // New: prune nodes that cannot reach any end node (exact, aggressive).
     prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-
-    Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
-    factor_common_destinations_trie1(precomputed1, trie1_god);
-    aggressive_merge_nodes_trie1(precomputed1, trie1_god);
-    if config.optimize_trie1_minimize_by_signature {
-        minimize_by_signature_trie1(precomputed1, trie1_god);
-    }
-
-    // Aggressively remove all None edges via full epsilon-closure flattening.
-    // This collapses intermediate "factored" nodes and any other epsilon bridges,
-    // keeping correctness by intersecting masks along None chains and pushing
-    // only keyed edges up to the current node.
-    flatten_all_none_edges_trie1(precomputed1, trie1_god);
-
-    // Normalize/coalesce immediately, then recompute and aggressively merge again.
-    optimize_state_masks_and_edges_trie1(precomputed1, trie1_god);
-    Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
-    aggressive_merge_nodes_trie1(precomputed1, trie1_god);
-    if config.optimize_trie1_minimize_by_signature {
-        minimize_by_signature_trie1(precomputed1, trie1_god);
-    }
     prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
-    Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
-    Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
 
+    // === Pass 2: Minimization and further cleanup ===
+    if config.optimize_trie1_minimize_by_signature {
+        merge_nodes_trie1(precomputed1, trie1_god);
+    }
+    if !config.optimize_trie1_early_flatten_epsilon {
+        flatten_all_none_edges_trie1(precomputed1, trie1_god);
+    }
+    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+    prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+
+    // === Pass 3: Token-level optimizations ===
     if config.optimize_trie1_merge_equivalent_llm_tokens {
         merge_equivalent_llm_tokens_trie1(precomputed1, trie1_god, stage_vocab);
     }
@@ -396,25 +430,14 @@ pub fn optimize_trie1_size(
         reorder_llm_tokens_for_range_minimization_trie1(precomputed1, trie1_god, stage_vocab);
     }
 
-    // Aggressive, exact Trie1 optimizations (safe, structure-preserving):
-    // - constrain bitvectors and remove empty edges
-    // - optional: flatten epsilon-like (None) chains where safe
-    // - optional: merge equivalent subgraphs by signature (partition refinement)
-    // - liveness pruning and GC
-    constraint_precompute1_aggressive_utils::aggressive_optimize_trie1_size(precomputed1, &trie1_god, config, internal_max_llm_token);
-
-    // Rerun token optimizations at the end.
-    if config.optimize_trie1_merge_equivalent_llm_tokens {
-        merge_equivalent_llm_tokens_trie1(precomputed1, trie1_god, stage_vocab);
-    }
+    // === Pass 4: Final Minimization and GC ===
     if config.optimize_trie1_minimize_by_signature {
-        minimize_by_signature_trie1(precomputed1, trie1_god);
-        prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
-        // New: prune unproductive nodes again after latest merges/token remaps, then GC.
-        prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-        Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
-        Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+        merge_nodes_trie1(precomputed1, trie1_god);
     }
+    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+    prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+    Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+    Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
 
     crate::debug!(2, "Final Trie1 stats:");
     let mut stats = PrecomputeStats::default();
@@ -540,117 +563,6 @@ fn replace_ignore_token_edges_with_none_edges_trie1(
         }
     }
     crate::debug!(2, "Done replacing ignore token edges in Trie1.");
-}
-
-fn simplify_none_edges_trie1(
-    roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-    trie1_god: &Trie1GodWrapper,
-) {
-    crate::debug!(2, "Simplifying None edges in Trie1...");
-    let root_node_ptrs: HashSet<PrecomputeNode1Index> = roots.values().cloned().collect();
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-    let mut arc_by_ptr: HashMap<PrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
-    for n in &all_nodes {
-        arc_by_ptr.insert(*n, n.clone());
-    }
-
-    let mut incoming: HashMap<
-        PrecomputeNode1Index,
-        Vec<(PrecomputeNode1Index, Option<GrammarTokenID>, LLMTokenBV)>,
-    > = HashMap::new();
-    let mut none_edges_from: HashMap<
-        PrecomputeNode1Index,
-        Vec<(PrecomputeNode1Index, LLMTokenBV)>,
-    > = HashMap::new();
-    let mut none_union: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
-
-    for src_arc in &all_nodes {
-        let src_ptr = src_arc;
-        let guard = src_arc.read(trie1_god).expect("poison");
-        for (ek, dest_map) in guard.children().iter() {
-            for (child_wrap, ev_bv) in dest_map.iter() {
-                let child_arc = child_wrap.as_arc().clone();
-                let child_ptr = child_arc;
-                incoming.entry(child_ptr)
-                    .or_default()
-                    .push((src_arc.clone(), ek.clone(), ev_bv.clone()));
-            }
-        }
-        if let Some(dest_map) = guard.children().get(&None) {
-            let list = none_edges_from.entry(*src_ptr).or_default();
-            for (child_wrap, ev_bv) in dest_map.iter() {
-                list.push((child_wrap.as_arc().clone(), ev_bv.clone()));
-                let entry = none_union.entry(*src_ptr).or_insert_with(LLMTokenBV::zeros);
-                *entry |= ev_bv;
-            }
-        }
-    }
-
-    for (b_ptr, none_edges) in none_edges_from.into_iter() {
-        let union_mask = match none_union.get(&b_ptr) {
-            Some(bv) if !bv.is_empty() => bv.clone(),
-            _ => continue,
-        };
-        let in_edges = match incoming.get(&b_ptr) {
-            Some(v) if !v.is_empty() => v.clone(),
-            _ => {
-                if root_node_ptrs.contains(&b_ptr) {
-                    continue;
-                }
-                if let Some(b_arc) = arc_by_ptr.get(&b_ptr).cloned() {
-                    let mut b_guard = b_arc.write(trie1_god).expect("poison");
-                    b_guard.children_mut().remove(&None);
-                }
-                continue;
-            }
-        };
-
-        let b_arc = arc_by_ptr.get(&b_ptr).unwrap().clone();
-        let b_key = b_arc.clone();
-
-        for (a_arc, edge_key, bv1_original) in in_edges.into_iter() {
-            if edge_key.is_none() { continue; }
-
-            let mut total_to_move = bv1_original.clone();
-            total_to_move &= &union_mask;
-            if total_to_move.is_empty() {
-                continue;
-            }
-
-            let mut a_guard = a_arc.write(trie1_god).expect("poison");
-            let dest_map = a_guard.children_mut().entry(edge_key.clone()).or_default();
-
-            for (c_arc, bv2) in &none_edges {
-                let mut to_move_for_c = bv1_original.clone();
-                to_move_for_c &= bv2;
-                if to_move_for_c.is_empty() {
-                    continue;
-                }
-                let c_key = c_arc.clone();
-                if let Some(existing_ev) = dest_map.get_mut(&c_key) {
-                    *existing_ev |= &to_move_for_c;
-                } else {
-                    dest_map.insert(c_key, to_move_for_c);
-                }
-            }
-
-            let mut remove_b_edge = false;
-            if let Some(ev_ab) = dest_map.get_mut(&b_key) {
-                *ev_ab -= &total_to_move;
-                remove_b_edge = ev_ab.is_empty();
-            }
-            if remove_b_edge {
-                dest_map.remove(&b_key);
-            }
-        }
-
-        {
-            let mut b_guard = b_arc.write(trie1_god).expect("poison");
-            b_guard.children_mut().remove(&None);
-        }
-    }
-    crate::debug!(2, "Done simplifying None edges in Trie1.");
 }
 
 fn count_total_ranges_trie1(
@@ -1080,113 +992,6 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
     crate::debug!(2, "Trie1 reordering complete. Ranges reduced from {} to {}. New max internal token ID: {}", ranges_before, ranges_after, stage_vocab.internal_max_llm_token);
 }
 
-/// Conservative normalization pass for Trie1:
-/// - Coalesce duplicate destination entries (union LLMBV) for same child under a terminal key.
-/// - Remove empty masks.
-pub fn optimize_state_masks_and_edges_trie1(
-    roots: &BTreeMap<crate::tokenizer::TokenizerStateID, PrecomputeNode1Index>,
-    trie1_god: &Trie1GodWrapper,
-) {
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-    for n in &all_nodes {
-        let mut w = n.write(trie1_god).expect("write");
-        let mut new_children: BTreeMap<Option<crate::types::TerminalID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
-        for (ek, dm) in w.children().clone() {
-            // Union masks for same dst
-            let mut coalesced: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
-            for (dst, bv) in dm {
-                let entry = coalesced.entry(dst).or_insert_with(LLMTokenBV::zeros);
-                *entry |= &bv;
-            }
-            let mut new_dm: OrderedHashMap<PrecomputeNode1Index, LLMTokenBV> = OrderedHashMap::new();
-            for (dst, bv) in coalesced {
-                if !bv.is_empty() {
-                    new_dm.insert(dst, bv);
-                }
-            }
-            if !new_dm.is_empty() {
-                new_children.insert(ek, new_dm);
-            }
-        }
-        *w.children_mut() = new_children;
-    }
-}
-
-fn prune_dead_paths_trie1(
-    roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-    trie1_god: &Trie1GodWrapper,
-    internal_max_llm_token: usize,
-) {
-    crate::debug!(2, "Pruning dead paths from Trie1.");
-    let mut live_tokens_cache: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
-    let all_llm_tokens = HybridBitset::ones(internal_max_llm_token + 1);
-    for root_arc in roots.values() {
-        get_live_tokens_and_prune_trie1(root_arc.clone(), &mut live_tokens_cache, trie1_god, &all_llm_tokens);
-    }
-    crate::debug!(2, "Finished pruning dead paths from Trie1.");
-}
-
-fn get_live_tokens_and_prune_trie1(
-    node_wrapper: PrecomputeNode1Index,
-    live_tokens_cache: &mut HashMap<PrecomputeNode1Index, LLMTokenBV>,
-    trie1_god: &Trie1GodWrapper,
-    all_llm_tokens: &LLMTokenBV,
-) -> LLMTokenBV {
-    if let Some(cached_bv) = live_tokens_cache.get(&node_wrapper) {
-        return cached_bv.clone();
-    }
-    live_tokens_cache.insert(node_wrapper.clone(), LLMTokenBV::zeros());
-
-    let node_arc = node_wrapper.as_arc().clone();
-
-    let children_to_check: Vec<PrecomputeNode1Index> = {
-        let node_guard = node_arc.read(trie1_god).unwrap();
-        node_guard.children().values().flat_map(|dest_map| dest_map.keys().cloned()).collect()
-    };
-
-    for child_wrapper in children_to_check {
-        get_live_tokens_and_prune_trie1(child_wrapper, live_tokens_cache, trie1_god, all_llm_tokens);
-    }
-
-    let mut node_guard = node_arc.write(trie1_god).unwrap();
-
-    node_guard.children_mut().retain(|_edge_key, dest_map| {
-        dest_map.retain(|child_wrapper, edge_value_bv| {
-            let live_tokens_from_child = live_tokens_cache.get(child_wrapper)
-                .expect("Child not found in live_tokens_cache. Logic error.");
-            let live_tokens_for_this_edge = &*edge_value_bv & live_tokens_from_child;
-            if live_tokens_for_this_edge.is_empty() {
-                false
-            } else {
-                *edge_value_bv = live_tokens_for_this_edge;
-                true
-            }
-        });
-        !dest_map.is_empty()
-    });
-
-    let mut current_node_live_tokens = LLMTokenBV::zeros();
-    for dest_map in node_guard.children().values() {
-        for edge_bv in dest_map.values() {
-            current_node_live_tokens |= edge_bv;
-        }
-    }
-    node_guard.value.live_tokens = current_node_live_tokens.clone();
-
-    let is_end_node = node_guard.value.end;
-    drop(node_guard);
-
-    let returned_live_tokens = if is_end_node {
-        all_llm_tokens.clone()
-    } else {
-        current_node_live_tokens
-    };
-
-    live_tokens_cache.insert(node_wrapper, returned_live_tokens.clone());
-    returned_live_tokens
-}
-
 /// Remove edges to nodes that cannot reach any end node, then GC unreachable nodes.
 /// This is an exact pruning that preserves correctness: nodes that cannot reach an end
 /// can never contribute tokens to the final mask in get_mask1, so their edges are dead.
@@ -1364,78 +1169,6 @@ fn prune_on_no_terminal_follow_trie1(
     crate::debug!(2, "Finished pruning Trie1 based on terminal follow sets.");
 }
 
-fn factor_common_destinations_trie1(
-    roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-    trie1_god: &Trie1GodWrapper,
-) {
-    crate::debug!(2, "Factoring out common destinations in Trie1.");
-    const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
-
-    let roots_vec: Vec<_> = roots.values().cloned().collect();
-    let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-    let arc_map: HashMap<_, _> = all_nodes.iter().map(|n| (n, n.clone())).collect();
-
-    let mut incoming_map: HashMap<
-        PrecomputeNode1Index,
-        HashMap<
-            Option<GrammarTokenID>,
-            Vec<(PrecomputeNode1Index, LLMTokenBV)>,
-        >,
-    > = HashMap::new();
-
-    for src_arc in &all_nodes {
-        let src_ptr = src_arc;
-        let guard = src_arc.read(trie1_god).expect("poison");
-        for (edge_key, dest_map) in guard.children() {
-            if edge_key.is_some() {
-                for (dest_wrapper, bv) in dest_map {
-                    let dest_arc = dest_wrapper.as_arc();
-                    let dest_ptr = dest_arc;
-                    incoming_map.entry(*dest_ptr).or_default().entry(edge_key.clone()).or_default().push((*src_ptr, bv.clone()));
-                }
-            }
-        }
-    }
-
-    for (dest_ptr, edges_by_key) in incoming_map {
-        for (edge_key, sources) in edges_by_key {
-            if sources.len() >= MIN_INCOMING_EDGES_FOR_FACTORING {
-                let dest_arc = arc_map.get(&dest_ptr).unwrap().clone();
-                let intermediate_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
-
-                let mut union_bv = LLMTokenBV::zeros();
-                for (_, bv) in &sources {
-                    union_bv |= bv;
-                }
-
-                {
-                    let mut intermediate_guard = intermediate_node.write(trie1_god).expect("poison");
-                    let mut edge_val_opt = Some(union_bv.clone());
-                    intermediate_guard.try_insert_unchecked(edge_key.clone(), &mut edge_val_opt, dest_arc.clone());
-                    intermediate_guard.value.live_tokens |= &union_bv;
-                }
-
-                for (src_ptr, bv) in &sources {
-                    let src_arc = arc_map.get(src_ptr).unwrap();
-                    let mut src_guard = src_arc.write(trie1_god).expect("poison");
-
-                    if let Some(dest_map_for_key) = src_guard.children_mut().get_mut(&edge_key) {
-                        dest_map_for_key.remove(&dest_arc.clone());
-                        if dest_map_for_key.is_empty() {
-                            src_guard.children_mut().remove(&edge_key);
-                        }
-                    }
-
-                    let mut edge_val_opt = Some(bv.clone());
-                    src_guard.try_insert_unchecked(None, &mut edge_val_opt, intermediate_node.clone());
-                    src_guard.value.live_tokens |= bv;
-                }
-            }
-        }
-    }
-    crate::debug!(2, "Finished factoring common destinations in Trie1.");
-}
-
 /// Flattens None edges (epsilon-closure) by computing a per-node closure and rewriting
 /// outgoing edges. Keyed edges from None-children are composed (bv_intersection) and pushed
 /// up to the current node. Additionally, we preserve only those None edges that are required
@@ -1579,504 +1312,4 @@ fn flatten_all_none_edges_trie1(
     Trie::recompute_all_max_depths(trie1_god, &roots_vec2);
 
     crate::debug!(2, "Done flattening None edges in Trie1.");
-}
-
-fn merge_nodes_trie1(
-    roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-    trie1_god: &Trie1GodWrapper,
-) {
-    crate::debug!(2, "Merging identical subtrees in Trie1.");
-    let mut canonical_nodes: HashMap<PrecomputeNode1, PrecomputeNode1Index> = HashMap::new();
-    let mut visited: HashMap<PrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
-
-    let mut new_roots = BTreeMap::new();
-    for (sid, root_arc) in roots.iter() {
-        let canonical_root = deduplicate_recursive_trie1(root_arc.clone(), &mut canonical_nodes, &mut visited, trie1_god);
-        new_roots.insert(*sid, canonical_root);
-    }
-    *roots = new_roots;
-    crate::debug!(2, "Finished merging subtrees in Trie1. Canonical nodes: {}", canonical_nodes.len());
-}
-
-fn deduplicate_recursive_trie1(
-    node_arc: PrecomputeNode1Index,
-    canonical_nodes: &mut HashMap<PrecomputeNode1, PrecomputeNode1Index>,
-    visited: &mut HashMap<PrecomputeNode1Index, PrecomputeNode1Index>,
-    trie1_god: &Trie1GodWrapper,
-) -> PrecomputeNode1Index {
-    let node_ptr = node_arc;
-    if let Some(canonical_arc) = visited.get(&node_ptr) {
-        return canonical_arc.clone();
-    }
-
-    // Mark as visited early to break potential cycles.
-    visited.insert(node_ptr, node_arc.clone());
-
-    // Snapshot children under a short-lived read lock, then drop it before recursing.
-    let children_snapshot: Vec<(
-        Option<GrammarTokenID>,
-        Vec<(PrecomputeNode1Index, LLMTokenBV)>,
-    )> = {
-        let g = node_arc.read(trie1_god).unwrap();
-        g.children()
-            .iter()
-            .map(|(ek, dest_map)| {
-                let entries = dest_map
-                    .iter()
-                    .map(|(node_ptr, ev)| (node_ptr.clone(), ev.clone()))
-                    .collect::<Vec<_>>();
-                (ek.clone(), entries)
-            })
-            .collect()
-    };
-
-    // Rebuild children map with canonicalized children (no locks held on the current node).
-    let mut new_children_map = BTreeMap::new();
-    let mut children_changed = false;
-    for (edge_key, entries) in children_snapshot {
-        let mut new_dest_map = OrderedHashMap::new();
-        for (child_arc, edge_val) in entries {
-            let canonical_child_arc = deduplicate_recursive_trie1(
-                child_arc.clone(),
-                canonical_nodes,
-                visited,
-                trie1_god,
-            );
-            if child_arc != canonical_child_arc {
-                children_changed = true;
-            }
-            new_dest_map.insert(canonical_child_arc, edge_val);
-        }
-        if !new_dest_map.is_empty() {
-            new_children_map.insert(edge_key, new_dest_map);
-        }
-    }
-
-    // Write back updated children; avoid recompute_max_depth here to prevent lock re-entrancy.
-    if children_changed {
-        let mut g = node_arc.write(trie1_god).unwrap();
-        *g.children_mut() = new_children_map;
-        // Depths are recomputed globally after merging:
-        // Trie::recompute_all_max_depths(...) is invoked by the caller.
-    }
-
-    // Canonicalize the current node by content after potential child rewrites.
-    let canonical_arc = {
-        let g = node_arc.read(trie1_god).unwrap();
-        let node_content = (*g).clone();
-        canonical_nodes
-            .entry(node_content)
-            .or_insert_with(|| node_arc.clone())
-            .clone()
-    };
-
-    visited.insert(node_ptr, canonical_arc.clone());
-    canonical_arc
-}
-
-
-// Aggressive, exact optimizations for Trie 1 (precompute1).
-// These passes reduce nodes/edges substantially while preserving exact semantics.
-pub(crate) mod constraint_precompute1_aggressive_utils {
-    use super::*;
-    use ordered_hash_map::OrderedHashMap;
-
-    pub fn aggressive_optimize_trie1_size(
-        roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-        trie1_god: &Trie1GodWrapper,
-        config: &GrammarConstraintConfig,
-        max_llm_token_id: usize,
-    ) {
-        crate::debug!(2, "Aggressively optimizing Trie 1 (precompute1)...");
-        let roots_vec: Vec<_> = roots.values().cloned().collect();
-        if Trie::all_nodes(trie1_god, &roots_vec).is_empty() {
-            crate::debug!(2, "Trie 1 is empty; skipping aggressive passes.");
-            return;
-        }
-
-        // Step A: Constrain bitvectors and drop empty edges first.
-        constrain_bitvecs_trie1(trie1_god, &roots_vec, max_llm_token_id);
-
-        // Optional early flattening of epsilon-like (None-key) chains.
-        if config.optimize_trie1_early_flatten_epsilon {
-            shortcut_none_chains_trie1(trie1_god, &roots_vec);
-        }
-
-        // Conservative liveness pruning (from end nodes) to drop dead branches.
-        prune_dead_paths_trie1(roots, trie1_god, max_llm_token_id);
-
-        // Optional signature-based exact minimization of subgraphs.
-        if config.optimize_trie1_minimize_by_signature {
-            merge_nodes_trie1(roots, trie1_god);
-        }
-
-        // Another liveness prune to clean up after merging.
-        prune_dead_paths_trie1(roots, trie1_god, max_llm_token_id);
-
-        // GC and recompute depths.
-        let roots_vec2: Vec<_> = roots.values().cloned().collect();
-        Trie::gc(trie1_god, &roots_vec2);
-        Trie::recompute_all_max_depths(trie1_god, &roots_vec2);
-        crate::debug!(2, "Aggressive Trie 1 optimization complete.");
-    }
-
-    fn constrain_bitvecs_trie1(
-        trie1_god: &Trie1GodWrapper,
-        roots: &[PrecomputeNode1Index],
-        max_llm_token_id: usize,
-    ) {
-        crate::debug!(3, "Trie1: constraining LLM token bitvectors and removing empty edges...");
-        let all_nodes = Trie::all_nodes(trie1_god, roots);
-        for n in all_nodes {
-            let mut w = n.write(trie1_god).expect("write");
-            let old_children = std::mem::take(w.children_mut());
-            let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
-            for (ek, dest_map) in old_children {
-                let mut new_dest_map = OrderedHashMap::new();
-                for (dst, mut bv) in dest_map {
-                    bv.constrain(max_llm_token_id);
-                    if !bv.is_empty() {
-                        new_dest_map.insert(dst, bv);
-                    }
-                }
-                if !new_dest_map.is_empty() {
-                    new_children.insert(ek, new_dest_map);
-                }
-            }
-            *w.children_mut() = new_children;
-        }
-    }
-
-    // Flatten None-key (epsilon-like) chains when safe:
-    // U --(None, B1)--> V, and V is non-end with exactly one outgoing edge (None, B2) -> W (and no other edges)
-    // becomes U --(None, B1 ∩ B2)--> W
-    // This is exact because None edges do not perform grammar steps (in get_mask1),
-    // and we do not bypass any 'end' union points (we forbid compressing through end nodes).
-    fn shortcut_none_chains_trie1(
-        trie1_god: &Trie1GodWrapper,
-        roots: &[PrecomputeNode1Index],
-    ) {
-        crate::debug!(3, "Trie1: shortcutting (flattening) None-key chains where safe...");
-        let nodes = Trie::all_nodes(trie1_god, roots);
-        if nodes.is_empty() { return; }
-
-        type DestList = Vec<(PrecomputeNode1Index, LLMTokenBV)>;
-        type EdgeList = Vec<(Option<GrammarTokenID>, DestList)>;
-
-        // Build summary snapshot
-        let mut summary: HashMap<PrecomputeNode1Index, (bool, EdgeList)> = HashMap::new();
-        for u in &nodes {
-            let g = u.read(trie1_god).expect("read");
-            let edges: EdgeList = g.children()
-                .iter()
-                .map(|(ek, dm)| {
-                    let dests = dm.iter().map(|(d, bv)| (*d, bv.clone())).collect::<DestList>();
-                    (*ek, dests)
-                })
-                .collect();
-            summary.insert(*u, (g.value.end, edges));
-        }
-
-        #[derive(Clone)]
-        struct ChainRes {
-            last: PrecomputeNode1Index,
-            llm: LLMTokenBV,
-        }
-
-        // Follow a chain of (None, B) with single outgoing None edge and non-end middle nodes.
-        fn follow_none_chain(
-            v: PrecomputeNode1Index,
-            trie1_god: &Trie1GodWrapper,
-            summary: &HashMap<PrecomputeNode1Index, (bool, EdgeList)>,
-            memo: &mut HashMap<PrecomputeNode1Index, Option<ChainRes>>,
-        ) -> Option<ChainRes> {
-            if let Some(cached) = memo.get(&v) {
-                return cached.clone();
-            }
-            let (is_end, edges) = match summary.get(&v) {
-                Some(x) => x,
-                None => {
-                    memo.insert(v, None);
-                    return None;
-                }
-            };
-            if *is_end { memo.insert(v, None); return None; }
-
-            // Count only None edges
-            let mut none_edges = edges.iter().filter(|(k, _)| k.is_none());
-            let next = match none_edges.next() {
-                Some(x) => x,
-                None => {
-                    memo.insert(v, None);
-                    return None;
-                }
-            };
-            // Must be the only outgoing edge and have exactly one destination.
-            if edges.len() != 1 || next.1.len() != 1 {
-                memo.insert(v, None);
-                return None;
-            }
-            let (dst, bv2) = &next.1[0];
-
-            let res = if let Some(tail) = follow_none_chain(*dst, trie1_god, summary, memo) {
-                Some(ChainRes { last: tail.last, llm: bv2 & &tail.llm })
-            } else {
-                Some(ChainRes { last: *dst, llm: bv2.clone() })
-            };
-            memo.insert(v, res.clone());
-            res
-        }
-
-        let mut memo: HashMap<PrecomputeNode1Index, Option<ChainRes>> = HashMap::new();
-
-        for u in &nodes {
-            // Snapshot current None edges for this node
-            let none_edges_snapshot: Vec<(PrecomputeNode1Index, LLMTokenBV)> = {
-                let g = u.read(trie1_god).expect("read");
-                match g.children().get(&None) {
-                    Some(dm) => dm.iter().map(|(d, bv)| (*d, bv.clone())).collect(),
-                    None => Vec::new(),
-                }
-            };
-            if none_edges_snapshot.is_empty() { continue; }
-
-            let mut w = u.write(trie1_god).expect("write");
-            for (v, b1) in none_edges_snapshot {
-                if let Some(chain) = follow_none_chain(v, trie1_god, &summary, &mut memo) {
-                    // Remove U --(None)--> V
-                    if let Some(dm) = w.children_mut().get_mut(&None) {
-                        dm.remove(&v);
-                    }
-                    // Add U --(None)--> chain.last with intersected BV
-                    let new_bv = b1 & &chain.llm;
-                    if !new_bv.is_empty() {
-                        w.children_mut()
-                            .entry(None)
-                            .or_default()
-                            .entry(chain.last)
-                            .and_modify(|e| *e |= &new_bv)
-                            .or_insert(new_bv);
-                    }
-                }
-            }
-        }
-    }
-
-    // Backward liveness pruning for Trie1:
-    // - Seed end nodes with ALL internal tokens (conservative upper bound).
-    // - Propagate back along edges with intersection & edge BV.
-    // - Remove edges with empty propagated BVs; set node.value.live_tokens to the liveness result.
-    fn prune_dead_paths_trie1(
-        roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-        trie1_god: &Trie1GodWrapper,
-        max_llm_token_id: usize,
-    ) {
-        crate::debug!(3, "Trie1: pruning dead paths (conservative, token-only)...");
-        let all_nodes = Trie::all_nodes(trie1_god, &roots.values().cloned().collect::<Vec<_>>());
-        if all_nodes.is_empty() { return; }
-
-        let all_tokens = LLMTokenBV::ones(max_llm_token_id + 1);
-        let mut live: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
-        let mut preds: HashMap<PrecomputeNode1Index, Vec<(PrecomputeNode1Index, Option<GrammarTokenID>, LLMTokenBV)>> = HashMap::new();
-        let mut worklist: VecDeque<PrecomputeNode1Index> = VecDeque::new();
-
-        // Initialize live sets and predecessors
-        for u in &all_nodes {
-            live.insert(*u, LLMTokenBV::zeros());
-            let g = u.read(trie1_god).expect("read");
-            if g.value.end {
-                live.insert(*u, all_tokens.clone()); // conservative seed
-                worklist.push_back(*u);
-            }
-            for (ek, dm) in g.children() {
-                for (v, bv) in dm {
-                    preds.entry(*v).or_default().push((*u, *ek, bv.clone()));
-                }
-            }
-        }
-
-        // Backward propagation
-        while let Some(v) = worklist.pop_front() {
-            let live_v = live.get(&v).unwrap().clone();
-            if let Some(in_edges) = preds.get(&v) {
-                for (u, _ek, edge_bv) in in_edges {
-                    let add = &live_v & edge_bv;
-                    if add.is_empty() { continue; }
-                    let entry = live.get_mut(u).unwrap();
-                    let before = entry.len();
-                    *entry |= &add;
-                    if entry.len() > before {
-                        worklist.push_back(*u);
-                    }
-                }
-            }
-        }
-
-        // Prune edges based on liveness intersections and write node live_tokens
-        for u in &all_nodes {
-            let mut w = u.write(trie1_god).expect("write");
-            let old_children = std::mem::take(w.children_mut());
-            let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
-            for (ek, dm) in old_children {
-                let mut new_dm = OrderedHashMap::new();
-                for (v, edge_bv) in dm {
-                    let live_v = live.get(&v).unwrap();
-                    let pass = &edge_bv & live_v;
-                    if !pass.is_empty() {
-                        new_dm.insert(v, pass);
-                    }
-                }
-                if !new_dm.is_empty() {
-                    new_children.insert(ek, new_dm);
-                }
-            }
-            *w.children_mut() = new_children;
-            // Update node live tokens for diagnostics/consumers
-            if let Some(l) = live.get(u) {
-                w.value.live_tokens = l.clone();
-            }
-        }
-    }
-
-    // Exact signature-based DAG minimization for Trie1:
-    // Two nodes are equivalent iff:
-    //   - their end flags match
-    //   - for each edge key and destination class, the aggregated LLMTokenBV is identical
-    // We reconstruct representative nodes and redirect all references to them.
-    fn merge_nodes_trie1(
-        roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-        trie1_god: &Trie1GodWrapper,
-    ) {
-        crate::debug!(3, "Trie1: merging identical subgraphs by signature (partition refinement)...");
-        let roots_vec: Vec<_> = roots.values().cloned().collect();
-        let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
-        if all_nodes.is_empty() { return; }
-
-        // Dense indexing
-        let mut dense_of: HashMap<PrecomputeNode1Index, usize> = HashMap::new();
-        let mut old_of: Vec<PrecomputeNode1Index> = Vec::with_capacity(all_nodes.len());
-        for (i, idx) in all_nodes.iter().enumerate() {
-            dense_of.insert(*idx, i);
-            old_of.push(*idx);
-        }
-        let n = old_of.len();
-
-        let mut ends: Vec<bool> = vec![false; n];
-        type RawEdge1 = (Option<GrammarTokenID>, LLMTokenBV, usize);
-        let mut raw_edges: Vec<Vec<RawEdge1>> = vec![Vec::new(); n];
-
-        for (u_dense, u_idx) in old_of.iter().enumerate() {
-            let g = u_idx.read(trie1_god).expect("read");
-            ends[u_dense] = g.value.end;
-            for (ek, dm) in g.children() {
-                for (v_idx, bv) in dm {
-                    if let Some(&v_dense) = dense_of.get(v_idx) {
-                        raw_edges[u_dense].push((*ek, bv.clone(), v_dense));
-                    }
-                }
-            }
-        }
-
-        // Initial partition by end flag
-        let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
-
-        const MAX_ITERS: usize = 40;
-        for _it in 0..MAX_ITERS {
-            // Signature: (end_flag, Vec<((edge_key, dest_class), llm_bv_union)>)
-            type SigEdgeKey = (Option<GrammarTokenID>, usize);
-            type Signature1 = (bool, Vec<(SigEdgeKey, LLMTokenBV)>);
-
-            let mut sig_to_id: HashMap<Signature1, usize> = HashMap::new();
-            let mut new_class = vec![0; n];
-            let mut next_id = 0;
-            let mut changes = 0;
-
-            for u in 0..n {
-                let mut aggr: BTreeMap<SigEdgeKey, LLMTokenBV> = BTreeMap::new();
-                for (ek, llm_bv, v_dense) in &raw_edges[u] {
-                    let dest_class = prev_class[*v_dense];
-                    let key = (*ek, dest_class);
-                    aggr.entry(key)
-                        .and_modify(|e| *e |= llm_bv)
-                        .or_insert_with(|| llm_bv.clone());
-                }
-                let agg_vec: Vec<(SigEdgeKey, LLMTokenBV)> = aggr.into_iter().collect();
-                let sig: Signature1 = (ends[u], agg_vec);
-
-                let cid = *sig_to_id.entry(sig).or_insert_with(|| {
-                    let id = next_id;
-                    next_id += 1;
-                    id
-                });
-                new_class[u] = cid;
-                if new_class[u] != prev_class[u] {
-                    changes += 1;
-                }
-            }
-
-            prev_class = new_class;
-            if changes == 0 { break; }
-        }
-
-        // Representatives per class
-        let num_classes = prev_class.iter().max().map_or(0, |m| m + 1);
-        let mut rep_of_class: Vec<Option<PrecomputeNode1Index>> = vec![None; num_classes];
-        for (u_dense, &cid) in prev_class.iter().enumerate() {
-            if rep_of_class[cid].is_none() {
-                rep_of_class[cid] = Some(old_of[u_dense]);
-            }
-        }
-
-        let mut node_to_rep: HashMap<PrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
-        for (u_dense, &cid) in prev_class.iter().enumerate() {
-            node_to_rep.insert(old_of[u_dense], rep_of_class[cid].unwrap());
-        }
-
-        // Rebuild edges of representatives from aggregated signatures
-        for cid in 0..num_classes {
-            if let Some(rep_idx) = rep_of_class[cid] {
-                let sample_dense = prev_class.iter().position(|&c| c == cid).unwrap();
-                // Aggregate edges by (edge_key, dest_class)
-                let mut aggr: BTreeMap<(Option<GrammarTokenID>, usize), LLMTokenBV> = BTreeMap::new();
-                for (ek, llm_bv, v_dense) in &raw_edges[sample_dense] {
-                    let dst_c = prev_class[*v_dense];
-                    aggr.entry((*ek, dst_c))
-                        .and_modify(|e| *e |= llm_bv)
-                        .or_insert(llm_bv.clone());
-                }
-
-                let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
-                for ((ek, dest_class), llm_bv) in aggr {
-                    if llm_bv.is_empty() { continue; }
-                    let dest_rep = rep_of_class[dest_class].unwrap();
-                    new_children.entry(ek)
-                        .or_default()
-                        .entry(dest_rep)
-                        .and_modify(|e| *e |= &llm_bv)
-                        .or_insert(llm_bv);
-                }
-
-                let mut w = rep_idx.write(trie1_god).expect("write");
-                *w.children_mut() = new_children;
-                // Optionally, set live_tokens to union of outgoing BVs for diagnostics.
-                let mut union_bv = LLMTokenBV::zeros();
-                for (_ek, dm) in w.children().iter() {
-                    for (_dst, bv) in dm.iter() {
-                        union_bv |= bv;
-                    }
-                }
-                w.value.live_tokens |= &union_bv;
-            }
-        }
-
-        // Redirect roots to representatives
-        for r in roots.values_mut() {
-            if let Some(rep) = node_to_rep.get(r) {
-                *r = *rep;
-            }
-        }
-
-        let roots_vec2: Vec<_> = roots.values().cloned().collect();
-        Trie::recompute_all_max_depths(trie1_god, &roots_vec2);
-    }
 }
