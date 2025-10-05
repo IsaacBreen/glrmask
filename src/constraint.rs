@@ -3,8 +3,6 @@
 
 use std::borrow::Borrow;
 use std::collections::btree_map::Entry as BTreeEntry;
-use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
-use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use crate::datastructures::ordered_hash_map::Retain;
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
@@ -27,10 +25,8 @@ use crate::constraint_extra::{calculate_final_stats2, dump_precompute_trie_recur
 use crate::constraint_precompute0_utils;
 use crate::constraint_precompute1_utils;
 use crate::constraint_precompute2_utils;
-use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::entry_api::EntryApi;
-use crate::datastructures::gss::Acc;
-use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig};
+use crate::datastructures::leveled_gss::{Acc, GSSPrintConfig, LeveledGSS};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -56,7 +52,6 @@ use std::collections::BTreeMap as StdMap;
 use std::io::{Read, Write};
 use std::ops::{BitAnd, Sub};
 use crate::constraint_precompute2_utils::optimize_trie2_size;
-pub(crate) use crate::constraint::constraint_precompute3_utils::clone_trie3_graph;
 use crate::constraint_precompute3_utils::optimize_trie3_size;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::trie::{God, GodWrapper};
@@ -73,7 +68,17 @@ pub enum TerminalAllowanceCheckMode {
     ImmediateProbe,
     #[default]
     StepProbe,
-}
+        }
+
+        // let mut roots: BTreeMap<TokenizerStateID, Arc<LeveledGSS>> = BTreeMap::new();
+        // for (tokenizer_state_id, glr_state) in &self.state {
+        //     roots.insert(*tokenizer_state_id, glr_state.active_state.stack.clone());
+        // }
+        // simplify(&mut roots);
+        // for (tokenizer_state_id, glr_state) in &mut self.state {
+        //     glr_state.active_state.stack = roots.get(tokenizer_state_id).unwrap().clone();
+        // }
+
 
 impl JSONConvertible for TerminalAllowanceCheckMode {
     fn to_json(&self) -> JSONNode {
@@ -1514,20 +1519,20 @@ impl GrammarConstraint {
         result_map
     }
 
-    pub fn print_gss_nodes(&self, roots: &Vec<Arc<GSSNode>>, labels: Option<&[String]>) {
+    pub fn print_gss_nodes(&self, roots: &[LeveledGSS], labels: Option<&[String]>) {
         let config = GSSPrintConfig {
-            labels,
+            labels: labels.map(|s| s.iter().map(|s| s.to_string()).collect()),
             max_edges: 500,
             original_internal_bimap: None,
             llm_token_map: Some(&self.llm_vocab.llm_token_map),
             verbose: false,
         };
 
-        let (gss_str, state_ids) = print_gss_forest(roots, &self.parser.terminal_map, &config);
+        let (gss_str, state_ids) = LeveledGSS::print_many(roots, &self.parser.terminal_map, &config);
         println!("{}", gss_str);
     }
 
-    pub fn state_with_nodes(&self, nodes: Vec<(usize, Arc<GSSNode>)>) -> GrammarConstraintState<'_> {
+    pub fn state_with_nodes(&self, nodes: Vec<(usize, LeveledGSS)>) -> GrammarConstraintState<'_> {
         let mut state = BTreeMap::new();
         for (tokenizer_state_id_val, gss_node) in nodes {
             let tokenizer_state_id = TokenizerStateID(tokenizer_state_id_val);
@@ -1764,21 +1769,21 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask(&self) -> LLMTokenBV {
         // return HybridBitset::ones(self.parent.llm_vocab.max_original_llm_token_id + 1); // TEMP
         // self.get_mask1()
-        // self.get_mask2()
-        self.get_mask3()
+        self.get_mask2()
+        // self.get_mask3()
     }
 
     #[time_it]
     pub fn get_mask1(&self) -> LLMTokenBV {
         let t0 = std::time::Instant::now();
-        crate::debug!(3, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
-        let stats = gather_gss_stats(
-            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        crate::debug!(3, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k| k.0).collect::<Vec<_>>());
+        let stats = LeveledGSS::gather_stats_many(
+            &self.state.values().map(|s| &s.active_state.stack).collect::<Vec<_>>(),
         );
         crate::debug!(3, "GSS stats: {:#?}", stats);
-        let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
+        let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
         if GSS_LOGGING_ENABLED {
-            let (s, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
+            let (s, state_ids) = LeveledGSS::print_many(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
             println!("{}", s);
             println!("\n\n--- GSS State Explanations ---\n");
             for state_id in state_ids {
@@ -1790,9 +1795,9 @@ impl<'a> GrammarConstraintState<'a> {
 
             println!("\n\n--- Begin GSS Graphviz ---");
             let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
-            let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+            let roots_with_labels: Vec<(&str, &LeveledGSS)> = labels.iter()
                 .map(|s| s.as_str())
-                .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
+                .zip(self.state.values().map(|s| &s.active_state.stack))
                 .collect();
             println!("{}", self.parent.parser.gss_forest_to_dot( // TODO: fix this
                 &roots_with_labels,
@@ -1829,10 +1834,8 @@ impl<'a> GrammarConstraintState<'a> {
             }
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed1.get(tokenizer_state_id) {
                 let mut glr_state = glr_state.clone();
-                prune_llm_tokens_by_disallowed_terminals(
-                    &mut glr_state.active_state.stack,
+                glr_state.active_state.stack.prune_llm_tokens_by_disallowed_terminals(
                     &self.parent.possible_matches,
-                    &mut HashMap::new(),
                 );
                 initial_values_for_map.push((precomputed_trie_root_arc.clone(), glr_state));
             } else {
@@ -1878,7 +1881,7 @@ impl<'a> GrammarConstraintState<'a> {
                 }
 
                 // let mut glr_s = glr_s.clone();
-                // disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                // glr_s.active_state.stack.disallow_llm_tokens(&final_mask_internal.borrow());
 
                 // Count num end nodes vs non end nodes
                 let mut num_end = 0;
@@ -1893,7 +1896,7 @@ impl<'a> GrammarConstraintState<'a> {
                 timeit!(format!("get_mask step_fn - end only? {}", num_end > 0 && num_non_end == 0), {
                     if num_non_end == 0 {
                         if let Some(gtid) = grammar_token_opt {
-                            // let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
+                            // let stats = glr_s.active_state.stack.gather_stats();
                             // crate::debug!(3, "Step for grammar token {:?} with only end nodes, GSS stats: {:#?}", gtid, stats);
                             // Perhaps we can avoid stepping by calling `has_action_for`
                             match glr_s.has_action_for(*gtid) {
@@ -1954,13 +1957,13 @@ impl<'a> GrammarConstraintState<'a> {
                     crate::debug!(4, "Processing edge: {:?}", grammar_token_opt);
                     for (child_node_trie_data, edge_llm_tokens_bv) in dest_map.iter() {
                         let mut glr_s = glr_s.clone();
-                        allow_only_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_llm_tokens_bv, &mut HashMap::new());
+                        glr_s.active_state.stack.allow_only_llm_tokens(&edge_llm_tokens_bv);
                         crate::debug!(4, "Stepping with grammar_token_opt: {:?}", grammar_token_opt);
                         glr_s.log_gss("Stepping with grammar_token_opt", grammar_token_opt.unwrap_or(TerminalID(0)), false, false);
                         crate::debug!(4, "Active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
                         crate::debug!(4, "Edge LLM tokens: {:?}", edge_llm_tokens_bv);
                         // crate::debug!(4, "Intersecting with edge_llm_tokens_bv: {:?}", edge_llm_tokens_bv);
-                        // subtract_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
+                        // glr_s.active_state.stack.disallow_llm_tokens(&final_mask_internal.borrow());
                         // glr_s.log_gss("After intersecting", grammar_token_opt.unwrap_or(TerminalID(0)));
 
                         if !glr_s.is_ok() {
@@ -2020,9 +2023,9 @@ impl<'a> GrammarConstraintState<'a> {
                             }
                         }
                         // Print GSS stats
-                        disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
-                        Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
-                        let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
+                        glr_s.active_state.stack.disallow_llm_tokens(&final_mask_internal.borrow());
+                        glr_s.active_state.stack.fuse_predecessors(1);
+                        let stats = glr_s.active_state.stack.gather_stats();
                         // crate::debug!(3, "GSS stats for precomputed node data: {:#?}", stats);
                         let mut do_phase3 = false;
                         do_phase3 |= num_outgoing_edges_that_lead_to_non_end_nodes >= 2;
@@ -2048,15 +2051,15 @@ impl<'a> GrammarConstraintState<'a> {
                                 let disallowed_l2 = crate::datastructures::hybrid_l2_bitset::HybridL2Bitset::from_iter(
                                     std::iter::once((0..=usize::MAX, disallowed_terminals_bv))
                                 );
-                                disallow_terminals_and_prune_arc(&mut glr_s.active_state.stack, &disallowed_l2, &mut HashMap::new());
+                                glr_s.active_state.stack.disallow_terminals(&disallowed_l2);
                             }
 
                             glr_s.process_default_reductions();
                             crate::debug!(4, "After phase 3, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
-                            Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                            glr_s.active_state.stack.fuse_predecessors(1);
                             crate::debug!(4, "Active LLM tokens after phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
                             crate::debug!(4, "Disallowing LLM tokens and pruning arc for precomputed node data: {:?}", final_mask_internal.borrow());
-                            Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                            glr_s.active_state.stack.fuse_predecessors(1);
                         }
                         crate::debug!(4, "After processing precomputed node data, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
                         crate::debug!(4, "Final active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
@@ -2095,15 +2098,15 @@ impl<'a> GrammarConstraintState<'a> {
         if GSS_LOGGING_ENABLED {
             crate::debug!(3, "Final GSS states after get_mask:");
             let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
-            let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
+            let labels: Vec<String> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
             let config = GSSPrintConfig {
-                labels: Some(&labels),
+                labels: Some(labels),
                 max_edges: 300,
                 original_internal_bimap: None,
                 llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
                 verbose: false,
             };
-            print!("{}", print_gss_forest(&roots, &self.parent.parser.terminal_map, &config).0);
+            print!("{}", LeveledGSS::print_many(&roots, &self.parent.parser.terminal_map, &config).0);
         }
 
         let final_mask_mapped = self.parent.internal_bv_to_original_precompute1(&final_mask_internal.into_inner());
@@ -2119,13 +2122,13 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask2(&self) -> LLMTokenBV {
         let t0 = std::time::Instant::now();
         crate::debug!(2, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
-        let stats = gather_gss_stats(
-            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        let stats = LeveledGSS::gather_stats_many(
+            &self.state.values().map(|s| &s.active_state.stack).collect::<Vec<_>>(),
         );
         crate::debug!(3, "GSS stats: {:#?}", stats);
-        let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
+        let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
         if GSS_LOGGING_ENABLED {
-            let (s, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
+            let (s, state_ids) = LeveledGSS::print_many(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
             println!("{}", s);
             println!("\n\n--- GSS State Explanations ---\n");
             for state_id in state_ids {
@@ -2137,9 +2140,9 @@ impl<'a> GrammarConstraintState<'a> {
 
             println!("\n\n--- Begin GSS Graphviz ---");
             let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
-            let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+            let roots_with_labels: Vec<(&str, &LeveledGSS)> = labels.iter()
                 .map(|s| s.as_str())
-                .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
+                .zip(self.state.values().map(|s| &s.active_state.stack))
                 .collect();
             println!("{}", self.parent.parser.gss_forest_to_dot( // TODO: fix this
                 &roots_with_labels,
@@ -2176,10 +2179,8 @@ impl<'a> GrammarConstraintState<'a> {
             }
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed2.get(tokenizer_state_id) {
                 let mut glr_state = glr_state.clone();
-                prune_llm_tokens_by_disallowed_terminals(
-                    &mut glr_state.active_state.stack,
+                glr_state.active_state.stack.prune_llm_tokens_by_disallowed_terminals(
                     &self.parent.possible_matches,
-                    &mut HashMap::new(),
                 );
                 initial_values_for_map.push((precomputed_trie_root_arc.clone(), glr_state));
             } else {
@@ -2232,8 +2233,8 @@ impl<'a> GrammarConstraintState<'a> {
                     crate::debug!(4, "No valid GSS nodes after popping, skipping.");
                     return Vec::new();
                 }
-                let out_gss = GSSNode::merge_many_with_depth(1, out_gsss);
-                crate::debug!(4, "After popping {} from GSS: {}", k, print_gss_forest(&[out_gss.clone()], &self.parent.parser.terminal_map, &GSSPrintConfig::default()).0);
+                let out_gss = LeveledGSS::merge_many(out_gsss);
+                crate::debug!(4, "After popping {} from GSS: {}", k, out_gss.print(&self.parent.parser.terminal_map, &GSSPrintConfig::default()).0);
                 // if !out_gss.is_alive() {
                 //     crate::debug!(4, "GLR state is not alive after popping, skipping.");
                 //     return Vec::new();
@@ -2242,7 +2243,7 @@ impl<'a> GrammarConstraintState<'a> {
                 for (dst_node_wrapper, edge_bv) in dest_map.iter() {
                     let mut out_gss_filtered = out_gss.clone();
                     crate::debug!(5, "Filtering GSS for edge LLM tokens: {:?}", edge_bv);
-                    allow_only_llm_tokens_and_prune_arc(&mut out_gss_filtered, edge_bv, &mut HashMap::new());
+                    out_gss_filtered.allow_only_llm_tokens(edge_bv);
                     let mut out_glr_s = glr_s.clone();
                     out_glr_s.active_state.stack = out_gss_filtered;
                     crate::debug!(4, "Allowed LLM tokens in out_gss_filtered: {:?}", out_glr_s.active_state.stack.allowed_llm_tokens());
@@ -2304,15 +2305,15 @@ impl<'a> GrammarConstraintState<'a> {
         if GSS_LOGGING_ENABLED {
             crate::debug!(3, "Final GSS states after get_mask:");
             let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
-            let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
+            let labels: Vec<String> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
             let config = GSSPrintConfig {
-                labels: Some(&labels),
+                labels: Some(labels),
                 max_edges: 300,
                 original_internal_bimap: None,
                 llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
                 verbose: false,
             };
-            print!("{}", print_gss_forest(&roots, &self.parent.parser.terminal_map, &config).0);
+            print!("{}", LeveledGSS::print_many(&roots, &self.parent.parser.terminal_map, &config).0);
         }
 
         crate::debug!(4, "Final mask internal: {:?}", final_mask_internal.borrow());
@@ -2330,21 +2331,22 @@ impl<'a> GrammarConstraintState<'a> {
         println!("  - Active tokenizer states: {}", self.state.len());
         if self.state.is_empty() {
             println!("  - GSS is empty.");
+            println!("  - Active tokenizer states: {}", self.state.len());
             return;
         }
-        let stats = gather_gss_stats(
-            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        let stats = LeveledGSS::gather_stats_many(
+            &self.state.values().map(|s| &s.active_state.stack).collect::<Vec<_>>(),
         );
         println!("  - GSS Stats: {:#?}", stats);
     }
 
     pub fn print_gss(&self) {
-        let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
+        let roots: Vec<LeveledGSS> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
         if roots.is_empty() {
             println!("GSS is empty.");
             return;
         }
-        let labels: Vec<_> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
+        let labels: Vec<String> = self.state.keys().map(|k| format!("Tokenizer State {}", k.0)).collect();
         self.parent.print_gss_nodes(&roots, Some(&labels));
     }
 
@@ -2355,7 +2357,7 @@ impl<'a> GrammarConstraintState<'a> {
             let mut seen = BTreeSet::new();
             let num_to_sample = 10;
             for i in 0..1000 {
-                if let Some(sampled_path_edges) = sample_path(&[&state.active_state.stack], i) {
+                if let Some(sampled_path_edges) = state.active_state.stack.sample_path(i) {
                     let mut sampled_stack: Vec<usize> = sampled_path_edges.iter()
                         .map(|edge| edge.state_id.0)
                         .collect();
@@ -2373,7 +2375,7 @@ impl<'a> GrammarConstraintState<'a> {
                 println!("  Sampled stack: {:?}", sampled_stack);
             }
             // Sample a stack
-            if let Some(sampled_path_edges) = sample_path(&[&state.active_state.stack], 1) {
+            if let Some(sampled_path_edges) = state.active_state.stack.sample_path(1) {
                 let mut sampled_stack: Vec<StateID> = sampled_path_edges.iter()
                     .map(|edge| edge.state_id)
                     .collect();
@@ -2388,8 +2390,8 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn num_unique_nodes(&self) -> usize {
-        gather_gss_stats(
-            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        LeveledGSS::gather_stats_many(
+            &self.state.values().map(|s| &s.active_state.stack).collect::<Vec<_>>(),
         ).unique_nodes
     }
 
@@ -2398,14 +2400,14 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(10, "\n--- get_mask3 START ---");
         crate::debug!(10, "GSS at start of get_mask3:");
         crate::debug!(3, "Getting mask {} states: {:?}", self.state.len(), self.state.keys().map(|k|k.0).collect::<Vec<_>>());
-        let stats = gather_gss_stats(
-            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        let stats = LeveledGSS::gather_stats_many(
+            &self.state.values().map(|s| &s.active_state.stack).collect::<Vec<_>>(),
         );
         crate::debug!(10, "Initial GSS stats: {:#?}", stats);
         crate::debug!(3, "GSS stats: {:#?}", stats);
-        let roots = self.state.values().map(|s| s.active_state.stack.clone()).collect::<Vec<_>>();
+        let roots: Vec<_> = self.state.values().map(|s| s.active_state.stack.clone()).collect();
         if GSS_LOGGING_ENABLED {
-            let (s, state_ids) = print_gss_forest(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
+            let (s, state_ids) = LeveledGSS::print_many(&roots, &self.parent.parser.terminal_map, &GSSPrintConfig::default());
             println!("{}", s);
             println!("\n\n--- GSS State Explanations ---\n");
             for state_id in state_ids {
@@ -2417,9 +2419,9 @@ impl<'a> GrammarConstraintState<'a> {
 
             println!("\n\n--- Begin GSS Graphviz ---");
             let labels: Vec<String> = self.state.keys().map(|k| format!("State {}", k.0)).collect();
-            let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+            let roots_with_labels: Vec<(&str, &LeveledGSS)> = labels.iter()
                 .map(|s| s.as_str())
-                .zip(self.state.values().map(|s| s.active_state.stack.as_ref()))
+                .zip(self.state.values().map(|s| &s.active_state.stack))
                 .collect();
             println!("{}", self.parent.parser.gss_forest_to_dot( // TODO: fix this
                 &roots_with_labels,
@@ -2444,10 +2446,8 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
             let mut glr_state = glr_state.clone();
-            prune_llm_tokens_by_disallowed_terminals(
-                &mut glr_state.active_state.stack,
+            glr_state.active_state.stack.prune_llm_tokens_by_disallowed_terminals(
                 &self.parent.possible_matches,
-                &mut HashMap::new(),
             );
 
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed3.get(&tokenizer_state_id) {
@@ -2508,7 +2508,7 @@ impl<'a> GrammarConstraintState<'a> {
                     let mut new_glr_s = glr_s.clone();
                     new_glr_s.active_state.stack = merged_gss;
 
-                    allow_only_llm_tokens_and_prune_arc(&mut new_glr_s.active_state.stack, llm_token_bv_from_edge, &mut HashMap::new());
+                    new_glr_s.active_state.stack.allow_only_llm_tokens(llm_token_bv_from_edge);
 
                     if new_glr_s.is_ok() {
                         crate::debug!(10, "      - Dest: idx={}, state_bv={}, matched={}, new_gss_ptr={:p}", dest_idx, format_bv(state_id_bv), valid_gss_nodes.len(), new_glr_s.active_state.stack);
@@ -2592,13 +2592,13 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         // 1) Reset LLM tokens on current stacks.
-        self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
+        self.transform_gss_stacks(|stack, _| stack.reset_llm_tokens());
 
         // 2) Prune disallowed terminals using the per-token precomputed terminal sets.
-        self.transform_gss_stacks(|stack, memo| prune_disallowed_terminals(stack, &terminals_map_by_state, memo));
+        self.transform_gss_stacks(|stack, _| stack.prune_disallowed_terminals(&terminals_map_by_state));
 
         // 3) Map tokenizer states
-        self.transform_gss_stacks(|stack, memo| map_allowed_terminals_tokenizer_states(stack, state_map, memo));
+        self.transform_gss_stacks(|stack, _| stack.map_allowed_terminals_tokenizer_states(state_map));
 
         // 3) Traverse the precomputed Trie 0 specialized to this token, stepping the GLR state.
         //    We only follow edges whose LLMTokenBV contains this token's internal ID.
@@ -2649,10 +2649,8 @@ impl<'a> GrammarConstraintState<'a> {
                             let mut tbv = TerminalBV::zeros();
                             tbv.insert(gtid.0);
                             disallowed.insert_l2_bitset(end_state.0, tbv);
-                            disallow_terminals_and_prune_arc(
-                                &mut glr_s.active_state.stack,
+                            glr_s.active_state.stack.disallow_terminals(
                                 &disallowed,
-                                &mut HashMap::new(),
                             );
                             if !glr_s.is_ok() {
                                 continue;
@@ -2691,8 +2689,8 @@ impl<'a> GrammarConstraintState<'a> {
         self.state = new_overall_state;
 
         // 5) Cleanup: reset llm tokens to ensure order invariance; fuse; filter dead states.
-        self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
-        self.map_gss_stacks(|stack, memo| fuse_predecessors_recursive(stack, 1, memo));
+        self.transform_gss_stacks(|stack, _| stack.reset_llm_tokens());
+        self.transform_gss_stacks(|stack, _| stack.fuse_predecessors(1));
         self.state.retain(|_, glr| glr.is_ok());
 
         match self.parent.post_commit_allow_check_mode {
@@ -2758,18 +2756,18 @@ impl<'a> GrammarConstraintState<'a> {
         //     state.log_gss("Before commit", TerminalID(0), false, false);
         // }
 
-        self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
+        self.transform_gss_stacks(|stack, _| stack.reset_llm_tokens());
 
         // Handle allowed terminals
         let (state_map, terminals_map) = self.compute_commit_maps(llm_token_bytes);
 
-        let gss_stats_before_pruning = gather_gss_stats(
-            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        let gss_stats_before_pruning = LeveledGSS::gather_stats_many(
+            &self.state.values().map(|s| &s.active_state.stack).collect::<Vec<_>>(),
         );
         crate::debug!(5, "Terminals map: {:?}", terminals_map);
-        self.transform_gss_stacks(|stack, memo| prune_disallowed_terminals(stack, &terminals_map, memo));
-        let gss_stats_after_pruning = gather_gss_stats(
-            &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
+        self.transform_gss_stacks(|stack, _| stack.prune_disallowed_terminals(&terminals_map));
+        let gss_stats_after_pruning = LeveledGSS::gather_stats_many(
+            &self.state.values().map(|s| &s.active_state.stack).collect::<Vec<_>>(),
         );
         crate::debug!(4, "GSS stats before pruning disallowed terminals: {:#?}", gss_stats_before_pruning);
         if gss_stats_after_pruning != gss_stats_before_pruning {
@@ -2779,7 +2777,7 @@ impl<'a> GrammarConstraintState<'a> {
             crate::debug!(4, "GSS stats did not change after pruning disallowed terminals.");
         }
 
-        self.transform_gss_stacks(|stack, memo| map_allowed_terminals_tokenizer_states(stack, &state_map, memo));
+        self.transform_gss_stacks(|stack, _| stack.map_allowed_terminals_tokenizer_states(&state_map));
         // println!("State after preparation: {}", self);
 
         let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
@@ -2816,7 +2814,7 @@ impl<'a> GrammarConstraintState<'a> {
                                 // Disallow this token from being matched again immediately.
                                 disallowed_terminals_for_end_state.insert(match_info.id);
                                 disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
-                                    disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
+                                cloned_glr_s.active_state.stack.disallow_terminals(&disallowed_terminals);
                             }
                         }
                         // cloned_glr_s.log_gss(format!("Before disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
@@ -2846,8 +2844,8 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         // TODO: this shouldn't be necessary, but due to some order-dependent LLM token BV weirdness in GSS, it is necessary to ensure commit order invariance.
-        self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
-        self.map_gss_stacks(|stack, memo| fuse_predecessors_recursive(stack, 1, memo));
+        self.transform_gss_stacks(|stack, _| stack.reset_llm_tokens());
+        self.transform_gss_stacks(|stack, _| stack.fuse_predecessors(1));
         self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
 
 
@@ -2918,7 +2916,7 @@ impl<'a> GrammarConstraintState<'a> {
         // }
         //
         // if !roots_to_simplify_arcs.is_empty() {
-        //     GSSNode::simplify_together(&mut roots_to_simplify_arcs);
+        //     LeveledGSS::simplify_together(&mut roots_to_simplify_arcs);
         // }
 
         crate::debug!(4, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k|k.0).collect::<Vec<_>>());
