@@ -376,10 +376,12 @@ impl GSSNode {
     }
 
     pub fn popn(&self, n: usize) -> GSSPopper {
-        let popped = self.inner.popn(n as isize);
-        GSSPopper {
-            node: Arc::new(GSSNode { inner: popped }),
-        }
+        let mut popper = GSSPopper {
+            node: Arc::new(GSSNode { inner: self.inner.clone() }),
+            below_bottom: BTreeMap::new(),
+        };
+        popper.popn(n);
+        popper
     }
 
     pub(crate) fn peek_iter(parent_arc: &Arc<GSSNode>) -> impl Iterator<Item = GSSPeek<'_>> {
@@ -453,6 +455,7 @@ impl<'a> GSSPeek<'a> {
 // --- Popper ---
 pub struct GSSPopper {
     node: Arc<GSSNode>,
+    below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>>,
 }
 pub struct GSSPopperItem {
     node: Arc<GSSNode>,
@@ -465,7 +468,7 @@ pub struct GSSPopperItemPeek<'a> {
 
 impl GSSPopper {
     pub fn new_from_node(node: Arc<GSSNode>, _acc: Arc<Acc>) -> Self {
-        GSSPopper { node }
+        GSSPopper { node, below_bottom: BTreeMap::new() }
     }
     pub fn iter(&self) -> impl Iterator<Item = GSSPopperItem> {
         self.node.inner.to_stacks().into_iter().map(|(p, a)| {
@@ -476,13 +479,31 @@ impl GSSPopper {
         })
     }
     pub fn below_bottom(&self) -> &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>> {
-        todo!()
+        &self.below_bottom
     }
     pub fn num_predecessors(&self) -> usize {
         self.node.inner.peek().len()
     }
     pub fn popn(&mut self, n: usize) {
-        Arc::make_mut(&mut self.node).inner = self.node.inner.popn(n as isize)
+        for _ in 0..n {
+            self.pop();
+        }
+    }
+    pub fn pop(&mut self) {
+        let mut inner = self.node.inner.clone();
+        let mut belows: BTreeMap<_, _> = self.below_bottom.iter().map(|(k, v)| (*k + 1, v.clone())).collect();
+        let new_below_slice = inner.filter_by_length(Some(1), Some(1));
+        let mut new_below_map = BTreeMap::new();
+        for (p, a) in new_below_slice.to_stacks() {
+            assert_eq!(p.len(), 1);
+            let item = p.into_iter().next().unwrap();
+            new_below_map.insert(item, Arc::new(a));
+        }
+        belows.insert(0, new_below_map);
+        self.below_bottom = belows;
+        inner = inner.pop();
+        inner.filter_by_length(Some(1), None);
+        self.node = Arc::new(GSSNode { inner });
     }
 }
 
