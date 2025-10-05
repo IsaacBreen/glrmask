@@ -1,8 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use std::borrow::Borrow;
-use crate::datastructures::gss_leveled::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, map_allowed_terminals_tokenizer_states, print_gss_forest, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify};
+use crate::datastructures::gss_leveled::{disallow_llm_tokens_and_prune_arc, get_roots, map_allowed_terminals_tokenizer_states, print_gss_forest, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path};
 use crate::datastructures::ordered_hash_map::Retain;
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
@@ -13,6 +12,7 @@ use std::env;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::mem;
+use std::borrow::Borrow;
 use std::ops::{BitOr, BitOrAssign};
 use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
@@ -27,8 +27,7 @@ use crate::constraint_precompute1_utils;
 use crate::constraint_precompute2_utils;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::entry_api::EntryApi;
-use crate::datastructures::gss_leveled::Acc;
-use crate::datastructures::gss_leveled::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig};
+use crate::datastructures::gss_leveled::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, Acc, GSSNode, GSSPrintConfig};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -1184,7 +1183,7 @@ impl GrammarConstraint {
                 reset();
 
                 crate::datastructures::gss::merge_stored_trie_nodes(
-                    &mut glr_s.active_state.stack,
+                    &mut glr_s.active_state.stack, // TODO: LeveledGSS
                     &mut crate::datastructures::gss_leveled::PruneAndTransformRecursiveMemo::default(),
                     glr_s.active_state.trie2_god.as_ref().unwrap(),
                 );
@@ -1229,7 +1228,7 @@ impl GrammarConstraint {
                 }
 
                 let mut stack = vec![glr_s.active_state.stack.clone()];
-                // gss_leveled::simplify_roots_in_place(&mut stack);
+                // gss_leveled::simplify_roots_in_place(&mut stack); // TODO: LeveledGSS
                 glr_s.active_state.stack = stack.into_iter().next().unwrap();
 
                 // print_summary();
@@ -2017,9 +2016,10 @@ impl<'a> GrammarConstraintState<'a> {
                                 break; // No need to check further, we have at least two non-end nodes.
                             }
                         }
+
                         // Print GSS stats
                         disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
-                        Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                        // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1); // TODO: LeveledGSS no-op
                         let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
                         // crate::debug!(3, "GSS stats for precomputed node data: {:#?}", stats);
                         let mut do_phase3 = false;
@@ -2051,10 +2051,10 @@ impl<'a> GrammarConstraintState<'a> {
 
                             glr_s.process_default_reductions();
                             crate::debug!(4, "After phase 3, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
-                            Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                            // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1); // TODO: LeveledGSS no-op
                             crate::debug!(4, "Active LLM tokens after phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
                             crate::debug!(4, "Disallowing LLM tokens and pruning arc for precomputed node data: {:?}", final_mask_internal.borrow());
-                            Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                            // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1); // TODO: LeveledGSS no-op
                         }
                         crate::debug!(4, "After processing precomputed node data, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
                         crate::debug!(4, "Final active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
@@ -2690,7 +2690,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         // 5) Cleanup: reset llm tokens to ensure order invariance; fuse; filter dead states.
         self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
-        self.transform_gss_stacks(|stack, _memo| Arc::make_mut(stack).fuse_predecessors(1));
+        // self.transform_gss_stacks(|stack, _memo| Arc::make_mut(stack).fuse_predecessors(1)); // TODO: LeveledGSS no-op
         self.state.retain(|_, glr| glr.is_ok());
 
         match self.parent.post_commit_allow_check_mode {
@@ -2845,7 +2845,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         // TODO: this shouldn't be necessary, but due to some order-dependent LLM token BV weirdness in GSS, it is necessary to ensure commit order invariance.
         self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
-        self.transform_gss_stacks(|stack, _memo| Arc::make_mut(stack).fuse_predecessors(1));
+        // self.transform_gss_stacks(|stack, _memo| Arc::make_mut(stack).fuse_predecessors(1)); // TODO: LeveledGSS no-op
         self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
 
 
@@ -2903,7 +2903,7 @@ impl<'a> GrammarConstraintState<'a> {
         // for (tokenizer_state_id, glr_state) in &self.state {
         //     roots.insert(*tokenizer_state_id, glr_state.active_state.stack.clone());
         // }
-        // simplify(&mut roots);
+        // simplify(&mut roots); // TODO: LeveledGSS no-op
         // for (tokenizer_state_id, glr_state) in &mut self.state {
         //     glr_state.active_state.stack = roots.get(tokenizer_state_id).unwrap().clone();
         // }
