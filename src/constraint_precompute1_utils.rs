@@ -400,42 +400,42 @@ pub fn optimize_trie1_size(
     crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
 
     // === Pass 1: Initial Simplification and Pruning ===
-    simplify_none_edges_to_former_end_nodes_trie1(precomputed1, trie1_god, trie0_god, node0_to_node1_map);
-    replace_ignore_token_edges_with_none_edges_trie1(precomputed1, trie1_god, ignore_terminal_id);
-    if config.optimize_trie1_early_flatten_epsilon {
-        flatten_all_none_edges_trie1(precomputed1, trie1_god);
-    } else {
-        shortcut_none_chains_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
-    }
-    constrain_bitvecs_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>(), internal_max_llm_token);
-    prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
-    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-    prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+    // simplify_none_edges_to_former_end_nodes_trie1(precomputed1, trie1_god, trie0_god, node0_to_node1_map);
+    // replace_ignore_token_edges_with_none_edges_trie1(precomputed1, trie1_god, ignore_terminal_id);
+    // if config.optimize_trie1_early_flatten_epsilon {
+    //     flatten_all_none_edges_trie1(precomputed1, trie1_god);
+    // } else {
+    //     shortcut_none_chains_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+    // }
+    // constrain_bitvecs_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>(), internal_max_llm_token);
+    // prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
+    // prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+    // prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
 
     // === Pass 2: Minimization and further cleanup ===
-    if config.optimize_trie1_minimize_by_signature {
-        merge_nodes_trie1(precomputed1, trie1_god);
-    }
-    if !config.optimize_trie1_early_flatten_epsilon {
-        flatten_all_none_edges_trie1(precomputed1, trie1_god);
-    }
-    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-    prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+    // if config.optimize_trie1_minimize_by_signature {
+    //     merge_nodes_trie1(precomputed1, trie1_god);
+    // }
+    // if !config.optimize_trie1_early_flatten_epsilon {
+    //     flatten_all_none_edges_trie1(precomputed1, trie1_god);
+    // }
+    // prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+    // prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
 
     // === Pass 3: Token-level optimizations ===
-    if config.optimize_trie1_merge_equivalent_llm_tokens {
-        merge_equivalent_llm_tokens_trie1(precomputed1, trie1_god, stage_vocab);
-    }
-    if config.optimize_trie1_reorder_llm_tokens {
-        reorder_llm_tokens_for_range_minimization_trie1(precomputed1, trie1_god, stage_vocab);
-    }
+    // if config.optimize_trie1_merge_equivalent_llm_tokens {
+    //     merge_equivalent_llm_tokens_trie1(precomputed1, trie1_god, stage_vocab);
+    // }
+    // if config.optimize_trie1_reorder_llm_tokens {
+    //     reorder_llm_tokens_for_range_minimization_trie1(precomputed1, trie1_god, stage_vocab);
+    // }
 
     // === Pass 4: Final Minimization and GC ===
-    if config.optimize_trie1_minimize_by_signature {
-        merge_nodes_trie1(precomputed1, trie1_god);
-    }
-    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-    prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+    // if config.optimize_trie1_minimize_by_signature {
+    //     merge_nodes_trie1(precomputed1, trie1_god);
+    // }
+    // prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+    // prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
     Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
     Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
 

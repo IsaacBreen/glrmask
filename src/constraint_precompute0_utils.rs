@@ -147,19 +147,19 @@ impl<'r> Precomputer0<'r> {
         calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
         print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
 
-        self.replace_ignore_token_edges_with_none_edges();
-        self.simplify_none_edges(); // This can invalidate max_depth.
+        // self.replace_ignore_token_edges_with_none_edges();
+        // self.simplify_none_edges(); // This can invalidate max_depth.
 
         // Recompute all max_depth values after major graph surgery.
         Trie::recompute_all_max_depths(&self.trie0_god, &self.roots.values().cloned().collect::<Vec<_>>());
 
         self.prune_dead_paths();
-        self.prune_on_no_terminal_follow();
+        // self.prune_on_no_terminal_follow();
         self.prune_dead_paths();
         // New: prune using substring parser in "everything state" mode
         // self.prune_with_substring_everything_state();
         self.prune_dead_paths(); // Clean up after GLR-based pruning
-        self.factor_common_destinations();
+        // self.factor_common_destinations();
         self.merge_nodes();
         // self.merge_nodes_basic();
         self.gc();
