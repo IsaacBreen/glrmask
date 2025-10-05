@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use bimap::BiBTreeMap;
-
+use crate::constraint::StateIDBV;
 use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
@@ -722,29 +722,112 @@ impl GSSNode {
 // --- Trie-utils stubs (no-ops) ---
 pub(crate) fn deep_add_precompute_trie_edges(
     root_arc: &mut Arc<GSSNode>,
-    _god: &StoredTrieGodWrapper,
-    _edge_key: &(usize, LLMTokenBV),
-    _edge_value: &HybridBitset,
-    _tokens_for_update: &LLMTokenBV,
-    _destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
+    god: &StoredTrieGodWrapper,
+    edge_key: &(usize, LLMTokenBV),
+    edge_value: &StateIDBV,
+    tokens_for_update: &LLMTokenBV,
+    destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
     _memo: &mut PruneAndTransformRecursiveMemo,
 ) {
-    // No-op in adapter
-    let _ = root_arc;
+    transform_all(root_arc, |acc| {
+        if acc.stored_trie_nodes().is_empty() {
+            return Some(acc.clone());
+        }
+
+        let destination = destination_provider();
+
+        for source_wrapper in acc.stored_trie_nodes() {
+            let source_arc = source_wrapper.as_arc().clone();
+
+            let inserter = crate::datastructures::trie::EdgeInserter::new(
+                god,
+                source_arc,
+                edge_key.clone(),
+                edge_value.clone(),
+                |e, n| *e |= n,
+                |node_value, _edge_value| node_value.live_tokens |= tokens_for_update,
+                |_, _| {}, // Unconditional insertion
+            );
+            inserter.try_destination(destination.clone()).expect("Cycle detected when adding precompute trie edges");
+        }
+
+        destination.write(god).expect("poison").value.live_tokens |= tokens_for_update;
+
+        let mut new_acc = acc.clone();
+        *new_acc.stored_trie_nodes_mut() = BTreeSet::from([destination]);
+        Some(new_acc)
+    });
 }
 
 pub(crate) fn merge_stored_trie_nodes(
-    _root_arc: &mut Arc<GSSNode>,
+    root_arc: &mut Arc<GSSNode>,
     _memo: &mut PruneAndTransformRecursiveMemo,
-    _stored_trie_god: &StoredTrieGodWrapper,
+    stored_trie_god: &StoredTrieGodWrapper,
 ) {
-    // No-op in adapter
+    let mut new_destinations = BTreeMap::new();
+
+    transform_all(root_arc, |acc| {
+        if !acc.stored_trie_nodes().iter().any(
+            |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != acc.llm_tokens_union
+        ) {
+            return Some(acc.clone());
+        }
+
+        let mut new_acc = acc.clone();
+        // Create a single new destination for this merge operation.
+        let new_destination = new_destinations.entry((new_acc.stored_trie_nodes().clone(), acc.llm_tokens_union.clone()))
+            .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(crate::constraint::PrecomputedNodeContents::internal()))))
+            .clone();
+
+        let edge_key = (0, new_acc.llm_tokens_union.clone());
+        let edge_value = crate::constraint::StateIDBV::max_ones();
+        let tokens_for_edge = new_acc.llm_tokens_union.clone();
+
+        for source_wrapper in new_acc.stored_trie_nodes() {
+            let source_arc = source_wrapper.as_arc().clone();
+
+            let inserter = crate::datastructures::trie::EdgeInserter::new(
+                stored_trie_god,
+                source_arc,
+                edge_key.clone(),
+                edge_value.clone(),
+                |e, n| *e |= n,
+                |node_value, _edge_value| node_value.live_tokens |= &tokens_for_edge,
+                |_, _| {}, // Unconditional insertion
+            );
+            inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging stored_trie nodes; this should be impossible.");
+        }
+
+        new_destination.write(stored_trie_god).expect("poison").value.live_tokens |= &tokens_for_edge;
+
+        new_acc.stored_trie_nodes = BTreeSet::from([new_destination]);
+        Some(new_acc)
+    });
 }
 
 pub(crate) fn is_simple_gss(
-    _node: &Arc<GSSNode>,
-    _hallucinated_state_id: StateID,
+    node: &Arc<GSSNode>,
+    hallucinated_state_id: StateID,
 ) -> Option<(StateID, Arc<Acc>)> {
+    let stacks = node.inner.to_stacks();
+    // Must be exactly one path.
+    if stacks.len() == 1 {
+        let (path, acc) = &stacks[0];
+        // Path must have length 2. The path is from leaf to root.
+        if path.len() == 2 {
+            let edge_to_leaf = &path[0];
+            let edge_to_middle = &path[1];
+
+            // The edge into the leaf must be the hallucinated one.
+            if edge_to_leaf.state_id == hallucinated_state_id {
+                let state_id_x = edge_to_middle.state_id;
+                // The leaf must have stored_trie_nodes.
+                if !acc.stored_trie_nodes().is_empty() {
+                    return Some((state_id_x, Arc::new(acc.clone())));
+                }
+            }
+        }
+    }
     None
 }
 
