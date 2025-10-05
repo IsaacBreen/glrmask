@@ -1,5 +1,6 @@
 pub mod charmap;
 pub mod frozenset;
+pub mod gss;
 pub mod u8set;
 pub mod vocab_prefix_tree;
 pub mod hybrid_bitset;
@@ -7,7 +8,6 @@ pub mod hybrid_l2_bitset;
 pub mod arc_wrapper;
 pub mod ordered_hash_map;
 pub mod cache;
-pub mod gss_types;
 pub mod entry_api;
 pub mod trie;
 pub mod leveled_gss;
