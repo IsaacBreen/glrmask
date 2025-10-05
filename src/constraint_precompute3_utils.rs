@@ -642,6 +642,7 @@ fn simplify_llm_token_bvs_trie3(
     trie3_god: &Trie3GodWrapper,
     max_llm_token_id: usize,
 ) {
+    return;
     crate::debug!(2, "Simplifying LLM token bitsets in Trie3 to reduce range counts...");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
@@ -689,6 +690,7 @@ fn prune_nodes_not_reaching_end_trie3(
     roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
 ) {
+    return;
     crate::debug!(2, "Pruning Trie3 nodes that cannot reach any end node (reverse reachability)...");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     if roots_vec.is_empty() {
@@ -780,6 +782,7 @@ fn factor_common_destinations_trie3(
     max_llm_token_id: usize,
     max_state_id: usize,
 ) {
+    return;
     crate::debug!(2, "Factoring out common destinations in Trie3.");
     const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
 
