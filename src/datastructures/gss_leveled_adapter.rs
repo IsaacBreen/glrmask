@@ -499,7 +499,7 @@ impl GSSPopper {
             let item = p.into_iter().next().unwrap();
             new_below_map.insert(item, Arc::new(a));
         }
-        belows.insert(0, new_below_map);
+        belows.insert(1, new_below_map);
         self.below_bottom = belows;
         inner = inner.pop();
         inner.filter_by_length(Some(1), None);
