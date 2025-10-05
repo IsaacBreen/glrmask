@@ -66,17 +66,17 @@ pub fn optimize_trie3_size(
 		};
 	}
 
-	if config.optimize_trie3_merge_equivalent_llm_tokens {
-		run_pass!("Merging equivalent LLM tokens", {
-			merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
-		});
-	}
-
-	if config.optimize_trie2_gc {
-		run_pass!("Garbage collection (pre-merge)", {
-			Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-		});
-	}
+	// if config.optimize_trie3_merge_equivalent_llm_tokens {
+	// 	run_pass!("Merging equivalent LLM tokens", {
+	// 		merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
+	// 	});
+	// }
+    //
+	// if config.optimize_trie2_gc {
+	// 	run_pass!("Garbage collection (pre-merge)", {
+	// 		Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+	// 	});
+	// }
 
 	// // After compression, prune and GC before the expensive merge.
 	// if config.optimize_trie2_prune_dead_paths {
@@ -97,11 +97,11 @@ pub fn optimize_trie3_size(
 	// 	simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
 	// });
 
-	if config.optimize_trie2_compress_edges {
-		run_pass!("Compressing edges", {
-			compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-		});
-	}
+	// if config.optimize_trie2_compress_edges {
+	// 	run_pass!("Compressing edges", {
+	// 		compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+	// 	});
+	// }
 
 	// // After compression, prune and GC before the expensive merge.
 	// if config.optimize_trie2_prune_dead_paths {
@@ -110,11 +110,11 @@ pub fn optimize_trie3_size(
 	// 	});
 	// }
 
-	if config.optimize_trie2_merge_nodes {
-		run_pass!("Merging nodes", {
-			merge_nodes_trie3(roots, &trie3_god);
-		});
-	}
+	// if config.optimize_trie2_merge_nodes {
+	// 	run_pass!("Merging nodes", {
+	// 		merge_nodes_trie3(roots, &trie3_god);
+	// 	});
+	// }
 
 	// --- Phase 1: Initial Pruning & Vocab Reduction ---
 	// These passes are expensive but have a huge impact on the initial massive graph.
