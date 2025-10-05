@@ -198,6 +198,13 @@ impl LeveledGSS {
         })
     }
 
+    #[pyo3(signature = (min_len = None, max_len = None))]
+    fn filter_by_length(&self, min_len: Option<isize>, max_len: Option<isize>) -> PyResult<Self> {
+        Ok(LeveledGSS {
+            inner: self.inner.filter_by_length(min_len, max_len),
+        })
+    }
+
     #[pyo3(signature = (func, memo = None))]
     fn apply(&self, func: PyObject, memo: Option<&PyDict>) -> PyResult<Self> {
         // We ignore the external memo and rely on internal per-accumulator memoization.
