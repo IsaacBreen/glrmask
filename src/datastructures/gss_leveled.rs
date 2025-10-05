@@ -1727,3 +1727,15 @@ impl GSSNode {
         s
     }
 }
+
+pub fn deep_add_precompute_trie_edges_leveled(
+    root_arc: &mut Arc<GSSNode>,
+    god: &StoredTrieGodWrapper,
+    edge_key: &(usize, LLMTokenBV),
+    edge_value: &StateIDBV,
+    tokens_for_update: &LLMTokenBV,
+    destination_provider: &mut impl FnMut() -> PrecomputeNode3Index,
+    memo: &mut PruneAndTransformRecursiveMemo,
+) {
+    todo!()
+}

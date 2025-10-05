@@ -1,5 +1,5 @@
 use crate::constraint::{LLMTokenBV, LLMVocab, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, Trie3GodWrapper};
-use crate::datastructures::gss_leveled::{find_longest_path, gather_gss_stats, DestKey, GSSNode, GSSPeek, GSSStats, NodeMap, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
+use crate::datastructures::gss_leveled::{deep_add_precompute_trie_edges_leveled, find_longest_path, gather_gss_stats, DestKey, GSSNode, GSSPeek, GSSStats, NodeMap, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
 use crate::datastructures::gss_leveled::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
@@ -957,7 +957,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
                     )
                 };
-                deep_add_precompute_trie_edges(
+                deep_add_precompute_trie_edges_leveled(
                     &mut constrained.stack,
                     god,
                     &key,
@@ -1516,7 +1516,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 );
                                 (new_dest, PruneAndTransformRecursiveMemo::default())
                             });
-                            deep_add_precompute_trie_edges(
+                            deep_add_precompute_trie_edges_leveled(
                                 &mut parent_after_filter,
                                 god,
                                 &edge_key_all_tokens_zero_k,
@@ -1642,7 +1642,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let memo_for_dest = cached_dest_memos.entry(cached_dest.clone())
                         .or_insert_with(PruneAndTransformRecursiveMemo::default);
 
-                    deep_add_precompute_trie_edges(
+                    deep_add_precompute_trie_edges_leveled(
                         &mut new_gss_arc,
                         god,
                         &edge_key,
