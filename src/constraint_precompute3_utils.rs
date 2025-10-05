@@ -92,6 +92,9 @@ pub fn optimize_trie3_size(
         factor_common_destinations_trie3(roots, &trie3_god, max_llm_token_id, max_state_id);
     }
 
+    crate::debug!(2, "Step 4.6: Simplifying LLM token bitsets...");
+    simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
+
     crate::debug!(2, "Step 5: Compressing edges...");
     if config.optimize_trie2_compress_edges {
         compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
@@ -533,6 +536,54 @@ pub fn reorder_llm_tokens_for_range_minimization_trie3(
     stage_vocab.original_to_internal = new_original_to_internal;
     stage_vocab.internal_max_llm_token = present.len().saturating_sub(1);
     crate::debug!(2, "Trie3 reordering complete. Ranges reduced from {} to {}. New max internal token ID: {}", ranges_before, ranges_after, stage_vocab.internal_max_llm_token);
+}
+
+fn simplify_llm_token_bvs_trie3(
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
+    trie3_god: &Trie3GodWrapper,
+    max_llm_token_id: usize,
+) {
+    crate::debug!(2, "Simplifying LLM token bitsets in Trie3 to reduce range counts...");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    if all_nodes.is_empty() {
+        return;
+    }
+
+    let universe = LLMTokenBV::ones(max_llm_token_id + 1);
+
+    #[cfg(not(rustrover))]
+    let it = tqdm!(all_nodes.iter(), desc = "Trie3 Simplify LLM BVs", total = all_nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false);
+    #[cfg(rustrover)]
+    let it = all_nodes.iter();
+
+    for node_idx in it {
+        let mut w = node_idx.write(trie3_god).expect("write");
+        if w.children().is_empty() {
+            continue;
+        }
+
+        let live_u = w.value.live_tokens.clone();
+        if live_u.is_all() { // If all tokens are live, no simplification is possible.
+            continue;
+        }
+        let dead_u = &universe - &live_u;
+
+        let old_children = std::mem::take(w.children_mut());
+        let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<PrecomputeNode3Index, StateIDBV>> = BTreeMap::new();
+
+        for ((pop, l), dm) in old_children {
+            let mut l_new = l.clone();
+            l_new |= &dead_u;
+
+            let entry = new_children.entry((pop, l_new)).or_default();
+            for (dest, sids) in dm {
+                entry.entry(dest).and_modify(|e| *e |= &sids).or_insert(sids);
+            }
+        }
+        *w.children_mut() = new_children;
+    }
+    crate::debug!(2, "Finished simplifying LLM token bitsets.");
 }
 
 fn prune_nodes_not_reaching_end_trie3(
