@@ -87,6 +87,16 @@ pub fn optimize_trie3_size(
     if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
         prune_dead_paths_trie3(roots, &trie3_god);
     }
+    crate::debug!(2, "Step 4.1: Pruning nodes that do not reach end...");
+    if config.optimize_trie2_prune_dead_paths { // Reusing config flag
+        prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
+    }
+
+    crate::debug!(2, "Step 4.2: Merging nodes...");
+    if config.optimize_trie2_merge_nodes {
+        merge_nodes_trie3(roots, &trie3_god);
+    }
+
     crate::debug!(2, "Step 4.5: Factoring common destinations...");
     if config.optimize_trie2_factor_common_destinations { // Reusing config flag
         factor_common_destinations_trie3(roots, &trie3_god, max_llm_token_id, max_state_id);
@@ -98,14 +108,6 @@ pub fn optimize_trie3_size(
     crate::debug!(2, "Step 5: Compressing edges...");
     if config.optimize_trie2_compress_edges {
         compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-    }
-    crate::debug!(2, "Step 6: Merging nodes...");
-    if config.optimize_trie2_merge_nodes {
-        merge_nodes_trie3(roots, &trie3_god);
-    }
-    crate::debug!(2, "Step 6.5: Pruning nodes that do not reach end...");
-    if config.optimize_trie2_prune_dead_paths { // Reusing config flag
-        prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
     }
 
     crate::debug!(2, "Step 7: Pruning dead paths (post-merge)...");
