@@ -1,6 +1,10 @@
 pub mod charmap;
 pub mod frozenset;
 pub mod gss;
+pub mod gss_analysis;
+pub mod gss_pruning;
+pub mod gss_simplification;
+pub mod gss_trie_utils;
 pub mod u8set;
 pub mod vocab_prefix_tree;
 pub mod hybrid_bitset;
