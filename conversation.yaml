@@ -1077,14 +1077,22 @@ local_system:
               }
           }
 
-          pub fn fuse_predecessors_recursive(&self, levels: usize, memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
-              todo!()
+          pub fn fuse_predecessors(&mut self, levels: usize) {
+              if levels == 0 {
+                  return;
+              }
+              let self_arc = Arc::new(self.clone());
+              let mut memo = HashMap::new();
+              let fused_arc = fuse_predecessors_recursive(&self_arc, levels, &mut memo);
+              if !Arc::ptr_eq(&self_arc, &fused_arc) {
+                  *self = (*fused_arc).clone();
+              }
           }
 
-          pub fn fuse_predecessors(&mut self, levels: usize) {
-              let mut memo = PruneAndTransformRecursiveMemo::new();
-              let fused = self.fuse_predecessors_recursive(levels, &mut memo);
-              *self = (*fused).clone();
+          pub fn fuse_predecessors_recursive(&self, levels: usize, _memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
+              let self_arc = Arc::new(self.clone());
+              let mut dummy_memo = HashMap::new();
+              fuse_predecessors_recursive(&self_arc, levels, &mut dummy_memo)
           }
       }
 
@@ -1380,8 +1388,13 @@ local_system:
 
       pub fn simplify(_states: &mut BTreeMap<crate::tokenizer::TokenizerStateID, Arc<GSSNode>>) {}
       pub(crate) fn simplify_roots_in_place(_roots: &mut [Arc<GSSNode>]) {}
-      pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, _levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
-          node_arc.clone()
+      pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
+          let fused_inner = node_arc.inner.fuse(Some(levels as isize));
+          if fused_inner.is(&node_arc.inner) {
+              node_arc.clone()
+          } else {
+              Arc::new(GSSNode { inner: fused_inner })
+          }
       }
 
       impl GSSNode {
@@ -4591,6 +4604,10 @@ local_system:
       }
 
       impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> LeveledGSS<T, A> {
+          pub fn is(&self, other: &Self) -> bool {
+              Arc::ptr_eq(&self.inner, &other.inner)
+          }
+
           pub fn empty() -> Self {
               empty_upper()
           }
@@ -5277,7 +5294,7 @@ local_system:
                   memo: &mut StdHashMap<(usize, Option<isize>), Arc<Lower<T>>>,
               ) -> Arc<Lower<T>>
               where
-                  T: Clone + Eq + Hash,
+                  T: Clone + Eq + Hash + std::cmp::Ord,
                   A: Merge + Clone + Eq + Hash,
               {
                   if let Some(r) = remain {
@@ -5338,8 +5355,8 @@ local_system:
                   memo_lower: &mut StdHashMap<(usize, Option<isize>), Arc<Lower<T>>>,
               ) -> Arc<Upper<T, A>>
               where
-                  T: Clone + Eq + Hash,
-                  A: Merge + Clone + Eq + Hash,
+                  T: Clone + Eq + Hash + std::cmp::Ord,
+                  A: Merge + Clone + Eq + Hash + std::cmp::Ord,
               {
                   if let Some(r) = remain {
                       if r == 0 {
@@ -12239,7 +12256,7 @@ local_system:
       pub(crate) fn simplify_roots_in_place(_roots: &mut [Arc<GSSNode>]) {}
       pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
           let fused_inner = node_arc.inner.fuse(Some(levels as isize));
-          if Arc::ptr_eq(&fused_inner.inner, &node_arc.inner.inner) {
+          if fused_inner.is(&node_arc.inner) {
               node_arc.clone()
           } else {
               Arc::new(GSSNode { inner: fused_inner })
@@ -15453,6 +15470,10 @@ local_system:
       }
 
       impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> LeveledGSS<T, A> {
+          pub fn is(&self, other: &Self) -> bool {
+              Arc::ptr_eq(&self.inner, &other.inner)
+          }
+
           pub fn empty() -> Self {
               empty_upper()
           }
@@ -16139,7 +16160,7 @@ local_system:
                   memo: &mut StdHashMap<(usize, Option<isize>), Arc<Lower<T>>>,
               ) -> Arc<Lower<T>>
               where
-                  T: Clone + Eq + Hash,
+                  T: Clone + Eq + Hash + std::cmp::Ord,
                   A: Merge + Clone + Eq + Hash,
               {
                   if let Some(r) = remain {
@@ -16200,8 +16221,8 @@ local_system:
                   memo_lower: &mut StdHashMap<(usize, Option<isize>), Arc<Lower<T>>>,
               ) -> Arc<Upper<T, A>>
               where
-                  T: Clone + Eq + Hash,
-                  A: Merge + Clone + Eq + Hash,
+                  T: Clone + Eq + Hash + std::cmp::Ord,
+                  A: Merge + Clone + Eq + Hash + std::cmp::Ord,
               {
                   if let Some(r) = remain {
                       if r == 0 {
@@ -20714,7 +20735,7 @@ local_system:
               let mut cached_dest_memos: BTreeMap<PrecomputeNode3Index, PruneAndTransformRecursiveMemo> = BTreeMap::new();
 
               // Collect todo pairs and deduplicate by (predecessor_state_id, isolated_parent pointer).
-              let mut todo_map: BTreeMap<StateID, BTreeMap<*const GSSNode, Arc<GSSNode>>> = BTreeMap::new();
+              let mut todo_map: BTreeMap<StateID, BTreeMap<GSSNode, Arc<GSSNode>>> = BTreeMap::new();
 
               // Handle "below bottom" (substring parsing continuation) first, adding to the todo list.
               if !popper.below_bottom().is_empty() {
@@ -20730,10 +20751,10 @@ local_system:
                           let below_todo = self.handle_below_bottom(nt, below_accs, config);
                           crate::debug!(5, "Popped below bottom, hallucinating {} new parse paths.", below_todo.len());
                           for (predecessor_state_id, isolated_parent) in below_todo {
-                              let pred_ptr = Arc::as_ptr(&isolated_parent);
+                              let key = (*isolated_parent).clone();
                               todo_map.entry(predecessor_state_id)
                                   .or_default()
-                                  .entry(pred_ptr)
+                                  .entry(key)
                                   .or_insert(isolated_parent);
                           }
                       }
@@ -20744,11 +20765,11 @@ local_system:
               for popper_item in popper.iter() {
                   for peek2 in popper_item.peek_iter() {
                       let predecessor_state_id = peek2.edge_value().state_id;
-                      let isolated_parent = peek2.isolated_parent();
-                      let pred_ptr = Arc::as_ptr(&isolated_parent);
+                      let isolated_parent = peek2.isolated_parent(); // Arc<GSSNode>
+                      let key = (*isolated_parent).clone();          // structural key
                       todo_map.entry(predecessor_state_id)
                           .or_default()
-                          .entry(pred_ptr)
+                          .entry(key)
                           .or_insert(isolated_parent);
                   }
               }
@@ -20756,7 +20777,7 @@ local_system:
               crate::debug!(4, "Total unique predecessor states to process for GOTO: {}", todo_map.len());
               for (predecessor_state_id, parents_map) in todo_map {
                   crate::debug!(9, "Processing predecessor state {} with {} isolated parents", predecessor_state_id.0, parents_map.len());
-                  for (_pred_ptr, isolated_parent) in parents_map {
+                  for (_key, isolated_parent) in parents_map {
                       timeit!("GLRParserState::reduce_and_goto::HandleGotos", {
                       let mut seen_nts: HashSet<NonTerminalID> = HashSet::new();
                       let mut seen_gotos = HashSet::new();
@@ -21733,7 +21754,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - cp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -22839,14 +22860,22 @@ messages:
               }
           }
 
-          pub fn fuse_predecessors_recursive(&self, levels: usize, memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
-              todo!()
+          pub fn fuse_predecessors(&mut self, levels: usize) {
+              if levels == 0 {
+                  return;
+              }
+              let self_arc = Arc::new(self.clone());
+              let mut memo = HashMap::new();
+              let fused_arc = fuse_predecessors_recursive(&self_arc, levels, &mut memo);
+              if !Arc::ptr_eq(&self_arc, &fused_arc) {
+                  *self = (*fused_arc).clone();
+              }
           }
 
-          pub fn fuse_predecessors(&mut self, levels: usize) {
-              let mut memo = PruneAndTransformRecursiveMemo::new();
-              let fused = self.fuse_predecessors_recursive(levels, &mut memo);
-              *self = (*fused).clone();
+          pub fn fuse_predecessors_recursive(&self, levels: usize, _memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
+              let self_arc = Arc::new(self.clone());
+              let mut dummy_memo = HashMap::new();
+              fuse_predecessors_recursive(&self_arc, levels, &mut dummy_memo)
           }
       }
 
@@ -23142,8 +23171,13 @@ messages:
 
       pub fn simplify(_states: &mut BTreeMap<crate::tokenizer::TokenizerStateID, Arc<GSSNode>>) {}
       pub(crate) fn simplify_roots_in_place(_roots: &mut [Arc<GSSNode>]) {}
-      pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, _levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
-          node_arc.clone()
+      pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
+          let fused_inner = node_arc.inner.fuse(Some(levels as isize));
+          if fused_inner.is(&node_arc.inner) {
+              node_arc.clone()
+          } else {
+              Arc::new(GSSNode { inner: fused_inner })
+          }
       }
 
       impl GSSNode {
@@ -26377,6 +26411,10 @@ messages:
       }
 
       impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> LeveledGSS<T, A> {
+          pub fn is(&self, other: &Self) -> bool {
+              Arc::ptr_eq(&self.inner, &other.inner)
+          }
+
           pub fn empty() -> Self {
               empty_upper()
           }
@@ -27063,7 +27101,7 @@ messages:
                   memo: &mut StdHashMap<(usize, Option<isize>), Arc<Lower<T>>>,
               ) -> Arc<Lower<T>>
               where
-                  T: Clone + Eq + Hash,
+                  T: Clone + Eq + Hash + std::cmp::Ord,
                   A: Merge + Clone + Eq + Hash,
               {
                   if let Some(r) = remain {
@@ -27124,8 +27162,8 @@ messages:
                   memo_lower: &mut StdHashMap<(usize, Option<isize>), Arc<Lower<T>>>,
               ) -> Arc<Upper<T, A>>
               where
-                  T: Clone + Eq + Hash,
-                  A: Merge + Clone + Eq + Hash,
+                  T: Clone + Eq + Hash + std::cmp::Ord,
+                  A: Merge + Clone + Eq + Hash + std::cmp::Ord,
               {
                   if let Some(r) = remain {
                       if r == 0 {
@@ -32706,146 +32744,85 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      The GSS explosion you're seeing is a classic sign of insufficient node sharing and canonicalization in the Graph-Structured Stack. The `leveled_gss` implementation is designed to be structurally unique, but without proper use of its features for fusing and simplifying the graph, redundant nodes can be created during parsing, leading to exponential growth in ambiguous grammars.
+      Here’s a minimal, targeted fix to stop the accelerating GSS path growth with the leveled GSS adapter.
 
-      The test case `test_js_if_statement_gss_explosion` is specifically designed to catch this kind of performance regression. The problem lies in the `gss_leveled_adapter.rs` file, where several key graph optimization functions (`fuse_predecessors`, `fuse_predecessors_recursive`) were left as stubs. These functions are critical for collapsing redundant parse paths.
+      Root cause
+      - In reduce_and_goto (src/glr/parser.rs), we deduplicate isolated parents per predecessor state using the address (pointer) of a freshly materialized Arc<GSSNode>. With leveled GSS, isolate() constructs a new persistent structure each time, so two structurally identical isolated parents get different pointers. That makes pointer-based deduplication ineffective and causes accelerating growth.
+      - The old (non-leveled) GSS often reused the same Arc via structural interning, making pointer-based keys accidentally work. The leveled GSS does not guarantee the same Arc pointer for identical structures, but GSSNode does implement Ord/Hash based on structure, so structural dedup should be used instead.
 
-      I will provide instructions to implement these missing functions by delegating to the `fuse` method of the underlying `LeveledGSS` implementation, which is designed for this purpose.
+      What to change
+      - In GLRParserState::reduce_and_goto, change the dedup map from BTreeMap<StateID, BTreeMap<*const GSSNode, Arc<GSSNode>>> to BTreeMap<StateID, BTreeMap<GSSNode, Arc<GSSNode>>>.
+      - Key the map by structural GSSNode (i.e., by cloning the GSSNode for the key), not by Arc pointer.
+      - Adjust insertions and the subsequent iteration accordingly.
 
-      ### Step-by-step Instructions
+      Step-by-step instructions
+      1) Edit src/glr/parser.rs.
+      2) In GLRParserState::reduce_and_goto:
+         - Change the type of todo_map from BTreeMap<StateID, BTreeMap<*const GSSNode, Arc<GSSNode>>> to BTreeMap<StateID, BTreeMap<GSSNode, Arc<GSSNode>>>.
+         - When inserting below-bottom entries: replace the pred_ptr key with a structural key created with (*isolated_parent).clone().
+         - When inserting standard reductions from popper.peek_iter(): same—use a structural key.
+         - When iterating over parents_map, adjust the destructuring to use a structural key variable name rather than pointer.
 
-      1.  **Open `src/datastructures/gss_leveled_adapter.rs`**.
+      After these changes, structurally identical isolated parents deduplicate correctly regardless of Arc identity. This prevents spurious blow-ups in the number of stacks/paths and halts the “accelerating” growth pattern.
 
-      2.  **Implement `GSSNode::fuse_predecessors`**:
-          Locate the `fuse_predecessors` method on `GSSNode`. Its current implementation calls a `todo!()` method. Replace it with logic that creates an `Arc` of `self` and calls the free function `fuse_predecessors_recursive`. This pattern ensures that we can reuse the existing `Arc` if no changes are made to the GSS node, preventing unnecessary allocations.
-
-      3.  **Implement `GSSNode::fuse_predecessors_recursive`**:
-          Find the `fuse_predecessors_recursive` method on `GSSNode`. It currently contains a `todo!()`. Replace it with an implementation that calls the free function `fuse_predecessors_recursive`. This ensures that even if this method is called directly, it will perform the correct fusing operation.
-
-      4.  **Implement the free function `fuse_predecessors_recursive`**:
-          At the bottom of the file, find the free function `fuse_predecessors_recursive`. It's currently a stub that returns a clone of the input node. Replace this with an implementation that calls the `fuse` method on the inner `LeveledGSS` object. This is the core of the fix, as it performs the actual graph simplification.
-
-      Here are the changes in detail:
-
-      #### In `src/datastructures/gss_leveled_adapter.rs`:
-
-      -   Around line 418, replace the `fuse_predecessors` and `fuse_predecessors_recursive` methods on `GSSNode`:
-
-          ```rust
-          // This was the old block
-          pub fn fuse_predecessors_recursive(&self, levels: usize, memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
-              todo!()
-          }
-
-          pub fn fuse_predecessors(&mut self, levels: usize) {
-              let mut memo = PruneAndTransformRecursiveMemo::new();
-              let fused = self.fuse_predecessors_recursive(levels, &mut memo);
-              *self = (*fused).clone();
-          }
-          ```
-
-          with the new implementations:
-
-          ```rust
-          pub fn fuse_predecessors(&mut self, levels: usize) {
-              if levels == 0 {
-                  return;
-              }
-              let self_arc = Arc::new(self.clone());
-              let mut memo = HashMap::new();
-              let fused_arc = fuse_predecessors_recursive(&self_arc, levels, &mut memo);
-              if !Arc::ptr_eq(&self_arc, &fused_arc) {
-                  *self = (*fused_arc).clone();
-              }
-          }
-
-          pub fn fuse_predecessors_recursive(&self, levels: usize, _memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
-              let self_arc = Arc::new(self.clone());
-              let mut dummy_memo = HashMap::new();
-              fuse_predecessors_recursive(&self_arc, levels, &mut dummy_memo)
-          }
-          ```
-
-      -   Around line 612, replace the stub for the free function `fuse_predecessors_recursive`:
-
-          ```rust
-          // This was the old stub
-          pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, _levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
-              node_arc.clone()
-          }
-          ```
-
-          with the new implementation:
-
-          ```rust
-          pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
-              let fused_inner = node_arc.inner.fuse(Some(levels as isize));
-              if Arc::ptr_eq(&fused_inner.inner, &node_arc.inner.inner) {
-                  node_arc.clone()
-              } else {
-                  Arc::new(GSSNode { inner: fused_inner })
-              }
-          }
-          ```
-
-      These changes correctly wire up the fusing logic, which should resolve the GSS explosion.
-
-      ### Git Diffs
-
-      Here are the changes as a git patch:
+      Git diffs
+      Apply the following patch.
 
       ```diff
-      diff --git a/src/datastructures/gss_leveled_adapter.rs b/src/datastructures/gss_leveled_adapter.rs
-      index 941114a..1111111 100644
-      --- a/src/datastructures/gss_leveled_adapter.rs
-      +++ b/src/datastructures/gss_leveled_adapter.rs
-      @@ -411,14 +411,22 @@
+      diff --git a/src/glr/parser.rs b/src/glr/parser.rs
+      index f3b9c5a..c8c9f8e 100644
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -2070,7 +2070,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
+               let mut cached_dest_memos: BTreeMap<PrecomputeNode3Index, PruneAndTransformRecursiveMemo> = BTreeMap::new();
+       
+               // Collect todo pairs and deduplicate by (predecessor_state_id, isolated_parent pointer).
+      -        let mut todo_map: BTreeMap<StateID, BTreeMap<*const GSSNode, Arc<GSSNode>>> = BTreeMap::new();
+      +        let mut todo_map: BTreeMap<StateID, BTreeMap<GSSNode, Arc<GSSNode>>> = BTreeMap::new();
+       
+               // Handle "below bottom" (substring parsing continuation) first, adding to the todo list.
+               if !popper.below_bottom().is_empty() {
+      @@ -2080,11 +2080,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
+                           let below_todo = self.handle_below_bottom(nt, below_accs, config);
+                           crate::debug!(5, "Popped below bottom, hallucinating {} new parse paths.", below_todo.len());
+                           for (predecessor_state_id, isolated_parent) in below_todo {
+      -                        let pred_ptr = Arc::as_ptr(&isolated_parent);
+      +                        let key = (*isolated_parent).clone();
+                               todo_map.entry(predecessor_state_id)
+                                   .or_default()
+      -                            .entry(pred_ptr)
+      -                            .or_insert(isolated_parent);
+      +                            .entry(key)
+      +                            .or_insert(isolated_parent);
+                           }
+                       }
+                   }
+      @@ -2096,16 +2096,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
+               for popper_item in popper.iter() {
+                   for peek2 in popper_item.peek_iter() {
+                       let predecessor_state_id = peek2.edge_value().state_id;
+      -                let isolated_parent = peek2.isolated_parent();
+      -                let pred_ptr = Arc::as_ptr(&isolated_parent);
+      +                let isolated_parent = peek2.isolated_parent(); // Arc<GSSNode>
+      +                let key = (*isolated_parent).clone();          // structural key
+                       todo_map.entry(predecessor_state_id)
+                           .or_default()
+      -                    .entry(pred_ptr)
+      -                    .or_insert(isolated_parent);
+      +                    .entry(key)
+      +                    .or_insert(isolated_parent);
+                   }
                }
-           }
        
-      -    pub fn fuse_predecessors_recursive(&self, levels: usize, memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
-      -        todo!()
-      -    }
-      -
-           pub fn fuse_predecessors(&mut self, levels: usize) {
-      -        let mut memo = PruneAndTransformRecursiveMemo::new();
-      -        let fused = self.fuse_predecessors_recursive(levels, &mut memo);
-      -        *self = (*fused).clone();
-      +        if levels == 0 {
-      +            return;
-      +        }
-      +        let self_arc = Arc::new(self.clone());
-      +        let mut memo = HashMap::new();
-      +        let fused_arc = fuse_predecessors_recursive(&self_arc, levels, &mut memo);
-      +        if !Arc::ptr_eq(&self_arc, &fused_arc) {
-      +            *self = (*fused_arc).clone();
-      +        }
-      +    }
-      +
-      +    pub fn fuse_predecessors_recursive(&self, levels: usize, _memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
-      +        let self_arc = Arc::new(self.clone());
-      +        let mut dummy_memo = HashMap::new();
-      +        fuse_predecessors_recursive(&self_arc, levels, &mut dummy_memo)
-           }
-       }
-       
-      @@ -610,8 +618,13 @@
-       
-       pub fn simplify(_states: &mut BTreeMap<crate::tokenizer::TokenizerStateID, Arc<GSSNode>>) {}
-       pub(crate) fn simplify_roots_in_place(_roots: &mut [Arc<GSSNode>]) {}
-      -pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, _levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
-      -    node_arc.clone()
-      +pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
-      +    let fused_inner = node_arc.inner.fuse(Some(levels as isize));
-      +    if Arc::ptr_eq(&fused_inner.inner, &node_arc.inner.inner) {
-      +        node_arc.clone()
-      +    } else {
-      +        Arc::new(GSSNode { inner: fused_inner })
-      +    }
-       }
-       
-       impl GSSNode {
-
+      -        crate::debug!(4, "Total unique predecessor states to process for GOTO: {}", todo_map.len());
+      +        crate::debug!(4, "Total unique predecessor states to process for GOTO: {}", todo_map.len());
+               for (predecessor_state_id, parents_map) in todo_map {
+                   crate::debug!(9, "Processing predecessor state {} with {} isolated parents", predecessor_state_id.0, parents_map.len());
+      -            for (_pred_ptr, isolated_parent) in parents_map {
+      +            for (_key, isolated_parent) in parents_map {
+                       timeit!("GLRParserState::reduce_and_goto::HandleGotos", {
+                       let mut seen_nts: HashSet<NonTerminalID> = HashSet::new();
+                       let mut seen_gotos = HashSet::new();
       ```
     metadata:
   - user: |
@@ -32853,11 +32830,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/gss_leveled_adapter.rs
-      Applying patch to 'src/datastructures/gss_leveled_adapter.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss_leveled_adapter.rs.
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
-  - user: 'Changes committed with message: "Implement GSS node predecessor fusing
-      in LeveledGSS adapter to prevent explosion"'
+  - user: 'Changes committed with message: "Fix GSS explosion by using structural
+      deduplication for isolated parents in reduce_and_goto"'
     metadata:
 ...
