@@ -434,24 +434,24 @@ pub fn optimize_trie2_size(
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes_pinner = Trie::all_nodes(&trie2_god, &roots_vec);
 
-    // if config.optimize_trie2_prune_dead_paths {
-    //     prune_dead_paths_trie2(roots, &trie2_god);
-    // }
-    // if config.optimize_trie2_merge_nodes {
-    //     merge_nodes_trie2(roots, &trie2_god);
-    // }
-    // if config.optimize_trie2_factor_common_destinations {
-    //     simplify_trie2_factor_common_destinations(roots, &trie2_god);
-    // }
-    // if config.optimize_trie2_compress_edges {
-    //     compress_trie2_edges(roots, &trie2_god);
-    // }
-    // if config.optimize_trie2_prune_dead_paths {
-    //     prune_dead_paths_trie2(roots, &trie2_god);
-    // }
-    // if config.optimize_trie2_merge_nodes {
-    //     merge_nodes_trie2(roots, &trie2_god);
-    // }
+    if config.optimize_trie2_prune_dead_paths {
+        prune_dead_paths_trie2(roots, &trie2_god);
+    }
+    if config.optimize_trie2_merge_nodes {
+        merge_nodes_trie2(roots, &trie2_god);
+    }
+    if config.optimize_trie2_factor_common_destinations {
+        simplify_trie2_factor_common_destinations(roots, &trie2_god);
+    }
+    if config.optimize_trie2_compress_edges {
+        compress_trie2_edges(roots, &trie2_god);
+    }
+    if config.optimize_trie2_prune_dead_paths {
+        prune_dead_paths_trie2(roots, &trie2_god);
+    }
+    if config.optimize_trie2_merge_nodes {
+        merge_nodes_trie2(roots, &trie2_god);
+    }
     if config.optimize_trie2_gc {
         Trie::gc(&trie2_god, &roots.values().cloned().collect::<Vec<_>>());
     }
