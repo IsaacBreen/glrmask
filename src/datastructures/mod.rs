@@ -15,6 +15,7 @@ pub mod cache;
 pub mod entry_api;
 pub mod trie;
 pub mod leveled_gss;
+mod test_gss;
 
 pub use arc_wrapper::ArcPtrWrapper;
 pub use entry_api::{EntryApi, OrderedMapEntry};
