@@ -304,20 +304,21 @@ def run_benchmark(args, run_index: int = 0):
     }
 
     # Determine output path
+    constraint_stem = Path(args.constraint_file).name.replace('.json.gz', '').replace('.json', '')
     if args.output:
         output_path = Path(args.output)
         if output_path.is_dir():
-            base_name = f"{args.model.stem}_results.json"
+            base_name = f"{args.model.stem}__{constraint_stem}_results.json"
             if args.repeat > 1:
-                base_name = f"{args.model.stem}_run{run_index + 1}_results.json"
+                base_name = f"{args.model.stem}__{constraint_stem}_run{run_index + 1}_results.json"
             output_path = output_path / base_name
         else:  # It's a file path
             if args.repeat > 1:
                 output_path = output_path.with_name(f"{output_path.stem}_run{run_index + 1}{output_path.suffix}")
     else:
-        base_name = f"{args.model.stem}_results.json"
+        base_name = f"{args.model.stem}__{constraint_stem}_results.json"
         if args.repeat > 1:
-            base_name = f"{args.model.stem}_run{run_index + 1}_results.json"
+            base_name = f"{args.model.stem}__{constraint_stem}_run{run_index + 1}_results.json"
         output_path = Path(base_name)
     
     output_path.parent.mkdir(parents=True, exist_ok=True)

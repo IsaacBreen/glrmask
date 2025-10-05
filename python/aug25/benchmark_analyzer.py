@@ -48,7 +48,15 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
             data = json.load(f)
 
         model_script = data.get("model_script") or data.get("competitor_script")  # legacy fallback
-        model_name = Path(model_script).stem if model_script else Path(file_path).stem
+        grammar_file = data.get("inputs", {}).get("grammar_file")
+
+        model_stem = Path(model_script).stem if model_script else Path(file_path).stem
+        
+        if grammar_file:
+            grammar_stem = Path(grammar_file).name.replace('.json.gz', '').replace('.json', '')
+            model_name = f"{model_stem}__{grammar_stem}"
+        else:
+            model_name = model_name = model_stem
 
         if model_name not in model_order:
             model_order.append(model_name)
@@ -139,20 +147,30 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
 
     # Determine baseline
     if baseline_key:
-        # Allow either a model name (stem) or a path to a results file
+        # Allow either a composite model name or a path to a results file
         candidate = baseline_key
         path_candidate = Path(candidate)
-        if path_candidate.exists():
+        candidate_name = None
+        if path_candidate.is_file():
             try:
                 with open(path_candidate, 'r') as f:
                     d = json.load(f)
-                candidate_name = Path(d.get("model_script", path_candidate)).stem
-            except Exception:
-                candidate_name = path_candidate.stem
+                model_script = d.get("model_script") or d.get("competitor_script")
+                grammar_file = d.get("inputs", {}).get("grammar_file")
+                model_stem = Path(model_script).stem if model_script else path_candidate.stem
+                if grammar_file:
+                    grammar_stem = Path(grammar_file).name.replace('.json.gz', '').replace('.json', '')
+                    candidate_name = f"{model_stem}__{grammar_stem}"
+                else:
+                    candidate_name = model_stem
+            except Exception as e:
+                print(f"Warning: Could not parse baseline file '{baseline_key}': {e}. Treating as a name.")
+                candidate_name = candidate
         else:
             candidate_name = candidate
+
         if candidate_name not in masks_by_model:
-            print(f"Warning: Baseline '{baseline_key}' not found among models: {list(masks_by_model.keys())}. Using first available model.")
+            print(f"Warning: Baseline '{baseline_key}' (resolved to '{candidate_name}') not found among models: {list(masks_by_model.keys())}. Using first available model.")
             baseline_name = model_order[0]
         else:
             baseline_name = candidate_name

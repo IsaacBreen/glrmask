@@ -4,22 +4,20 @@ set -euo pipefail
 # ==============================================================================
 # run_benchmarks.sh
 #
-# A script to automate running benchmarks for multiple grammar constraint models,
-# generating JSON results and analysis plots. This script runs each model once
-# (no in-process reference/baseline). The analyzer is later told which result
-# is the baseline to perform mask comparisons.
+# A script to automate running benchmarks for multiple model and constraint
+# file pairs, generating JSON results and analysis plots.
 #
 # This script should be run from the project root directory.
 #
 # Usage:
-#   ./run_benchmarks.sh <baseline_model.py> <model1.py> [model2.py ...]
+#   ./run_benchmarks.sh <model1.py:constraint1.json.gz> [model2.py:constraint2.json.gz ...]
 #
 # Example:
-#   ./run_benchmarks.sh aug25/precompute2_model.py aug25/precompute3_model.py
+#   ./run_benchmarks.sh model.py:c1.json.gz model.py:c2.json.gz
 #
 # Environment Variables:
-#   CONSTRAINT_FILE: Path to the pre-compiled .json.gz constraint file.
-#                    (Default: ./.cache/test_vocabs/js_grammar_constraint.json.gz)
+#   CODE_FILE:    Path to the code file to use as input.
+#                 (Default: ./src/example_code.js)
 #   CODE_FILE:    Path to the code file to use as input.
 #                 (Default: ./src/example_code.js)
 #   REPEAT:       Number of times to run each benchmark. (Default: 1)
@@ -28,8 +26,6 @@ set -euo pipefail
 # ==============================================================================
 
 # --- Configuration ---
-# Use environment variables if set, otherwise use defaults.
-: "${CONSTRAINT_FILE:="./.cache/test_vocabs/js_grammar_constraint.json.gz"}"
 : "${CODE_FILE:="./src/example_code.js"}"
 : "${SKIP_CPP_BUILD:=0}" # Set to 1 to disable C++ compilation
 : "${SKIP_RUST:=0}" # Set to 1 to disable Rust compilation
@@ -45,28 +41,31 @@ export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
 
 # --- Argument Validation ---
 if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 <baseline_model.py> <model1.py> [model2.py ...]"
-    echo "Error: At least one model argument is required. The first is treated as the baseline."
+    echo "Usage: $0 <model1.py:constraint1.json.gz> [model2.py:constraint2.json.gz ...]"
+    echo "Error: At least one model:constraint pair is required. The first is treated as the baseline."
     exit 1
 fi
 
-BASELINE_MODEL="$1"
-shift
-COMPETITORS=("$@")
-
-ALL_MODELS=("$BASELINE_MODEL" "${COMPETITORS[@]}")
+ALL_PAIRS=("$@")
+BASELINE_PAIR="$1"
 
 # Check that all provided files exist
-for file in "${ALL_MODELS[@]}"; do
-    if [ ! -f "$file" ]; then
-        echo "Error: Model file not found: $file"
+for pair in "${ALL_PAIRS[@]}"; do
+    MODEL_FILE="${pair%%:*}"
+    CONSTRAINT_FILE_ARG="${pair#*:}"
+    if [ "$MODEL_FILE" == "$CONSTRAINT_FILE_ARG" ]; then # handles case where there is no ':'
+        echo "Error: Invalid argument format '$pair'. Expected 'model.py:constraint.json.gz'."
+        exit 1
+    fi
+    if [ ! -f "$MODEL_FILE" ]; then
+        echo "Error: Model file not found: $MODEL_FILE"
+        exit 1
+    fi
+    if [ ! -f "$CONSTRAINT_FILE_ARG" ]; then
+        echo "Error: Constraint file not found: $CONSTRAINT_FILE_ARG"
         exit 1
     fi
 done
-if [ ! -f "$CONSTRAINT_FILE" ]; then
-    echo "Error: Constraint file not found: $CONSTRAINT_FILE"
-    exit 1
-fi
 if [ ! -f "$CODE_FILE" ]; then
     echo "Error: Code file not found: $CODE_FILE"
     exit 1
@@ -78,14 +77,7 @@ fi
 RESULTS_DIR="benchmark_results/$(date +"%Y-%m-%d_%H-%M-%S")"
 mkdir -p "$RESULTS_DIR"
 echo "Benchmark results will be saved in: $RESULTS_DIR"
-echo "---"
-echo "Baseline Model: $BASELINE_MODEL"
-if [ "${#COMPETITORS[@]}" -gt 0 ]; then
-  echo "Other Models: ${COMPETITORS[*]}"
-else
-  echo "Other Models: (none)"
-fi
-echo "Constraint File: $CONSTRAINT_FILE"
+echo "Benchmark pairs: ${ALL_PAIRS[*]}"
 echo "Code: $CODE_FILE"
 echo "Repeat count: $REPEAT"
 if [[ -n "$AGG_METHOD" ]]; then
@@ -195,29 +187,32 @@ echo "Starting benchmark runs..."
 # Define the ASAN library path at the top of the loop for clarity
 ASAN_LIB="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/17/lib/darwin/libclang_rt.asan_osx_dynamic.dylib"
 
-for model_to_benchmark in "${ALL_MODELS[@]}"; do
+for pair in "${ALL_PAIRS[@]}"; do
+    MODEL_FILE="${pair%%:*}"
+    CONSTRAINT_FILE_ARG="${pair#*:}"
+
     echo
-    echo ">>> Running benchmark for: $(basename "$model_to_benchmark")"
+    echo ">>> Running benchmark for: $(basename "$MODEL_FILE") with $(basename "$CONSTRAINT_FILE_ARG")"
     cmd=(python -m python.aug25.benchmark_runner
         --code "$CODE_FILE"
-        --constraint-file "$CONSTRAINT_FILE"
-        --model "$model_to_benchmark"
+        --constraint-file "$CONSTRAINT_FILE_ARG"
+        --model "$MODEL_FILE"
         --output "$RESULTS_DIR"
         --repeat "$REPEAT")
     echo "${cmd[*]}"
     # Prepend the environment variable ONLY for the C++ model
-    if [[ "$model_to_benchmark" == *"precompute3_model_cpp.py"* ]]; then
+    if [[ "$MODEL_FILE" == *"precompute3_model_cpp.py"* ]]; then
         echo ">>> Running with AddressSanitizer..."
         if DYLD_INSERT_LIBRARIES="$ASAN_LIB" "${cmd[@]}"; then
-            echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
+            echo ">>> Finished benchmark for: $(basename "$MODEL_FILE")"
         else
             exit_code=$?
             echo
-            echo ">>> Benchmark for $(basename "$model_to_benchmark") failed with exit code $exit_code. Skipping."
+            echo ">>> Benchmark for $(basename "$MODEL_FILE") failed with exit code $exit_code. Skipping."
         fi
     else
         if "${cmd[@]}"; then
-            echo ">>> Finished benchmark for: $(basename "$model_to_benchmark")"
+            echo ">>> Finished benchmark for: $(basename "$MODEL_FILE")"
         else
             exit_code=$?
             echo
@@ -233,10 +228,18 @@ echo "---"
 # --- Analyze Results ---
 echo "Analyzing results and generating plots..."
 PLOTS_DIR="${RESULTS_DIR}/analysis"
-BASELINE_STEM="$(basename "$BASELINE_MODEL" .py)"
+
+BASELINE_MODEL_FILE="${BASELINE_PAIR%%:*}"
+BASELINE_CONSTRAINT_FILE="${BASELINE_PAIR#*:}"
+BASELINE_MODEL_STEM="$(basename "$BASELINE_MODEL_FILE" .py)"
+BASELINE_CONSTRAINT_STEM=$(basename "${BASELINE_CONSTRAINT_FILE}")
+BASELINE_CONSTRAINT_STEM=${BASELINE_CONSTRAINT_STEM%.json.gz}
+BASELINE_CONSTRAINT_STEM=${BASELINE_CONSTRAINT_STEM%.json}
+BASELINE_KEY="${BASELINE_MODEL_STEM}__${BASELINE_CONSTRAINT_STEM}"
+
 cmd=(python -m python.aug25.benchmark_analyzer
     "${RESULTS_DIR}"/*.json
-    --baseline "$BASELINE_STEM"
+    --baseline "$BASELINE_KEY"
     --output-dir "$PLOTS_DIR")
 
 if [[ -n "$AGG_METHOD" ]]; then
@@ -249,6 +252,6 @@ echo "${cmd[*]}"
 echo
 echo "---"
 echo "Benchmark analysis complete."
-echo "Baseline: $BASELINE_STEM"
+echo "Baseline: $BASELINE_KEY"
 echo "Summary printed above. Plots are saved in: $PLOTS_DIR"
 echo "Full JSON results are in: $RESULTS_DIR"
