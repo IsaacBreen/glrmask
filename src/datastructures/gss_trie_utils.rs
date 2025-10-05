@@ -15,24 +15,24 @@ pub(crate) fn merge_stored_trie_nodes(
 ) {
     let mut new_destinations = BTreeMap::new();
 
-    let mut internal_closure = |internal: &GSSInternal| Some((internal.acc.clone(), true));
+    let mut internal_closure = |internal: &GSSInternal| Some((internal.acc().clone(), true));
     let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        if !root.acc.stored_trie_nodes.iter().any(
+        if !root.acc().stored_trie_nodes().iter().any(
             // TODO: can this condition be relaxed to a subset or something?
-            |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != root.acc.llm_tokens_union
+            |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != root.acc().llm_tokens_union
         ) {
-            return Some(root.acc.clone());
+            return Some(root.acc().clone());
         }
-        let mut new_acc = (*root.acc).clone();
+        let mut new_acc = (*root.acc()).clone();
         // Create a single new destination for this merge operation.
-        let new_destination = new_destinations.entry((new_acc.stored_trie_nodes.clone(), root.acc.llm_tokens_union.clone()))
+        let new_destination = new_destinations.entry((new_acc.stored_trie_nodes().clone(), root.acc().llm_tokens_union.clone()))
             .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(StoredPrecomputeNode::new(PrecomputedNodeContents::internal()))))
             .clone();
         let edge_key = (0, new_acc.llm_tokens_union.clone());
         let edge_value = StateIDBV::max_ones();
         let tokens_for_edge = new_acc.llm_tokens_union.clone();
 
-        for source_wrapper in &new_acc.stored_trie_nodes {
+        for source_wrapper in &new_acc.stored_trie_nodes() {
             let source_arc = source_wrapper.as_arc().clone();
 
             let inserter = EdgeInserter::new(
@@ -153,7 +153,7 @@ fn deep_add_precompute_trie_edges_recursive(
             let mut any_child_changed = false;
             let mut new_predecessors_map = BTreeMap::new();
 
-            for (edge_val, preds_by_depth) in &internal.predecessors {
+            for (edge_val, preds_by_depth) in &internal.predecessors() {
                 let mut new_preds_by_depth = BTreeMap::new();
                 for (dest_key, pred_vec) in preds_by_depth {
                     let mut new_vec: Vec<Arc<GSSNode>> = Vec::with_capacity(pred_vec.len());

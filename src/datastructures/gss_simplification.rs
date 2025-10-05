@@ -101,7 +101,7 @@ fn canonicalize_node(
     let out = match node_arc.as_ref() {
         GSSNode::Root(root) => {
             // Intern roots by their Acc value. This makes identical roots share a single Arc.
-            let acc = (*root.acc).clone();
+            let acc = (**root.acc()).clone();
             pool.intern(GSSNode::new(acc))
         }
         GSSNode::Internal(internal) => {
@@ -111,7 +111,7 @@ fn canonicalize_node(
 
             let mut new_map: NodeMap = BTreeMap::new();
 
-            for (edge_val, preds_by_depth) in &internal.predecessors {
+            for (edge_val, preds_by_depth) in internal.predecessors() {
                 let mut new_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
 
                 for (dest_key, pred_vec) in preds_by_depth {
@@ -139,7 +139,7 @@ fn canonicalize_node(
 
             // Important: pass a neutral Acc when rebuilding internal nodes, so we keep structure only.
             // Now: we must preserve local acc as well.
-            pool.intern(GSSNode::new_with_map(internal.acc.clone(), new_map))
+            pool.intern(GSSNode::new_with_map(internal.acc().clone(), new_map))
         }
     };
 

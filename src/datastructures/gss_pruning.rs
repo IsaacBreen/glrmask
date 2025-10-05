@@ -311,14 +311,14 @@ pub fn prune_disallowed_terminals(
     };
 
     let mut internal_closure = |internal: &GSSInternal| {
-        if check_and_prune(&internal.acc) {
+        if check_and_prune(&internal.acc()) {
             None
         } else {
-            Some((internal.acc.clone(), true))
+            Some((internal.acc().clone(), true))
         }
     };
     let mut root_closure = |root: &GSSRoot| -> Option<Arc<Acc>> {
-        if check_and_prune(&root.acc) { None } else { Some(root.acc.clone()) }
+        if check_and_prune(&root.acc()) { None } else { Some(root.acc().clone()) }
     };
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
         *root_arc = new_root;
@@ -357,8 +357,8 @@ pub fn map_allowed_terminals_tokenizer_states(
         Some(Arc::new(new_acc))
     };
 
-    let mut internal_closure = |internal: &GSSInternal| transform_acc(&internal.acc).map(|acc| (acc, true));
-    let mut root_closure = |root: &GSSRoot| transform_acc(&root.acc);
+    let mut internal_closure = |internal: &GSSInternal| transform_acc(&internal.acc()).map(|acc| (acc, true));
+    let mut root_closure = |root: &GSSRoot| transform_acc(&root.acc());
 
     if let Some(new_root) = prune_and_transform_recursive(root_arc, &mut internal_closure, &mut root_closure, memo) {
         *root_arc = new_root;
