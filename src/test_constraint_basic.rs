@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use bimap::BiBTreeMap;
 use reqwest::blocking;
 use serde_json;
-use crate::constraint::{GrammarConstraint};
+use crate::constraint::{GrammarConstraint, GrammarConstraintState};
 use crate::datastructures::trie::Trie;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 // Already a main dependency, but good to be explicit if used directly
@@ -1590,7 +1590,7 @@ fn test_js_full_grammar_gss_explosion() -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-fn num_unique_nodes(constraint_state: &ConstraintState) -> usize {
+fn num_unique_nodes(constraint_state: &GrammarConstraintState) -> usize {
     gather_gss_stats(
         &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
     ).unique_nodes
