@@ -1,8 +1,6 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use std::borrow::Borrow;
-use std::collections::btree_map::Entry as BTreeEntry;
 use crate::datastructures::gss_leveled_adapter::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
 use crate::datastructures::gss_leveled_adapter::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use crate::datastructures::ordered_hash_map::Retain;
@@ -28,7 +26,6 @@ use crate::constraint_precompute0_utils;
 use crate::constraint_precompute1_utils;
 use crate::constraint_precompute2_utils;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
-use crate::datastructures::entry_api::EntryApi;
 use crate::datastructures::gss_leveled_adapter::Acc;
 use crate::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig};
 use crate::datastructures::hybrid_bitset::HybridBitset;
@@ -55,9 +52,12 @@ use serde_json::Value as SerdeValue;
 use std::collections::BTreeMap as StdMap;
 use std::io::{Read, Write};
 use std::ops::{BitAnd, Sub};
+use std::borrow::Borrow;
+use std::collections::btree_map::Entry as BTreeEntry;
 use crate::constraint_precompute2_utils::optimize_trie2_size;
 pub(crate) use crate::constraint::constraint_precompute3_utils::clone_trie3_graph;
 use crate::constraint_precompute3_utils::optimize_trie3_size;
+use crate::datastructures::EntryApi;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::trie::{God, GodWrapper};
 
@@ -1709,8 +1709,7 @@ impl<'a> Display for GrammarConstraintState<'a> {
             llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
             verbose: false,
         };
-            let (gss_str, _) =
-                crate::datastructures::gss_leveled_adapter::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
+            let (gss_str, _) = print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
             write!(f, "{}", gss_str)?;
         }
 
