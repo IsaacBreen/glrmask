@@ -1590,12 +1590,6 @@ fn test_js_full_grammar_gss_explosion() -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-fn num_unique_nodes(constraint_state: &GrammarConstraintState) -> usize {
-    gather_gss_stats(
-        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-    ).unique_nodes
-}
-
 #[test]
 fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>> {
     // This test reproduces the GSS explosion seen in `test_js_constraint_integration`
@@ -1697,7 +1691,7 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     assert!(constraint_state.is_active());
     println!("After first chunk '{}'", String::from_utf8_lossy(repeating_chunk));
     constraint_state.print_gss_stats();
-    let nodes1 = num_unique_nodes(&constraint_state);
+    let nodes1 = constraint_state.num_unique_nodes();
     constraint_state.print_gss();
 
     // Second chunk
@@ -1707,7 +1701,7 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     assert!(constraint_state.is_active());
     println!("\nAfter second chunk '{}'", String::from_utf8_lossy(repeating_chunk));
     constraint_state.print_gss_stats();
-    let nodes2 = num_unique_nodes(&constraint_state);
+    let nodes2 = constraint_state.num_unique_nodes();
     constraint_state.print_gss();
 
     // Third chunk
@@ -1717,7 +1711,7 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     assert!(constraint_state.is_active());
     println!("\nAfter third chunk '{}'", String::from_utf8_lossy(repeating_chunk));
     constraint_state.print_gss_stats();
-    let nodes3 = num_unique_nodes(&constraint_state);
+    let nodes3 = constraint_state.num_unique_nodes();
     constraint_state.print_gss();
 
     let increase1 = nodes2 - nodes1;
@@ -1809,21 +1803,21 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
     assert!(constraint_state.is_active());
     println!("After first single '{{': {} states", constraint_state.state.len());
     constraint_state.print_gss();
-    let nodes1 = num_unique_nodes(&constraint_state);
+    let nodes1 = constraint_state.num_unique_nodes();
 
     // Second single '{' commit$
     constraint_state.commit_bytes(b"{");
     assert!(constraint_state.is_active());
     println!("After second single '{{': {} states", constraint_state.state.len());
     constraint_state.print_gss();
-    let nodes2 = num_unique_nodes(&constraint_state);
+    let nodes2 = constraint_state.num_unique_nodes();
 
     // Third single '{' commit
     constraint_state.commit_bytes(b"{");
     assert!(constraint_state.is_active());
     println!("After third single '{{': {} states", constraint_state.state.len());
     constraint_state.print_gss();
-    let nodes3 = num_unique_nodes(&constraint_state);
+    let nodes3 = constraint_state.num_unique_nodes();
 
     let increase1 = nodes2 - nodes1;
     let increase2 = nodes3 - nodes2;
