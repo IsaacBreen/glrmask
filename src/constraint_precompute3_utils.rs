@@ -9,7 +9,7 @@ use ordered_hash_map::OrderedHashMap;
 use crate::constraint::{GrammarConstraintConfig, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper, StageVocab, PrecomputedNodeContents};
 use crate::constraint_extra::{calculate_final_stats3, print_precompute_stats3, PrecomputeStats};
 use crate::datastructures::EntryApi;
-use crate::datastructures::gss::LLMTokenBV;
+use crate::constraint::LLMTokenBV;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::tokenizer::TokenizerStateID;
 
@@ -78,12 +78,12 @@ pub fn optimize_trie3_size(
 		});
 	}
 
-	// After compression, prune and GC before the expensive merge.
-	if config.optimize_trie2_prune_dead_paths {
-		run_pass!("Pruning dead paths (post-compress)", {
-			prune_dead_paths_trie3(roots, &trie3_god);
-		});
-	}
+	// // After compression, prune and GC before the expensive merge.
+	// if config.optimize_trie2_prune_dead_paths {
+	// 	run_pass!("Pruning dead paths (post-compress)", {
+	// 		prune_dead_paths_trie3(roots, &trie3_god);
+	// 	});
+	// }
 
 	if config.optimize_trie3_constrain_bitvecs {
 		let roots_vec: Vec<_> = roots.values().cloned().collect();

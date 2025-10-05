@@ -11,7 +11,7 @@ use bimap::BiBTreeMap;
 use crate::datastructures::ArcPtrWrapper;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use crate::datastructures::gss::LLMTokenBV;
+use crate::constraint::LLMTokenBV;
 use crate::glr::grammar::Terminal;
 use crate::glr::table::StateID;
 

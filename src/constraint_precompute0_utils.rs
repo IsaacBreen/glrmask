@@ -5,7 +5,7 @@ use bimap::BiBTreeMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
 use crate::constraint::{PrecomputeNode0, PrecomputeNode0Index, PrecomputedNodeContents0, Trie0GodWrapper};
-use crate::datastructures::gss::LLMTokenBV;
+use crate::constraint::LLMTokenBV;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};

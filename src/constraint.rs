@@ -30,7 +30,7 @@ use crate::constraint_precompute2_utils;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::entry_api::EntryApi;
 use crate::datastructures::gss::Acc;
-use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig, LLMTokenBV, TerminalBV};
+use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -58,6 +58,7 @@ use std::ops::{BitAnd, Sub};
 use crate::constraint_precompute2_utils::optimize_trie2_size;
 pub(crate) use crate::constraint::constraint_precompute3_utils::clone_trie3_graph;
 use crate::constraint_precompute3_utils::optimize_trie3_size;
+use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::trie::{God, GodWrapper};
 
 const MERGE_THRESHOLD: usize = 20;
@@ -1578,7 +1579,7 @@ pub struct GrammarConstraintState<'a> {
 
 pub(crate) mod constraint_precompute3_utils {
     use super::{PrecomputeNode3, PrecomputeNode3Index, Trie3GodWrapper};
-    use crate::datastructures::gss::LLMTokenBV;
+    use crate::constraint::LLMTokenBV;
     use crate::datastructures::trie::{Trie, Trie2Index};
     use std::collections::{HashMap, VecDeque};
 
@@ -2930,3 +2931,8 @@ impl<'a> GrammarConstraintState<'a> {
         &self.state
     }
 }
+
+pub(crate) type LLMTokenBV = HybridBitset;
+pub(crate) type TerminalBV = HybridBitset;
+/// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
+pub type TerminalInfo = HybridL2Bitset;

@@ -21,9 +21,6 @@ use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID;
 use profiler_macro::{time_it, timeit};
 
-pub(crate) type LLMTokenBV = HybridBitset;
-pub(crate) type TerminalBV = HybridBitset;
-
 // --- Type Aliases ---
 
 pub(crate) type MaxDepth = usize;
@@ -32,8 +29,6 @@ pub(crate) type DestKey = MaxDepth;
 pub(crate) type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>>;
 /// A temporary set of predecessors used during node construction and simplification.
 type NodeSet = ordered_hash_map::OrderedHashSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
-/// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
-pub type TerminalInfo = HybridL2Bitset;
 
 pub(crate)type StoredPrecomputeNodeIndex = PrecomputeNode3Index;
 pub(crate)type StoredPrecomputeNode = PrecomputeNode3;
@@ -42,7 +37,7 @@ pub(crate) type StoredTrieGodWrapper = Trie3GodWrapper;
 
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
-use crate::constraint::{PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, Trie3GodWrapper};
+use crate::constraint::{LLMTokenBV, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, TerminalBV, TerminalInfo, Trie3God, Trie3GodWrapper};
 use crate::datastructures::trie::God;
 
 /// Recursively traverses a GSS, and for each node (both internal and root) that has

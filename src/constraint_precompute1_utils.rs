@@ -13,7 +13,7 @@ use crate::constraint::{StageVocab, PrecomputeNode1Index, Trie1GodWrapper};
 use crate::constraint_extra::PrecomputeStats;
 use deterministic_hash::DeterministicHasher;
 use crate::datastructures::EntryApi;
-use crate::datastructures::gss::LLMTokenBV;
+use crate::constraint::LLMTokenBV;
 use crate::datastructures::trie::Trie;
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::tokenizer::TokenizerStateID;

@@ -20,7 +20,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
 use bimap::{BiBTreeMap};
-use crate::datastructures::gss::LLMTokenBV;
+use crate::constraint::LLMTokenBV;
 use crate::constraint_extra::PrecomputeStats;
 use crate::constraint_precompute2_utils::{are_precompute2_trees_equivalent, clone_trie2_graph, optimize_trie2_size};
 use crate::json_serialization::JSONConvertible;
