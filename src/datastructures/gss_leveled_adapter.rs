@@ -452,8 +452,8 @@ impl<'a> GSSPeek<'a> {
 pub struct GSSPopper {
     node: Arc<GSSNode>,
 }
-pub struct GSSPopperItem<'a> {
-    node: &'a Arc<GSSNode>,
+pub struct GSSPopperItem {
+    node: Arc<GSSNode>,
     acc: Acc,
 }
 pub struct GSSPopperItemPeek<'a> {
@@ -465,10 +465,12 @@ impl GSSPopper {
     pub fn new_from_node(node: Arc<GSSNode>, _acc: Arc<Acc>) -> Self {
         GSSPopper { node }
     }
-    pub fn iter(&self) -> impl Iterator<Item = GSSPopperItem<'_>> {
-        std::iter::once(GSSPopperItem {
-            node: &self.node,
-            acc: Acc::new_fresh(),
+    pub fn iter(&self) -> impl Iterator<Item = GSSPopperItem> {
+        self.node.inner.to_stacks().into_iter().map(|(p, a)| {
+            let node = Arc::new(GSSNode {
+                inner: LeveledGSS::from_stacks(&[(p, a.clone())]),
+            });
+            GSSPopperItem { node, acc: a }
         })
     }
     pub fn below_bottom(&self) -> &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>> {
@@ -484,11 +486,11 @@ impl GSSPopper {
     }
 }
 
-impl<'a> GSSPopperItem<'a> {
-    pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'a>> {
+impl GSSPopperItem {
+    pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
         let keys: Vec<_> = self.node.inner.peek().into_iter().collect();
         GSSPopperItemPeekIter {
-            parent: self.node,
+            parent: &self.node,
             keys,
             idx: 0,
         }
