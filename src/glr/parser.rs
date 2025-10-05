@@ -1420,7 +1420,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut cached_dest_memos: BTreeMap<PrecomputeNode3Index, PruneAndTransformRecursiveMemo> = BTreeMap::new();
 
         // Collect todo pairs and deduplicate by (predecessor_state_id, isolated_parent pointer).
-        let mut todo_map: BTreeMap<StateID, BTreeMap<GSSNode, Arc<GSSNode>>> = BTreeMap::new();
+        let mut todo_map: BTreeMap<StateID, BTreeMap<*const GSSNode, Arc<GSSNode>>> = BTreeMap::new();
 
         // Handle "below bottom" (substring parsing continuation) first, adding to the todo list.
         if !popper.below_bottom().is_empty() {
@@ -1436,10 +1436,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let below_todo = self.handle_below_bottom(nt, below_accs, config);
                     crate::debug!(5, "Popped below bottom, hallucinating {} new parse paths.", below_todo.len());
                     for (predecessor_state_id, isolated_parent) in below_todo {
-                        let key = (*isolated_parent).clone();
+                        let pred_ptr = Arc::as_ptr(&isolated_parent);
                         todo_map.entry(predecessor_state_id)
                             .or_default()
-                            .entry(key)
+                            .entry(pred_ptr)
                             .or_insert(isolated_parent);
                     }
                 }
@@ -1450,11 +1450,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for popper_item in popper.iter() {
             for peek2 in popper_item.peek_iter() {
                 let predecessor_state_id = peek2.edge_value().state_id;
-                let isolated_parent = peek2.isolated_parent(); // Arc<GSSNode>
-                let key = (*isolated_parent).clone();          // structural key
+                let isolated_parent = peek2.isolated_parent();
+                let pred_ptr = Arc::as_ptr(&isolated_parent);
                 todo_map.entry(predecessor_state_id)
                     .or_default()
-                    .entry(key)
+                    .entry(pred_ptr)
                     .or_insert(isolated_parent);
             }
         }
@@ -1462,7 +1462,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Total unique predecessor states to process for GOTO: {}", todo_map.len());
         for (predecessor_state_id, parents_map) in todo_map {
             crate::debug!(9, "Processing predecessor state {} with {} isolated parents", predecessor_state_id.0, parents_map.len());
-            for (_key, isolated_parent) in parents_map {
+            for (_pred_ptr, isolated_parent) in parents_map {
                 timeit!("GLRParserState::reduce_and_goto::HandleGotos", {
                 let mut seen_nts: HashSet<NonTerminalID> = HashSet::new();
                 let mut seen_gotos = HashSet::new();
