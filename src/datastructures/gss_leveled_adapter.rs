@@ -53,6 +53,14 @@ impl Acc {
     pub fn union_llm_tokens(&self) -> HybridBitset {
         self.llm_tokens_union.clone()
     }
+
+    pub fn stored_trie_nodes(&self) -> &BTreeSet<StoredPrecomputeNodeIndex> {
+        &self.stored_trie_nodes
+    }
+
+    pub fn stored_trie_nodes_mut(&mut self) -> &mut BTreeSet<StoredPrecomputeNodeIndex> {
+        &mut self.stored_trie_nodes
+    }
 }
 
 impl LGMerge for Acc {
@@ -239,6 +247,11 @@ impl Hash for GSSNode {
 }
 
 impl GSSNode {
+    pub fn new(acc: Acc) -> Self {
+        GSSNode {
+            inner: LeveledGSS::from_stacks(&vec![(vec![], acc)]),
+        }
+    }
     pub fn new_fresh() -> Self {
         GSSNode {
             inner: LeveledGSS::empty(),
@@ -356,6 +369,10 @@ impl GSSNode {
         todo!()
     }
 
+    pub fn num_predecessors(&self) -> usize {
+        self.inner.peek().len()
+    }
+
     pub fn popn(&self, n: usize) -> GSSPopper {
         let popped = self.inner.popn(n as isize);
         GSSPopper {
@@ -370,6 +387,16 @@ impl GSSNode {
             keys,
             idx: 0,
         }
+    }
+
+    pub fn fuse_predecessors_recursive(&self, levels: usize, memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
+        todo!()
+    }
+
+    pub fn fuse_predecessors(&mut self, levels: usize) {
+        let mut memo = PruneAndTransformRecursiveMemo::new();
+        let fused = self.fuse_predecessors_recursive(levels, &mut memo);
+        *self = (*fused).clone();
     }
 }
 
@@ -616,9 +643,10 @@ pub fn prune_disallowed_terminals(
     _memo: &mut PruneAndTransformRecursiveMemo,
 ) {
     let matched = matched_terminals.clone();
+    let all = HybridBitset::max_ones();
     transform_all(root_arc, |a| {
         for (sid, bv) in &matched {
-            let allowed = a.terminals_union.get_l2_bitset(sid.0).unwrap_or(&HybridBitset::max_ones());
+            let allowed = a.terminals_union.get_l2_bitset(sid.0).unwrap_or(&all);
             if !bv.is_subset(allowed) {
                 return None;
             }
@@ -657,6 +685,15 @@ pub fn simplify(_states: &mut BTreeMap<crate::tokenizer::TokenizerStateID, Arc<G
 pub(crate) fn simplify_roots_in_place(_roots: &mut [Arc<GSSNode>]) {}
 pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, _levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
     node_arc.clone()
+}
+
+impl GSSNode {
+    pub fn reset_llm_tokens(&mut self) {
+        let mut memo = PruneAndTransformRecursiveMemo::new();
+        let mut arc = Arc::new(self.clone());
+        reset_llm_tokens(&mut arc, &mut memo);
+        *self = (*arc).clone();
+    }
 }
 
 // --- Trie-utils stubs (no-ops) ---

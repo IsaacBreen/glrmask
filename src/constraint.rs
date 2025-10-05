@@ -1185,7 +1185,7 @@ impl GrammarConstraint {
             |precomputed_node_data, glr_s| {
                 reset();
 
-                crate::datastructures::gss::merge_stored_trie_nodes(
+                crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
                     &mut glr_s.active_state.stack,
                     &mut HashMap::new(),
                     glr_s.active_state.trie2_god.as_ref().unwrap(),
@@ -1710,7 +1710,7 @@ impl<'a> Display for GrammarConstraintState<'a> {
             verbose: false,
         };
             let (gss_str, _) =
-                crate::datastructures::gss::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
+                crate::datastructures::gss_leveled_adapter::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
             write!(f, "{}", gss_str)?;
         }
 

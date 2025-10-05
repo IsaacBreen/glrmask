@@ -28,6 +28,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use crate::datastructures::trie::{God, GodWrapper};
 use crate::datastructures::gss_leveled_adapter::{is_simple_gss, PruneAndTransformRecursiveMemo};
+use crate::datastructures::leveled_gss::Merge;
 
 // A single combined action for a given (state,row) and token:
 // - Normal(...) is a concrete per-token action from the row's action map
@@ -1176,7 +1177,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             std::iter::once((0..=usize::MAX, disallowed_terminals_bv))
                         );
 
-                        crate::datastructures::gss::disallow_terminals_and_prune_arc(
+                        crate::datastructures::gss_leveled_adapter::disallow_terminals_and_prune_arc(
                             &mut constrained_state.stack,
                             &disallowed_l2,
                             &mut HashMap::new(),
@@ -2292,7 +2293,7 @@ impl GLRParser {
 
             // Define the GSS node if it hasn't been visited yet
             if visited_nodes.insert(node_ptr) {
-                let acc_str = crate::datastructures::gss::format_acc(
+                let acc_str = crate::datastructures::gss_leveled_adapter::format_acc(
                     &node_arc,
                     &self.terminal_map,
                     original_internal_bimap,
