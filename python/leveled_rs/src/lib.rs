@@ -271,6 +271,13 @@ impl LeveledGSS {
         Ok(accumulator)
     }
 
+    #[pyo3(signature = (levels = None))]
+    fn fuse(&self, levels: Option<isize>) -> PyResult<Self> {
+        Ok(LeveledGSS {
+            inner: self.inner.fuse(levels),
+        })
+    }
+
     fn peek(&self) -> PyResult<PyObject> {
         Python::with_gil(|py| {
             let keys: Vec<PyObject> = self

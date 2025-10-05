@@ -91,6 +91,9 @@ class LeveledRSGSS(GSS[T, Acc], Generic[T, Acc]):
                 inner_list.append(_LeveledRSGSS.from_stacks(gss.to_stacks()))
         return cls(_LeveledRSGSS.merge_many(inner_list))
 
+    def fuse(self, levels: Optional[int] = None) -> LeveledRSGSS[T, Acc]:
+        return LeveledRSGSS(self._inner.fuse(levels))
+
     def peek(self) -> Set[T]:
         return self._inner.peek()
 
