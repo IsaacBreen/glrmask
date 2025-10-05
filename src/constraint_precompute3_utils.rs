@@ -126,11 +126,11 @@ pub fn optimize_trie3_size(
 		});
 	}
 
-	if config.optimize_trie2_prune_dead_paths { // Reusing config flag
-		run_pass!("Pruning nodes that do not reach end", {
-			prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-		});
-	}
+	// if config.optimize_trie2_prune_dead_paths { // Reusing config flag
+	// 	run_pass!("Pruning nodes that do not reach end", {
+	// 		prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
+	// 	});
+	// }
 
 	if config.optimize_trie3_merge_equivalent_llm_tokens {
 		run_pass!("Merging equivalent LLM tokens", {
@@ -157,9 +157,9 @@ pub fn optimize_trie3_size(
 	// Now that the graph is smaller and token sets are simpler, we can apply
 	// heavy structural optimizations.
 
-	run_pass!("Simplifying LLM token bitsets", {
-		simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
-	});
+	// run_pass!("Simplifying LLM token bitsets", {
+	// 	simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
+	// });
 
 	if config.optimize_trie2_compress_edges {
 		run_pass!("Compressing edges", {
@@ -188,11 +188,11 @@ pub fn optimize_trie3_size(
 	// --- Phase 3: Iterative Refinement ---
 	// A few rounds of compression and merging on the now much smaller graph.
 
-	if config.optimize_trie2_prune_dead_paths { // Reusing config flag
-		run_pass!("Pruning nodes that do not reach end (post-merge)", {
-			prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-		});
-	}
+	// if config.optimize_trie2_prune_dead_paths { // Reusing config flag
+	// 	run_pass!("Pruning nodes that do not reach end (post-merge)", {
+	// 		prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
+	// 	});
+	// }
 
 	if config.optimize_trie2_compress_edges {
 		run_pass!("Compressing edges (post-merge)", {
