@@ -169,6 +169,51 @@ class _InternalGSS(Generic[T]):
         new_root = _Node(children=filtered_children, empty=new_empty)
         return _InternalGSS(new_root)
 
+    def filter_by_length(self, min_len: Optional[int] = None, max_len: Optional[int] = None) -> "_InternalGSS[T]":
+        _min = min_len if min_len is not None else 0
+        _max = max_len if max_len is not None else float('inf')
+
+        memo: Dict[Tuple[int, int], Optional[_Node[T]]] = {}
+
+        def _filter(node: _Node[T], depth: int) -> Optional[_Node[T]]:
+            key = (id(node), depth)
+            if key in memo:
+                return memo[key]
+
+            if depth > _max:
+                memo[key] = None
+                return None
+
+            keep_empty = node.empty and _min <= depth <= _max
+
+            new_children: Dict[T, Dict[int, _Node[T]]] = {}
+            if depth < _max:
+                for v, kids in node.children.items():
+                    new_kids_for_v: Dict[int, _Node[T]] = {}
+                    for d, child in kids.items():
+                        new_child = _filter(child, depth + 1)
+                        if new_child:
+                            new_kids_for_v[new_child._max_depth] = new_child
+                    if new_kids_for_v:
+                        new_children[v] = new_kids_for_v
+
+            if not new_children and not keep_empty:
+                memo[key] = None
+                return None
+
+            if new_children == node.children and keep_empty == node.empty:
+                memo[key] = node
+                return node
+
+            res = _Node(children=new_children, empty=keep_empty)
+            memo[key] = res
+            return res
+
+        new_root = _filter(self.root, 0)
+        if new_root is None:
+            return self.empty()
+        return _InternalGSS(new_root)
+
     def merge(self, other: "_InternalGSS[T]") -> "_InternalGSS[T]":
         if self is other: return self
         if self.is_empty(): return other
@@ -241,6 +286,11 @@ class LeveledPerAccGSS(GSS[T, Acc], Generic[T, Acc]):
         if not valset or self.is_empty():
             return self.empty()
         return LeveledPerAccGSS({acc: g.isolate_many(valset) for acc, g in self._parts.items()})
+
+    def filter_by_length(self, min_len: Optional[int] = None, max_len: Optional[int] = None) -> "LeveledPerAccGSS[T, Acc]":
+        if self.is_empty():
+            return self
+        return LeveledPerAccGSS({acc: g.filter_by_length(min_len, max_len) for acc, g in self._parts.items()})
 
     def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
         new_parts: Dict[NewAcc, _InternalGSS[T]] = {}

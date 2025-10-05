@@ -101,6 +101,17 @@ class ReferenceGSS(GSS[T, Acc]):
                 kept.append((list(vals), acc))
         return ReferenceGSS(kept)
 
+    def filter_by_length(self, min_len: Optional[int] = None, max_len: Optional[int] = None) -> 'ReferenceGSS[T, Acc]':
+        min_len = min_len if min_len is not None else 0
+        max_len = max_len if max_len is not None else float('inf')
+
+        filtered_stacks: List[Tuple[List[T], Acc]] = []
+        for vals, acc in self._stacks:
+            stack_len = len(vals)
+            if min_len <= stack_len <= max_len:
+                filtered_stacks.append((list(vals), acc))
+        return ReferenceGSS(filtered_stacks)
+
     def merge(self, other: ReferenceGSS[T, Acc]) -> ReferenceGSS[T, Acc]:
         # The __post_init__ of ReferenceGSS handles merging of duplicate stacks.
         return ReferenceGSS(self._stacks + other._stacks)

@@ -107,6 +107,11 @@ class LeveledPerAccGSS(GSS[T, Acc], Generic[T, Acc]):
             return LeveledPerAccGSS.empty()
         return LeveledPerAccGSS({acc: g.isolate_many(valset) for acc, g in self._parts.items()})
 
+    def filter_by_length(self, min_len: Optional[int] = None, max_len: Optional[int] = None) -> "LeveledPerAccGSS[T, Acc]":
+        if self.is_empty():
+            return self
+        return LeveledPerAccGSS({acc: g.filter_by_length(min_len, max_len) for acc, g in self._parts.items()})
+
     # ------------------------------
     # Accumulator transforms
     # ------------------------------

@@ -60,6 +60,9 @@ class LeveledRSGSS(GSS[T, Acc], Generic[T, Acc]):
         # The Rust implementation expects a set.
         return LeveledRSGSS(self._inner.isolate_many(set(values)))
 
+    def filter_by_length(self, min_len: Optional[int] = None, max_len: Optional[int] = None) -> LeveledRSGSS[T, Acc]:
+        return LeveledRSGSS(self._inner.filter_by_length(min_len, max_len))
+
     def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
         # This wrapper handles the memo argument correctly for the Rust implementation.
         return LeveledRSGSS(self._inner.apply(func, memo=memo))

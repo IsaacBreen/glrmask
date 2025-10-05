@@ -553,6 +553,127 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 new_inner = try_promote(UpperBranch(children={}, empty=new_empty))
                 return LeveledGSS(new_inner)
 
+    def filter_by_length(self, min_len: Optional[int] = None, max_len: Optional[int] = None) -> LeveledGSS[T, Acc]:
+        _min = min_len if min_len is not None else 0
+        _max = max_len if max_len is not None else float('inf')
+
+        memo: Dict[Tuple[str, int, int], Optional[Any]] = {}
+
+        def _filter_lower(node: Lower[T], depth: int) -> Optional[Lower[T]]:
+            key = ('L', id(node), depth)
+            if key in memo:
+                return memo[key]
+
+            if depth > _max:
+                memo[key] = None
+                return None
+
+            keep_empty = node.empty and _min <= depth <= _max
+
+            new_children: Dict[T, Dict[int, Lower[T]]] = {}
+            if depth < _max:
+                for v, kids in node.children.items():
+                    new_kids_for_v: Dict[int, Lower[T]] = {}
+                    for d, child in kids.items():
+                        new_child = _filter_lower(child, depth + 1)
+                        if new_child:
+                            new_kids_for_v[new_child._max_depth] = new_child
+                    if new_kids_for_v:
+                        new_children[v] = new_kids_for_v
+
+            if not new_children and not keep_empty:
+                memo[key] = None
+                return None
+
+            if new_children == node.children and keep_empty == node.empty:
+                memo[key] = node
+                return node
+
+            res = Lower(children=new_children, empty=keep_empty)
+            memo[key] = res
+            return res
+
+        def _filter_upper(node: Upper[T, Acc], depth: int) -> Optional[Upper[T, Acc]]:
+            key = ('U', id(node), depth)
+            if key in memo:
+                return memo[key]
+
+            if depth > _max:
+                memo[key] = None
+                return None
+
+            if isinstance(node, Interface):
+                keep_empty = node.empty is not None and _min <= depth <= _max
+                new_empty = node.empty if keep_empty else None
+
+                is_implicit_terminal = not node.children and node.empty is None
+                keep_implicit_terminal = is_implicit_terminal and _min <= depth <= _max
+
+                new_children: Dict[T, Dict[int, Lower[T]]] = {}
+                if not is_implicit_terminal and depth < _max:
+                    for v, kids in node.children.items():
+                        new_kids_for_v: Dict[int, Lower[T]]] = {}
+                        for d, child in kids.items():
+                            new_child = _filter_lower(child, depth + 1)
+                            if new_child:
+                                new_kids_for_v[new_child._max_depth] = new_child
+                        if new_kids_for_v:
+                            new_children[v] = new_kids_for_v
+
+                if not new_children and not keep_empty and not keep_implicit_terminal:
+                    memo[key] = None
+                    return None
+
+                if new_children == node.children and new_empty == node.empty:
+                    memo[key] = node
+                    return node
+
+                if not new_children and keep_implicit_terminal:
+                    res = Interface(children={}, acc=node.acc, empty=None)
+                    memo[key] = res
+                    return res
+
+                if not new_children and not keep_implicit_terminal and keep_empty:
+                    res = try_promote(UpperBranch(children={}, empty=new_empty))
+                    memo[key] = res
+                    return res
+
+                res = Interface(children=new_children, acc=node.acc, empty=new_empty)
+                memo[key] = res
+                return res
+
+            # UpperBranch
+            keep_empty = node.empty is not None and _min <= depth <= _max
+            new_empty = node.empty if keep_empty else None
+
+            new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
+            if depth < _max:
+                for v, kids in node.children.items():
+                    new_kids_for_v: Dict[int, Upper[T, Acc]] = {}
+                    for d, child in kids.items():
+                        new_child = _filter_upper(child, depth + 1)
+                        if new_child:
+                            new_kids_for_v[new_child._max_depth] = new_child
+                    if new_kids_for_v:
+                        new_children[v] = new_kids_for_v
+
+            if not new_children and not keep_empty:
+                memo[key] = None
+                return None
+
+            if new_children == node.children and new_empty == node.empty:
+                memo[key] = node
+                return node
+
+            res = try_promote(UpperBranch(children=new_children, empty=new_empty))
+            memo[key] = res
+            return res
+
+        new_inner = _filter_upper(self.inner, 0)
+        if new_inner is None:
+            return self.empty()
+        return LeveledGSS(new_inner)
+
     def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> LeveledGSS[T, NewAcc]:
         if memo is None:
             memo = {}

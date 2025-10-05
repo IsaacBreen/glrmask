@@ -120,6 +120,16 @@ class GSS(ABC, Generic[T, Acc]):
         """
         pass
 
+    @abstractmethod
+    def filter_by_length(self: GSSType, min_len: Optional[int] = None, max_len: Optional[int] = None) -> GSSType:
+        """
+        Keeps only stacks whose length is within the given range [min_len, max_len].
+        - If min_len is None, there is no lower bound.
+        - If max_len is None, there is no upper bound.
+        Lengths are inclusive.
+        """
+        pass
+
     def apply_and_prune(self, mutator: Callable[[Acc], Optional[NewAcc]], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
         """
         Combined transform that applies a mutate-and-prune function to each stack's accumulator.

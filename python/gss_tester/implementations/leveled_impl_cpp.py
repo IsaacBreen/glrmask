@@ -43,6 +43,9 @@ class Leveled_impl_cppGSS(GSS[T, Acc]):
     def isolate_many(self, values: Iterable[Optional[T]]) -> Leveled_impl_cppGSS[T, Acc]:
         return Leveled_impl_cppGSS(self._cpp_gss.isolate_many(list(values)))
 
+    def filter_by_length(self, min_len: Optional[int] = None, max_len: Optional[int] = None) -> Leveled_impl_cppGSS[T, Acc]:
+        return Leveled_impl_cppGSS(self._cpp_gss.filter_by_length(min_len, max_len))
+
     def apply(self, func: Callable[[Acc], NewAcc], memo: Optional[Dict[int, Any]] = None) -> GSS[T, NewAcc]:
         return Leveled_impl_cppGSS(self._cpp_gss.apply(func))
 
