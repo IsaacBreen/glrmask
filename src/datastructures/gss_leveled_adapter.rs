@@ -678,7 +678,7 @@ pub fn simplify(_states: &mut BTreeMap<crate::tokenizer::TokenizerStateID, Arc<G
 pub(crate) fn simplify_roots_in_place(_roots: &mut [Arc<GSSNode>]) {}
 pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
     let fused_inner = node_arc.inner.fuse(Some(levels as isize));
-    if Arc::ptr_eq(&fused_inner.inner, &node_arc.inner.inner) {
+    if fused_inner.is(&node_arc.inner) {
         node_arc.clone()
     } else {
         Arc::new(GSSNode { inner: fused_inner })
