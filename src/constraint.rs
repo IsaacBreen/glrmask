@@ -1,7 +1,6 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use std::borrow::Borrow;
 use std::collections::btree_map::Entry as BTreeEntry;
 use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
 use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
@@ -26,13 +25,12 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use crate::constraint_extra::{calculate_final_stats2, dump_precompute_trie_recursive, print_precompute_stats2, PrecomputeStats};
 use crate::constraint_precompute0_utils;
 use crate::constraint_precompute1_utils;
-use crate::constraint_precompute2_utils;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::entry_api::EntryApi;
-use crate::datastructures::gss::Acc;
-use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig};
+use crate::datastructures::gss_api::Acc;
+use crate::datastructures::gss_api::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig, LLMTokenBV, PrecomputeNode0, PrecomputeNode0Index, PrecomputeNode1, PrecomputeNode1Index, PrecomputeNode2, PrecomputeNode2Index, PrecomputeNode3, PrecomputeNode3Index, Precomputed0, Precomputed2, Precomputed3, PrecomputedNodeContents, PrecomputedNodeContents0, StateIDBV, TerminalBV, TerminalInfo, Trie0God, Trie0GodWrapper, Trie1God, Trie1GodWrapper, Trie2God, Trie2GodWrapper, Trie3God, Trie3GodWrapper, Precomputed};
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
+use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::finite_automata::Regex;
 use crate::glr::analyze::compute_terminal_follow_sets;
@@ -55,16 +53,12 @@ use serde_json::Value as SerdeValue;
 use std::collections::BTreeMap as StdMap;
 use std::io::{Read, Write};
 use std::ops::{BitAnd, Sub};
-use crate::constraint_precompute2_utils::optimize_trie2_size;
 pub(crate) use crate::constraint::constraint_precompute3_utils::clone_trie3_graph;
 use crate::constraint_precompute3_utils::optimize_trie3_size;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::trie::{God, GodWrapper};
 
 const MERGE_THRESHOLD: usize = 20;
-const DEDUP_START_ID: usize = 0;
-
-pub type StateIDBV = HybridBitset;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TerminalAllowanceCheckMode {
@@ -99,22 +93,6 @@ impl JSONConvertible for TerminalAllowanceCheckMode {
         }
     }
 }
-
-pub type PrecomputeNode0 = Trie<Option<(GrammarTokenID, Option<TokenizerStateID>)>, LLMTokenBV, PrecomputedNodeContents0>;
-pub type PrecomputeNode1 = Trie<Option<GrammarTokenID>, LLMTokenBV, PrecomputedNodeContents>;
-pub type PrecomputeNode2 = Trie<(usize, Option<StateID>), LLMTokenBV, PrecomputedNodeContents>;
-pub type PrecomputeNode3 = Trie<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
-
-// Indices
-pub type PrecomputeNode0Index = Trie2Index;
-pub type PrecomputeNode1Index = Trie2Index;
-pub type PrecomputeNode2Index = Trie2Index;
-pub type PrecomputeNode3Index = Trie2Index;
-
-pub type Precomputed0 = BTreeMap<TokenizerStateID, PrecomputeNode0Index>;
-pub type Precomputed = BTreeMap<TokenizerStateID, PrecomputeNode1Index>;
-pub type Precomputed2 = BTreeMap<TokenizerStateID, PrecomputeNode2Index>;
-pub type Precomputed3 = BTreeMap<TokenizerStateID, PrecomputeNode3Index>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LLMVocab {
@@ -163,6 +141,7 @@ impl JSONConvertible for StageVocab {
 /// A memory-sharing map: many keys can reference the same (large) value via an internal ID.
 /// Externally, this behaves like a BTreeMap<K, V> for common operations: insert, get, iter, len.
 #[derive(Debug, Clone, PartialEq, Eq)]
+use std::borrow::Borrow;
 pub struct DedupValueMap<K, V>
 where
     K: Ord + Clone + Eq,
@@ -173,6 +152,8 @@ where
     value_to_id: std::collections::HashMap<V, usize>,
     next_id: usize,
 }
+
+const DEDUP_START_ID: usize = 0;
 
 impl<K, V> Default for DedupValueMap<K, V>
 where
@@ -313,107 +294,6 @@ where
         Ok(Self { key_to_id, id_to_value, value_to_id, next_id })
     }
 }
-
-
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PrecomputedNodeContents {
-    pub(crate) end: bool,
-    pub(crate) live_tokens: LLMTokenBV,
-}
-
-impl PrecomputedNodeContents {
-    pub(crate) fn root(internal_max_llm_token_id: usize) -> Self {
-        Self { end: false, live_tokens: LLMTokenBV::ones(internal_max_llm_token_id + 1) }
-    }
-
-    pub(crate) fn internal() -> Self {
-        Self { end: false, live_tokens: LLMTokenBV::zeros() }
-    }
-
-    pub(crate) fn leaf() -> Self {
-        Self { end: true, live_tokens: LLMTokenBV::zeros() }
-    }
-}
-
-impl JSONConvertible for PrecomputedNodeContents {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("clean_end".to_string(), self.end.to_json());
-        obj.insert("live_tokens".to_string(), self.live_tokens.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let end = obj.remove("clean_end").ok_or_else(|| "Missing field clean_end for PrecomputedNodeContents".to_string())
-                                   .and_then(bool::from_json)?;
-                let live_tokens = obj.remove("live_tokens").ok_or_else(|| "Missing field live_tokens for PrecomputedNodeContents".to_string())
-                                       .and_then(LLMTokenBV::from_json)?;
-                Ok(PrecomputedNodeContents { end, live_tokens })
-            }
-            _ => Err("Expected JSONNode::Object for PrecomputedNodeContents".to_string()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PrecomputedNodeContents0 {
-    pub(crate) live_tokens: LLMTokenBV,
-    // If this is an end node in Trie0, which tokenizer state should the GLR state be placed under?
-    // Always Some(_) for leaf nodes; None for non-leaf nodes.
-    pub(crate) final_tokenizer_state: Option<TokenizerStateID>,
-}
-
-impl PrecomputedNodeContents0 {
-    pub(crate) fn root(internal_max_llm_token_id: usize) -> Self {
-        Self {
-            live_tokens: LLMTokenBV::ones(internal_max_llm_token_id + 1),
-            final_tokenizer_state: None,
-        }
-    }
-
-    pub(crate) fn internal() -> Self {
-        Self {
-            live_tokens: LLMTokenBV::zeros(),
-            final_tokenizer_state: None,
-        }
-    }
-
-    pub(crate) fn leaf(final_sid: TokenizerStateID) -> Self {
-        Self { live_tokens: LLMTokenBV::zeros(), final_tokenizer_state: Some(final_sid) }
-    }
-}
-
-impl JSONConvertible for PrecomputedNodeContents0 {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("clean_end".to_string(), self.final_tokenizer_state.is_some().to_json());
-        obj.insert("live_tokens".to_string(), self.live_tokens.to_json());
-        obj.insert("final_tokenizer_state".to_string(), self.final_tokenizer_state.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let live_tokens = obj.remove("live_tokens").ok_or_else(|| "Missing field live_tokens for PrecomputedNodeContents0".to_string())
-                                       .and_then(LLMTokenBV::from_json)?;
-                let final_tokenizer_state = obj.remove("final_tokenizer_state").ok_or_else(|| "Missing field final_tokenizer_state for PrecomputedNodeContents0".to_string())
-                                               .and_then(|n| Option::<TokenizerStateID>::from_json(n))?;
-                Ok(PrecomputedNodeContents0 { live_tokens, final_tokenizer_state })
-            }
-            _ => Err("Expected JSONNode::Object for PrecomputedNodeContents0".to_string()),
-        }
-    }
-}
-
-impl Into<PrecomputedNodeContents> for PrecomputedNodeContents0 {
-    fn into(self) -> PrecomputedNodeContents {
-        PrecomputedNodeContents { end: self.final_tokenizer_state.is_some(), live_tokens: self.live_tokens }
-    }
-}
-
-
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintConfig {
@@ -1571,98 +1451,9 @@ fn format_bv(bv: &LLMTokenBV) -> String {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct GrammarConstraintState<'a> {
-    pub parent: &'a GrammarConstraint,
-    pub state:  BTreeMap<TokenizerStateID, GLRParserState<'a>>,
-}
-
-pub(crate) mod constraint_precompute3_utils {
-    use super::{PrecomputeNode3, PrecomputeNode3Index, Trie3GodWrapper};
-    use crate::constraint::LLMTokenBV;
-    use crate::datastructures::trie::{Trie, Trie2Index};
-    use std::collections::{HashMap, VecDeque};
-
-    pub fn clone_trie3_graph(
-        root: &Trie2Index,
-        trie3_god: &Trie3GodWrapper,
-    ) -> (
-        Trie2Index,
-        HashMap<PrecomputeNode3Index, PrecomputeNode3Index>,
-    ) {
-        let mut map: HashMap<PrecomputeNode3Index, PrecomputeNode3Index> = HashMap::new();
-        let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
-
-        let root_ptr = *root;
-        let root_value = { root.read(trie3_god).expect("poison").value.clone() };
-        let new_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(root_value)));
-        map.insert(root_ptr, new_root.clone());
-        q.push_back(root.clone());
-
-        while let Some(old_arc) = q.pop_front() {
-            let old_ptr = old_arc;
-            let new_arc = map.get(&old_ptr).expect("parent must be created").clone();
-
-            let children_snapshot: Vec<( (usize, LLMTokenBV), Vec<(PrecomputeNode3Index, crate::constraint::StateIDBV)> )> = {
-                let g = old_arc.read(trie3_god).expect("poison");
-                g.children()
-                    .iter()
-                    .map(|(ek, dest_map)| {
-                        let entries = dest_map
-                            .iter()
-                            .map(|(node_ptr, ev)| {
-                                (node_ptr.clone(), ev.clone())
-                            })
-                            .collect::<Vec<_>>();
-                        (ek.clone(), entries)
-                    })
-                    .collect()
-            };
-
-            for (_ek, entries) in &children_snapshot {
-                for (node_ptr, _ev) in entries {
-                    let child_arc_old = node_ptr.as_arc().clone();
-                    let child_ptr_old = child_arc_old;
-                    if !map.contains_key(&child_ptr_old) {
-                        let child_value = { child_arc_old.read(trie3_god).expect("poison").value.clone() };
-                        let child_arc_new = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(child_value)));
-                        map.insert(child_ptr_old, child_arc_new);
-                        q.push_back(child_arc_old);
-                    }
-                }
-            }
-
-            {
-                let mut new_g = new_arc.write(trie3_god).expect("poison");
-                for (ek, entries) in children_snapshot {
-                    let dest_map = new_g.children_mut().entry(ek).or_default();
-                    for (old_node_ptr, ev) in entries {
-                        let child_arc_old = old_node_ptr.as_arc().clone();
-                        let child_ptr_old = child_arc_old;
-                        let child_arc_new = map.get(&child_ptr_old).expect("must exist").clone();
-                        let new_key = child_arc_new;
-                        dest_map.insert(new_key, ev);
-                    }
-                }
-            }
-        }
-
-        Trie::recompute_all_max_depths(trie3_god, &[new_root.clone()]);
-        (new_root, map)
-    }
-}
-
-pub type Trie0GodWrapper = GodWrapper<Option<(TerminalID, Option<TokenizerStateID>)>, HybridBitset, PrecomputedNodeContents0>;
-pub type Trie0God = God<Option<(TerminalID, Option<TokenizerStateID>)>, HybridBitset, PrecomputedNodeContents>;
-pub type Trie1GodWrapper = GodWrapper<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
-pub type Trie1God = God<Option<TerminalID>, HybridBitset, PrecomputedNodeContents>;
-pub type Trie2GodWrapper = GodWrapper<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
-pub type Trie2God = God<(usize, Option<StateID>), HybridBitset, PrecomputedNodeContents>;
-pub type Trie3GodWrapper = GodWrapper<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
-pub type Trie3God = God<(usize, LLMTokenBV), StateIDBV, PrecomputedNodeContents>;
-
 impl<'a> PartialEq for GrammarConstraintState<'a> {
     fn eq(&self, other: &Self) -> bool {
+        // Compare parent by pointer to ensure they originate from the same constraint object.
         // Compare parent by pointer to ensure they originate from the same constraint object.
         std::ptr::eq(self.parent, other.parent) && self.state == other.state
     }
@@ -2938,7 +2729,76 @@ impl<'a> GrammarConstraintState<'a> {
     }
 }
 
-pub(crate) type LLMTokenBV = HybridBitset;
-pub(crate) type TerminalBV = HybridBitset;
-/// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
-pub type TerminalInfo = HybridL2Bitset;
+pub(crate) mod constraint_precompute3_utils {
+    use crate::datastructures::gss_api::{PrecomputeNode3, PrecomputeNode3Index, Trie3GodWrapper, LLMTokenBV, StateIDBV};
+    use crate::datastructures::trie::{Trie, Trie2Index};
+    use std::collections::{HashMap, VecDeque};
+
+    pub fn clone_trie3_graph(
+        root: &Trie2Index,
+        trie3_god: &Trie3GodWrapper,
+    ) -> (
+        Trie2Index,
+        HashMap<PrecomputeNode3Index, PrecomputeNode3Index>,
+    ) {
+        let mut map: HashMap<PrecomputeNode3Index, PrecomputeNode3Index> = HashMap::new();
+        let mut q: VecDeque<PrecomputeNode3Index> = VecDeque::new();
+
+        let root_ptr = *root;
+        let root_value = { root.read(trie3_god).expect("poison").value.clone() };
+        let new_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(root_value)));
+        map.insert(root_ptr, new_root.clone());
+        q.push_back(root.clone());
+
+        while let Some(old_arc) = q.pop_front() {
+            let old_ptr = old_arc;
+            let new_arc = map.get(&old_ptr).expect("parent must be created").clone();
+
+            let children_snapshot: Vec<( (usize, LLMTokenBV), Vec<(PrecomputeNode3Index, StateIDBV)> )> = {
+                let g = old_arc.read(trie3_god).expect("poison");
+                g.children()
+                    .iter()
+                    .map(|(ek, dest_map)| {
+                        let entries = dest_map
+                            .iter()
+                            .map(|(node_ptr, ev)| {
+                                (node_ptr.clone(), ev.clone())
+                            })
+                            .collect::<Vec<_>>();
+                        (ek.clone(), entries)
+                    })
+                    .collect()
+            };
+
+            for (_ek, entries) in &children_snapshot {
+                for (node_ptr, _ev) in entries {
+                    let child_arc_old = node_ptr.as_arc().clone();
+                    let child_ptr_old = child_arc_old;
+                    if !map.contains_key(&child_ptr_old) {
+                        let child_value = { child_arc_old.read(trie3_god).expect("poison").value.clone() };
+                        let child_arc_new = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(child_value)));
+                        map.insert(child_ptr_old, child_arc_new);
+                        q.push_back(child_arc_old);
+                    }
+                }
+            }
+
+            {
+                let mut new_g = new_arc.write(trie3_god).expect("poison");
+                for (ek, entries) in children_snapshot {
+                    let dest_map = new_g.children_mut().entry(ek).or_default();
+                    for (old_node_ptr, ev) in entries {
+                        let child_arc_old = old_node_ptr.as_arc().clone();
+                        let child_ptr_old = child_arc_old;
+                        let child_arc_new = map.get(&child_ptr_old).expect("must exist").clone();
+                        let new_key = child_arc_new;
+                        dest_map.insert(new_key, ev);
+                    }
+                }
+            }
+        }
+
+        Trie::recompute_all_max_depths(trie3_god, &[new_root.clone()]);
+        (new_root, map)
+    }
+}
