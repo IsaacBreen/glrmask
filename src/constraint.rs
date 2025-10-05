@@ -886,9 +886,9 @@ impl GrammarConstraint {
             config,
         );
 
-        let mut stats2 = PrecomputeStats::default();
-        crate::constraint_extra::calculate_final_stats2(&precomputed2, &mut stats2, &trie2_god);
-        crate::constraint_extra::print_precompute_stats2(&stats2, &trie2_god);
+        // let mut stats2 = PrecomputeStats::default();
+        // crate::constraint_extra::calculate_final_stats2(&precomputed2, &mut stats2, &trie2_god);
+        // crate::constraint_extra::print_precompute_stats2(&stats2, &trie2_god);
 
         // Self::_dump_precomputed2(
         //     &precomputed2,
