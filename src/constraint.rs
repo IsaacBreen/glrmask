@@ -28,7 +28,7 @@ use crate::constraint_precompute1_utils;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::entry_api::EntryApi;
 use crate::datastructures::gss_api::Acc;
-use crate::datastructures::gss_api::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig, LLMTokenBV, PrecomputeNode0, PrecomputeNode0Index, PrecomputeNode1, PrecomputeNode1Index, PrecomputeNode2, PrecomputeNode2Index, PrecomputeNode3, PrecomputeNode3Index, Precomputed0, Precomputed2, Precomputed3, PrecomputedNodeContents, PrecomputedNodeContents0, StateIDBV, TerminalBV, TerminalInfo, Trie0God, Trie0GodWrapper, Trie1God, Trie1GodWrapper, Trie2God, Trie2GodWrapper, Trie3God, Trie3GodWrapper, Precomputed};
+pub(crate) use crate::datastructures::gss_api::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig, LLMTokenBV, PrecomputeNode0, PrecomputeNode0Index, PrecomputeNode1, PrecomputeNode1Index, PrecomputeNode2, PrecomputeNode2Index, PrecomputeNode3, PrecomputeNode3Index, Precomputed0, Precomputed2, Precomputed3, PrecomputedNodeContents, PrecomputedNodeContents0, StateIDBV, TerminalBV, TerminalInfo, Trie0God, Trie0GodWrapper, Trie1God, Trie1GodWrapper, Trie2God, Trie2GodWrapper, Trie3God, Trie3GodWrapper, Precomputed};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
