@@ -13,16 +13,18 @@ use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use profiler_macro::{time_it, timeit};
 
-mod gss_analysis;
-mod gss_pruning;
-mod gss_simplification;
-mod gss_trie_utils;
+pub use crate::datastructures::gss_analysis::*;
+pub use crate::datastructures::gss_pruning::*;
+pub use crate::datastructures::gss_simplification::*;
+pub use crate::datastructures::gss_trie_utils::*;
 
-pub use gss_analysis::*;
-pub use gss_pruning::*;
-pub use gss_simplification::*;
-pub use gss_trie_utils::*;
-
+use crate::json_serialization::{JSONConvertible, JSONNode};
+use std::collections::BTreeMap as StdMap;
+use crate::constraint::{LLMTokenBV, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, TerminalBV, TerminalInfo, Trie3God, Trie3GodWrapper};
+use crate::datastructures::{gss_analysis, gss_simplification};
+use crate::datastructures::trie::{EdgeInserter, God};
+use crate::tokenizer::TokenizerStateID;
+use crate::types::TerminalID;
 // --- Type Aliases ---
 
 pub(crate) type MaxDepth = usize;
@@ -30,16 +32,12 @@ pub(crate) type DestKey = MaxDepth;
 /// Maps an edge value to a map of destination keys (depths) to a list of predecessor nodes.
 pub(crate) type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>>;
 /// A temporary set of predecessors used during node construction and simplification.
-type NodeSet = ordered_hash_map::OrderedHashSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
+pub(crate) type NodeSet = ordered_hash_map::OrderedHashSet<(Arc<GSSNode>, ParseStateEdgeContent)>;
 
 pub(crate)type StoredPrecomputeNodeIndex = PrecomputeNode3Index;
 pub(crate)type StoredPrecomputeNode = PrecomputeNode3;
 pub(crate)type StoredTrieGod = Trie3God;
 pub(crate) type StoredTrieGodWrapper = Trie3GodWrapper;
-
-use crate::json_serialization::{JSONConvertible, JSONNode};
-use std::collections::BTreeMap as StdMap;
-use crate::datastructures::trie::God;
 
 /// Recursively traverses a GSS, and for each node (both internal and root) that has
 /// `stored_trie_nodes`, it:
@@ -388,7 +386,7 @@ fn compute_hash_key_root(acc: &Acc) -> u64 {
 
 /// Processes a set of incoming predecessors, grouping them by depth and edge,
 /// and merging nodes that share the same edge to create a canonical `NodeMap`.
-fn process_predecessors(incoming: &NodeSet) -> NodeMap {
+pub(crate) fn process_predecessors(incoming: &NodeSet) -> NodeMap {
     let mut grouped: BTreeMap<(ParseStateEdgeContent, DestKey), Vec<Arc<GSSNode>>> =
         BTreeMap::new();
 
@@ -1700,6 +1698,8 @@ impl GSSNode {
 
 #[cfg(test)]
 mod tests {
+    use bimap::BiBTreeMap;
+    use crate::constraint::PrecomputedNodeContents;
     use super::*;
     use crate::glr::table::StateID;
 
