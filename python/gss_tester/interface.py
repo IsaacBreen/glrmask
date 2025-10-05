@@ -1,7 +1,8 @@
 from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from functools import reduce
-from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type, Dict
+from typing import TypeVar, Generic, List, Tuple, Callable, Set, Iterable, Optional, Protocol, Type, Dict, Any
 
 
 class Mergeable(Protocol):
