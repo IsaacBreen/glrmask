@@ -614,12 +614,6 @@ fn prune_nodes_not_reaching_end_trie3(
             }
         }
         *w.children_mut() = new_children;
-        // Recompute live_tokens
-        let mut lt = LLMTokenBV::zeros();
-        for ((_, llm_bv), _dm) in w.children().iter() {
-            lt |= llm_bv;
-        }
-        w.value.live_tokens = lt;
     }
 
     // GC everything now unreachable from roots
