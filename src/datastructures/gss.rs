@@ -48,7 +48,7 @@ pub(crate) type StoredTrieGodWrapper = Trie3GodWrapper;
 pub struct Acc {
     pub llm_tokens_union: HybridBitset,
     pub terminals_union: HybridL2Bitset,
-    stored_trie_nodes: BTreeSet<StoredPrecomputeNodeIndex>,
+    pub stored_trie_nodes: BTreeSet<StoredPrecomputeNodeIndex>,
 }
 
 impl Acc {
