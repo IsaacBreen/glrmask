@@ -1430,19 +1430,24 @@ fn factor_common_destinations_trie1(
     crate::debug!(2, "Finished factoring common destinations in Trie1.");
 }
 
-/// Fully flattens all None edges (epsilon edges) by computing a per-node epsilon-closure
-/// and replacing every node's outgoing edges with keyed edges only.
+/// Flattens None edges (epsilon-closure) by computing a per-node closure and rewriting
+/// outgoing edges. Keyed edges from None-children are composed (bv_intersection) and pushed
+/// up to the current node. Additionally, we preserve only those None edges that are required
+/// to maintain reachability to end nodes via None-only paths.
 ///
 /// For a node A:
 /// - Start from A's existing keyed edges (Some(t) -> {dst -> bv}).
 /// - For each None-edge A -(None, bv1)-> B, compose B's already-flattened keyed edges
 ///   with bv1 via intersection: bv_final = bv1 & bv_child_edge, and union into A's map.
-/// - Replace A's children with this new keyed-only map, recompute live_tokens.
+/// - Preserve the None-edge A -(None)-> B if B can (via a None-only path) reach an end node.
+///   This avoids dropping necessary epsilon paths to end/leaf nodes.
+/// - Replace A's children with this new map (keyed edges plus the preserved None edges),
+///   and recompute live_tokens.
 ///
 /// Notes:
 /// - We never turn A into an end node via None-closure. That would be unsound for partial masks.
-///   End detection remains tied to explicit keyed paths to leaf/end nodes, which is how get_mask1 uses it.
-/// - We process nodes in descending max_depth so children are flattened before parents.
+///   End detection remains tied to explicit keyed paths to leaf/end nodes, and epsilon paths preserved explicitly.
+/// - We process nodes in descending max_depth so children are processed (flattened) before parents.
 fn flatten_all_none_edges_trie1(
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
     trie1_god: &Trie1GodWrapper,
@@ -1458,20 +1463,26 @@ fn flatten_all_none_edges_trie1(
     });
     all_nodes.reverse();
 
-    // Cache of flattened keyed edges per node (None edges removed).
+    // Cache of flattened edges per node (primarily keyed edges; we may also keep
+    // some None edges if necessary to preserve reachability to end).
     // Key: node index -> map: Some(terminal) -> OrderedHashMap<dst, bv>
     let mut flat_cache: HashMap<
         PrecomputeNode1Index,
         BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>>
     > = HashMap::new();
 
+    // Bottom-up memo: whether a node can reach an end node using only None edges (or is itself end).
+    let mut none_reaches_end: HashMap<PrecomputeNode1Index, bool> = HashMap::new();
+
     // Work backwards from deepest leaves
     for node_idx in &all_nodes {
         // Snapshot current children to avoid lock re-entrancy
-        let children_snapshot: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = {
+        let (children_snapshot, node_is_end) = {
             let g = node_idx.read(trie1_god).expect("read");
-            g.children().clone()
+            (g.children().clone(), g.value.end)
         };
+
+        let mut has_none_path_to_end_from_children = false;
 
         // Start with direct keyed edges
         let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
@@ -1491,44 +1502,53 @@ fn flatten_all_none_edges_trie1(
             for (child_idx, bv_none_edge) in none_dest_map {
                 if bv_none_edge.is_empty() { continue; }
 
-                // Child should have been flattened already given descending order
-                if let Some(child_flat) = flat_cache.get(child_idx) {
-                    for (ek2, dm2) in child_flat {
-                        // Only keyed edges should exist in child_flat, but guard anyway.
-                        if ek2.is_none() { continue; }
-                        let dest_map = new_children.entry(ek2.clone()).or_default();
-                        for (dst2, bv_child) in dm2 {
-                            let mut composed = bv_none_edge.clone();
-                            composed &= bv_child;
-                            if composed.is_empty() { continue; }
-                            dest_map.entry(*dst2)
-                                .and_modify(|e| *e |= &composed)
-                                .or_insert(composed);
-                        }
-                    }
+                // Check if child has a None-path to an end node.
+                // Since we process bottom-up, this should be in the memo.
+                let child_none_to_end = *none_reaches_end.get(child_idx).unwrap_or(&false);
+                has_none_path_to_end_from_children |= child_none_to_end;
+
+                // If it does, preserve the None edge.
+                if child_none_to_end {
+                    let dest_map_none = new_children.entry(None).or_default();
+                    dest_map_none
+                        .entry(*child_idx)
+                        .and_modify(|e| *e |= bv_none_edge)
+                        .or_insert(bv_none_edge.clone());
+                }
+
+                // Now, compose its keyed edges, regardless of whether we preserved the None edge.
+                let child_keyed_edges_to_compose = if let Some(child_flat) = flat_cache.get(child_idx) {
+                    child_flat.clone()
                 } else {
-                    // In well-ordered DAG, this should not happen. Fall back to using child's immediate keyed edges (unflattened).
+                    // Fallback: use child's immediate keyed edges.
                     let child_children_snapshot: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = {
                         let cg = child_idx.read(trie1_god).expect("read");
                         cg.children().clone()
                     };
-                    for (ek2, dm2) in child_children_snapshot {
-                        if ek2.is_none() { continue; }
-                        let dest_map = new_children.entry(ek2.clone()).or_default();
-                        for (dst2, bv_child) in dm2 {
-                            let mut composed = bv_none_edge.clone();
-                            composed &= &bv_child;
-                            if composed.is_empty() { continue; }
-                            dest_map.entry(dst2)
-                                .and_modify(|e| *e |= &composed)
-                                .or_insert(composed);
-                        }
+                    child_children_snapshot
+                };
+
+                for (ek2, dm2) in child_keyed_edges_to_compose {
+                    if ek2.is_none() { continue; } // Only compose keyed edges
+                    let dest_map = new_children.entry(ek2.clone()).or_default();
+                    for (dst2, bv_child) in dm2 {
+                        let mut composed = bv_none_edge.clone();
+                        composed &= &bv_child;
+                        if composed.is_empty() { continue; }
+                        dest_map.entry(dst2)
+                            .and_modify(|e| *e |= &composed)
+                            .or_insert(composed);
                     }
                 }
             }
         }
 
-        // Write back: replace children with keyed-only map and recompute live_tokens
+        // Finalize the memo for this node: it can reach an end via None-only path if it's an end
+        // or if any of its None-children could reach an end via None-only paths.
+        let this_none_reaches_end = node_is_end || has_none_path_to_end_from_children;
+        none_reaches_end.insert(*node_idx, this_none_reaches_end);
+
+        // Write back: replace children with new map and recompute live_tokens
         {
             let mut w = node_idx.write(trie1_god).expect("write");
             *w.children_mut() = new_children.clone();
@@ -1540,7 +1560,7 @@ fn flatten_all_none_edges_trie1(
                 }
             }
             w.value.live_tokens = lt;
-            // Do NOT change w.value.end here. End detection remains via keyed paths.
+            // Do NOT change w.value.end here. End detection remains via keyed paths and preserved None paths.
         }
 
         flat_cache.insert(*node_idx, new_children);
