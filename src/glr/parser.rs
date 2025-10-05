@@ -1,6 +1,6 @@
 use crate::constraint::{LLMTokenBV, LLMVocab, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, Trie3GodWrapper};
-use crate::datastructures::gss_leveled::{deep_add_precompute_trie_edges_leveled, find_longest_path, gather_gss_stats, DestKey, GSSNode, GSSPeek, GSSStats, NodeMap, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
-use crate::datastructures::gss_leveled::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
+use crate::datastructures::gss::{find_longest_path, gather_gss_stats, DestKey, GSSNode, GSSPeek, GSSStats, NodeMap, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
+use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
@@ -27,7 +27,7 @@ use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use crate::datastructures::trie::{God, GodWrapper};
-use crate::datastructures::gss_leveled::{is_simple_gss, PruneAndTransformRecursiveMemo};
+use crate::datastructures::gss::{is_simple_gss, PruneAndTransformRecursiveMemo};
 
 // A single combined action for a given (state,row) and token:
 // - Normal(...) is a concrete per-token action from the row's action map
@@ -957,7 +957,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
                     )
                 };
-                deep_add_precompute_trie_edges_leveled(
+                deep_add_precompute_trie_edges(
                     &mut constrained.stack,
                     god,
                     &key,
@@ -1176,7 +1176,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             std::iter::once((0..=usize::MAX, disallowed_terminals_bv))
                         );
 
-                        crate::datastructures::gss_leveled::disallow_terminals_and_prune_arc(
+                        crate::datastructures::gss::disallow_terminals_and_prune_arc(
                             &mut constrained_state.stack,
                             &disallowed_l2,
                             &mut HashMap::new(),
@@ -1516,7 +1516,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 );
                                 (new_dest, PruneAndTransformRecursiveMemo::default())
                             });
-                            deep_add_precompute_trie_edges_leveled(
+                            deep_add_precompute_trie_edges(
                                 &mut parent_after_filter,
                                 god,
                                 &edge_key_all_tokens_zero_k,
@@ -1642,7 +1642,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let memo_for_dest = cached_dest_memos.entry(cached_dest.clone())
                         .or_insert_with(PruneAndTransformRecursiveMemo::default);
 
-                    deep_add_precompute_trie_edges_leveled(
+                    deep_add_precompute_trie_edges(
                         &mut new_gss_arc,
                         god,
                         &edge_key,
@@ -2292,7 +2292,7 @@ impl GLRParser {
 
             // Define the GSS node if it hasn't been visited yet
             if visited_nodes.insert(node_ptr) {
-                let acc_str = crate::datastructures::gss_leveled::format_acc(
+                let acc_str = crate::datastructures::gss::format_acc(
                     &node_arc,
                     &self.terminal_map,
                     original_internal_bimap,
