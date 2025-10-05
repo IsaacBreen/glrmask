@@ -612,7 +612,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 new_children: Dict[T, Dict[int, Lower[T]]] = {}
                 if not is_implicit_terminal and depth < _max:
                     for v, kids in node.children.items():
-                        new_kids_for_v: Dict[int, Lower[T]]] = {}
+                        new_kids_for_v: Dict[int, Lower[T]] = {}
                         for d, child in kids.items():
                             new_child = _filter_lower(child, depth + 1)
                             if new_child:
