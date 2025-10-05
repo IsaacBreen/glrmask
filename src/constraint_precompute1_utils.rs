@@ -464,7 +464,6 @@ fn simplify_none_edges_to_former_end_nodes_trie1(
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
     let mut nodes_to_make_end: HashSet<PrecomputeNode1Index> = HashSet::new();
-
     for a_arc in all_nodes {
         let mut edges_to_add = Vec::new();
         let mut none_edges_to_b_to_remove = Vec::new();
@@ -477,11 +476,7 @@ fn simplify_none_edges_to_former_end_nodes_trie1(
                         let b_arc = b_arc_wrapper.as_arc();
                         let b_guard = b_arc.read(trie1_god).unwrap();
 
-                        if b_guard.children().is_empty() {
-                            // This former end node has no successors, so it's a valid end point.
-                            // Mark it to become a true end node. The edge is preserved.
-                            nodes_to_make_end.insert(b_arc_wrapper.clone());
-                        } else {
+                        if !b_guard.children().is_empty() {
                             // This is a candidate for simplification: A -(None)-> B, where B has children.
                             none_edges_to_b_to_remove.push(b_arc_wrapper.clone());
 
@@ -523,11 +518,6 @@ fn simplify_none_edges_to_former_end_nodes_trie1(
                 dest_map.entry(c_arc_wrapper).or_insert_with(LLMTokenBV::zeros).bitor_assign(&new_bv);
             }
         }
-    }
-
-    for node_to_make_end in nodes_to_make_end {
-        let mut guard = node_to_make_end.write(trie1_god).unwrap();
-        guard.value.end = true;
     }
 
     crate::debug!(2, "Done simplifying None edges to former end nodes in Trie1.");

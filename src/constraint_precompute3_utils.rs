@@ -921,11 +921,9 @@ pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
 
         let guard = node_arc.read(trie3_god).unwrap();
         if guard.value.end {
-            let initial_live = guard.value.live_tokens.clone();
-            if !initial_live.is_empty() {
-                live.insert(node_ptr, initial_live);
-                worklist.push_back(node_ptr);
-            }
+            // Seed end nodes with 'all tokens' to allow backward propagation through edge masks.
+            live.insert(node_ptr, LLMTokenBV::max_ones());
+            worklist.push_back(node_ptr);
         }
 
         for (edge_key, dest_map) in guard.children() {
@@ -1192,7 +1190,13 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
 
             if new_children != old_children {
                 let mut w = node_idx.write(trie3_god).expect("write");
+                // Recompute node live tokens as union of outgoing LLM masks.
+                let mut union_bv = LLMTokenBV::zeros();
+                for ((_, llm_bv), _) in &new_children {
+                    union_bv |= llm_bv;
+                }
                 *w.children_mut() = new_children;
+                w.value.live_tokens = union_bv;
                 changed_any = true;
             }
         }
@@ -1339,6 +1343,12 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
             }
 
             if local_changed {
+                // Keep node metadata consistent after rewrites
+                let mut union_bv = LLMTokenBV::zeros();
+                for ((_, llm_bv), _) in w.children().iter() {
+                    union_bv |= llm_bv;
+                }
+                w.value.live_tokens = union_bv;
                 changed_any = true;
             }
         }
@@ -1435,6 +1445,12 @@ pub fn compress_trie3_edges(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNod
             }
 
             if local_changed {
+                // Keep node metadata consistent after rewrites
+                let mut union_bv = LLMTokenBV::zeros();
+                for ((_, llm_bv), _) in w.children().iter() {
+                    union_bv |= llm_bv;
+                }
+                w.value.live_tokens = union_bv;
                 changed_any = true;
             }
         }
