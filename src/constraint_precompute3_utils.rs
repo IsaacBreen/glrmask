@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashMap, VecDeque, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 use range_set_blaze::RangeSetBlaze;
 use indicatif::{ProgressBar, ProgressStyle};
 use kdam::tqdm;
@@ -51,101 +52,131 @@ pub fn optimize_trie3_size(
     crate::debug!(2, "Initial stats:");
     compute_and_print_precompute_stats3(roots, trie3_god);
 
-    crate::debug!(2, "Step 1: Merging equivalent LLM tokens...");
+    let mut step_counter = 1;
+    macro_rules! run_pass {
+        ($name:expr, $code:block) => {
+            crate::debug!(2, "Running optimization pass {}: {}...", step_counter, $name);
+            let start = Instant::now();
+            $code
+            let duration = start.elapsed();
+            crate::debug!(2, "Pass {} ('{}') finished in {:?}", step_counter, $name, duration);
+            crate::debug!(2, "Stats after pass {}:", step_counter);
+            compute_and_print_precompute_stats3(roots, trie3_god);
+            step_counter += 1;
+        };
+    }
+
     if config.optimize_trie3_merge_equivalent_llm_tokens {
-        merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
+        run_pass!("Merging equivalent LLM tokens", {
+            merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
+        });
     }
 
     // let roots_vec: Vec<_> = roots.values().cloned().collect();
     // let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
     //
-    // crate::debug!(2, "Step 1.1: Constraining bitvectors...");
     // if config.optimize_trie3_constrain_bitvecs {
     //     constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
     // }
     //
-    // crate::debug!(2, "Step 1.2: Pruning dead paths...");
     // if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
     //     prune_dead_paths_trie3(roots, &trie3_god);
     // }
 
-    crate::debug!(2, "Step 2: Reordering LLM tokens...");
     if config.optimize_trie3_reorder_llm_tokens {
-        reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
-        max_llm_token_id = stage_vocab.internal_max_llm_token;
+        run_pass!("Reordering LLM tokens", {
+            reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
+            max_llm_token_id = stage_vocab.internal_max_llm_token;
+        });
     }
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
 
-    crate::debug!(2, "Step 3: Constraining bitvectors...");
     if config.optimize_trie3_constrain_bitvecs {
-        constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
+        run_pass!("Constraining bitvectors", {
+            constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
+        });
     }
 
-    crate::debug!(2, "Step 4: Pruning dead paths...");
     if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
-        prune_dead_paths_trie3(roots, &trie3_god);
+        run_pass!("Pruning dead paths", {
+            prune_dead_paths_trie3(roots, &trie3_god);
+        });
     }
-    crate::debug!(2, "Step 4.5: Factoring common destinations...");
     if config.optimize_trie2_factor_common_destinations { // Reusing config flag
-        factor_common_destinations_trie3(roots, &trie3_god, max_llm_token_id, max_state_id);
+        run_pass!("Factoring common destinations", {
+            factor_common_destinations_trie3(roots, &trie3_god, max_llm_token_id, max_state_id);
+        });
     }
 
-    crate::debug!(2, "Step 4.6: Simplifying LLM token bitsets...");
-    simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
+    run_pass!("Simplifying LLM token bitsets", {
+        simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
+    });
 
-    crate::debug!(2, "Step 5: Compressing edges...");
     if config.optimize_trie2_compress_edges {
-        compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+        run_pass!("Compressing edges", {
+            compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+        });
     }
-    crate::debug!(2, "Step 6: Merging nodes...");
     if config.optimize_trie2_merge_nodes {
-        merge_nodes_trie3(roots, &trie3_god);
+        run_pass!("Merging nodes", {
+            merge_nodes_trie3(roots, &trie3_god);
+        });
     }
-    crate::debug!(2, "Step 6.5: Pruning nodes that do not reach end...");
     if config.optimize_trie2_prune_dead_paths { // Reusing config flag
-        prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
+        run_pass!("Pruning nodes that do not reach end", {
+            prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
+        });
     }
 
-    crate::debug!(2, "Step 7: Pruning dead paths (post-merge)...");
     if config.optimize_trie2_prune_dead_paths {
-        prune_dead_paths_trie3(roots, &trie3_god);
+        run_pass!("Pruning dead paths (post-merge)", {
+            prune_dead_paths_trie3(roots, &trie3_god);
+        });
     }
-    crate::debug!(2, "Step 8: Compressing edges (post-merge)...");
     if config.optimize_trie2_compress_edges {
-        compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+        run_pass!("Compressing edges (post-merge)", {
+            compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+        });
     }
     if config.optimize_trie2_merge_nodes {
-        merge_nodes_trie3(roots, &trie3_god);
+        run_pass!("Merging nodes (post-compress)", {
+            merge_nodes_trie3(roots, &trie3_god);
+        });
     }
-    crate::debug!(2, "Step 9.5: Pruning nodes that do not reach end (post-merge)...");
     if config.optimize_trie2_prune_dead_paths { // Reusing config flag
-        prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
+        run_pass!("Pruning nodes that do not reach end (post-merge)", {
+            prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
+        });
     }
 
-    crate::debug!(2, "Step 10: Garbage collection...");
     if config.optimize_trie2_gc {
-        Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+        run_pass!("Garbage collection", {
+            Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+        });
     }
-    crate::debug!(2, "Step 11: Recomputing max depths...");
-    Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+    run_pass!("Recomputing max depths", {
+        Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+    });
 
-    crate::debug!(2, "Step 12: Merging equivalent LLM tokens (final pass)...");
     if config.optimize_trie3_merge_equivalent_llm_tokens {
-        merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
+        run_pass!("Merging equivalent LLM tokens (final pass)", {
+            merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
+        });
     }
-    crate::debug!(2, "Step 13: Reordering LLM tokens (final pass)...");
     if config.optimize_trie3_reorder_llm_tokens {
-        reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
+        run_pass!("Reordering LLM tokens (final pass)", {
+            reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
+        });
     }
 
     // TODO: Probably not needed
-    crate::debug!(2, "Step 14: Recomputing max depths...");
-    Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+    run_pass!("Recomputing max depths (final)", {
+        Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+    });
 
-    crate::debug!(2, "Final stats:");
-    compute_and_print_precompute_stats3(roots, trie3_god);
+    crate::debug!(2, "Finished optimizing Trie 3 size.");
 }
 
 fn remap_llm_bv_many_to_one(bv: &LLMTokenBV, map_old_to_new: &BTreeMap<usize, usize>, max_token_id: usize) -> LLMTokenBV {
