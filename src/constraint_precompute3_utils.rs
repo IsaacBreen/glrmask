@@ -66,6 +66,22 @@ pub fn optimize_trie3_size(
         };
     }
 
+    if config.optimize_trie2_prune_dead_paths { // Reusing config flags from trie2
+        run_pass!("Pruning dead paths", {
+            prune_dead_paths_trie3(roots, &trie3_god);
+        });
+    }
+    if config.optimize_trie2_factor_common_destinations { // Reusing config flag
+        run_pass!("Factoring common destinations", {
+            factor_common_destinations_trie3(roots, &trie3_god, max_llm_token_id, max_state_id);
+        });
+    }
+    if config.optimize_trie2_merge_nodes {
+        run_pass!("Merging nodes", {
+            merge_nodes_trie3(roots, &trie3_god);
+        });
+    }
+
     if config.optimize_trie3_merge_equivalent_llm_tokens {
         run_pass!("Merging equivalent LLM tokens", {
             merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
