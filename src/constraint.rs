@@ -1,10 +1,6 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use std::borrow::Borrow;
-use std::collections::btree_map::Entry as BTreeEntry;
-use crate::datastructures::gss_leveled::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
-use crate::datastructures::gss_leveled::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
 use crate::datastructures::ordered_hash_map::Retain;
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
@@ -12,6 +8,8 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
+use std::borrow::Borrow;
+use std::collections::btree_map::Entry as BTreeEntry;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::mem;
@@ -29,8 +27,10 @@ use crate::constraint_precompute1_utils;
 use crate::constraint_precompute2_utils;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::entry_api::EntryApi;
-use crate::datastructures::gss_leveled::Acc;
-use crate::datastructures::gss_leveled::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig};
+use crate::datastructures::gss::{Acc, GSSNode, GSSPrintConfig};
+use crate::datastructures::gss_analysis::{gather_gss_stats, get_roots, print_gss_forest, sample_path};
+use crate::datastructures::gss_pruning::{allow_only_llm_tokens_and_prune_arc, disallow_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, map_allowed_terminals_tokenizer_states, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_llm_tokens, reset_terminals};
+use crate::datastructures::gss_simplification::{fuse_predecessors_recursive, simplify, simplify_roots_in_place};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -1185,7 +1185,7 @@ impl GrammarConstraint {
             |precomputed_node_data, glr_s| {
                 reset();
 
-                crate::datastructures::gss_leveled::merge_stored_trie_nodes(
+                crate::datastructures::gss_trie_utils::merge_stored_trie_nodes(
                     &mut glr_s.active_state.stack,
                     &mut HashMap::new(),
                     glr_s.active_state.trie2_god.as_ref().unwrap(),
@@ -1523,7 +1523,7 @@ impl GrammarConstraint {
             verbose: false,
         };
 
-        let (gss_str, state_ids) = crate::datastructures::gss_leveled::print_gss_forest(roots, &self.parser.terminal_map, &config);
+        let (gss_str, state_ids) = print_gss_forest(roots, &self.parser.terminal_map, &config);
         println!("{}", gss_str);
     }
 
@@ -1710,7 +1710,7 @@ impl<'a> Display for GrammarConstraintState<'a> {
             verbose: false,
         };
             let (gss_str, _) =
-                crate::datastructures::gss_leveled::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
+                print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
             write!(f, "{}", gss_str)?;
         }
 
