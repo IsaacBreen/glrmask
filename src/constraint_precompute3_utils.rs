@@ -71,11 +71,6 @@ pub fn optimize_trie3_size(
             prune_dead_paths_trie3(roots, &trie3_god);
         });
     }
-    if config.optimize_trie2_factor_common_destinations { // Reusing config flag
-        run_pass!("Factoring common destinations", {
-            factor_common_destinations_trie3(roots, &trie3_god, max_llm_token_id, max_state_id);
-        });
-    }
     if config.optimize_trie2_merge_nodes {
         run_pass!("Merging nodes", {
             merge_nodes_trie3(roots, &trie3_god);
