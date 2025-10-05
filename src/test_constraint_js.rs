@@ -17,7 +17,6 @@ use crate::interface::{CompiledGrammar, GrammarDefinition};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::TerminalID;
-use crate::datastructures::gss::{GSSNode, sample_path};
 use crate::datastructures::vocab_prefix_tree::VocabPrefixTree;
 use bimap::BiBTreeMap;
 use rand::rngs::StdRng;
