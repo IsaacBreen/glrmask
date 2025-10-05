@@ -93,6 +93,57 @@ class ArenaReorderVariation(VariationBase):
         print(f"[Variation] {self.name}: re-optimizing arena with params={self.params}")
         model.optimize_arena(self.params)
 
+@dataclass
+class MergeByPopVariation(VariationBase):
+    """Dramatically restructure the arena by merging all edges with the same pop value."""
+    def __call__(self, model: "Model") -> None:
+        print(f"[Variation] {self.name}: rebuilding arena, merging all edges with the same pop value.")
+
+        # 1. Convert to intermediate arena to get a flat list of edges per node
+        intermediate_arena = model.to_intermediate_arena()
+        new_arena: Dict[NodeID, ArenaNode] = {}
+
+        # 2. Rebuild each node with the new merging strategy
+        for uid, inter_node in tqdm(intermediate_arena.items(), desc="[MergeByPop] Rebuilding arena"):
+            if not inter_node.children:
+                new_arena[uid] = ArenaNode(children=[], llm_bv_union=RangeSet.empty(), clean_end=inter_node.clean_end)
+                continue
+
+            # Group all flattened edges by their pop value
+            grouped_by_pop: Dict[int, List[IntermediateArenaEdge]] = collections.defaultdict(list)
+            for edge in inter_node.children:
+                grouped_by_pop[edge.pop].append(edge)
+
+            new_children: List[ArenaEdge] = []
+            node_llm_union = RangeSet.empty()
+
+            # For each pop value, create one single merged edge
+            for pop, edges_to_merge in sorted(grouped_by_pop.items()):
+                merged_llm_bv = RangeSet.empty()
+                merged_dests: List[ArenaEdgeDest] = []
+                dest_states_union = RangeSetStates.empty()
+
+                for edge in edges_to_merge:
+                    merged_llm_bv |= edge.llm_bv
+                    dest = ArenaEdgeDest(edge.dests.dest_idx, edge.dests.state_bv)
+                    merged_dests.append(dest)
+                    dest_states_union |= dest.state_bv
+
+                node_llm_union |= merged_llm_bv
+                new_children.append(ArenaEdge(
+                    pop=pop,
+                    llm_bv=merged_llm_bv,
+                    dests=merged_dests,
+                    dest_states_union=dest_states_union,
+                ))
+
+            new_arena[uid] = ArenaNode(children=new_children, llm_bv_union=node_llm_union, clean_end=inter_node.clean_end)
+
+        # 3. Replace the model's arena and re-initialize accelerators
+        model.arena = new_arena
+        model._compute_edge_accelerators()
+        model.optimize_traversal()
+
 # Type Aliases
 NodeID = int
 LLMTokenSet = RangeSet
@@ -655,6 +706,7 @@ class Model(GraphProvider):
         vars.append(ArenaReorderVariation(name="arena_diversity_default", params=ArenaOptimizeParams()))
         vars.append(ArenaReorderVariation(name="arena_diversity_more_depth", params=ArenaOptimizeParams(depth_weight=2048)))
         vars.append(ArenaReorderVariation(name="arena_diversity_less_overlap_penalty", params=ArenaOptimizeParams(penalty_llm_overlap=256, penalty_state_overlap=128)))
+        vars.append(MergeByPopVariation(name="arena_merge_by_pop"))
         return vars
 
     def get_benchmark_config(self) -> Dict:
