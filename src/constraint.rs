@@ -1,8 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
-use std::borrow::Borrow;
-use crate::datastructures::gss_leveled::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, map_allowed_terminals_tokenizer_states, print_gss_forest, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify};
+use crate::datastructures::gss_leveled::{allow_only_llm_tokens_and_prune_arc, disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, gather_gss_stats, get_roots, map_allowed_terminals_tokenizer_states, print_gss_forest, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_llm_tokens, reset_terminals, sample_path, simplify, Acc, GSSNode, GSSPrintConfig};
 use crate::datastructures::ordered_hash_map::Retain;
 use ordered_hash_map::OrderedHashMap;
 use ordered_hash_map::OrderedHashSet;
@@ -12,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
+use std::borrow::Borrow;
 use std::mem;
 use std::ops::{BitOr, BitOrAssign};
 use std::sync::Arc;
@@ -27,8 +27,6 @@ use crate::constraint_precompute1_utils;
 use crate::constraint_precompute2_utils;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::entry_api::EntryApi;
-use crate::datastructures::gss_leveled::Acc;
-use crate::datastructures::gss_leveled::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -1167,7 +1165,7 @@ impl GrammarConstraint {
                 let mut out = Vec::new();
                 for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
                     let mut glr_s_copy = glr_s.clone();
-                    allow_only_llm_tokens_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new());
+                    allow_only_llm_tokens_and_prune_arc(&mut Arc::new(glr_s_copy.active_state.stack), edge_bv, &mut ());
                     out.push((dst_node_wrapper.clone(), glr_s_copy));
                 }
                 print_summary();
@@ -1184,7 +1182,7 @@ impl GrammarConstraint {
                 reset();
 
                 crate::datastructures::gss::merge_stored_trie_nodes(
-                    &mut glr_s.active_state.stack,
+                    &mut Arc::new(glr_s.active_state.stack),
                     &mut crate::datastructures::gss_leveled::PruneAndTransformRecursiveMemo::default(),
                     glr_s.active_state.trie2_god.as_ref().unwrap(),
                 );
@@ -1229,7 +1227,7 @@ impl GrammarConstraint {
                 }
 
                 let mut stack = vec![glr_s.active_state.stack.clone()];
-                // gss_leveled::simplify_roots_in_place(&mut stack);
+                // gss_leveled::simplify_roots_in_place(&mut stack); // TODO: Re-enable simplification
                 glr_s.active_state.stack = stack.into_iter().next().unwrap();
 
                 // print_summary();
@@ -1828,7 +1826,7 @@ impl<'a> GrammarConstraintState<'a> {
             if let Some(precomputed_trie_root_arc) = self.parent.precomputed1.get(tokenizer_state_id) {
                 let mut glr_state = glr_state.clone();
                 prune_llm_tokens_by_disallowed_terminals(
-                    &mut glr_state.active_state.stack,
+                    &mut Arc::new(glr_state.active_state.stack),
                     &self.parent.possible_matches,
                     &mut HashMap::new(),
                 );
@@ -2813,8 +2811,8 @@ impl<'a> GrammarConstraintState<'a> {
                                 let mut disallowed_terminals_for_end_state = TerminalBV::zeros();
                                 // Disallow this token from being matched again immediately.
                                 disallowed_terminals_for_end_state.insert(match_info.id);
-                                disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
-                                    disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
+                                disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state); // TODO: This is wrong for LeveledGSS
+                                    // disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
                             }
                         }
                         // cloned_glr_s.log_gss(format!("Before disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
