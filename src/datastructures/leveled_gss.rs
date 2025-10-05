@@ -1277,6 +1277,188 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> LeveledGSS<
         }
     }
 
+    pub fn fuse(&self, levels: Option<isize>) -> Self {
+        if let Some(l) = levels {
+            if l <= 0 {
+                return self.clone();
+            }
+        }
+
+        let mut memo_upper: StdHashMap<(usize, Option<isize>), Arc<Upper<T, A>>> = StdHashMap::new();
+        let mut memo_lower: StdHashMap<(usize, Option<isize>), Arc<Lower<T>>> = StdHashMap::new();
+
+        fn fuse_lower<T, A>(
+            node: &Arc<Lower<T>>,
+            remain: Option<isize>,
+            memo: &mut StdHashMap<(usize, Option<isize>), Arc<Lower<T>>>,
+        ) -> Arc<Lower<T>>
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+        {
+            if let Some(r) = remain {
+                if r == 0 {
+                    return node.clone();
+                }
+            }
+            let key = (Arc::as_ptr(node) as usize, remain);
+            if let Some(cached) = memo.get(&key) {
+                return cached.clone();
+            }
+
+            let next_remain = remain.map(|r| r - 1);
+
+            let has_multi_depth_slots = node.children.values().any(|kids| kids.len() > 1);
+
+            let mut new_children_by_value: StdHashMap<T, Vec<Arc<Lower<T>>>> = StdHashMap::new();
+            let mut children_changed = false;
+
+            for (v, kids) in node.children.iter() {
+                for child in kids.values() {
+                    let fused_child = fuse_lower::<T, A>(child, next_remain, memo);
+                    if !Arc::ptr_eq(&fused_child, child) {
+                        children_changed = true;
+                    }
+                    new_children_by_value
+                        .entry(v.clone())
+                        .or_default()
+                        .push(fused_child);
+                }
+            }
+
+            if !has_multi_depth_slots && !children_changed {
+                memo.insert(key, node.clone());
+                return node.clone();
+            }
+
+            let mut final_children: Children<T, Lower<T>> = IHashMap::new();
+            for (v, fused_kids) in new_children_by_value {
+                if fused_kids.is_empty() {
+                    continue;
+                }
+                let mut it = fused_kids.into_iter();
+                let first = it.next().unwrap();
+                let merged_child = it.fold(first, |acc, next| merge_lower(&acc, &next));
+                final_children.insert(v, OrdMap::unit(merged_child.max_depth, merged_child));
+            }
+
+            let res = new_lower(final_children, node.empty);
+            memo.insert(key, res.clone());
+            res
+        }
+
+        fn fuse_upper<T, A>(
+            node: &Arc<Upper<T, A>>,
+            remain: Option<isize>,
+            memo_upper: &mut StdHashMap<(usize, Option<isize>), Arc<Upper<T, A>>>,
+            memo_lower: &mut StdHashMap<(usize, Option<isize>), Arc<Lower<T>>>,
+        ) -> Arc<Upper<T, A>>
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+        {
+            if let Some(r) = remain {
+                if r == 0 {
+                    return node.clone();
+                }
+            }
+            let key = (Arc::as_ptr(node) as usize, remain);
+            if let Some(cached) = memo_upper.get(&key) {
+                return cached.clone();
+            }
+
+            let next_remain = remain.map(|r| r - 1);
+
+            let res = match &**node {
+                Upper::Interface(i) => {
+                    let has_multi_depth_slots = i.children.values().any(|kids| kids.len() > 1);
+                    let mut new_children_by_value: StdHashMap<T, Vec<Arc<Lower<T>>>> =
+                        StdHashMap::new();
+                    let mut children_changed = false;
+
+                    for (v, kids) in i.children.iter() {
+                        for child in kids.values() {
+                            let fused_child = fuse_lower::<T, A>(child, next_remain, memo_lower);
+                            if !Arc::ptr_eq(&fused_child, child) {
+                                children_changed = true;
+                            }
+                            new_children_by_value
+                                .entry(v.clone())
+                                .or_default()
+                                .push(fused_child);
+                        }
+                    }
+
+                    if !has_multi_depth_slots && !children_changed {
+                        memo_upper.insert(key, node.clone());
+                        return node.clone();
+                    }
+
+                    let mut final_children: Children<T, Lower<T>> = IHashMap::new();
+                    for (v, fused_kids) in new_children_by_value {
+                        if fused_kids.is_empty() {
+                            continue;
+                        }
+                        let mut it = fused_kids.into_iter();
+                        let first = it.next().unwrap();
+                        let merged_child = it.fold(first, |acc, next| merge_lower(&acc, &next));
+                        final_children.insert(v, OrdMap::unit(merged_child.max_depth, merged_child));
+                    }
+                    new_interface(final_children, i.acc.clone(), i.empty.clone())
+                }
+                Upper::Branch(b) => {
+                    let has_multi_depth_slots = b.children.values().any(|kids| kids.len() > 1);
+                    let mut new_children_by_value: StdHashMap<T, Vec<Arc<Upper<T, A>>>> =
+                        StdHashMap::new();
+                    let mut children_changed = false;
+
+                    for (v, kids) in b.children.iter() {
+                        for child in kids.values() {
+                            let fused_child =
+                                fuse_upper(child, next_remain, memo_upper, memo_lower);
+                            if !Arc::ptr_eq(&fused_child, child) {
+                                children_changed = true;
+                            }
+                            new_children_by_value
+                                .entry(v.clone())
+                                .or_default()
+                                .push(fused_child);
+                        }
+                    }
+
+                    if !has_multi_depth_slots && !children_changed {
+                        memo_upper.insert(key, node.clone());
+                        return node.clone();
+                    }
+
+                    let mut final_children: Children<T, Upper<T, A>> = IHashMap::new();
+                    for (v, fused_kids) in new_children_by_value {
+                        if fused_kids.is_empty() {
+                            continue;
+                        }
+                        let mut it = fused_kids.into_iter();
+                        let first = it.next().unwrap();
+                        let merged_child = it.fold(first, |acc, next| merge_upper(&acc, &next));
+                        final_children
+                            .insert(v, OrdMap::unit(merged_child.max_depth(), merged_child));
+                    }
+                    let new_b = new_branch(final_children, b.empty.clone());
+                    try_promote(&new_b)
+                }
+            };
+
+            memo_upper.insert(key, res.clone());
+            res
+        }
+
+        let new_inner = fuse_upper::<T, A>(&self.inner, levels, &mut memo_upper, &mut memo_lower);
+        if Arc::ptr_eq(&new_inner, &self.inner) {
+            self.clone()
+        } else {
+            LeveledGSS { inner: new_inner }
+        }
+    }
+
     pub fn peek(&self) -> HashSet<T> {
         self.inner.children_keys().into_iter().collect()
     }
