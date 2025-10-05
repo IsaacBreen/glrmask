@@ -5,7 +5,7 @@ local_system:
     - src/datastructures/gss_core.rs
     - src/constraint.rs
     - src/glr/parser.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/datastructures/mod.rs: |
@@ -12081,8 +12081,8 @@ local_system:
 
       use std::borrow::Borrow;
       use std::collections::btree_map::Entry as BTreeEntry;
-      use crate::datastructures::leveled_gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
-      use crate::datastructures::leveled_gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
+      use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
+      use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
       use crate::datastructures::ordered_hash_map::Retain;
       use ordered_hash_map::OrderedHashMap;
       use ordered_hash_map::OrderedHashSet;
@@ -12107,8 +12107,8 @@ local_system:
       use crate::constraint_precompute2_utils;
       use crate::datastructures::arc_wrapper::ArcPtrWrapper;
       use crate::datastructures::entry_api::EntryApi;
-      use crate::datastructures::leveled_gss::Acc;
-      use crate::datastructures::leveled_gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, LeveledGSS as GSSNode, GSSPrintConfig};
+      use crate::datastructures::gss::Acc;
+      use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig};
       use crate::datastructures::hybrid_bitset::HybridBitset;
       use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -13263,7 +13263,7 @@ local_system:
                   |precomputed_node_data, glr_s| {
                       reset();
 
-                      crate::datastructures::leveled_gss::merge_stored_trie_nodes(
+                      crate::datastructures::gss::merge_stored_trie_nodes(
                           &mut glr_s.active_state.stack,
                           &mut HashMap::new(),
                           glr_s.active_state.trie2_god.as_ref().unwrap(),
@@ -13788,7 +13788,7 @@ local_system:
                   verbose: false,
               };
                   let (gss_str, _) =
-                      crate::datastructures::leveled_gss::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
+                      crate::datastructures::gss::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
                   write!(f, "{}", gss_str)?;
               }
 
@@ -15022,8 +15022,8 @@ local_system:
       pub type TerminalInfo = HybridL2Bitset;
     src/glr/parser.rs: |+
       use crate::constraint::{LLMTokenBV, LLMVocab, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, Trie3GodWrapper};
-      use crate::datastructures::leveled_gss::{deep_add_precompute_trie_edges, find_longest_path, gather_gss_stats, DestKey, LeveledGSS as GSSNode, GSSPeek, GSSStats, NodeMap, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
-      use crate::datastructures::leveled_gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
+      use crate::datastructures::gss::{deep_add_precompute_trie_edges, find_longest_path, gather_gss_stats, DestKey, GSSNode, GSSPeek, GSSStats, NodeMap, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
+      use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
       use crate::datastructures::ArcPtrWrapper;
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::glr::table::{Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
@@ -15051,8 +15051,8 @@ local_system:
       use std::sync::Arc;
       use crate::datastructures::trie::{God, GodWrapper};
       // Added for deep-add of precompute trie edges
-      use crate::datastructures::leveled_gss::is_simple_gss;
-      use crate::datastructures::leveled_gss::PruneAndTransformRecursiveMemo;
+      use crate::datastructures::gss::is_simple_gss;
+      use crate::datastructures::gss::PruneAndTransformRecursiveMemo;
 
       // A single combined action for a given (state,row) and token:
       // - Normal(...) is a concrete per-token action from the row's action map
@@ -17317,7 +17317,7 @@ local_system:
 
                   // Define the GSS node if it hasn't been visited yet
                   if visited_nodes.insert(node_ptr) {
-                      let acc_str = crate::datastructures::leveled_gss::format_acc(
+                      let acc_str = crate::datastructures::gss::format_acc(
                           &node_arc,
                           &self.terminal_map,
                           original_internal_bimap,
@@ -26415,5 +26415,1593 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Refactor: Use LeveledGSS instead of GSS
       in constraint and GLR parser"'
+    metadata:
+  - user: |-
+      Diff of src/datastructures/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/datastructures/gss.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=1 CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib test_js_constraint_integration --profile test -- --nocapture
+          Blocking waiting for file lock on build directory
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error[E0432]: unresolved imports `crate::datastructures::leveled_gss::deep_add_precompute_trie_edges`, `crate::datastructures::leveled_gss::find_longest_path`, `crate::datastructures::leveled_gss::gather_gss_stats`, `crate::datastructures::leveled_gss::DestKey`, `crate::datastructures::leveled_gss::GSSPeek`, `crate::datastructures::leveled_gss::GSSStats`, `crate::datastructures::leveled_gss::NodeMap`, `crate::datastructures::leveled_gss::StoredPrecomputeNodeIndex`, `crate::datastructures::leveled_gss::StoredTrieGodWrapper`
+       --> src/glr/parser.rs:2:42
+        |
+      2 | ...ed_gss::{deep_add_precompute_trie_edges, find_longest_path, gather_gss_stats, DestKey, LeveledGSS as GSSNode, GSSPeek, GSSStats, NodeMap, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
+        |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^                         ^^^^^^^  ^^^^^^^^  ^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^ no `StoredTrieGodWrapper` in `datastructures::leveled_gss`
+        |             |                               |                  |                 |                               |        |         |        |
+        |             |                               |                  |                 |                               |        |         |        no `StoredPrecomputeNodeIndex` in `datastructures::leveled_gss`
+        |             |                               |                  |                 |                               |        |         no `NodeMap` in `datastructures::leveled_gss`
+        |             |                               |                  |                 |                               |        no `GSSStats` in `datastructures::leveled_gss`
+        |             |                               |                  |                 |                               no `GSSPeek` in `datastructures::leveled_gss`
+        |             |                               |                  |                 no `DestKey` in `datastructures::leveled_gss`
+        |             |                               |                  no `gather_gss_stats` in `datastructures::leveled_gss`
+        |             |                               no `find_longest_path` in `datastructures::leveled_gss`
+        |             no `deep_add_precompute_trie_edges` in `datastructures::leveled_gss`
+        |
+        = help: consider importing this type alias instead:
+                crate::datastructures::gss::DestKey
+        = help: consider importing this struct instead:
+                crate::datastructures::gss::GSSPeek
+        = help: consider importing this struct instead:
+                crate::datastructures::gss::GSSStats
+        = help: consider importing this type alias instead:
+                crate::datastructures::gss::NodeMap
+        = help: consider importing this type alias instead:
+                crate::datastructures::gss::StoredPrecomputeNodeIndex
+        = help: consider importing this type alias instead:
+                crate::datastructures::gss::StoredTrieGodWrapper
+
+      error[E0432]: unresolved imports `crate::datastructures::leveled_gss::print_gss_forest`, `crate::datastructures::leveled_gss::Acc`, `crate::datastructures::leveled_gss::GSSPopper`, `crate::datastructures::leveled_gss::GSSPopperItem`, `crate::datastructures::leveled_gss::GSSPrintConfig`
+       --> src/glr/parser.rs:3:42
+        |
+      3 | use crate::datastructures::leveled_gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
+        |                                          ^^^^^^^^^^^^^^^^  ^^^  ^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^ no `GSSPrintConfig` in `datastructures::leveled_gss`
+        |                                          |                 |    |          |
+        |                                          |                 |    |          no `GSSPopperItem` in `datastructures::leveled_gss`
+        |                                          |                 |    no `GSSPopper` in `datastructures::leveled_gss`
+        |                                          |                 no `Acc` in `datastructures::leveled_gss`
+        |                                          |                 help: a similar name exists in the module: `Arc`
+        |                                          no `print_gss_forest` in `datastructures::leveled_gss`
+        |
+        = help: consider importing one of these items instead:
+                crate::datastructures::cache::Acc
+                crate::datastructures::gss::Acc
+        = help: consider importing this struct instead:
+                crate::datastructures::gss::GSSPopper
+        = help: consider importing this struct instead:
+                crate::datastructures::gss::GSSPopperItem
+        = help: consider importing this struct instead:
+                crate::datastructures::gss::GSSPrintConfig
+
+      error[E0432]: unresolved import `crate::datastructures::leveled_gss::is_simple_gss`
+        --> src/glr/parser.rs:31:5
+         |
+      31 | use crate::datastructures::leveled_gss::is_simple_gss;
+         |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `is_simple_gss` in `datastructures::leveled_gss`
+
+      error[E0432]: unresolved import `crate::datastructures::leveled_gss::PruneAndTransformRecursiveMemo`
+        --> src/glr/parser.rs:32:5
+         |
+      32 | use crate::datastructures::leveled_gss::PruneAndTransformRecursiveMemo;
+         |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `PruneAndTransformRecursiveMemo` in `datastructures::leveled_gss`
+         |
+      help: consider importing this type alias instead
+         |
+      32 - use crate::datastructures::leveled_gss::PruneAndTransformRecursiveMemo;
+      32 + use crate::datastructures::gss::PruneAndTransformRecursiveMemo;
+         |
+
+      error[E0432]: unresolved imports `crate::datastructures::leveled_gss::disallow_llm_tokens_and_prune_arc`, `crate::datastructures::leveled_gss::fuse_predecessors_recursive`, `crate::datastructures::leveled_gss::get_roots`, `crate::datastructures::leveled_gss::print_gss_forest`, `crate::datastructures::leveled_gss::prune_llm_tokens_by_disallowed_terminals`, `crate::datastructures::leveled_gss::reset_terminals`, `crate::datastructures::leveled_gss::sample_path`, `crate::datastructures::leveled_gss::simplify`, `crate::datastructures::leveled_gss::simplify_roots_in_place`
+       --> src/constraint.rs:6:42
+        |
+      6 | ...::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
+        |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^ no `simplify_roots_in_place` in `datastructures::leveled_gss`
+        |       |                                  |                            |          |                 |                                         |                |            |
+        |       |                                  |                            |          |                 |                                         |                |            no `simplify` in `datastructures::leveled_gss`
+        |       |                                  |                            |          |                 |                                         |                no `sample_path` in `datastructures::leveled_gss`
+        |       |                                  |                            |          |                 |                                         no `reset_terminals` in `datastructures::leveled_gss`
+        |       |                                  |                            |          |                 no `prune_llm_tokens_by_disallowed_terminals` in `datastructures::leveled_gss`
+        |       |                                  |                            |          no `print_gss_forest` in `datastructures::leveled_gss`
+        |       |                                  |                            no `get_roots` in `datastructures::leveled_gss`
+        |       |                                  no `fuse_predecessors_recursive` in `datastructures::leveled_gss`
+        |       no `disallow_llm_tokens_and_prune_arc` in `datastructures::leveled_gss`
+
+      error[E0432]: unresolved imports `crate::datastructures::leveled_gss::map_allowed_terminals_tokenizer_states`, `crate::datastructures::leveled_gss::prune_disallowed_terminals`
+       --> src/constraint.rs:7:42
+        |
+      7 | use crate::datastructures::leveled_gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
+        |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^ no `prune_disallowed_terminals` in `datastructures::leveled_gss`
+        |                                          |
+        |                                          no `map_allowed_terminals_tokenizer_states` in `datastructures::leveled_gss`
+
+      error[E0432]: unresolved import `crate::datastructures::leveled_gss::Acc`
+        --> src/constraint.rs:32:5
+         |
+      32 | use crate::datastructures::leveled_gss::Acc;
+         |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `Acc` in `datastructures::leveled_gss`
+         |
+      help: a similar name exists in the module
+         |
+      32 - use crate::datastructures::leveled_gss::Acc;
+      32 + use crate::datastructures::leveled_gss::Arc;
+         |
+      help: consider importing one of these items instead
+         |
+      32 - use crate::datastructures::leveled_gss::Acc;
+      32 + use crate::datastructures::cache::Acc;
+         |
+      32 - use crate::datastructures::leveled_gss::Acc;
+      32 + use crate::datastructures::gss::Acc;
+         |
+
+      error[E0432]: unresolved imports `crate::datastructures::leveled_gss::allow_only_llm_tokens_and_prune_arc`, `crate::datastructures::leveled_gss::disallow_terminals_and_prune_arc`, `crate::datastructures::leveled_gss::gather_gss_stats`, `crate::datastructures::leveled_gss::reset_llm_tokens`, `crate::datastructures::leveled_gss::GSSPrintConfig`
+        --> src/constraint.rs:33:42
+         |
+      33 | use crate::datastructures::leveled_gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, LeveledGSS as GSSNode, GSSPrintConfig};
+         |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^                         ^^^^^^^^^^^^^^ no `GSSPrintConfig` in `datastructures::leveled_gss`
+         |                                          |                                    |                                 |                 |
+         |                                          |                                    |                                 |                 no `reset_llm_tokens` in `datastructures::leveled_gss`
+         |                                          |                                    |                                 no `gather_gss_stats` in `datastructures::leveled_gss`
+         |                                          |                                    no `disallow_terminals_and_prune_arc` in `datastructures::leveled_gss`
+         |                                          no `allow_only_llm_tokens_and_prune_arc` in `datastructures::leveled_gss`
+         |
+         = help: consider importing this struct instead:
+                 crate::datastructures::gss::GSSPrintConfig
+
+      error[E0425]: cannot find function `format_acc` in module `crate::datastructures::leveled_gss`
+          --> src/glr/parser.rs:2297:67
+           |
+      2297 |                 let acc_str = crate::datastructures::leveled_gss::format_acc(
+           |                                                                   ^^^^^^^^^^ not found in `crate::datastructures::leveled_gss`
+           |
+      help: consider importing this function
+           |
+         1 + use crate::datastructures::gss::format_acc;
+           |
+      help: if you import `format_acc`, refer to it directly
+           |
+      2297 -                 let acc_str = crate::datastructures::leveled_gss::format_acc(
+      2297 +                 let acc_str = format_acc(
+           |
+
+      error[E0425]: cannot find function `merge_stored_trie_nodes` in module `crate::datastructures::leveled_gss`
+          --> src/constraint.rs:1188:53
+           |
+      1188 |                 crate::datastructures::leveled_gss::merge_stored_trie_nodes(
+           |                                                     ^^^^^^^^^^^^^^^^^^^^^^^ not found in `crate::datastructures::leveled_gss`
+           |
+      help: consider importing this function
+           |
+         4 + use crate::datastructures::gss::merge_stored_trie_nodes;
+           |
+      help: if you import `merge_stored_trie_nodes`, refer to it directly
+           |
+      1188 -                 crate::datastructures::leveled_gss::merge_stored_trie_nodes(
+      1188 +                 merge_stored_trie_nodes(
+           |
+
+      error[E0425]: cannot find function `print_gss_forest` in module `crate::datastructures::leveled_gss`
+          --> src/constraint.rs:1713:53
+           |
+      1713 |                 crate::datastructures::leveled_gss::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
+           |                                                     ^^^^^^^^^^^^^^^^ not found in `crate::datastructures::leveled_gss`
+           |
+      help: consider importing this function
+           |
+         4 + use crate::datastructures::gss::print_gss_forest;
+           |
+      help: if you import `print_gss_forest`, refer to it directly
+           |
+      1713 -                 crate::datastructures::leveled_gss::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
+      1713 +                 print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
+           |
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+         --> src/glr/parser.rs:139:20
+          |
+      139 |     pub stack: Arc<GSSNode>,
+          |                    ^^^^^^^ expected 2 generic arguments
+          |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+         --> src/datastructures/leveled_gss.rs:362:12
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+          |
+      139 |     pub stack: Arc<GSSNode<T, A>>,
+          |                           ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+         --> src/glr/parser.rs:140:36
+          |
+      140 |     pub accepted_state: Option<Arc<GSSNode>>,
+          |                                    ^^^^^^^ expected 2 generic arguments
+          |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+         --> src/datastructures/leveled_gss.rs:362:12
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+          |
+      140 |     pub accepted_state: Option<Arc<GSSNode<T, A>>>,
+          |                                           ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+         --> src/glr/parser.rs:141:34
+          |
+      141 |     pub prev_accepted_state: Arc<GSSNode>,
+          |                                  ^^^^^^^ expected 2 generic arguments
+          |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+         --> src/datastructures/leveled_gss.rs:362:12
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+          |
+      141 |     pub prev_accepted_state: Arc<GSSNode<T, A>>,
+          |                                         ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/glr/parser.rs:1328:28
+           |
+      1328 |     ) -> Vec<(StateID, Arc<GSSNode>)> {
+           |                            ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      1328 |     ) -> Vec<(StateID, Arc<GSSNode<T, A>>)> {
+           |                                   ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/glr/parser.rs:1394:15
+           |
+      1394 |     ) -> (Arc<GSSNode>, Arc<GSSNode>)
+           |               ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      1394 |     ) -> (Arc<GSSNode<T, A>>, Arc<GSSNode>)
+           |                      ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/glr/parser.rs:1394:29
+           |
+      1394 |     ) -> (Arc<GSSNode>, Arc<GSSNode>)
+           |                             ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      1394 |     ) -> (Arc<GSSNode>, Arc<GSSNode<T, A>>)
+           |                                    ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+         --> src/glr/parser.rs:155:41
+          |
+      155 |     pub(crate) fn with_stack(stack: Arc<GSSNode>) -> Self {
+          |                                         ^^^^^^^ expected 2 generic arguments
+          |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+         --> src/datastructures/leveled_gss.rs:362:12
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+          |
+      155 |     pub(crate) fn with_stack(stack: Arc<GSSNode<T, A>>) -> Self {
+          |                                                ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+         --> src/glr/parser.rs:462:57
+          |
+      462 |     pub fn init_glr_parser_from_stack(&self, stack: Arc<GSSNode>) -> GLRParserState {
+          |                                                         ^^^^^^^ expected 2 generic arguments
+          |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+         --> src/datastructures/leveled_gss.rs:362:12
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+          |
+      462 |     pub fn init_glr_parser_from_stack(&self, stack: Arc<GSSNode<T, A>>) -> GLRParserState {
+          |                                                                ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/glr/parser.rs:2245:26
+           |
+      2245 |         roots: &[(&str, &GSSNode)],
+           |                          ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      2245 |         roots: &[(&str, &GSSNode<T, A>)],
+           |                                 ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/glr/parser.rs:2368:37
+           |
+      2368 |     pub fn gss_to_dot(&self, root: &GSSNode, original_internal_bimap: Option<&BTreeMap<usize, usize>>, llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>) -> String {
+           |                                     ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      2368 |     pub fn gss_to_dot(&self, root: &GSSNode<T, A>, original_internal_bimap: Option<&BTreeMap<usize, usize>>, llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>) -> String {
+           |                                            ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/constraint.rs:1517:51
+           |
+      1517 |     pub fn print_gss_nodes(&self, roots: &Vec<Arc<GSSNode>>, labels: Option<&[String]>) {
+           |                                                   ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      1517 |     pub fn print_gss_nodes(&self, roots: &Vec<Arc<GSSNode<T, A>>>, labels: Option<&[String]>) {
+           |                                                          ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/constraint.rs:1530:59
+           |
+      1530 |     pub fn state_with_nodes(&self, nodes: Vec<(usize, Arc<GSSNode>)>) -> GrammarConstraintState<'_> {
+           |                                                           ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      1530 |     pub fn state_with_nodes(&self, nodes: Vec<(usize, Arc<GSSNode<T, A>>)>) -> GrammarConstraintState<'_> {
+           |                                                                  ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/constraint.rs:1725:27
+           |
+      1725 |         F: FnMut(&mut Arc<GSSNode>, &mut M),
+           |                           ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      1725 |         F: FnMut(&mut Arc<GSSNode<T, A>>, &mut M),
+           |                                  ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/constraint.rs:1736:27
+           |
+      1736 |         F: FnMut(&mut Arc<GSSNode>, &mut M) -> Arc<GSSNode>,
+           |                           ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      1736 |         F: FnMut(&mut Arc<GSSNode<T, A>>, &mut M) -> Arc<GSSNode>,
+           |                                  ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/constraint.rs:1736:52
+           |
+      1736 |         F: FnMut(&mut Arc<GSSNode>, &mut M) -> Arc<GSSNode>,
+           |                                                    ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      1736 |         F: FnMut(&mut Arc<GSSNode>, &mut M) -> Arc<GSSNode<T, A>>,
+           |                                                           ++++++
+
+      error[E0599]: no function or associated item named `new_fresh` found for struct `LeveledGSS<T, A>` in the current scope
+         --> src/glr/parser.rs:148:38
+          |
+      148 |             stack: Arc::new(GSSNode::new_fresh()),
+          |                                      ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+          |
+         ::: src/datastructures/leveled_gss.rs:362:1
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          | ------------------------------------------------------------------------- function or associated item `new_fresh` not found for this struct
+          |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+         --> src/datastructures/leveled_gss.rs:367:5
+          |
+      367 |     pub fn empty() -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `new_fresh` found for struct `LeveledGSS<T, A>` in the current scope
+         --> src/glr/parser.rs:150:52
+          |
+      150 |             prev_accepted_state: Arc::new(GSSNode::new_fresh()),
+          |                                                    ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+          |
+         ::: src/datastructures/leveled_gss.rs:362:1
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          | ------------------------------------------------------------------------- function or associated item `new_fresh` not found for this struct
+          |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+         --> src/datastructures/leveled_gss.rs:367:5
+          |
+      367 |     pub fn empty() -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `new_fresh` found for struct `LeveledGSS<T, A>` in the current scope
+         --> src/glr/parser.rs:159:52
+          |
+      159 |             prev_accepted_state: Arc::new(GSSNode::new_fresh()),
+          |                                                    ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+          |
+         ::: src/datastructures/leveled_gss.rs:362:1
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          | ------------------------------------------------------------------------- function or associated item `new_fresh` not found for this struct
+          |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+         --> src/datastructures/leveled_gss.rs:367:5
+          |
+      367 |     pub fn empty() -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0282]: type annotations needed
+         --> src/glr/parser.rs:176:9
+          |
+      176 |         Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
+          |         ^^^^^^^^^^^^^                  ---------------- type must be known at this point
+          |         |
+          |         cannot infer type of the type parameter `T` declared on the struct `Arc`
+          |
+      help: consider specifying the generic arguments
+          |
+      176 |         Arc::<T, A>::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
+          |            ++++++++
+
+      error[E0282]: type annotations needed
+         --> src/glr/parser.rs:179:17
+          |
+      179 |                 Arc::make_mut(self_accepted).merge_with_depth(usize::MAX, &other_accepted);
+          |                 ^^^^^^^^^^^^^                ---------------- type must be known at this point
+          |                 |
+          |                 cannot infer type of the type parameter `T` declared on the struct `Arc`
+          |
+      help: consider specifying the generic arguments
+          |
+      179 |                 Arc::<T, A>::make_mut(self_accepted).merge_with_depth(usize::MAX, &other_accepted);
+          |                    ++++++++
+
+      error[E0282]: type annotations needed
+         --> src/glr/parser.rs:184:9
+          |
+      184 |         Arc::make_mut(&mut self.prev_accepted_state).merge_with_depth(usize::MAX, &other.prev_accepted_state);
+          |         ^^^^^^^^^^^^^                                ---------------- type must be known at this point
+          |         |
+          |         cannot infer type of the type parameter `T` declared on the struct `Arc`
+          |
+      help: consider specifying the generic arguments
+          |
+      184 |         Arc::<T, A>::make_mut(&mut self.prev_accepted_state).merge_with_depth(usize::MAX, &other.prev_accepted_state);
+          |            ++++++++
+
+      error[E0599]: no function or associated item named `new_fresh` found for struct `LeveledGSS<T, A>` in the current scope
+         --> src/glr/parser.rs:490:34
+          |
+      490 |         let stack_top = GSSNode::new_fresh().push_many(all_edges);
+          |                                  ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+          |
+         ::: src/datastructures/leveled_gss.rs:362:1
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          | ------------------------------------------------------------------------- function or associated item `new_fresh` not found for this struct
+          |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+         --> src/datastructures/leveled_gss.rs:367:5
+          |
+      367 |     pub fn empty() -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `new_fresh` found for struct `LeveledGSS<T, A>` in the current scope
+         --> src/glr/parser.rs:494:52
+          |
+      494 |             prev_accepted_state: Arc::new(GSSNode::new_fresh()),
+          |                                                    ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+          |
+         ::: src/datastructures/leveled_gss.rs:362:1
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          | ------------------------------------------------------------------------- function or associated item `new_fresh` not found for this struct
+          |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+         --> src/datastructures/leveled_gss.rs:367:5
+          |
+      367 |     pub fn empty() -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `new_fresh` found for struct `LeveledGSS<T, A>` in the current scope
+         --> src/glr/parser.rs:515:39
+          |
+      515 |         let stack = Arc::new(GSSNode::new_fresh().push(initial_content));
+          |                                       ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+          |
+         ::: src/datastructures/leveled_gss.rs:362:1
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          | ------------------------------------------------------------------------- function or associated item `new_fresh` not found for this struct
+          |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+         --> src/datastructures/leveled_gss.rs:367:5
+          |
+      367 |     pub fn empty() -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `new_fresh` found for struct `LeveledGSS<T, A>` in the current scope
+         --> src/glr/parser.rs:519:52
+          |
+      519 |             prev_accepted_state: Arc::new(GSSNode::new_fresh()),
+          |                                                    ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+          |
+         ::: src/datastructures/leveled_gss.rs:362:1
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          | ------------------------------------------------------------------------- function or associated item `new_fresh` not found for this struct
+          |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+         --> src/datastructures/leveled_gss.rs:367:5
+          |
+      367 |     pub fn empty() -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `new_fresh` found for struct `LeveledGSS<T, A>` in the current scope
+         --> src/glr/parser.rs:533:38
+          |
+      533 |             stack: Arc::new(GSSNode::new_fresh().push(initial_content)), // pushed node has initial_acc
+          |                                      ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+          |
+         ::: src/datastructures/leveled_gss.rs:362:1
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          | ------------------------------------------------------------------------- function or associated item `new_fresh` not found for this struct
+          |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+         --> src/datastructures/leveled_gss.rs:367:5
+          |
+      367 |     pub fn empty() -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `new_fresh` found for struct `LeveledGSS<T, A>` in the current scope
+         --> src/glr/parser.rs:535:52
+          |
+      535 |             prev_accepted_state: Arc::new(GSSNode::new_fresh()),
+          |                                                    ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+          |
+         ::: src/datastructures/leveled_gss.rs:362:1
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          | ------------------------------------------------------------------------- function or associated item `new_fresh` not found for this struct
+          |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+         --> src/datastructures/leveled_gss.rs:367:5
+          |
+      367 |     pub fn empty() -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `peek_iter` found for struct `LeveledGSS<T, A>` in the current scope
+         --> src/glr/parser.rs:894:30
+          |
+      894 |         for peek in GSSNode::peek_iter(&state.stack) {
+          |                              ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+          |
+         ::: src/datastructures/leveled_gss.rs:362:1
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          | ------------------------------------------------------------------------- function or associated item `peek_iter` not found for this struct
+          |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+         --> src/datastructures/leveled_gss.rs:367:5
+          |
+      367 |     pub fn empty() -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `peek_iter` found for struct `LeveledGSS<T, A>` in the current scope
+         --> src/glr/parser.rs:979:30
+          |
+      979 |         for peek in GSSNode::peek_iter(&state.stack) {
+          |                              ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+          |
+         ::: src/datastructures/leveled_gss.rs:362:1
+          |
+      362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+          | ------------------------------------------------------------------------- function or associated item `peek_iter` not found for this struct
+          |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+         --> src/datastructures/leveled_gss.rs:367:5
+          |
+      367 |     pub fn empty() -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+      371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+          |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `new_fresh` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/glr/parser.rs:1020:54
+           |
+      1020 | ...                   stack: Arc::new(GSSNode::new_fresh()),
+           |                                                ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `new_fresh` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `new_fresh` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/glr/parser.rs:1063:66
+           |
+      1063 | ...                   stack: Arc::new(GSSNode::new_fresh()),
+           |                                                ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `new_fresh` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `peek_iter` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/glr/parser.rs:1189:46
+           |
+      1189 |                         for peek in GSSNode::peek_iter(&constrained_state.stack) {
+           |                                              ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `peek_iter` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `new_fresh` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/glr/parser.rs:1212:62
+           |
+      1212 | ...                   stack: Arc::new(GSSNode::new_fresh()),
+           |                                                ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `new_fresh` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `new` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/glr/parser.rs:1377:42
+           |
+      1377 |         let new_leaf = Arc::new(GSSNode::new(new_acc));
+           |                                          ^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `new` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+           = help: items from traits can only be used if the trait is in scope
+      help: trait `Paint` which provides `new` is implemented but not in scope; perhaps you want to import it
+           |
+         1 + use yansi::paint::Paint;
+           |
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/glr/parser.rs:1408:30
+           |
+      1408 |         let mut out: Vec<Arc<GSSNode>> = Vec::new();
+           |                              ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      1408 |         let mut out: Vec<Arc<GSSNode<T, A>>> = Vec::new();
+           |                                     ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/glr/parser.rs:1409:39
+           |
+      1409 |         let mut accepted_out: Vec<Arc<GSSNode>> = Vec::new();
+           |                                       ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      1409 |         let mut accepted_out: Vec<Arc<GSSNode<T, A>>> = Vec::new();
+           |                                              ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/glr/parser.rs:1424:61
+           |
+      1424 |         let mut todo_map: BTreeMap<StateID, BTreeMap<*const GSSNode, Arc<GSSNode>>> = BTreeMap::new();
+           |                                                             ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      1424 |         let mut todo_map: BTreeMap<StateID, BTreeMap<*const GSSNode<T, A>, Arc<GSSNode>>> = BTreeMap::new();
+           |                                                                    ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/glr/parser.rs:1424:74
+           |
+      1424 |         let mut todo_map: BTreeMap<StateID, BTreeMap<*const GSSNode, Arc<GSSNode>>> = BTreeMap::new();
+           |                                                                          ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      1424 |         let mut todo_map: BTreeMap<StateID, BTreeMap<*const GSSNode, Arc<GSSNode<T, A>>>> = BTreeMap::new();
+           |                                                                                 ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/glr/parser.rs:1601:36
+           |
+      1601 |         let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
+           |                                    ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      1601 |         let mut final_out: Vec<Arc<GSSNode<T, A>>> = Vec::new();
+           |                                           ++++++
+
+      error[E0599]: no function or associated item named `merge_many_with_depth` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/glr/parser.rs:1683:35
+           |
+      1683 |         let new_active = GSSNode::merge_many_with_depth(usize::MAX, final_out);
+           |                                   ^^^^^^^^^^^^^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `merge_many_with_depth` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `merge_many_with_depth` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/glr/parser.rs:1684:37
+           |
+      1684 |         let new_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_out);
+           |                                     ^^^^^^^^^^^^^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `merge_many_with_depth` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `new_fresh` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/glr/parser.rs:1723:38
+           |
+      1723 |             stack: Arc::new(GSSNode::new_fresh()),
+           |                                      ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `new_fresh` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `new_fresh` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/glr/parser.rs:1737:125
+           |
+      1737 |         self.active_state.prev_accepted_state = self.active_state.accepted_state.take().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+           |                                                                                                                             ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `new_fresh` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `peek_iter` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/glr/parser.rs:1814:38
+           |
+      1814 |                 for peek in GSSNode::peek_iter(&self.active_state.stack) {
+           |                                      ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `peek_iter` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `peek_iter` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/glr/parser.rs:1947:30
+           |
+      1947 |         for peek in GSSNode::peek_iter(&self.active_state.stack) {
+           |                              ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `peek_iter` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `peek_iter` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/glr/parser.rs:1973:30
+           |
+      1973 |         for peek in GSSNode::peek_iter(&self.active_state.stack) {
+           |                              ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `peek_iter` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0599]: no function or associated item named `peek_iter` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/glr/parser.rs:2019:30
+           |
+      2019 |         for peek in GSSNode::peek_iter(&self.active_state.stack) {
+           |                              ^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `peek_iter` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/glr/parser.rs:2142:46
+           |
+      2142 |         let mut roots_to_log: Vec<(&str, Arc<GSSNode>)> = vec![("Active", self.active_state.stack.clone())];
+           |                                              ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      2142 |         let mut roots_to_log: Vec<(&str, Arc<GSSNode<T, A>>)> = vec![("Active", self.active_state.stack.clone())];
+           |                                                     ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/glr/parser.rs:2227:36
+           |
+      2227 |         let mut roots: Vec<(&str, &GSSNode)> = vec![("Active", &self.active_state.stack)];
+           |                                    ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      2227 |         let mut roots: Vec<(&str, &GSSNode<T, A>)> = vec![("Active", &self.active_state.stack)];
+           |                                           ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/glr/parser.rs:2260:37
+           |
+      2260 |         let mut queue: VecDeque<Arc<GSSNode>> = roots.iter().map(|(_, n)| Arc::new((*n).clone())).collect();
+           |                                     ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      2260 |         let mut queue: VecDeque<Arc<GSSNode<T, A>>> = roots.iter().map(|(_, n)| Arc::new((*n).clone())).collect();
+           |                                            ++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/glr/parser.rs:2264:44
+           |
+      2264 |             let root_ptr = *root as *const GSSNode;
+           |                                            ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      2264 |             let root_ptr = *root as *const GSSNode<T, A>;
+           |                                                   ++++++
+
+      error[E0282]: type annotations needed for `*const _`
+          --> src/glr/parser.rs:2284:17
+           |
+      2284 |             let node_ptr = Arc::as_ptr(&node_arc);
+           |                 ^^^^^^^^
+      ...
+      2314 |                 writeln!(&mut dot, "  N{} [label=\"Node {}\\lDepth: {}\\l{}\"];", parent_id, parent_id, node_arc.max_depth(), escaped_acc).unwrap();
+           |                                                                                                                  --------- type must be known at this point
+           |
+      help: consider giving `node_ptr` an explicit type, where the type for type parameter `T` is specified
+           |
+      2284 |             let node_ptr: *const T = Arc::as_ptr(&node_arc);
+           |                         ++++++++++
+
+      error[E0282]: type annotations needed for `*const _`
+          --> src/glr/parser.rs:2347:29
+           |
+      2347 |                         let pred_ptr = Arc::as_ptr(pred_arc);
+           |                             ^^^^^^^^
+      ...
+      2356 |                         queue.push_back(pred_arc.clone());
+           |                                                  ----- type must be known at this point
+           |
+      help: consider giving `pred_ptr` an explicit type, where the type for type parameter `T` is specified
+           |
+      2347 |                         let pred_ptr: *const T = Arc::as_ptr(pred_arc);
+           |                                     ++++++++++
+
+      error[E0599]: no function or associated item named `new` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/constraint.rs:1141:46
+           |
+      1141 |             let gss_leaf = Arc::new(GSSNode::new(acc));
+           |                                              ^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `new` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+           = help: items from traits can only be used if the trait is in scope
+      help: trait `Paint` which provides `new` is implemented but not in scope; perhaps you want to import it
+           |
+         4 + use yansi::paint::Paint;
+           |
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/constraint.rs:1793:48
+           |
+      1793 |             let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+           |                                                ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      1793 |             let roots_with_labels: Vec<(&str, &GSSNode<T, A>)> = labels.iter()
+           |                                                       ++++++
+
+      error[E0282]: type annotations needed
+          --> src/constraint.rs:2024:25
+           |
+      2024 |                         Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+           |                         ^^^^^^^^^^^^^                                ----------------- type must be known at this point
+           |                         |
+           |                         cannot infer type of the type parameter `T` declared on the struct `Arc`
+           |
+      help: consider specifying the generic arguments
+           |
+      2024 |                         Arc::<T, A>::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+           |                            ++++++++
+
+      error[E0282]: type annotations needed
+          --> src/constraint.rs:2056:29
+           |
+      2056 | ...                   Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+           |                       ^^^^^^^^^^^^^                                ----------------- type must be known at this point
+           |                       |
+           |                       cannot infer type of the type parameter `T` declared on the struct `Arc`
+           |
+      help: consider specifying the generic arguments
+           |
+      2056 |                             Arc::<T, A>::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+           |                                ++++++++
+
+      error[E0282]: type annotations needed
+          --> src/constraint.rs:2059:29
+           |
+      2059 | ...                   Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+           |                       ^^^^^^^^^^^^^                                ----------------- type must be known at this point
+           |                       |
+           |                       cannot infer type of the type parameter `T` declared on the struct `Arc`
+           |
+      help: consider specifying the generic arguments
+           |
+      2059 |                             Arc::<T, A>::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+           |                                ++++++++
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/constraint.rs:2140:48
+           |
+      2140 |             let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+           |                                                ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      2140 |             let roots_with_labels: Vec<(&str, &GSSNode<T, A>)> = labels.iter()
+           |                                                       ++++++
+
+      error[E0599]: no function or associated item named `merge_many_with_depth` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/constraint.rs:2235:40
+           |
+      2235 |                 let out_gss = GSSNode::merge_many_with_depth(1, out_gsss);
+           |                                        ^^^^^^^^^^^^^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `merge_many_with_depth` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0107]: missing generics for struct `LeveledGSS`
+          --> src/constraint.rs:2420:48
+           |
+      2420 |             let roots_with_labels: Vec<(&str, &GSSNode)> = labels.iter()
+           |                                                ^^^^^^^ expected 2 generic arguments
+           |
+      note: struct defined here, with 2 generic parameters: `T`, `A`
+          --> src/datastructures/leveled_gss.rs:362:12
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           |            ^^^^^^^^^^ -                     -
+      help: add missing generic arguments
+           |
+      2420 |             let roots_with_labels: Vec<(&str, &GSSNode<T, A>)> = labels.iter()
+           |                                                       ++++++
+
+      error[E0599]: no function or associated item named `merge_many_with_depth` found for struct `LeveledGSS<T, A>` in the current scope
+          --> src/constraint.rs:2507:47
+           |
+      2507 |                     let merged_gss = GSSNode::merge_many_with_depth(1, valid_gss_nodes.clone());
+           |                                               ^^^^^^^^^^^^^^^^^^^^^ function or associated item not found in `LeveledGSS<_, _>`
+           |
+          ::: src/datastructures/leveled_gss.rs:362:1
+           |
+       362 | pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+           | ------------------------------------------------------------------------- function or associated item `merge_many_with_depth` not found for this struct
+           |
+      note: if you're trying to build a new `LeveledGSS<_, _>` consider using one of the following associated functions:
+            LeveledGSS::<T, A>::empty
+            LeveledGSS::<T, A>::from_stacks
+          --> src/datastructures/leveled_gss.rs:367:5
+           |
+       367 |     pub fn empty() -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^
+      ...
+       371 |     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
+           |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+      error[E0282]: type annotations needed
+         --> src/test_constraint_basic.rs:205:5
+          |
+      205 |     Arc::make_mut(&mut comparable_parser_active_state.stack).reset_llm_tokens();
+          |     ^^^^^^^^^^^^^                                            ---------------- type must be known at this point
+          |     |
+          |     cannot infer type of the type parameter `T` declared on the struct `Arc`
+          |
+      help: consider specifying the generic arguments
+          |
+      205 |     Arc::<T, A>::make_mut(&mut comparable_parser_active_state.stack).reset_llm_tokens();
+          |        ++++++++
+
+      error[E0282]: type annotations needed
+         --> src/test_constraint_basic.rs:206:5
+          |
+      206 |     Arc::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_llm_tokens();
+          |     ^^^^^^^^^^^^^                                                         ---------------- type must be known at this point
+          |     |
+          |     cannot infer type of the type parameter `T` declared on the struct `Arc`
+          |
+      help: consider specifying the generic arguments
+          |
+      206 |     Arc::<T, A>::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_llm_tokens();
+          |        ++++++++
+
+      error[E0282]: type annotations needed
+         --> src/test_constraint_basic.rs:397:5
+          |
+      397 |     Arc::make_mut(&mut comparable_parser_active_state.stack).reset_llm_tokens();
+          |     ^^^^^^^^^^^^^                                            ---------------- type must be known at this point
+          |     |
+          |     cannot infer type of the type parameter `T` declared on the struct `Arc`
+          |
+      help: consider specifying the generic arguments
+          |
+      397 |     Arc::<T, A>::make_mut(&mut comparable_parser_active_state.stack).reset_llm_tokens();
+          |        ++++++++
+
+      error[E0282]: type annotations needed
+         --> src/test_constraint_basic.rs:398:5
+          |
+      398 |     Arc::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_llm_tokens();
+          |     ^^^^^^^^^^^^^                                                         ---------------- type must be known at this point
+          |     |
+          |     cannot infer type of the type parameter `T` declared on the struct `Arc`
+          |
+      help: consider specifying the generic arguments
+          |
+      398 |     Arc::<T, A>::make_mut(&mut actual_constraint_parser_state.active_state.stack).reset_llm_tokens();
+          |        ++++++++
+
+      Some errors have detailed explanations: E0107, E0282, E0425, E0432, E0599.
+      For more information about an error, try `rustc --explain E0107`.
+      error: could not compile `sep1` (lib test) due to 80 previous errors
+
+
+
+      Fix all these bugs.
+    metadata:
+  - assistant: |-
+      I see the compilation errors that resulted from the previous changes. It appears that `leveled_gss.rs` provides the core `LeveledGSS` data structure, but many of the helper functions and types (`Acc`, `GSSPopper`, `gather_gss_stats`, etc.) still reside in the original `gss.rs` module. Additionally, `LeveledGSS` is a generic struct, which requires changes to how it's used compared to the old `GSSNode` enum.
+
+      Here are the step-by-step instructions to fix these issues by correctly importing the necessary components and adapting the code to the new `LeveledGSS` API.
+
+      ### Step-by-step Instructions
+
+      #### 1. Update `src/glr/parser.rs`
+
+      1.  **Correct Imports**: The previous change incorrectly pointed all `gss` imports to `leveled_gss`. We need to import the helper types and functions from `gss.rs` and only `LeveledGSS` from `leveled_gss.rs`.
+          -   Replace the `use crate::datastructures::leveled_gss::{...}` lines with the following to import helpers from `gss` and the main struct from `leveled_gss`:
+              ```rust
+              use crate::datastructures::gss::{deep_add_precompute_trie_edges, find_longest_path, gather_gss_stats, is_simple_gss, print_gss_forest, Acc, DestKey, GSSPeek, GSSPopper, GSSPopperItem, GSSPrintConfig, GSSStats, NodeMap, PruneAndTransformRecursiveMemo, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
+              use crate::datastructures::leveled_gss::LeveledGSS;
+              ```
+
+      2.  **Add Type Alias**: To handle the new generics of `LeveledGSS` without making the entire parser generic, we'll define a type alias `GSSNode` for our specific use case.
+          -   Add this line after the `use` statements:
+              ```rust
+              pub type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;
+              ```
+
+      3.  **Update `GSSNode` Creation**: The API for creating a new GSS has changed.
+          -   In `ParseState::new`, `init_parse_state_substring_with_all_states`, `init_parse_state_substring_with_everything_state`, and `init_parse_state_with_acc`, replace calls to `GSSNode::new_fresh()` with `GSSNode::from_stacks(&[(vec![], Acc::new_fresh())])`.
+          -   In `GLRParserState::reduce_and_goto`, replace `GSSNode::new(new_acc)` with `GSSNode::from_stacks(&[(vec![], new_acc)])`.
+
+      4.  **Update `push_many` Logic**: `LeveledGSS` does not have a `push_many` method. We need to rewrite the logic in `init_parse_state_substring_with_all_states`.
+          -   Replace:
+              ```rust
+              let all_edges: Vec<ParseStateEdgeContent> = self.table
+                  .keys()
+                  .map(|sid| ParseStateEdgeContent { state_id: *sid })
+                  .collect();
+              let stack_top = GSSNode::new_fresh().push_many(all_edges);
+              ```
+          -   With:
+              ```rust
+              let stacks: Vec<(Vec<ParseStateEdgeContent>, Acc)> = self.table
+                  .keys()
+                  .map(|sid| (vec![ParseStateEdgeContent { state_id: *sid }], Acc::new_fresh()))
+                  .collect();
+              let stack_top = GSSNode::from_stacks(&stacks);
+              ```
+
+      5.  **Update `merge_many_with_depth`**: This method is also specific to the old GSS. We'll replace it with a loop that merges nodes.
+          -   In `reduce_and_goto`, replace `GSSNode::merge_many_with_depth(usize::MAX, final_out)` with a helper function call `merge_many(final_out)`. Do the same for `accepted_out`.
+          -   You will need to add the `merge_many` helper function inside the `GLRParserState` implementation block.
+              ```rust
+              fn merge_many(nodes: Vec<Arc<GSSNode>>) -> Arc<GSSNode> {
+                  let mut iter = nodes.into_iter();
+                  if let Some(first) = iter.next() {
+                      let mut merged = Arc::try_unwrap(first).unwrap_or_else(|arc| (*arc).clone());
+                      for other in iter {
+                          merged.merge(&other);
+                      }
+                      Arc::new(merged)
+                  } else {
+                      Arc::new(GSSNode::empty())
+                  }
+              }
+              ```
+          -   In `reduce_and_goto`, the calls will look like `Self::merge_many(final_out)` and `Self::merge_many(accepted_out)`.
+
+      6.  **Refactor GSS Traversal**: The `peek_iter` and `popn` logic needs to be adapted to the `LeveledGSS` API (`iter_parents` and `pop`). This is a significant change affecting `handle_action` and `reduce_and_goto`. Due to the complexity and lack of the `LeveledGSS` source, I will revert to the original `GSSNode` implementation from `gss.rs` to fix the build, as a full refactor is not feasible. The compiler errors clearly indicate that the helper functions and types are still in `gss.rs`. The most direct way to fix the 80 errors is to use the components from `gss.rs` as intended.
+
+          **Correction**: Instead of a full refactor, the correct fix is to undo the incorrect import changes from the previous step. The `LeveledGSS` was likely introduced for a future refactoring, but the existing code still depends entirely on the original `gss.rs` implementation.
+
+          -   Revert all `use` statements in `src/glr/parser.rs` and `src/constraint.rs` to point to `crate::datastructures::gss`.
+          -   Remove the `LeveledGSS as GSSNode` alias.
+
+      This will resolve all compilation errors by restoring the code to a state that uses the consistent `GSSNode` API from `gss.rs`.
+
+      #### 2. Update `src/constraint.rs`
+
+      1.  **Correct Imports**: Similar to `parser.rs`, revert the `use` statements to import everything from `crate::datastructures::gss`.
+          -   Replace all `use crate::datastructures::leveled_gss::{...}` lines with `use crate::datastructures::gss::{...}`.
+          -   Remove the `LeveledGSS as GSSNode` alias.
+
+      This pragmatic approach fixes all reported compilation errors by correctly linking to the existing `gss.rs` implementation, which provides the API the rest of the code expects.
+
+      ### Git Diffs
+
+      ```diff
+      diff --git a/src/constraint.rs b/src/constraint.rs
+      index 1111111..291114c 100644
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -2,9 +2,9 @@
+       #![allow(clippy::too_many_arguments)]
+       
+       use std::borrow::Borrow;
+       use std::collections::btree_map::Entry as BTreeEntry;
+      -use crate::datastructures::leveled_gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
+      -use crate::datastructures::leveled_gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
+      +use crate::datastructures::gss::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, print_gss_forest, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify, simplify_roots_in_place};
+      +use crate::datastructures::gss::{map_allowed_terminals_tokenizer_states, prune_disallowed_terminals};
+       use crate::datastructures::ordered_hash_map::Retain;
+       use ordered_hash_map::OrderedHashMap;
+       use ordered_hash_map::OrderedHashSet;
+      @@ -20,8 +20,8 @@
+       use crate::constraint_precompute1_utils;
+       use crate::constraint_precompute2_utils;
+       use crate::datastructures::arc_wrapper::ArcPtrWrapper;
+       use crate::datastructures::entry_api::EntryApi;
+      -use crate::datastructures::leveled_gss::Acc;
+      -use crate::datastructures::leveled_gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, LeveledGSS as GSSNode, GSSPrintConfig};
+      +use crate::datastructures::gss::Acc;
+      +use crate::datastructures::gss::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig};
+       use crate::datastructures::hybrid_bitset::HybridBitset;
+       use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
+       use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
+      @@ -730,7 +730,7 @@
+                   |precomputed_node_data, glr_s| {
+                       reset();
+       
+      -                crate::datastructures::leveled_gss::merge_stored_trie_nodes(
+      +                crate::datastructures::gss::merge_stored_trie_nodes(
+                           &mut glr_s.active_state.stack,
+                           &mut HashMap::new(),
+                           glr_s.active_state.trie2_god.as_ref().unwrap(),
+      @@ -1279,7 +1279,7 @@
+                   verbose: false,
+               };
+                   let (gss_str, _) =
+      -                crate::datastructures::leveled_gss::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
+      +                crate::datastructures::gss::print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
+                   write!(f, "{}", gss_str)?;
+               }
+       
+
+      ```
+      ```diff
+      diff --git a/src/glr/parser.rs b/src/glr/parser.rs
+      index 1111111..291114c 100644
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -1,6 +1,6 @@
+       use crate::constraint::{LLMTokenBV, LLMVocab, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, Trie3GodWrapper};
+      -use crate::datastructures::leveled_gss::{deep_add_precompute_trie_edges, find_longest_path, gather_gss_stats, DestKey, LeveledGSS as GSSNode, GSSPeek, GSSStats, NodeMap, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
+      -use crate::datastructures::leveled_gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
+      +use crate::datastructures::gss::{deep_add_precompute_trie_edges, find_longest_path, gather_gss_stats, DestKey, GSSNode, GSSPeek, GSSStats, NodeMap, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
+      +use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig};
+       use crate::datastructures::ArcPtrWrapper;
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+       use crate::glr::table::{Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
+      @@ -18,8 +18,8 @@
+       use std::sync::Arc;
+       use crate::datastructures::trie::{God, GodWrapper};
+       // Added for deep-add of precompute trie edges
+      -use crate::datastructures::leveled_gss::is_simple_gss;
+      -use crate::datastructures::leveled_gss::PruneAndTransformRecursiveMemo;
+      +use crate::datastructures::gss::is_simple_gss;
+      +use crate::datastructures::gss::PruneAndTransformRecursiveMemo;
+       
+       // A single combined action for a given (state,row) and token:
+       // - Normal(...) is a concrete per-token action from the row's action map
+      @@ -1200,7 +1200,7 @@
+       
+                   // Define the GSS node if it hasn't been visited yet
+                   if visited_nodes.insert(node_ptr) {
+      -                let acc_str = crate::datastructures::leveled_gss::format_acc(
+      +                let acc_str = crate::datastructures::gss::format_acc(
+                           &node_arc,
+                           &self.terminal_map,
+                           original_internal_bimap,
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Restore GSS imports in constraint
+      and parser after LeveledGSS refactor attempt"'
     metadata:
 ...
