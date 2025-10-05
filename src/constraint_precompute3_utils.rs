@@ -84,18 +84,18 @@ pub fn optimize_trie3_size(
 	// 		prune_dead_paths_trie3(roots, &trie3_god);
 	// 	});
 	// }
-
-	if config.optimize_trie3_constrain_bitvecs {
-		let roots_vec: Vec<_> = roots.values().cloned().collect();
-		let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
-		run_pass!("Constraining bitvectors", {
-			constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
-		});
-	}
-
-	run_pass!("Simplifying LLM token bitsets", {
-		simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
-	});
+    //
+	// if config.optimize_trie3_constrain_bitvecs {
+	// 	let roots_vec: Vec<_> = roots.values().cloned().collect();
+	// 	let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
+	// 	run_pass!("Constraining bitvectors", {
+	// 		constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
+	// 	});
+	// }
+    //
+	// run_pass!("Simplifying LLM token bitsets", {
+	// 	simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
+	// });
 
 	if config.optimize_trie2_compress_edges {
 		run_pass!("Compressing edges", {
@@ -103,12 +103,12 @@ pub fn optimize_trie3_size(
 		});
 	}
 
-	// After compression, prune and GC before the expensive merge.
-	if config.optimize_trie2_prune_dead_paths {
-		run_pass!("Pruning dead paths (post-compress)", {
-			prune_dead_paths_trie3(roots, &trie3_god);
-		});
-	}
+	// // After compression, prune and GC before the expensive merge.
+	// if config.optimize_trie2_prune_dead_paths {
+	// 	run_pass!("Pruning dead paths (post-compress)", {
+	// 		prune_dead_paths_trie3(roots, &trie3_god);
+	// 	});
+	// }
 
 	if config.optimize_trie2_merge_nodes {
 		run_pass!("Merging nodes", {
