@@ -557,7 +557,7 @@ class Model(GraphProvider):
         dumps, bs_from_json = json.dumps, ffi.Bitset.from_json_string
 
         loaded_arena: Dict[NodeID, LoadedArenaNode] = {}
-        for uid, node_data in arena_dict.items():
+        for uid, node_data in tqdm(arena_dict.items(), desc="Loading trie3 nodes"):
             max_depth[uid] = int(node_data.get("max_depth", 0) or 0)
             children_data = node_data.get("children") or []
 
