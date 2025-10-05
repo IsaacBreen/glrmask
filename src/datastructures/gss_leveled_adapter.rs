@@ -217,7 +217,11 @@ impl Debug for GSSNode {
 
 impl PartialEq for GSSNode {
     fn eq(&self, other: &Self) -> bool {
-        self.inner.to_stacks() == other.inner.to_stacks()
+        let mut self_stacks = self.inner.to_stacks();
+        let mut other_stacks = other.inner.to_stacks();
+        self_stacks.sort();
+        other_stacks.sort();
+        self_stacks == other_stacks
     }
 }
 impl Eq for GSSNode {}
@@ -228,7 +232,11 @@ impl PartialOrd for GSSNode {
 }
 impl Ord for GSSNode {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.inner.to_stacks().cmp(&other.inner.to_stacks())
+        let mut self_stacks = self.inner.to_stacks();
+        let mut other_stacks = other.inner.to_stacks();
+        self_stacks.sort();
+        other_stacks.sort();
+        self_stacks.cmp(&other_stacks)
     }
 }
 impl Hash for GSSNode {
