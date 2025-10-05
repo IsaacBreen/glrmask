@@ -353,9 +353,7 @@ impl GSSNode {
     }
 
     pub fn predecessors(&self) -> &NodeMap {
-        // Adapter: no internal per-depth predecessors. Return static empty map to satisfy signatures.
-        static EMPTY: once_cell::sync::OnceCell<NodeMap> = once_cell::sync::OnceCell::new();
-        EMPTY.get_or_init(|| NodeMap::new())
+        todo!()
     }
 
     pub fn popn(&self, n: usize) -> GSSPopper {
