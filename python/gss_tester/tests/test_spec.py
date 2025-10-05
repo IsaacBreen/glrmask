@@ -246,7 +246,44 @@ def run_test_spec(gss_class: Type[GSS]) -> Generator[Tuple[Any, int], None, None
     gss_empty_pruned = gss_empty_start.prune(lambda acc: True) # Should still be empty
     yield from _yield_state(gss_empty_pruned)
 
-    # --- Test 16: Fuzz tests ---
+    # --- Test 16: filter_by_length ---
+    gss_fl_base = gss_class.merge_many([
+        gss_class.from_stacks([([], MergeableInt(0))]),          # len 0
+        gss_class.from_stacks([([1], MergeableInt(1))]),         # len 1
+        gss_class.from_stacks([([1, 2], MergeableInt(2))]),      # len 2
+        gss_class.from_stacks([([1, 2, 3], MergeableInt(3))]),   # len 3
+    ])
+    yield from _yield_state(gss_fl_base)
+
+    # Case 16a: min_len only
+    gss_fl_min2 = gss_fl_base.filter_by_length(min_len=2)
+    yield from _yield_state(gss_fl_min2)
+
+    # Case 16b: max_len only
+    gss_fl_max1 = gss_fl_base.filter_by_length(max_len=1)
+    yield from _yield_state(gss_fl_max1)
+
+    # Case 16c: min_len and max_len
+    gss_fl_1_to_2 = gss_fl_base.filter_by_length(min_len=1, max_len=2)
+    yield from _yield_state(gss_fl_1_to_2)
+
+    # Case 16d: No match
+    gss_fl_none = gss_fl_base.filter_by_length(min_len=5)
+    yield from _yield_state(gss_fl_none)
+
+    # Case 16e: min_len=0
+    gss_fl_min0 = gss_fl_base.filter_by_length(min_len=0)
+    yield from _yield_state(gss_fl_min0)
+
+    # Case 16f: max_len=0
+    gss_fl_max0 = gss_fl_base.filter_by_length(max_len=0)
+    yield from _yield_state(gss_fl_max0)
+
+    # Case 16g: No-op filter
+    gss_fl_noop = gss_fl_base.filter_by_length()
+    yield from _yield_state(gss_fl_noop)
+
+    # --- Test 17: Fuzz tests ---
     # Run a short, seeded fuzz test to catch more complex interactions.
     # The seed ensures the test is deterministic.
     fuzz_seed = 42

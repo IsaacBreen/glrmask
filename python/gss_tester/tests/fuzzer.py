@@ -70,7 +70,7 @@ def run_fuzz_test(
         
         # Choose an operation deterministically based on the source GSS state
         can_merge = len(gss_states) >= 2
-        operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune']
+        operations = ['push', 'pop', 'popn', 'isolate', 'apply', 'prune', 'filter_by_length']
         if can_merge:
             operations.append('merge')
         
@@ -127,6 +127,15 @@ def run_fuzz_test(
                 predicate: Callable[[MergeableInt], bool] = lambda acc, thr=threshold: acc.real > thr
                 new_gss = source_gss.prune(predicate)
                 args = {"threshold": threshold}
+
+            elif op_choice == 'filter_by_length':
+                min_len = rng.choice([None, 0, 1, 2, 3, 5])
+                max_len = rng.choice([None, 0, 1, 2, 3, 5])
+                # Ensure min_len <= max_len if both are specified
+                if min_len is not None and max_len is not None and min_len > max_len:
+                    min_len, max_len = max_len, min_len
+                new_gss = source_gss.filter_by_length(min_len=min_len, max_len=max_len)
+                args = {"min_len": min_len, "max_len": max_len}
 
             elif op_choice == 'merge' and can_merge:
                 candidates = [i for i in range(len(gss_states)) if i != source_index]
