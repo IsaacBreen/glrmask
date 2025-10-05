@@ -10,22 +10,26 @@ set -euo pipefail
 # This script should be run from the project root directory.
 #
 # Usage:
-#   ./run_benchmarks.sh <model1.py:constraint1.json.gz> [model2.py:constraint2.json.gz ...]
+#   Usage (Mode 1: model:constraint pairs):
+#     ./run_benchmarks.sh <model1.py:constraint1.json.gz> [model2.py:constraint2.json.gz ...]
+#
+#   Usage (Mode 2: legacy, with CONSTRAINT_FILE env var):
+#     CONSTRAINT_FILE=c.json.gz ./run_benchmarks.sh <model1.py> [model2.py ...]
 #
 # Example:
 #   ./run_benchmarks.sh model.py:c1.json.gz model.py:c2.json.gz
 #
 # Environment Variables:
-#   CODE_FILE:    Path to the code file to use as input.
-#                 (Default: ./src/example_code.js)
-#   CODE_FILE:    Path to the code file to use as input.
-#                 (Default: ./src/example_code.js)
-#   REPEAT:       Number of times to run each benchmark. (Default: 1)
-#   AGG_METHOD:   Aggregation method for analyzer (mean, median, min, max).
-#                 If unset, runs are plotted individually. (Default: "")
+#   CONSTRAINT_FILE: Path to a constraint file. Used as a default in legacy mode.
+#   CODE_FILE:       Path to the code file to use as input.
+#                    (Default: ./src/example_code.js)
+#   REPEAT:          Number of times to run each benchmark. (Default: 1)
+#   AGG_METHOD:      Aggregation method for analyzer (mean, median, min, max).
+#                    If unset, runs are plotted individually. (Default: "")
 # ==============================================================================
 
 # --- Configuration ---
+: "${CONSTRAINT_FILE:=""}"
 : "${CODE_FILE:="./src/example_code.js"}"
 : "${SKIP_CPP_BUILD:=0}" # Set to 1 to disable C++ compilation
 : "${SKIP_RUST:=0}" # Set to 1 to disable Rust compilation
@@ -41,13 +45,33 @@ export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
 
 # --- Argument Validation ---
 if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 <model1.py:constraint1.json.gz> [model2.py:constraint2.json.gz ...]"
-    echo "Error: At least one model:constraint pair is required. The first is treated as the baseline."
+    echo "Usage 1: $0 <model1.py:constraint1.json.gz> [model2.py:constraint2.json.gz ...]"
+    echo "Usage 2: CONSTRAINT_FILE=c.json.gz $0 <model1.py> [model2.py ...]"
+    echo "Error: At least one model argument is required."
     exit 1
 fi
 
-ALL_PAIRS=("$@")
-BASELINE_PAIR="$1"
+ALL_PAIRS=()
+# Check if we are in pair mode (arg contains ':') or legacy mode
+if [[ "$1" == *":"* ]]; then
+    echo "Detected 'model:constraint' pair syntax."
+    ALL_PAIRS=("$@")
+else
+    echo "Detected legacy model-only syntax. Using CONSTRAINT_FILE env var."
+    if [ -z "$CONSTRAINT_FILE" ]; then
+        echo "Error: CONSTRAINT_FILE must be set when using legacy model-only syntax."
+        exit 1
+    fi
+    if [ ! -f "$CONSTRAINT_FILE" ]; then
+        echo "Error: Constraint file from environment not found: $CONSTRAINT_FILE"
+        exit 1
+    fi
+    for model_file in "$@"; do
+        ALL_PAIRS+=("${model_file}:${CONSTRAINT_FILE}")
+    done
+fi
+
+BASELINE_PAIR="${ALL_PAIRS[0]}"
 
 # Check that all provided files exist
 for pair in "${ALL_PAIRS[@]}"; do
