@@ -177,6 +177,129 @@ where
 }
 
 // --------------------
+// Filtering
+// --------------------
+
+fn filter_lower<T: Clone + Eq + Hash>(
+    node: &Arc<Lower<T>>,
+    current_depth: isize,
+    min_len: Option<isize>,
+    max_len: Option<isize>,
+) -> Option<Arc<Lower<T>>> {
+    let min_d = min_len.unwrap_or(0);
+    let max_d = max_len.unwrap_or(isize::MAX);
+
+    if current_depth > max_d {
+        return None;
+    }
+
+    let keep_empty = node.empty && current_depth >= min_d;
+
+    let mut new_children: Children<T, Lower<T>> = IHashMap::new();
+    if current_depth < max_d {
+        for (v, kids) in node.children.iter() {
+            let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
+            for child in kids.values() {
+                if let Some(new_child) =
+                    filter_lower(child, current_depth + 1, min_len, max_len)
+                {
+                    new_kids.insert(new_child.max_depth, new_child);
+                }
+            }
+            if !new_kids.is_empty() {
+                new_children.insert(v.clone(), new_kids);
+            }
+        }
+    }
+
+    if !keep_empty && new_children.is_empty() {
+        None
+    } else {
+        Some(new_lower(new_children, keep_empty))
+    }
+}
+
+fn filter_upper<T, A>(
+    node: &Arc<Upper<T, A>>,
+    current_depth: isize,
+    min_len: Option<isize>,
+    max_len: Option<isize>,
+) -> Option<Arc<Upper<T, A>>>
+where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
+    let min_d = min_len.unwrap_or(0);
+    let max_d = max_len.unwrap_or(isize::MAX);
+
+    if current_depth > max_d {
+        return None;
+    }
+
+    match &**node {
+        Upper::Branch(b) => {
+            let keep_empty = b.empty.is_some() && current_depth >= min_d;
+            let new_empty = if keep_empty { b.empty.clone() } else { None };
+
+            let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+            if current_depth < max_d {
+                for (v, kids) in b.children.iter() {
+                    let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
+                    for child in kids.values() {
+                        if let Some(new_child) =
+                            filter_upper(child, current_depth + 1, min_len, max_len)
+                        {
+                            new_kids.insert(new_child.max_depth(), new_child);
+                        }
+                    }
+                    if !new_kids.is_empty() {
+                        new_children.insert(v.clone(), new_kids);
+                    }
+                }
+            }
+
+            if new_children.is_empty() && new_empty.is_none() {
+                None
+            } else {
+                let new_b = new_branch(new_children, new_empty);
+                Some(try_promote(&new_b))
+            }
+        }
+        Upper::Interface(i) => {
+            let keep_empty = i.empty.is_some() && current_depth >= min_d;
+            let new_empty = if keep_empty { i.empty.clone() } else { None };
+
+            let mut new_l_children: Children<T, Lower<T>> = IHashMap::new();
+            if current_depth < max_d {
+                for (v, kids) in i.children.iter() {
+                    let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
+                    for child in kids.values() {
+                        if let Some(new_child) =
+                            filter_lower(child, current_depth + 1, min_len, max_len)
+                        {
+                            new_kids.insert(new_child.max_depth, new_child);
+                        }
+                    }
+                    if !new_kids.is_empty() {
+                        new_l_children.insert(v.clone(), new_kids);
+                    }
+                }
+            }
+
+            let is_leaf_interface = i.children.is_empty() && i.empty.is_none();
+            let keep_leaf_interface = is_leaf_interface && current_depth >= min_d;
+
+            if new_l_children.is_empty() && new_empty.is_none() && !keep_leaf_interface {
+                None
+            } else {
+                let new_i = new_interface(new_l_children, i.acc.clone(), new_empty);
+                Some(try_promote(&new_i))
+            }
+        }
+    }
+}
+
+// --------------------
 // Conversions and merges
 // --------------------
 
@@ -794,6 +917,15 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         };
 
         LeveledGSS { inner: new_inner }
+    }
+
+    pub fn filter_by_length(&self, min_len: Option<isize>, max_len: Option<isize>) -> Self {
+        if self.is_empty() {
+            return self.clone();
+        }
+
+        let new_inner_opt = filter_upper::<T, A>(&self.inner, 0, min_len, max_len);
+        new_inner_opt.map_or_else(Self::empty, |inner| LeveledGSS { inner })
     }
 
     pub fn apply<B, F>(&self, mut func: F) -> LeveledGSS<T, B>
