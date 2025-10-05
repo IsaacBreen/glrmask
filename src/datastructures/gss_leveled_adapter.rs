@@ -217,40 +217,23 @@ impl Debug for GSSNode {
 
 impl PartialEq for GSSNode {
     fn eq(&self, other: &Self) -> bool {
-        let mut self_stacks = self.inner.to_stacks();
-        let mut other_stacks = other.inner.to_stacks();
-        self_stacks.sort();
-        other_stacks.sort();
-        self_stacks == other_stacks
+        self.inner == other.inner
     }
 }
 impl Eq for GSSNode {}
 impl PartialOrd for GSSNode {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        self.inner.partial_cmp(&other.inner)
     }
 }
 impl Ord for GSSNode {
     fn cmp(&self, other: &Self) -> Ordering {
-        let mut self_stacks = self.inner.to_stacks();
-        let mut other_stacks = other.inner.to_stacks();
-        self_stacks.sort();
-        other_stacks.sort();
-        self_stacks.cmp(&other_stacks)
+        self.inner.cmp(&other.inner)
     }
 }
 impl Hash for GSSNode {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        for (p, a) in self.inner.to_stacks() {
-            for e in &p {
-                e.state_id.hash(state);
-            }
-            a.llm_tokens_union.hash(state);
-            a.terminals_union.hash(state);
-            for t in &a.stored_trie_nodes {
-                t.hash(state);
-            }
-        }
+        self.inner.hash(state);
     }
 }
 
@@ -273,18 +256,15 @@ impl GSSNode {
     }
 
     // Helper: append a value to all stacks; if empty, create singleton stack.
-    fn push_all(inner: &LeveledGSS<ParseStateEdgeContent, Acc>, edge: ParseStateEdgeContent) -> LeveledGSS<ParseStateEdgeContent, Acc> {
-        let stacks = inner.to_stacks();
-        let mut out: Vec<(Vec<ParseStateEdgeContent>, Acc)> = Vec::new();
-        if stacks.is_empty() {
-            out.push((vec![edge], Acc::new_fresh()));
+    fn push_all(
+        inner: &LeveledGSS<ParseStateEdgeContent, Acc>,
+        edge: ParseStateEdgeContent,
+    ) -> LeveledGSS<ParseStateEdgeContent, Acc> {
+        if inner.is_empty() {
+            LeveledGSS::from_stacks(&[(vec![edge], Acc::new_fresh())])
         } else {
-            for (mut p, a) in stacks {
-                p.push(edge.clone());
-                out.push((p, a));
-            }
+            inner.push(edge)
         }
-        LeveledGSS::from_stacks(&out)
     }
 
     pub fn push(&self, edge_value: ParseStateEdgeContent) -> Self {
@@ -314,31 +294,15 @@ impl GSSNode {
         self.is_alive()
     }
     pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
-        // merge all leaf accs
-        let stacks = self.inner.to_stacks();
-        let mut out = HybridBitset::zeros();
-        for (_p, a) in stacks {
-            out |= a.llm_tokens_union.clone();
-        }
-        out
+        self.inner
+            .reduce_acc()
+            .map_or(HybridBitset::zeros(), |acc| acc.llm_tokens_union)
     }
     pub fn disallowed_terminals(&self) -> HybridL2Bitset {
-        let stacks = self.inner.to_stacks();
-        // intersection of allowed -> disallowed = complement
-        let mut allowed_union = HybridL2Bitset::all();
-        if stacks.is_empty() {
-            return allowed_union.complement();
-        }
-        let mut first = true;
-        for (_p, a) in stacks {
-            if first {
-                allowed_union = a.terminals_union.clone();
-                first = false;
-            } else {
-                allowed_union |= a.terminals_union.clone();
-            }
-        }
-        allowed_union.complement()
+        self.inner
+            .reduce_acc()
+            .map(|acc| acc.terminals_union.complement())
+            .unwrap_or_else(|| HybridL2Bitset::all().complement())
     }
     pub fn max_depth(&self) -> usize {
         self.inner
@@ -501,18 +465,21 @@ impl GSSPopper {
         let mut inner = self.node.inner.clone();
         let mut belows: BTreeMap<_, _> = self.below_bottom.iter().map(|(k, v)| (*k + 1, v.clone())).collect();
         let new_below_slice = inner.filter_by_length(Some(1), Some(1));
-        let mut new_below_map = BTreeMap::new();
-        for (p, a) in new_below_slice.to_stacks() {
-            assert_eq!(p.len(), 1);
-            let item = p.into_iter().next().unwrap();
-            new_below_map.insert(item, Arc::new(a));
-        }
-        if !new_below_map.is_empty() {
-            belows.insert(1, new_below_map);
+        if !new_below_slice.is_empty() {
+            let mut new_below_map = BTreeMap::new();
+            for edge in new_below_slice.peek() {
+                let isolated = new_below_slice.isolate(Some(edge.clone()));
+                if let Some(acc) = isolated.reduce_acc() {
+                    new_below_map.insert(edge, Arc::new(acc));
+                }
+            }
+            if !new_below_map.is_empty() {
+                belows.insert(1, new_below_map);
+            }
         }
         self.below_bottom = belows;
         inner = inner.pop();
-        inner.filter_by_length(Some(1), None);
+        inner = inner.filter_by_length(Some(1), None);
         self.node = Arc::new(GSSNode { inner });
     }
 }
@@ -580,24 +547,9 @@ pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<P
 }
 
 // --- Transformations (simplified) ---
-fn transform_all(
-    root_arc: &mut Arc<GSSNode>,
-    mut f: impl FnMut(&Acc) -> Option<Acc>,
-) {
-    let stacks = root_arc.inner.to_stacks();
-    let mut new_stacks = Vec::new();
-    for (p, a) in stacks {
-        if let Some(na) = f(&a) {
-            new_stacks.push((p, na));
-        }
-    }
-    *root_arc = if new_stacks.is_empty() {
-        Arc::new(GSSNode::new_dead())
-    } else {
-        Arc::new(GSSNode {
-            inner: LeveledGSS::from_stacks(&new_stacks),
-        })
-    };
+fn transform_all(root_arc: &mut Arc<GSSNode>, f: impl FnMut(&Acc) -> Option<Acc>) {
+    let new_inner = root_arc.inner.apply_and_prune(f);
+    *root_arc = Arc::new(GSSNode { inner: new_inner });
 }
 
 pub type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<Arc<GSSNode>>>;

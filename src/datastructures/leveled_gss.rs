@@ -17,6 +17,7 @@
 
 use im::{HashMap as IHashMap, OrdMap};
 use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
+use std::cmp::Ordering;
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -28,34 +29,104 @@ pub trait Merge: Clone {
 type Children<T, N> = IHashMap<T, OrdMap<isize, Arc<N>>>;
 
 #[derive(Clone)]
-struct Lower<T: Clone + Eq + Hash> {
+struct Lower<T: Clone + Eq + Hash + Ord> {
     children: Children<T, Lower<T>>,
     empty: bool,
     max_depth: isize,
 }
 
+impl<T: Clone + Eq + Hash + Ord> PartialEq for Lower<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.empty == other.empty && self.children == other.children
+    }
+}
+impl<T: Clone + Eq + Hash + Ord> Eq for Lower<T> {}
+
+impl<T: Clone + Eq + Hash + Ord> PartialOrd for Lower<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl<T: Clone + Eq + Hash + Ord> Ord for Lower<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.empty.cmp(&other.empty)
+            .then_with(|| self.children.cmp(&other.children))
+    }
+}
+
+impl<T: Clone + Eq + Hash + Ord> Hash for Lower<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.empty.hash(state);
+        self.children.hash(state);
+    }
+}
+
 #[derive(Clone)]
-struct Interface<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+struct Interface<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
     children: Children<T, Lower<T>>,
     acc: A,
     empty: Option<A>,
     max_depth: isize,
 }
 
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> PartialEq for Interface<T, A> {
+    fn eq(&self, other: &Self) -> bool {
+        self.acc == other.acc && self.empty == other.empty && self.children == other.children
+    }
+}
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Eq for Interface<T, A> {}
+
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> PartialOrd for Interface<T, A> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Ord for Interface<T, A> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.acc.cmp(&other.acc)
+            .then_with(|| self.empty.cmp(&other.empty))
+            .then_with(|| self.children.cmp(&other.children))
+    }
+}
+
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Hash for Interface<T, A> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.acc.hash(state);
+        self.empty.hash(state);
+        self.children.hash(state);
+    }
+}
+
 #[derive(Clone)]
-struct UpperBranch<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+struct UpperBranch<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
     children: Children<T, Upper<T, A>>,
     empty: Option<A>,
     max_depth: isize,
 }
 
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> PartialEq for UpperBranch<T, A> {
+    fn eq(&self, other: &Self) -> bool { self.empty == other.empty && self.children == other.children }
+}
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Eq for UpperBranch<T, A> {}
+
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> PartialOrd for UpperBranch<T, A> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Ord for UpperBranch<T, A> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.empty.cmp(&other.empty).then_with(|| self.children.cmp(&other.children))
+    }
+}
+
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Hash for UpperBranch<T, A> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { self.empty.hash(state); self.children.hash(state); }
+}
+
 #[derive(Clone)]
-enum Upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+enum Upper<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
     Branch(Arc<UpperBranch<T, A>>),
     Interface(Arc<Interface<T, A>>),
 }
 
-impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Upper<T, A> {
     fn max_depth(&self) -> isize {
         match self {
             Upper::Branch(b) => b.max_depth,
@@ -71,7 +142,40 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
     }
 }
 
-// --------------------
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> PartialEq for Upper<T, A> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Upper::Branch(a), Upper::Branch(b)) => a == b,
+            (Upper::Interface(a), Upper::Interface(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Eq for Upper<T, A> {}
+
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> PartialOrd for Upper<T, A> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Ord for Upper<T, A> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Upper::Branch(a), Upper::Branch(b)) => a.cmp(b),
+            (Upper::Interface(a), Upper::Interface(b)) => a.cmp(b),
+            (Upper::Branch(_), Upper::Interface(_)) => Ordering::Less,
+            (Upper::Interface(_), Upper::Branch(_)) => Ordering::Greater,
+        }
+    }
+}
+
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Hash for Upper<T, A> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Upper::Branch(b) => b.hash(state),
+            Upper::Interface(i) => i.hash(state),
+        }
+    }
+}// --------------------
 // Small, reusable helpers
 // --------------------
 
@@ -86,7 +190,7 @@ fn merge_optional_acc<A: Merge + Clone>(a: &Option<A>, b: &Option<A>) -> Option<
 
 fn max_depth_from_children<T, N, F>(children: &Children<T, N>, depth_of: F) -> isize
 where
-    T: Clone + Eq + Hash,
+    T: Clone + Eq + Hash + Ord,
     F: Fn(&Arc<N>) -> isize,
 {
     children
@@ -99,7 +203,7 @@ where
 
 fn merge_children<T, N, F>(c1: &Children<T, N>, c2: &Children<T, N>, merge_fn: F) -> Children<T, N>
 where
-    T: Clone + Eq + Hash,
+    T: Clone + Eq + Hash + Ord,
     F: Fn(&Arc<N>, &Arc<N>) -> Arc<N>,
 {
     if c1.ptr_eq(c2) {
@@ -125,7 +229,7 @@ where
     merged
 }
 
-fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool) -> Arc<Lower<T>> {
+fn new_lower<T: Clone + Eq + Hash + Ord>(children: Children<T, Lower<T>>, empty: bool) -> Arc<Lower<T>> {
     let max_depth = max_depth_from_children(&children, |n: &Arc<Lower<T>>| n.max_depth);
     Arc::new(Lower {
         children,
@@ -140,8 +244,8 @@ fn new_interface<T, A>(
     empty: Option<A>,
 ) -> Arc<Upper<T, A>>
 where
-    T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash,
+    T: Clone + Eq + Hash + Ord,
+    A: Merge + Clone + Eq + Hash + Ord,
 {
     let max_depth = max_depth_from_children(&children, |n: &Arc<Lower<T>>| n.max_depth);
     Arc::new(Upper::Interface(Arc::new(Interface {
@@ -157,8 +261,8 @@ fn new_branch<T, A>(
     empty: Option<A>,
 ) -> Arc<Upper<T, A>>
 where
-    T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash,
+    T: Clone + Eq + Hash + Ord,
+    A: Merge + Clone + Eq + Hash + Ord,
 {
     let max_depth = max_depth_from_children(&children, |n: &Arc<Upper<T, A>>| n.max_depth());
     Arc::new(Upper::Branch(Arc::new(UpperBranch {
@@ -170,8 +274,8 @@ where
 
 fn empty_upper_inner<T, A>() -> Arc<Upper<T, A>>
 where
-    T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash,
+    T: Clone + Eq + Hash + Ord,
+    A: Merge + Clone + Eq + Hash + Ord,
 {
     new_branch(IHashMap::new(), None)
 }
@@ -180,7 +284,7 @@ where
 // Filtering
 // --------------------
 
-fn filter_lower<T: Clone + Eq + Hash>(
+fn filter_lower<T: Clone + Eq + Hash + Ord>(
     node: &Arc<Lower<T>>,
     current_depth: isize,
     min_len: Option<isize>,
@@ -226,8 +330,8 @@ fn filter_upper<T, A>(
     max_len: Option<isize>,
 ) -> Option<Arc<Upper<T, A>>>
 where
-    T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash,
+    T: Clone + Eq + Hash + Ord,
+    A: Merge + Clone + Eq + Hash + Ord,
 {
     let min_d = min_len.unwrap_or(0);
     let max_d = max_len.unwrap_or(isize::MAX);
@@ -303,7 +407,7 @@ where
 // Conversions and merges
 // --------------------
 
-fn merge_lower<T: Clone + Eq + Hash>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> Arc<Lower<T>> {
+fn merge_lower<T: Clone + Eq + Hash + Ord>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> Arc<Lower<T>> {
     if Arc::ptr_eq(l1, l2) {
         return l1.clone();
     }
@@ -314,8 +418,8 @@ fn merge_lower<T: Clone + Eq + Hash>(l1: &Arc<Lower<T>>, l2: &Arc<Lower<T>>) -> 
 
 fn interface_to_upperbranch<T, A>(it: &Arc<Interface<T, A>>) -> Arc<UpperBranch<T, A>>
 where
-    T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash,
+    T: Clone + Eq + Hash + Ord,
+    A: Merge + Clone + Eq + Hash + Ord,
 {
     let mut children: Children<T, Upper<T, A>> = IHashMap::new();
     for (v, kids) in it.children.iter() {
@@ -352,8 +456,8 @@ fn merge_upperbranches<T, A>(
     b: &Arc<UpperBranch<T, A>>,
 ) -> Arc<Upper<T, A>>
 where
-    T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash,
+    T: Clone + Eq + Hash + Ord,
+    A: Merge + Clone + Eq + Hash + Ord,
 {
     if Arc::ptr_eq(a, b) {
         return Arc::new(Upper::Branch(a.clone()));
@@ -366,8 +470,8 @@ where
 
 fn merge_interfaces<T, A>(a: &Arc<Interface<T, A>>, b: &Arc<Interface<T, A>>) -> Arc<Upper<T, A>>
 where
-    T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash,
+    T: Clone + Eq + Hash + Ord,
+    A: Merge + Clone + Eq + Hash + Ord,
 {
     if a.acc == b.acc || a.children.ptr_eq(&b.children) {
         let merged_children =
@@ -384,8 +488,8 @@ where
 
 fn merge_upper<T, A>(u1: &Arc<Upper<T, A>>, u2: &Arc<Upper<T, A>>) -> Arc<Upper<T, A>>
 where
-    T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash,
+    T: Clone + Eq + Hash + Ord,
+    A: Merge + Clone + Eq + Hash + Ord,
 {
     if Arc::ptr_eq(u1, u2) {
         return u1.clone();
@@ -402,8 +506,8 @@ where
 
 fn try_promote<T, A>(node: &Arc<Upper<T, A>>) -> Arc<Upper<T, A>>
 where
-    T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash,
+    T: Clone + Eq + Hash + Ord,
+    A: Merge + Clone + Eq + Hash + Ord,
 {
     if let Upper::Branch(b) = &**node {
         let all_children: Vec<_> = b
@@ -469,8 +573,8 @@ where
 
 fn empty_upper<T, A>() -> LeveledGSS<T, A>
 where
-    T: Clone + Eq + Hash,
-    A: Merge + Clone + Eq + Hash,
+    T: Clone + Eq + Hash + Ord,
+    A: Merge + Clone + Eq + Hash + Ord,
 {
     LeveledGSS {
         inner: empty_upper_inner(),
@@ -482,18 +586,34 @@ where
 // --------------------
 
 #[derive(Clone)]
-pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+pub struct LeveledGSS<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
     inner: Arc<Upper<T, A>>,
 }
 
-impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> PartialEq for LeveledGSS<T, A> {
+    fn eq(&self, other: &Self) -> bool { self.inner == other.inner }
+}
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Eq for LeveledGSS<T, A> {}
+
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> PartialOrd for LeveledGSS<T, A> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Ord for LeveledGSS<T, A> {
+    fn cmp(&self, other: &Self) -> Ordering { self.inner.cmp(&other.inner) }
+}
+
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Hash for LeveledGSS<T, A> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { self.inner.hash(state); }
+}
+
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> LeveledGSS<T, A> {
     pub fn empty() -> Self {
         empty_upper()
     }
 
     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
         // Canonicalize: merge accumulators for identical stacks
-        let mut canon: StdHashMap<Vec<T>, A> = StdHashMap::new();
+        let mut canon: StdHashMap<Vec<T>, A> = StdHashMap::new(); // T must be Eq+Hash
         for (vals, acc) in stacks {
             if let Some(existing) = canon.get_mut(vals) {
                 let merged = existing.merge(acc);
@@ -504,12 +624,12 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
 
         // Build a trie: map value -> { end: Option<A>, sub: Trie }
-        struct Entry<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+        struct Entry<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
             end: Option<A>,
             sub: StdHashMap<T, Entry<T, A>>,
         }
 
-        impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Default for Entry<T, A> {
+        impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Default for Entry<T, A> {
             fn default() -> Self {
                 Self {
                     end: None,
@@ -541,7 +661,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
         }
 
-        fn build_lower<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+        fn build_lower<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord>(
             d: &StdHashMap<T, Entry<T, A>>,
         ) -> Arc<Lower<T>> {
             let mut l_children: Children<T, Lower<T>> = IHashMap::new();
@@ -557,7 +677,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             new_lower(l_children, false)
         }
 
-        fn build_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+        fn build_upper<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord>(
             d: &StdHashMap<T, Entry<T, A>>,
             root_empty: Option<A>,
         ) -> Arc<Upper<T, A>> {
@@ -624,7 +744,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     pub fn to_stacks(&self) -> Vec<(Vec<T>, A)> {
         let mut res: Vec<(Vec<T>, A)> = Vec::new();
 
-        fn dfs_lower<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+        fn dfs_lower<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord>(
             l: &Lower<T>,
             pref: &mut Vec<T>,
             acc: &A,
@@ -644,7 +764,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
         }
 
-        fn dfs_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+        fn dfs_upper<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord>(
             u: &Upper<T, A>,
             pref: &mut Vec<T>,
             out: &mut Vec<(Vec<T>, A)>,
@@ -725,7 +845,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let mut memo_upper: StdHashMap<(usize, isize), Arc<Upper<T, A>>> = StdHashMap::new();
         let mut memo_lower: StdHashMap<(usize, isize), Arc<Lower<T>>> = StdHashMap::new();
 
-        fn popn_lower<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+        fn popn_lower<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord>(
             node: &Arc<Lower<T>>,
             k: isize,
             memo_lower: &mut StdHashMap<(usize, isize), Arc<Lower<T>>>,
@@ -762,7 +882,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             res
         }
 
-        fn popn_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+        fn popn_upper<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord>(
             node: &Arc<Upper<T, A>>,
             k: isize,
             memo_upper: &mut StdHashMap<(usize, isize), Arc<Upper<T, A>>>,
@@ -930,7 +1050,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn apply<B, F>(&self, mut func: F) -> LeveledGSS<T, B>
     where
-        B: Merge + Clone + Eq + Hash,
+        B: Merge + Clone + Eq + Hash + Ord,
         F: FnMut(&A) -> B,
     {
         // Memoize per-accumulator transformation so the closure is not invoked more than once per unique A.
@@ -956,9 +1076,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             f: &mut F,
         ) -> Arc<Upper<T, B>>
         where
-            T: Clone + Eq + Hash,
-            A: Merge + Clone + Eq + Hash,
-            B: Merge + Clone + Eq + Hash,
+            T: Clone + Eq + Hash + Ord,
+            A: Merge + Clone + Eq + Hash + Ord,
+            B: Merge + Clone + Eq + Hash + Ord,
             F: FnMut(&A) -> B,
         {
             match &**node {
@@ -1016,8 +1136,8 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             p: &mut P,
         ) -> Option<Arc<Upper<T, A>>>
         where
-            T: Clone + Eq + Hash,
-            A: Merge + Clone + Eq + Hash,
+            T: Clone + Eq + Hash + Ord,
+            A: Merge + Clone + Eq + Hash + Ord,
             P: FnMut(&A) -> bool,
         {
             match &**node {
@@ -1070,7 +1190,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn apply_and_prune<B, M>(&self, mut mutator: M) -> LeveledGSS<T, B>
     where
-        B: Merge + Clone + Eq + Hash,
+        B: Merge + Clone + Eq + Hash + Ord,
         M: FnMut(&A) -> Option<B>,
     {
         // Memoize per-accumulator mutate/prune
@@ -1100,9 +1220,9 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             m: &mut M,
         ) -> Option<Arc<Upper<T, B>>>
         where
-            T: Clone + Eq + Hash,
-            A: Merge + Clone + Eq + Hash,
-            B: Merge + Clone + Eq + Hash,
+            T: Clone + Eq + Hash + Ord,
+            A: Merge + Clone + Eq + Hash + Ord,
+            B: Merge + Clone + Eq + Hash + Ord,
             M: FnMut(&A) -> Option<B>,
         {
             match &**node {
