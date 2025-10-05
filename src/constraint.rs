@@ -760,7 +760,7 @@ impl GrammarConstraint {
         // Cache for the possible_matches computation
         let mut pm_cache: HashMap<(*const VocabPrefixTreeNode, TokenizerStateID), BTreeMap<GrammarTokenID, LLMTokenBV>> = HashMap::new();
 
-        crate::debug!(2, "Computing possible_matches for all {} tokenizer states", tokenizer.iter_states().count());
+        crate::debug!(2, "Computing possible_matches for all {} tokenizer states", tokenizer.iter_states().count()); // slow-ish
         for sid in tokenizer.iter_states() { // Use the `tokenizer` parameter passed to `new`
             let matches_for_sid = Self::compute_possible_matches_for_vocab_node(
                 &tokenizer, // Pass the tokenizer parameter from `new`
@@ -774,7 +774,9 @@ impl GrammarConstraint {
         // pm_cache is dropped here as it's no longer needed.
 
         // Build precomputed per-token (internal) maps.
-        let state_map_by_llm = Self::build_state_map_by_llm(&tokenizer, &vocab_for_possible_matches.root);
+        crate::debug!(2, "Building state_map_by_llm and terminal_map_by_llm");
+        let state_map_by_llm = Self::build_state_map_by_llm(&tokenizer, &vocab_for_possible_matches.root); // slow
+        crate::debug!(2, "Built state_map_by_llm with {} entries", state_map_by_llm.len());
         let terminal_map_by_llm = Self::rearrange_possible_matches(&computed_possible_matches);
 
         let grammar_productions = &parser.productions; // Assuming parser is the GLRParser instance
@@ -783,6 +785,7 @@ impl GrammarConstraint {
         // These might be computed elsewhere or need to be computed here.
         // Assuming compute_first_sets is available from grammar module.
 
+        crate::debug!(2, "Computing terminal follow sets");
         let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions);
         crate::debug!(5, "terminal_follow_sets_named:");
         for (terminal, following_terminals) in &terminal_follow_sets_named {
