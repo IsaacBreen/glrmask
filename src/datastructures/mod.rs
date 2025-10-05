@@ -15,7 +15,6 @@ pub mod cache;
 pub mod entry_api;
 pub mod trie;
 pub mod leveled_gss;
-pub mod gss_leveled;
 mod test_gss;
 
 pub use arc_wrapper::ArcPtrWrapper;

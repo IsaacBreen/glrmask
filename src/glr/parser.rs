@@ -1,8 +1,8 @@
 use crate::constraint::{LLMTokenBV, LLMVocab, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, Trie3GodWrapper};
-use crate::datastructures::gss_leveled::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
-use crate::datastructures::gss_leveled::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
+use crate::datastructures::gss::{find_longest_path, gather_gss_stats, DestKey, GSSNode, GSSPeek, GSSStats, NodeMap, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
+use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
 use crate::datastructures::ArcPtrWrapper;
-use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal}; 
+use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
 use crate::tokenizer::LLMTokenID;
 use std::any::Any;
@@ -25,9 +25,9 @@ use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Arc; 
+use std::sync::Arc;
 use crate::datastructures::trie::{God, GodWrapper};
-use crate::datastructures::gss_leveled::{is_simple_gss, PruneAndTransformRecursiveMemo};
+use crate::datastructures::gss::{is_simple_gss, PruneAndTransformRecursiveMemo};
 
 // A single combined action for a given (state,row) and token:
 // - Normal(...) is a concrete per-token action from the row's action map
@@ -1340,7 +1340,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut new_acc = None;
         let mut dest = PrecomputeNode3Index::new(
             god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-        ); // TODO: LeveledGSS
+        );
         for (k, mut acc) in below {
             // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
             let tokens_all = LLMTokenBV::max_ones();
@@ -1401,7 +1401,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // 1) Pop len
         let popper: GSSPopper = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
-        crate::debug!(4, "Popped with {} results...", popper.paths.len());
+        crate::debug!(4, "Popped with {} results...", popper.num_predecessors());
 
         let mut out: Vec<Arc<GSSNode>> = Vec::new();
         let mut accepted_out: Vec<Arc<GSSNode>> = Vec::new();
@@ -1423,12 +1423,33 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // Handle "below bottom" (substring parsing continuation) first, adding to the todo list.
         if !popper.below_bottom().is_empty() {
-            todo!("below_bottom reductions for substring parsing are not supported with LeveledGSS");
+            match config.below_bottom_mode {
+                BelowBottomReductionMode::Fail => {
+                    crate::debug!(5, "Popped below bottom, failing these parse paths.");
+                }
+                BelowBottomReductionMode::Panic => {
+                    panic!("A reduction popped below the bottom of the stack, and BelowBottomReductionMode was set to Panic.");
+                }
+                _ => {
+                    let below_accs = self.build_below_bottom_accs(&popper);
+                    let below_todo = self.handle_below_bottom(nt, below_accs, config);
+                    crate::debug!(5, "Popped below bottom, hallucinating {} new parse paths.", below_todo.len());
+                    for (predecessor_state_id, isolated_parent) in below_todo {
+                        let pred_ptr = Arc::as_ptr(&isolated_parent);
+                        todo_map.entry(predecessor_state_id)
+                            .or_default()
+                            .entry(pred_ptr)
+                            .or_insert(isolated_parent);
+                    }
+                }
+            }
         }
 
         // Standard reductions along in-graph paths
-        for (edge_content, isolated_parent) in popper.paths.iter() {
-                let predecessor_state_id = edge_content.state_id;
+        for popper_item in popper.iter() {
+            for peek2 in popper_item.peek_iter() {
+                let predecessor_state_id = peek2.edge_value().state_id;
+                let isolated_parent = peek2.isolated_parent();
                 let pred_ptr = Arc::as_ptr(&isolated_parent);
                 todo_map.entry(predecessor_state_id)
                     .or_default()
@@ -1440,7 +1461,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Total unique predecessor states to process for GOTO: {}", todo_map.len());
         for (predecessor_state_id, parents_map) in todo_map {
             crate::debug!(9, "Processing predecessor state {} with {} isolated parents", predecessor_state_id.0, parents_map.len());
-            for (_pred_ptr, isolated_parent) in parents_map { // TODO: LeveledGSS - this is now a GSSNode, not an Arc<GSSNode>
+            for (_pred_ptr, isolated_parent) in parents_map {
                 timeit!("GLRParserState::reduce_and_goto::HandleGotos", {
                 let mut seen_nts: HashSet<NonTerminalID> = HashSet::new();
                 let mut seen_gotos = HashSet::new();
@@ -1487,7 +1508,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         }
                         // Apply the optional state filter (for hallucinated transitions) before consuming the GOTO.
                         let mut parent_after_filter = isolated_parent.clone();
-                        if let (Some(god), Some(bv)) = (god_opt, maybe_filter.as_ref()) { // TODO: LeveledGSS
+                        if let (Some(god), Some(bv)) = (god_opt, maybe_filter.as_ref()) {
                             // Reuse a single destination per unique state filter BV and memoize the transformation.
                             let (dest, memo) = filter_ctxs.entry(bv.clone()).or_insert_with(|| {
                                 let new_dest = PrecomputeNode3Index::new(
@@ -1508,7 +1529,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                         // Accept contribution (store isolated parent)
                         if goto.accept {
-                            accepted_out.push(Arc::new(parent_after_filter.clone()));
+                            accepted_out.push(parent_after_filter.clone());
                         }
 
                         if let Some(goto_state_id) = goto.state_id {
@@ -1531,7 +1552,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             || def
                                                 .reduce
                                                 .as_ref()
-                                                .map_or(false, |r| r.0.len != 1) // TODO: LeveledGSS
+                                                .map_or(false, |r| r.0.len != 1)
                                         {
                                             out.push(Arc::new(parent_after_filter.push(
                                                 ParseStateEdgeContent {
@@ -1551,14 +1572,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     }
                                     _ => {
                                         // Not a unit reduction path anymore -> emit a single push to goto_state
-                                        out.push(Arc::new(parent_after_filter.push( // TODO: LeveledGSS
+                                        out.push(Arc::new(parent_after_filter.push(
                                             ParseStateEdgeContent {
                                                 state_id: goto_state_id,
                                             },
                                         )));
                                     }
                                 }
-                            } else { // TODO: LeveledGSS
+                            } else {
                                 // Not a unit reduction path anymore -> emit a single push to goto_state
                                 out.push(Arc::new(parent_after_filter.push(ParseStateEdgeContent {
                                     state_id: goto_state_id,
@@ -1577,7 +1598,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // --- NEW CACHING LOGIC ---
         let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
         if let Some(god) = self.active_state.trie2_god.as_ref() {
-            timeit!("GLRParserState::reduce_and_goto::Caching", { // TODO: LeveledGSS
+            timeit!("GLRParserState::reduce_and_goto::Caching", {
             for gss_arc in out {
                 timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", {
                 if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {

@@ -1,6 +1,7 @@
 // src/constraint.rs
 #![allow(clippy::too_many_arguments)]
 
+use std::borrow::Borrow;
 use crate::datastructures::gss_leveled::{disallow_llm_tokens_and_prune_arc, fuse_predecessors_recursive, get_roots, map_allowed_terminals_tokenizer_states, print_gss_forest, prune_disallowed_terminals, prune_llm_tokens_by_disallowed_terminals, reset_terminals, sample_path, simplify};
 use crate::datastructures::ordered_hash_map::Retain;
 use ordered_hash_map::OrderedHashMap;
@@ -8,6 +9,7 @@ use ordered_hash_map::OrderedHashSet;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::env;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::mem;
@@ -25,7 +27,8 @@ use crate::constraint_precompute1_utils;
 use crate::constraint_precompute2_utils;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
 use crate::datastructures::entry_api::EntryApi;
-use crate::datastructures::gss_leveled::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, Acc, GSSNode, GSSPrintConfig, PruneAndTransformRecursiveMemo};
+use crate::datastructures::gss_leveled::Acc;
+use crate::datastructures::gss_leveled::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -47,7 +50,6 @@ use profiler_macro::{time_it, timeit};
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand::Rng;
 use serde_json::Value as SerdeValue;
-use std::borrow::Borrow;
 use std::collections::BTreeMap as StdMap;
 use std::io::{Read, Write};
 use std::ops::{BitAnd, Sub};
@@ -1182,7 +1184,7 @@ impl GrammarConstraint {
                 reset();
 
                 crate::datastructures::gss::merge_stored_trie_nodes(
-                    &mut glr_s.active_state.stack, // TODO: LeveledGSS
+                    &mut glr_s.active_state.stack,
                     &mut crate::datastructures::gss_leveled::PruneAndTransformRecursiveMemo::default(),
                     glr_s.active_state.trie2_god.as_ref().unwrap(),
                 );
@@ -1226,10 +1228,9 @@ impl GrammarConstraint {
                     // ... logic from precompute2 ...
                 }
 
-
                 let mut stack = vec![glr_s.active_state.stack.clone()];
                 // gss_leveled::simplify_roots_in_place(&mut stack);
-                // glr_s.active_state.stack = stack.into_iter().next().unwrap();
+                glr_s.active_state.stack = stack.into_iter().next().unwrap();
 
                 // print_summary();
                 reset();
@@ -1276,7 +1277,7 @@ impl GrammarConstraint {
         let mut out = DedupValueMap::new();
 
         fn dfs(
-            _tokenizer: &Regex,
+            tokenizer: &Regex,
             node: &VocabPrefixTreeNode,
             current_map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
             out: &mut DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>,
@@ -1285,10 +1286,10 @@ impl GrammarConstraint {
                 // Advance mapping through this segment
                 let mut next_map: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
                 for (start, cur) in current_map {
-                    // let exec = tokenizer.execute_from_state(&segment_bytes, *cur);
-                    // if let Some(end_state) = exec.end_state {
-                    //     next_map.insert(*start, TokenizerStateID(end_state));
-                    // }
+                    let exec = tokenizer.execute_from_state(&segment_bytes, *cur);
+                    if let Some(end_state) = exec.end_state {
+                        next_map.insert(*start, TokenizerStateID(end_state));
+                    }
                 }
 
                 // Record mapping for the token at this node (if applicable).
@@ -1297,7 +1298,7 @@ impl GrammarConstraint {
                 out.insert(LLMTokenID(tok_id), next_map.clone());
 
                 // Recurse to longer tokens sharing this prefix.
-                dfs(_tokenizer, child, &next_map, out);
+                dfs(tokenizer, child, &next_map, out);
             }
         }
 
@@ -1844,6 +1845,10 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         let t1 = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("after initial_values_for_map: {:>15?}", t1.duration_since(t0));
+        }
+
         let step_counts_clone1 = Arc::clone(&step_counts);
         let step_counts_clone2 = Arc::clone(&step_counts);
 
@@ -2012,10 +2017,9 @@ impl<'a> GrammarConstraintState<'a> {
                                 break; // No need to check further, we have at least two non-end nodes.
                             }
                         }
-
                         // Print GSS stats
                         disallow_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &final_mask_internal.borrow(), &mut HashMap::new());
-                        // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1); // TODO: LeveledGSS no-op
+                        Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                         let stats = gather_gss_stats(&[glr_s.active_state.stack.as_ref()]);
                         // crate::debug!(3, "GSS stats for precomputed node data: {:#?}", stats);
                         let mut do_phase3 = false;
@@ -2047,10 +2051,10 @@ impl<'a> GrammarConstraintState<'a> {
 
                             glr_s.process_default_reductions();
                             crate::debug!(4, "After phase 3, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
-                            // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1); // TODO: LeveledGSS no-op
+                            Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                             crate::debug!(4, "Active LLM tokens after phase 3: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
                             crate::debug!(4, "Disallowing LLM tokens and pruning arc for precomputed node data: {:?}", final_mask_internal.borrow());
-                            // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1); // TODO: LeveledGSS no-op
+                            Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                         }
                         crate::debug!(4, "After processing precomputed node data, active stack.stack.is_empty(): {}", glr_s.active_state.stack.is_empty());
                         crate::debug!(4, "Final active LLM tokens: {:?}", glr_s.active_state.stack.allowed_llm_tokens());
@@ -2061,6 +2065,10 @@ impl<'a> GrammarConstraintState<'a> {
         );
 
         let t_after_special_map = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("after special_map: {:>15?}", t_after_special_map.duration_since(t0));
+        }
+
         crate::profiler::print_summary_flat();
 
         let counts = step_counts.read().unwrap();
@@ -2099,6 +2107,10 @@ impl<'a> GrammarConstraintState<'a> {
         let final_mask_mapped = self.parent.internal_bv_to_original_precompute1(&final_mask_internal.into_inner());
 
         let t_end = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("get_mask took: {:>15?}", t_end.duration_since(t0));
+        }
+
         final_mask_mapped
     }
 
@@ -2180,6 +2192,10 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         let t1 = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("after initial_values_for_map: {:>15?}", t1.duration_since(t0));
+        }
+
         let step_counts_clone1 = Arc::clone(&step_counts);
         let step_counts_clone2 = Arc::clone(&step_counts);
 
@@ -2258,6 +2274,10 @@ impl<'a> GrammarConstraintState<'a> {
         );
 
         let t_after_special_map = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("after special_map: {:>15?}", t_after_special_map.duration_since(t0));
+        }
+
         crate::profiler::print_summary_flat();
 
         let counts = step_counts.read().unwrap();
@@ -2298,6 +2318,7 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(4, "Final mask mapped: {:?}", final_mask_mapped);
 
         let t_end = std::time::Instant::now();
+        println!("get_mask took: {:>15?}", t_end.duration_since(t0));
 
         final_mask_mapped
     }
@@ -2448,6 +2469,10 @@ impl<'a> GrammarConstraintState<'a> {
         }
 
         let t1 = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("after initial_values_for_map: {:>15?}", t1.duration_since(t0));
+        }
+
         crate::profiler::reset();
 
         Trie::special_map_grouped(
@@ -2516,6 +2541,10 @@ impl<'a> GrammarConstraintState<'a> {
         );
 
         let t_after_special_map = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("after special_map: {:>15?}", t_after_special_map.duration_since(t0));
+        }
+
         crate::profiler::print_summary_flat();
         crate::profiler::print_summary();
         crate::profiler::reset();
@@ -2528,6 +2557,10 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(4, "Final mask mapped: {}", format_bv(&final_mask_mapped));
 
         let t_end = std::time::Instant::now();
+        if env::var("RUST_LOG_MASK_TIMING").is_ok() {
+            println!("get_mask took: {:>15?}", t_end.duration_since(t0));
+        }
+
         final_mask_mapped
     }
 
@@ -2657,7 +2690,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         // 5) Cleanup: reset llm tokens to ensure order invariance; fuse; filter dead states.
         self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
-        // self.transform_gss_stacks(|stack, _memo| Arc::make_mut(stack).fuse_predecessors(1)); // TODO: LeveledGSS no-op
+        self.transform_gss_stacks(|stack, _memo| Arc::make_mut(stack).fuse_predecessors(1));
         self.state.retain(|_, glr| glr.is_ok());
 
         match self.parent.post_commit_allow_check_mode {
@@ -2812,7 +2845,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         // TODO: this shouldn't be necessary, but due to some order-dependent LLM token BV weirdness in GSS, it is necessary to ensure commit order invariance.
         self.transform_gss_stacks(|stack, memo| reset_llm_tokens(stack, memo));
-        // self.transform_gss_stacks(|stack, _memo| Arc::make_mut(stack).fuse_predecessors(1)); // TODO: LeveledGSS no-op
+        self.transform_gss_stacks(|stack, _memo| Arc::make_mut(stack).fuse_predecessors(1));
         self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
 
 
@@ -2870,7 +2903,7 @@ impl<'a> GrammarConstraintState<'a> {
         // for (tokenizer_state_id, glr_state) in &self.state {
         //     roots.insert(*tokenizer_state_id, glr_state.active_state.stack.clone());
         // }
-        // simplify(&mut roots); // TODO: LeveledGSS no-op
+        // simplify(&mut roots);
         // for (tokenizer_state_id, glr_state) in &mut self.state {
         //     glr_state.active_state.stack = roots.get(tokenizer_state_id).unwrap().clone();
         // }

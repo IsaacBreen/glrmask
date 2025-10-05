@@ -18,12 +18,14 @@ pub use crate::datastructures::gss_pruning::*;
 pub use crate::datastructures::gss_simplification::*;
 pub use crate::datastructures::gss_trie_utils::*;
 
+use crate::json_serialization::{JSONConvertible, JSONNode};
+use std::collections::BTreeMap as StdMap;
 use crate::constraint::{LLMTokenBV, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, TerminalBV, TerminalInfo, Trie3God, Trie3GodWrapper};
 use crate::datastructures::{gss_analysis, gss_simplification};
 use crate::datastructures::trie::{EdgeInserter, God};
-use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::tokenizer::TokenizerStateID;
 use crate::types::TerminalID;
+// --- Type Aliases ---
 
 pub(crate) type MaxDepth = usize;
 pub(crate) type DestKey = MaxDepth;
@@ -36,8 +38,6 @@ pub(crate)type StoredPrecomputeNodeIndex = PrecomputeNode3Index;
 pub(crate)type StoredPrecomputeNode = PrecomputeNode3;
 pub(crate)type StoredTrieGod = Trie3God;
 pub(crate) type StoredTrieGodWrapper = Trie3GodWrapper;
-
-// --- Type Aliases ---
 
 /// Recursively traverses a GSS, and for each node (both internal and root) that has
 /// `stored_trie_nodes`, it:
@@ -997,10 +997,19 @@ impl GSSNode {
                         new_preds_by_depth.insert(depth, new_pred_vec);
                     }
                     new_preds_map.insert(edge, new_preds_by_depth);
+                }
+                final_predecessors_map = new_preds_map;
+            } else {
+                // No constraints to suck up. Parent gets a fresh acc, children are not modified.
+                final_parent_acc = Arc::new(Acc::new_fresh());
             }
+        } else {
+            // Children have different accs, or there are no children.
+            // Parent gets a fresh acc.
+            final_parent_acc = Arc::new(Acc::new_fresh());
         }
 
-        let final_predecessors = if merge_depth > 0 { // TODO: this is slow
+        let final_predecessors = if merge_depth > 0 {
             // After merging, unify structurally identical predecessors to increase sharing.
             let mut canonical_map: BTreeMap<GSSNode, Arc<GSSNode>> = BTreeMap::new();
             let mut unified_predecessors = BTreeMap::new();
