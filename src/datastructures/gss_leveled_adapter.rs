@@ -254,12 +254,14 @@ impl GSSNode {
     }
     pub fn new_fresh() -> Self {
         GSSNode {
-            inner: LeveledGSS::empty(),
+            inner: LeveledGSS::from_stacks(&vec![(vec![], Acc::new_fresh())]),
         }
     }
     pub fn new_dead() -> Self {
         // Represent dead as empty; allowed_llm_tokens() on empty returns zeros.
-        Self::new_fresh()
+        GSSNode {
+            inner: LeveledGSS::empty(),
+        }
     }
 
     // Helper: append a value to all stacks; if empty, create singleton stack.
@@ -474,15 +476,13 @@ impl GSSPopper {
         })
     }
     pub fn below_bottom(&self) -> &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>> {
-        static EMPTY: once_cell::sync::OnceCell<BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>>> =
-            once_cell::sync::OnceCell::new();
-        EMPTY.get_or_init(|| BTreeMap::new())
+        
     }
     pub fn num_predecessors(&self) -> usize {
         self.node.inner.peek().len()
     }
-    pub fn popn(&mut self, _n: usize) {
-        // NOP in adapter; pop applied at construction.
+    pub fn popn(&mut self, n: usize) {
+        Arc::make_mut(&mut self.node).inner = self.node.inner.popn(n as isize)
     }
 }
 
