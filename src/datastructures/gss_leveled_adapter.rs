@@ -365,14 +365,22 @@ impl GSSNode {
         }
     }
 
-    pub fn fuse_predecessors_recursive(&self, levels: usize, memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
-        todo!()
+    pub fn fuse_predecessors(&mut self, levels: usize) {
+        if levels == 0 {
+            return;
+        }
+        let self_arc = Arc::new(self.clone());
+        let mut memo = HashMap::new();
+        let fused_arc = fuse_predecessors_recursive(&self_arc, levels, &mut memo);
+        if !Arc::ptr_eq(&self_arc, &fused_arc) {
+            *self = (*fused_arc).clone();
+        }
     }
 
-    pub fn fuse_predecessors(&mut self, levels: usize) {
-        let mut memo = PruneAndTransformRecursiveMemo::new();
-        let fused = self.fuse_predecessors_recursive(levels, &mut memo);
-        *self = (*fused).clone();
+    pub fn fuse_predecessors_recursive(&self, levels: usize, _memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
+        let self_arc = Arc::new(self.clone());
+        let mut dummy_memo = HashMap::new();
+        fuse_predecessors_recursive(&self_arc, levels, &mut dummy_memo)
     }
 }
 
@@ -668,8 +676,13 @@ pub fn map_allowed_terminals_tokenizer_states(
 
 pub fn simplify(_states: &mut BTreeMap<crate::tokenizer::TokenizerStateID, Arc<GSSNode>>) {}
 pub(crate) fn simplify_roots_in_place(_roots: &mut [Arc<GSSNode>]) {}
-pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, _levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
-    node_arc.clone()
+pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
+    let fused_inner = node_arc.inner.fuse(Some(levels as isize));
+    if Arc::ptr_eq(&fused_inner.inner, &node_arc.inner.inner) {
+        node_arc.clone()
+    } else {
+        Arc::new(GSSNode { inner: fused_inner })
+    }
 }
 
 impl GSSNode {
