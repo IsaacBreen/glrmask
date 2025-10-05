@@ -478,6 +478,16 @@ fn merge_node_maps(target: &mut NodeMap, source: NodeMap, merge_depth: usize) {
     }
 }
 
+impl GSSInternal {
+    pub(crate) fn predecessors(&self) -> &NodeMap { &self.predecessors }
+    pub(crate) fn max_depth(&self) -> MaxDepth { self.max_depth }
+    pub(crate) fn acc(&self) -> &Arc<Acc> { &self.acc }
+}
+
+impl GSSRoot {
+    pub(crate) fn acc(&self) -> &Arc<Acc> { &self.acc }
+}
+
 impl GSSNode {
     /// Creates a new GSS root node with the given local constraints.
     pub(crate) fn new(acc: Acc) -> Self {
@@ -603,7 +613,7 @@ impl GSSNode {
     /// Returns the aggregate Acc for this node.
     /// - If root: returns the node's Acc.
     /// - If internal: merges its childrens' Accs and narrows through its own local Acc.
-    fn acc(&self) -> Arc<Acc> {
+    pub(crate) fn acc(&self) -> Arc<Acc> {
         match self {
             GSSNode::Root(r) => r.acc.clone(),
             GSSNode::Internal(i) => {
@@ -1680,7 +1690,7 @@ pub fn popn_collect_isolated_parents(
 }
 
 impl GSSNode {
-    fn hash_code(&self) -> u64 {
+    pub(crate) fn hash_code(&self) -> u64 {
         match self {
             GSSNode::Root(r) => r.hash_key_cache,
             GSSNode::Internal(i) => i.hash_key_cache,
