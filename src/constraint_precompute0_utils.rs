@@ -560,9 +560,13 @@ impl<'r> Precomputer0<'r> {
         }
 
         if children_changed {
+            // Update children under a short write lock. Do NOT recompute max_depth here.
+            // Calling recompute_max_depth while holding a write lock can deadlock on
+            // self-loops, because it may attempt to acquire a read lock on the same node.
+            // We recompute max depths globally after merging (see optimize()), which is safe.
             let mut node_guard = node_arc.write(&self.trie0_god).unwrap();
             *node_guard.children_mut() = new_children_map;
-            node_guard.recompute_max_depth(&self.trie0_god);
+            // IMPORTANT: No recompute_max_depth here to avoid deadlocks on self-loops.
             // The live_tokens field will be recomputed by prune_dead_paths after merging.
         }
 
