@@ -1829,6 +1829,12 @@ impl<'r> Precomputer0<'r> {
         self.end_nodes[&TokenizerStateID(0)].clone() // Temporary hack: use state 0 for all final states
     }
 
+    fn finish(
+        self,
+    ) -> (BTreeMap<TokenizerStateID, PrecomputeNode0Index>, Trie0GodWrapper) {
+        (self.roots, self.trie0_god)
+    }
+
     fn possible_matches(&self, vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
         let cache_key_ptr = vocab_node as *const VocabPrefixTreeNode;
 
@@ -1887,12 +1893,6 @@ impl<'r> Precomputer0<'r> {
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish();
         crate::debug!(2, "Precomputation complete");
-    }
-
-    fn finish(
-        self,
-    ) -> (BTreeMap<TokenizerStateID, PrecomputeNode0Index>, Trie0GodWrapper) {
-        (self.roots, self.trie0_god)
     }
 
     fn dfs(
