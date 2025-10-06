@@ -2129,11 +2129,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
         self.active_state.accepted_state.as_ref().map_or(false, |s| !s.is_empty())
     }
-
     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
         if !GSS_LOGGING_ENABLED {
             return;
         }
+        self._log_gss(phase, token, explain_states, generate_dot);
+    }
+
+    pub fn _log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
         // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
         const MAX: usize = 100;
         const PANIC_THRESHOLD: usize = 1_000_000;
