@@ -392,6 +392,7 @@ pub fn optimize_trie1_size(
     stage_vocab: &mut StageVocab,
     token_name_map: &bimap::BiBTreeMap<crate::glr::grammar::Terminal, usize>,
 ) {
+    assert!(!Trie::has_cycle(&trie1_god, precomputed1.values().cloned().collect::<Vec<_>>()));
     crate::debug!(2, "Starting Trie1 size optimization...");
 
     crate::debug!(2, "Initial Trie1 stats:");
