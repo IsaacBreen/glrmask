@@ -1935,7 +1935,7 @@ impl<'r> Precomputer0<'r> {
             let work_queue_value = assoc_by_state.iter().map(|(sid, nodes)| {
                 let ohm: OrderedHashMap<PrecomputeNode0Index, LLMTokenBV> = nodes
                     .iter()
-                    .map(|n| (n.clone(), self.all_llm_tokens.clone()))
+                    .map(|n| (n.clone(), HybridBitset::max_ones()))
                     .collect();
                 (*sid, ohm)
             }).collect();
@@ -2005,6 +2005,7 @@ impl<'r> Precomputer0<'r> {
                                 edge_bv -= matches_for_terminal;
                             }
                             edge_bv &= src_contextual_tokens;
+                            edge_bv &= src_node_wrapper.as_arc().read(&self.trie0_god).unwrap().value.live_tokens.clone();
 
                             if edge_bv.is_empty() { continue; }
 
