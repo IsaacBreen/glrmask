@@ -1369,7 +1369,11 @@ fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3
         let mut next_id = 0;
         let mut changes = 0;
 
-        for u in 0..n {
+        #[cfg(not(rustrover))]
+        let its = tqdm!(0..n, desc = format!("Trie3 Merge Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
+        #[cfg(rustrover)]
+        let its = 0..n;
+        for u in its {
             let mut aggr: BTreeMap<(usize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
             for (p, bv_key, v_dense, sids) in &raw_edges[u] {
                 let dest_class = prev_class[*v_dense];
