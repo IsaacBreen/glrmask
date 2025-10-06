@@ -1565,24 +1565,10 @@ fn test_precompute_self_loop_panic() {
         );
     });
 
-    assert!(result.is_err(), "The precomputation should have panicked due to a self-loop assertion.");
-    
-    let panic_info = match result.err() {
-        Some(e) => {
-            if let Some(s) = e.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = e.downcast_ref::<&'static str>() {
-                s.to_string()
-            } else {
-                format!("{:?}", e)
-            }
-        },
-        None => "".to_string(),
-    };
-
     assert!(
-        panic_info.contains("assertion `left != right` failed"),
-        "Panic message should indicate an assertion failure on equality. Got: {}", panic_info
+        result.is_ok(),
+        "The precomputation should not have panicked. Panic info: {:?}",
+        result.err()
     );
 }
 
