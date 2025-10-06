@@ -520,6 +520,58 @@ impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T> {
             false
         }
     }
+
+    /// Detects if there are any cycles in the graph reachable from the given roots.
+    /// This uses a depth-first search approach.
+    pub fn has_cycle(
+        arena: &Arena<Trie<EK, EV, T>>,
+        roots: impl IntoIterator<Item = Trie2Index>,
+    ) -> bool {
+        let mut visiting = HashSet::new(); // Gray set: nodes currently in the recursion stack.
+        let mut visited = HashSet::new();  // Black set: nodes that have been fully explored.
+
+        for root in roots {
+            if !visited.contains(&root.as_usize()) {
+                if Self::detect_cycle_recursive(root, arena, &mut visiting, &mut visited) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Recursive helper for cycle detection.
+    fn detect_cycle_recursive(
+        node_idx: Trie2Index,
+        arena: &Arena<Trie<EK, EV, T>>,
+        visiting: &mut HashSet<usize>,
+        visited: &mut HashSet<usize>,
+    ) -> bool {
+        let u = node_idx.as_usize();
+        visiting.insert(u);
+
+        let children_indices: Vec<Trie2Index> = if let Some(guard) = node_idx.read(arena) {
+            guard.children.values().flat_map(|m| m.keys().cloned()).collect()
+        } else {
+            Vec::new()
+        };
+
+        for child_idx in children_indices {
+            let v = child_idx.as_usize();
+            if visiting.contains(&v) {
+                return true; // Cycle detected: found a back edge to a node in the current recursion stack.
+            }
+            if !visited.contains(&v) {
+                if Self::detect_cycle_recursive(child_idx, arena, visiting, visited) {
+                    return true;
+                }
+            }
+        }
+
+        visiting.remove(&u);
+        visited.insert(u);
+        false
+    }
 }
 
 // Add this impl block for the recursive comparison helper (index-based)
