@@ -16,7 +16,7 @@
 //! All logic here is pure Rust and contains no Python bindings.
 
 use im::{HashMap as IHashMap, OrdMap};
-use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap as StdHashMap, HashSet, VecDeque};
 use std::cmp::Ordering;
 use std::hash::Hash;
 use std::sync::Arc;
@@ -29,10 +29,10 @@ pub trait Merge: Clone {
 type Children<T, N> = IHashMap<T, OrdMap<isize, Arc<N>>>;
 
 #[derive(Clone)]
-pub(crate) struct Lower<T: Clone + Eq + Hash + Ord> {
-    pub(crate) children: Children<T, Lower<T>>,
-    pub(crate) empty: bool,
-    pub(crate) max_depth: isize,
+struct Lower<T: Clone + Eq + Hash + Ord> {
+    children: Children<T, Lower<T>>,
+    empty: bool,
+    max_depth: isize,
 }
 
 impl<T: Clone + Eq + Hash + Ord> PartialEq for Lower<T> {
@@ -62,11 +62,11 @@ impl<T: Clone + Eq + Hash + Ord> Hash for Lower<T> {
 }
 
 #[derive(Clone)]
-pub(crate) struct Interface<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
-    pub(crate) children: Children<T, Lower<T>>,
-    pub(crate) acc: A,
-    pub(crate) empty: Option<A>,
-    pub(crate) max_depth: isize,
+struct Interface<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
+    children: Children<T, Lower<T>>,
+    acc: A,
+    empty: Option<A>,
+    max_depth: isize,
 }
 
 impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> PartialEq for Interface<T, A> {
@@ -96,10 +96,10 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Hash for In
 }
 
 #[derive(Clone)]
-pub(crate) struct UpperBranch<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
-    pub(crate) children: Children<T, Upper<T, A>>,
-    pub(crate) empty: Option<A>,
-    pub(crate) max_depth: isize,
+struct UpperBranch<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
+    children: Children<T, Upper<T, A>>,
+    empty: Option<A>,
+    max_depth: isize,
 }
 
 impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> PartialEq for UpperBranch<T, A> {
@@ -121,7 +121,7 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Hash for Up
 }
 
 #[derive(Clone)]
-pub(crate) enum Upper<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
+enum Upper<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
     Branch(Arc<UpperBranch<T, A>>),
     Interface(Arc<Interface<T, A>>),
 }
@@ -238,7 +238,7 @@ fn new_lower<T: Clone + Eq + Hash + Ord>(children: Children<T, Lower<T>>, empty:
     })
 }
 
-pub(crate) fn new_interface<T, A>(
+fn new_interface<T, A>(
     children: Children<T, Lower<T>>,
     acc: A,
     empty: Option<A>,
@@ -587,7 +587,7 @@ where
 
 #[derive(Clone)]
 pub struct LeveledGSS<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
-    pub(crate) inner: Arc<Upper<T, A>>,
+    inner: Arc<Upper<T, A>>,
 }
 
 impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> PartialEq for LeveledGSS<T, A> {
@@ -1503,5 +1503,46 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> LeveledGSS<
         let first = it.next()?;
         let reduced = it.fold(first, |acc, next| acc.merge(&next));
         Some(reduced)
+    }
+
+    pub fn predecessors(&self) -> BTreeMap<T, BTreeMap<isize, Vec<Self>>>
+    where
+        T: Clone + Eq + Hash + Ord,
+        A: Merge + Clone + Eq + Hash + Ord,
+    {
+        let mut result = BTreeMap::new();
+        match &*self.inner {
+            Upper::Branch(b) => {
+                for (edge_val, children_by_depth) in &b.children {
+                    let mut preds_by_depth: BTreeMap<isize, Vec<Self>> = BTreeMap::new();
+                    for (depth, child_upper_arc) in children_by_depth {
+                        let gss = LeveledGSS {
+                            inner: child_upper_arc.clone(),
+                        };
+                        preds_by_depth.entry(*depth).or_default().push(gss);
+                    }
+                    result.insert(edge_val.clone(), preds_by_depth);
+                }
+            }
+            Upper::Interface(i) => {
+                for (edge_val, children_by_depth) in &i.children {
+                    let mut preds_by_depth: BTreeMap<isize, Vec<Self>> = BTreeMap::new();
+                    for (depth, child_lower_arc) in children_by_depth {
+                        let empty = if child_lower_arc.empty { Some(i.acc.clone()) } else { None };
+                        let new_interface_upper = new_interface(
+                            child_lower_arc.children.clone(),
+                            i.acc.clone(),
+                            empty,
+                        );
+                        let gss = LeveledGSS {
+                            inner: new_interface_upper,
+                        };
+                        preds_by_depth.entry(*depth).or_default().push(gss);
+                    }
+                    result.insert(edge_val.clone(), preds_by_depth);
+                }
+            }
+        }
+        result
     }
 }
