@@ -1945,11 +1945,8 @@ impl<'r> Precomputer0<'r> {
 
             while let Some((pos, states_at_pos)) = work_queue.pop_first() {
                 if pos == segment_bytes.len() {
-                    for (tokenizer_state_id, nodes_with_tokens) in states_at_pos {
-                        let entry = next_level_assoc.entry(tokenizer_state_id).or_default();
-                        for (node, tokens) in nodes_with_tokens {
-                            entry.insert(node.clone());
-                        }
+                    for (tokenizer_state_id, nodes) in states_at_pos {
+                        next_level_assoc.entry(tokenizer_state_id).or_default().extend(nodes.keys());
                     }
                     continue;
                 }
