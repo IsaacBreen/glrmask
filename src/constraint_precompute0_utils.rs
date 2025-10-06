@@ -1,147 +1,14 @@
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
-use bimap::BiBTreeMap;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
-use crate::constraint::{PrecomputeNode0, PrecomputeNode0Index, PrecomputedNodeContents0, Trie0GodWrapper};
+use crate::constraint::{PrecomputeNode0, PrecomputeNode0Index, Precomputer0, Trie0GodWrapper};
 use crate::constraint::LLMTokenBV;
-use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::datastructures::trie::{EdgeInserter, Trie};
-use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
-use crate::finite_automata::Regex;
-use crate::glr::grammar::Terminal;
-use crate::glr::parser::GLRParser;
-use crate::profiler::PROGRESS_BAR_ENABLED;
-use crate::tokenizer::{LLMTokenID, TokenizerStateID};
+use crate::datastructures::trie::Trie;
+use crate::tokenizer::TokenizerStateID;
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
-use crate::constraint::LLMVocab;
 use crate::constraint_extra::{calculate_final_stats0, print_precompute_stats0, PrecomputeStats};
 use crate::datastructures::ordered_hash_map::Retain;
 
-const MERGE_THRESHOLD: usize = 20;
-
-pub(crate) fn do_precompute0(
-    tokenizer:        &Regex,
-    parser:           Option<&GLRParser>,
-    llm_vocab:        Option<Arc<LLMVocab>>,
-    internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-    token_name_map:   &BiBTreeMap<Terminal, usize>,
-    internal_max_llm_token: usize,
-    terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-    ignore_terminal_id: Option<TerminalID>,
-    _possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-) -> (BTreeMap<TokenizerStateID, PrecomputeNode0Index>, Trie0GodWrapper) {
-    let mut helper = Precomputer0::new(
-        tokenizer,
-        parser,
-        llm_vocab,
-        internal_llm_token_map,
-        internal_max_llm_token,
-        MERGE_THRESHOLD,
-        terminal_follow_map,
-        ignore_terminal_id,
-        token_name_map,
-    );
-
-    helper.run_dfs();
-    // helper.optimize();
-    helper.finish()
-}
-
-
-struct Precomputer0<'r> {
-    tokenizer:        &'r Regex,
-    parser:           Option<&'r GLRParser>,
-    llm_vocab:        Option<Arc<LLMVocab>>,
-    vocab:            VocabPrefixTree,
-    roots:            BTreeMap<TokenizerStateID, PrecomputeNode0Index>,
-    possible_matches: RefCell<BTreeMap<*const VocabPrefixTreeNode, BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>>>,
-    all_llm_tokens:   HybridBitset,
-    merge_threshold:  usize,
-    pb:               ProgressBar,
-    stats:            PrecomputeStats,
-    terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-    ignore_terminal_id: Option<TerminalID>,
-    token_name_map:   &'r BiBTreeMap<Terminal, usize>,
-    // Map each precompute node to the set of LLM tokens that can pass through it.
-    // tags:             RefCell<HashMap<PrecomputeNodeIndex, LLMTokenBV>>, // Removed
-    // One end node per final tokenizer state.
-    end_nodes:        BTreeMap<TokenizerStateID, PrecomputeNode0Index>,
-    trie0_god:        Trie0GodWrapper,
-}
-
 impl<'r> Precomputer0<'r> {
-    fn new(
-        tokenizer:        &'r Regex,
-        parser:           Option<&'r GLRParser>,
-        llm_vocab:        Option<Arc<LLMVocab>>,
-        internal_llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>,
-        internal_max_llm_token: usize,
-        merge_threshold:  usize,
-        terminal_follow_map: &'r BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
-        ignore_terminal_id: Option<TerminalID>,
-        token_name_map: &'r BiBTreeMap<Terminal, usize>,
-    ) -> Self {
-        let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
-            .iter()
-            .map(|(bytes, id)| (id.0 as usize, bytes.clone()))
-            .collect();
-
-        crate::debug!(2, "Building vocab prefix tree");
-        let vocab = VocabPrefixTree::build(&tokens);
-        crate::debug!(2, "Done building vocab prefix tree");
-
-        let mut roots = BTreeMap::new();
-        let trie0_god = Trie0GodWrapper::new();
-        for sid in tokenizer.iter_states() {
-            roots.insert(
-                sid,
-                PrecomputeNode0Index::new(trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents0::root(internal_max_llm_token)))),
-            );
-        }
-        crate::debug!(2, "Created trie0 roots for {} tokenizer states", tokenizer.iter_states().count());
-
-        crate::debug!(2, "Counting vocab nodes for progress bar...");
-        let total_nodes = count_vocab_nodes(&vocab.root);
-        crate::debug!(2, "Counted {} vocab nodes", total_nodes);
-        let pb = ProgressBar::new(total_nodes);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] \
-                           [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})")
-                .expect("progress-bar"),
-        );
-        if !PROGRESS_BAR_ENABLED {
-            pb.set_draw_target(ProgressDrawTarget::hidden());
-        }
-
-        let end_nodes = tokenizer.iter_states()
-            .map(|tsid| (tsid, PrecomputeNode0Index::new(trie0_god.insert(PrecomputeNode0::new(PrecomputedNodeContents0::leaf(tsid))))))
-            .collect();
-        crate::debug!(2, "Created trie0 end nodes for {} tokenizer states", tokenizer.iter_states().count());
-
-        Self {
-            tokenizer,
-            parser,
-            llm_vocab,
-            vocab,
-            roots,
-            possible_matches: RefCell::new(BTreeMap::new()),
-            all_llm_tokens: HybridBitset::ones(internal_max_llm_token + 1),
-            merge_threshold,
-            pb,
-            stats: PrecomputeStats::default(),
-            terminal_follow_map,
-            ignore_terminal_id,
-            token_name_map,
-            // tags: RefCell::new(HashMap::new()), // Removed
-            end_nodes,
-            trie0_god,
-        }
-    }
-
-    fn optimize(&mut self) {
+    pub(crate) fn optimize(&mut self) {
         crate::debug!(2, "Initial Trie0 stats:");
         let mut stats = PrecomputeStats::default();
         calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
@@ -169,71 +36,6 @@ impl<'r> Precomputer0<'r> {
         let mut stats = PrecomputeStats::default();
         calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
         print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
-    }
-
-    fn get_end_node(&self, final_sid: TokenizerStateID) -> PrecomputeNode0Index {
-        // self.end_nodes[&final_sid].clone()
-        self.end_nodes[&TokenizerStateID(0)].clone() // Temporary hack: use state 0 for all final states
-    }
-
-    fn possible_matches(&self, vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
-        let cache_key_ptr = vocab_node as *const VocabPrefixTreeNode;
-
-        if let Some(cached_for_vocab_node) = self.possible_matches.borrow().get(&cache_key_ptr) {
-            if let Some(cached_result) = cached_for_vocab_node.get(&tokenizer_state_id) {
-                return cached_result.clone();
-            }
-        }
-
-        let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
-
-        for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let exec_result = self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
-            for token in &exec_result.matches {
-                let grammar_token_id = GrammarTokenID(token.id);
-                let applicable_tokens = child_vocab_node.reachable_token_ids();
-                *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
-            }
-            if let Some(final_state_val) = exec_result.end_state {
-                let matches_possible_from_tokenizer_state: BTreeSet<_> = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(final_state_val)).into_iter().collect();
-                let matches_here: BTreeSet<_> = exec_result.matches.iter().map(|m| GrammarTokenID(m.id)).collect();
-                let possible_new_matches = &matches_possible_from_tokenizer_state - &matches_here;
-                if !possible_new_matches.is_empty() {
-                    let next_results = self.possible_matches(child_vocab_node, TokenizerStateID(final_state_val));
-                    for (token, bv) in next_results {
-                        *result_map.entry(token).or_insert_with(LLMTokenBV::zeros) |= bv;
-                    }
-                }
-            }
-        }
-
-        self.possible_matches.borrow_mut().entry(cache_key_ptr).or_default().insert(tokenizer_state_id, result_map.clone());
-
-        result_map
-    }
-
-    fn run_dfs(&mut self) {
-        let mut assoc: BTreeMap<
-            TokenizerStateID,
-            OrderedHashSet<PrecomputeNode0Index>,
-        > = BTreeMap::new();
-
-        for (sid, arc) in &self.roots {
-            assoc
-                .entry(*sid)
-                .or_default()
-                .insert(arc.clone());
-        }
-
-        crate::debug!(2, "Starting precompute DFS");
-        crate::debug!(6, "Roots for each tokenizer state:");
-        for (sid, root) in &self.roots {
-            crate::debug!(6, "  {}: {}", sid.0, root);
-        }
-        self.dfs(&self.vocab.root, assoc);
-        crate::debug!(2, "Finished precompute DFS");
-        self.pb.finish();
-        crate::debug!(2, "Precomputation complete");
     }
 
     fn replace_ignore_token_edges_with_none_edges(&mut self) {
@@ -915,14 +717,3 @@ impl<'r> Precomputer0<'r> {
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc);
             }
-        }
-    }
-}
-
-fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
-    1 + node
-        .children()
-        .values()
-        .map(|c| count_vocab_nodes(c))
-        .sum::<u64>()
-}
