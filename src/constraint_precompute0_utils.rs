@@ -7,6 +7,7 @@ use crate::tokenizer::TokenizerStateID;
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::constraint_extra::{calculate_final_stats0, print_precompute_stats0, PrecomputeStats};
 use crate::datastructures::ordered_hash_map::Retain;
+use kdam::tqdm;
 
 impl<'r> Precomputer0<'r> {
     pub(crate) fn optimize(&mut self) {
@@ -506,7 +507,11 @@ impl<'r> Precomputer0<'r> {
 
         // We need to process all roots.
         let mut new_roots = BTreeMap::new();
-        for (sid, root_arc) in self.roots.iter() {
+        #[cfg(not(rustrover))]
+        let it = tqdm!(self.roots.iter(), desc="Merging subtrees", unit="root");
+        #[cfg(rustrover)]
+        let it = self.roots.iter();
+        for (sid, root_arc) in it {
             let canonical_root = self.deduplicate_recursive(root_arc.clone(), &mut canonical_nodes, &mut visited);
             new_roots.insert(*sid, canonical_root);
         }
