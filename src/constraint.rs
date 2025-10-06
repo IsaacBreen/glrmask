@@ -1979,6 +1979,7 @@ impl<'r> Precomputer0<'r> {
                                 let llm_token_id = child_vocab_node.token_id();
                                 let mut edge_bv = HybridBitset::zeros();
                                 edge_bv.insert(llm_token_id);
+                                edge_bv &= src_contextual_tokens;
                                 let edge_key = Some((terminal_id, disallowed_tokenizer_state_info));
                                 let mut inserter = EdgeInserter::new(
                                     &self.trie0_god,
@@ -2005,7 +2006,7 @@ impl<'r> Precomputer0<'r> {
                                 edge_bv -= matches_for_terminal;
                             }
                             edge_bv &= src_contextual_tokens;
-                            edge_bv &= src_node_wrapper.as_arc().read(&self.trie0_god).unwrap().value.live_tokens.clone();
+                            // edge_bv &= src_node_wrapper.as_arc().read(&self.trie0_god).unwrap().value.live_tokens.clone();
 
                             if edge_bv.is_empty() { continue; }
 
@@ -2066,6 +2067,7 @@ impl<'r> Precomputer0<'r> {
                             let llm_token_id = child_vocab_node.token_id();
                             let mut edge_bv = HybridBitset::zeros();
                             edge_bv.insert(llm_token_id);
+                            edge_bv &= src_contextual_tokens;
                             let edge_key = None;
                             let mut inserter = EdgeInserter::new(
                                 &self.trie0_god,
