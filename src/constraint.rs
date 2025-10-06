@@ -2,8 +2,6 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::datastructures::ordered_hash_map::Retain;
-use ordered_hash_map::OrderedHashMap;
-use ordered_hash_map::OrderedHashSet;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -51,6 +49,7 @@ use std::ops::{BitAnd, Sub};
 use std::borrow::Borrow;
 use std::collections::btree_map::Entry as BTreeEntry;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::constraint_precompute2_utils::optimize_trie2_size;
 pub(crate) use crate::constraint::constraint_precompute3_utils::clone_trie3_graph;
@@ -1900,14 +1899,14 @@ impl<'r> Precomputer0<'r> {
     fn run_dfs(&mut self) {
         let mut assoc: BTreeMap<
             TokenizerStateID,
-            OrderedHashSet<PrecomputeNode0Index>,
+            OrderedHashMap<PrecomputeNode0Index, LLMTokenBV>,
         > = BTreeMap::new();
 
         for (sid, arc) in &self.roots {
             assoc
                 .entry(*sid)
                 .or_default()
-                .insert(arc.clone());
+                .insert(arc.clone(), self.all_llm_tokens.clone());
         }
 
         crate::debug!(2, "Starting precompute DFS");
@@ -1924,28 +1923,34 @@ impl<'r> Precomputer0<'r> {
     fn dfs(
         &self,
         vocab_node: &VocabPrefixTreeNode,
-        assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
+        assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashMap<PrecomputeNode0Index, LLMTokenBV>>,
     ) {
         self.pb.inc(1);
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let mut work_queue: BTreeMap<
                 usize,
-                BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
+                BTreeMap<TokenizerStateID, OrderedHashMap<PrecomputeNode0Index, LLMTokenBV>>,
             > = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
 
-            let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
+            let mut next_level_assoc: BTreeMap<_, OrderedHashMap<_, _>> = BTreeMap::new();
 
             while let Some((pos, states_at_pos)) = work_queue.pop_first() {
                 if pos == segment_bytes.len() {
-                    for (tokenizer_state_id, nodes) in states_at_pos {
-                        next_level_assoc.entry(tokenizer_state_id).or_default().extend(nodes);
+                    for (tokenizer_state_id, nodes_with_tokens) in states_at_pos {
+                        let entry = next_level_assoc.entry(tokenizer_state_id).or_default();
+                        for (node, tokens) in nodes_with_tokens {
+                            entry
+                                .entry(node)
+                                .or_insert_with(LLMTokenBV::zeros)
+                                .bitor_assign(&tokens);
+                        }
                     }
                     continue;
                 }
 
-                for (tokenizer_state_id, precompute_nodes) in states_at_pos {
+                for (tokenizer_state_id, precompute_nodes_with_tokens) in states_at_pos {
                     let exec_result = self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
 
                     let possible_matches_at_end = if let Some(end_state_val) = exec_result.end_state {
@@ -1967,7 +1972,7 @@ impl<'r> Precomputer0<'r> {
                         //     }
                         // }
 
-                        for src_node_wrapper in &precompute_nodes {
+                        for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
                             if next_pos == segment_bytes.len() {
                                 // Exact end-of-segment terminal match: finishing LLM token here goes to tokenizer initial state.
                                 let llm_token_id = child_vocab_node.token_id();
@@ -1978,7 +1983,7 @@ impl<'r> Precomputer0<'r> {
                                     &self.trie0_god,
                                     src_node_wrapper.as_arc().clone(),
                                     edge_key,
-                                    edge_bv,
+                                    &edge_bv & src_contextual_tokens,
                                     |e, n| *e |= n,
                                     |node_value, edge_value| node_value.live_tokens |= edge_value,
                                     |ev, t| *ev &= &t.live_tokens,
@@ -1999,7 +2004,8 @@ impl<'r> Precomputer0<'r> {
                                 edge_bv -= matches_for_terminal;
                             }
 
-                            if edge_bv.is_empty() { continue; }
+                            let edge_bv_for_inserter = &edge_bv & src_contextual_tokens;
+                            if edge_bv_for_inserter.is_empty() { continue; }
 
                             // NOTE: It is likely wrong to just use disallowed_tokenizer_state_info as-is here.
                             //  The actual disallowed state can vary by LLM token. But we don't capture that here.
@@ -2009,7 +2015,7 @@ impl<'r> Precomputer0<'r> {
                                 &self.trie0_god,
                                 src_node_wrapper.as_arc().clone(),
                                 edge_key,
-                                edge_bv.clone(),
+                                edge_bv_for_inserter.clone(),
                                 |e, n| *e |= n,
                                 |node_value, edge_value| node_value.live_tokens |= edge_value,
                                 |ev, t| *ev &= &t.live_tokens,
@@ -2018,27 +2024,43 @@ impl<'r> Precomputer0<'r> {
                             let next_tokenizer_state = self.tokenizer.initial_state_id();
                             let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
 
-                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| w.read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_none()));
+                            let eligible_destinations_from_queue = dest_nodes_in_queue.iter().filter_map(|(dest_node, dest_contextual_tokens)| {
+                                if dest_node.read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_some() {
+                                    return None;
+                                }
+                                let risky_tokens = &edge_bv_for_inserter - dest_contextual_tokens;
+                                if risky_tokens.is_empty() {
+                                    return Some(dest_node.clone());
+                                }
+                                let dest_live_tokens = &dest_node.read(&self.trie0_god).unwrap().value.live_tokens;
+                                if (&risky_tokens & dest_live_tokens).is_empty() {
+                                    Some(dest_node.clone())
+                                } else {
+                                    None
+                                }
+                            }).collect::<Vec<_>>();
+                            inserter = inserter.try_destinations_iter(eligible_destinations_from_queue.into_iter());
 
-                            if true {
+                            if !inserter.is_some() {
                                 let children_of_src: Vec<_> = src_node_wrapper.as_arc().read(&self.trie0_god).unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
-                                let eligible_children = children_of_src.iter().map(|child_node_ptr| {
-                                    child_node_ptr.as_arc().clone()
-                                }).filter(|child_arc| {
-                                    (child_arc.read(&self.trie0_god).unwrap().value.live_tokens.clone() & &edge_bv).is_empty() && child_arc.read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_none()
-                                });
+                                let eligible_children = children_of_src.iter().filter(|child_arc| {
+                                    let guard = child_arc.read(&self.trie0_god).unwrap();
+                                    if guard.value.final_tokenizer_state.is_some() {
+                                        return false;
+                                    }
+                                    (&guard.value.live_tokens & &edge_bv_for_inserter).is_empty()
+                                }).cloned();
                                 inserter = inserter.try_destinations_iter(eligible_children);
                             }
 
                             let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents0::internal()).unwrap();
                             assert_ne!(&result_node, src_node_wrapper);
-                            let result_node_ptr = result_node.clone();
-                            dest_nodes_in_queue.insert(result_node_ptr.clone());
+                            dest_nodes_in_queue.entry(result_node.clone()).or_insert_with(LLMTokenBV::zeros).bitor_assign(&edge_bv_for_inserter);
                         }
                     }
 
                     if let Some(end_state_val) = exec_result.end_state {
-                        for src_node_wrapper in &precompute_nodes {
+                        for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
                             let llm_token_id = child_vocab_node.token_id();
                             let mut edge_bv = HybridBitset::zeros();
                             edge_bv.insert(llm_token_id);
@@ -2047,7 +2069,7 @@ impl<'r> Precomputer0<'r> {
                                 &self.trie0_god,
                                 src_node_wrapper.as_arc().clone(),
                                 edge_key,
-                                edge_bv,
+                                &edge_bv & src_contextual_tokens,
                                 |e, n| *e |= n,
                                 |node_value, edge_value| node_value.live_tokens |= edge_value,
                                 |ev, t| *ev &= &t.live_tokens,
@@ -2056,7 +2078,13 @@ impl<'r> Precomputer0<'r> {
                             let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
                             assert_ne!(&actual_dst, src_node_wrapper);
                         }
-                        next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
+                        let entry = next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default();
+                        for (node, tokens) in precompute_nodes_with_tokens {
+                            entry
+                                .entry(node.clone())
+                                .or_insert_with(LLMTokenBV::zeros)
+                                .bitor_assign(&tokens);
+                        }
                     }
                 }
             }
@@ -3162,7 +3190,7 @@ impl<'a> GrammarConstraintState<'a> {
             // step: for a given edge key, propagate only along children whose edge BV contains the token.
             |glr_s0: &GLRParserState<'a>,
              edge_key: &Option<(GrammarTokenID, Option<TokenizerStateID>)>,
-             dest_map: &ordered_hash_map::OrderedHashMap<Trie2Index, LLMTokenBV>| {
+             dest_map: &OrderedHashMap<Trie2Index, LLMTokenBV>| {
                 let mut out = Vec::new();
 
                 for (child_idx, edge_bv) in dest_map.iter() {

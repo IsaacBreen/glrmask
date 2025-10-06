@@ -1076,7 +1076,7 @@ where
     arena: &'a Arena<Trie<EK, EV, T>>,
     source_idx: Trie2Index,                      // The source node for the edge
     edge_key: EK,                                // The key for the edge to be inserted
-    edge_value: Option<EV>,                      // The value for the edge to be inserted
+    pub edge_value: Option<EV>,                      // The value for the edge to be inserted
     merge_edge_value: FMergeEV,                  // The function to merge edge values
     update_node_value: FUpdateT,
     merge_edge_value_and_source_node_value: FMergeEV_T,
