@@ -970,6 +970,94 @@ impl GrammarConstraint {
         )
     }
 
+    fn has_llm_compatible_cycle(
+        arena: &Trie1GodWrapper,
+        roots: &[PrecomputeNode1Index],
+        internal_max_llm_token: usize,
+    ) -> bool {
+        let mut visited: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
+        let initial_tokens = LLMTokenBV::ones(internal_max_llm_token + 1);
+
+        for &root in roots {
+            if Self::detect_cycle_recursive(
+                root,
+                initial_tokens.clone(),
+                arena,
+                &mut HashMap::new(), // recursion_stack
+                &mut visited,
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn detect_cycle_recursive(
+        node_idx: PrecomputeNode1Index,
+        current_tokens: LLMTokenBV,
+        arena: &Trie1GodWrapper,
+        recursion_stack: &mut HashMap<PrecomputeNode1Index, LLMTokenBV>,
+        visited: &mut HashMap<PrecomputeNode1Index, LLMTokenBV>,
+    ) -> bool {
+        // Check for cycle: if we're re-visiting a node on the current path with compatible tokens.
+        if let Some(tokens_on_stack) = recursion_stack.get(&node_idx) {
+            if !(&current_tokens & tokens_on_stack).is_empty() {
+                return true; // Cycle detected
+            }
+        }
+
+        // Pruning based on globally visited nodes.
+        let new_tokens_to_process = match visited.entry(node_idx) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let previously_visited_tokens = entry.get_mut();
+                let new_unseen_tokens = &current_tokens - &*previously_visited_tokens;
+                if new_unseen_tokens.is_empty() {
+                    return false; // Already explored from this node with a superset of tokens.
+                }
+                // Record that we've now seen the current tokens at this node.
+                *previously_visited_tokens |= &current_tokens;
+                new_unseen_tokens
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(current_tokens.clone());
+                current_tokens.clone() // All current tokens are new for this node.
+            }
+        };
+
+        // Add to recursion stack for this path.
+        let original_tokens_on_stack = recursion_stack.insert(node_idx, current_tokens);
+
+        let children_to_visit = if let Some(guard) = node_idx.read(arena) {
+            guard.children().clone()
+        } else {
+            // Should not happen in a well-formed trie. Restore stack and return.
+            if let Some(original) = original_tokens_on_stack {
+                recursion_stack.insert(node_idx, original);
+            } else {
+                recursion_stack.remove(&node_idx);
+            }
+            return false;
+        };
+
+        for (_edge_key, dest_map) in children_to_visit.iter() {
+            for (child_idx, edge_tokens) in dest_map.iter() {
+                let next_tokens = &new_tokens_to_process & edge_tokens;
+                if !next_tokens.is_empty() {
+                    if Self::detect_cycle_recursive(*child_idx, next_tokens, arena, recursion_stack, visited) {
+                        // Cycle found, restore stack and propagate true.
+                        if let Some(original) = original_tokens_on_stack { recursion_stack.insert(node_idx, original); } else { recursion_stack.remove(&node_idx); }
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Backtrack: remove from recursion stack.
+        if let Some(original) = original_tokens_on_stack { recursion_stack.insert(node_idx, original); } else { recursion_stack.remove(&node_idx); }
+
+        false
+    }
+
     pub fn precompute1(
         precomputed0: &BTreeMap<TokenizerStateID, PrecomputeNode0Index>,
         trie0_god: &Trie0GodWrapper,
@@ -1060,6 +1148,13 @@ impl GrammarConstraint {
                     dest_map.insert(trie1_leaf.clone(), all_llm_tokens.clone());
                 }
             }
+        }
+
+        // Check for LLM-compatible cycles.
+        let roots: Vec<_> = precomputed1.values().cloned().collect();
+        if Self::has_llm_compatible_cycle(&trie1_god, &roots, internal_max_llm_token) {
+            // This is a hard error for now. In the future we might want to handle it.
+            panic!("LLM-compatible cycle detected in precompute1 trie. This can lead to infinite loops during mask generation.");
         }
 
         // Optimizations, similar to precompute0
