@@ -45,7 +45,7 @@ pub(crate) fn do_precompute0(
     );
 
     helper.run_dfs();
-    helper.optimize();
+    // helper.optimize();
     helper.finish()
 }
 
