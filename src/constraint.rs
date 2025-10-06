@@ -1899,14 +1899,14 @@ impl<'r> Precomputer0<'r> {
     fn run_dfs(&mut self) {
         let mut assoc: BTreeMap<
             TokenizerStateID,
-            OrderedHashMap<PrecomputeNode0Index, LLMTokenBV>,
+            OrderedHashSet<PrecomputeNode0Index>,
         > = BTreeMap::new();
 
         for (sid, arc) in &self.roots {
             assoc
                 .entry(*sid)
                 .or_default()
-                .insert(arc.clone(), self.all_llm_tokens.clone());
+                .insert(arc.clone());
         }
 
         crate::debug!(2, "Starting precompute DFS");
@@ -1923,7 +1923,7 @@ impl<'r> Precomputer0<'r> {
     fn dfs(
         &self,
         vocab_node: &VocabPrefixTreeNode,
-        assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashMap<PrecomputeNode0Index, LLMTokenBV>>,
+        assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
     ) {
         self.pb.inc(1);
 
@@ -1932,19 +1932,23 @@ impl<'r> Precomputer0<'r> {
                 usize,
                 BTreeMap<TokenizerStateID, OrderedHashMap<PrecomputeNode0Index, LLMTokenBV>>,
             > = BTreeMap::new();
-            work_queue.insert(0, assoc_by_state.clone());
+            let work_queue_value = assoc_by_state.iter().map(|(sid, nodes)| {
+                let mut ohm: OrderedHashMap<PrecomputeNode0Index, LLMTokenBV> = OrderedHashMap::new();
+                for n in nodes {
+                    ohm.insert(n.clone(), LLMTokenBV::zeros());
+                }
+                (*sid, ohm)
+            }).collect();
+            work_queue.insert(0, work_queue_value);
 
-            let mut next_level_assoc: BTreeMap<_, OrderedHashMap<_, _>> = BTreeMap::new();
+            let mut next_level_assoc: BTreeMap<_, OrderedHashSet<PrecomputeNode0Index>> = BTreeMap::new();
 
             while let Some((pos, states_at_pos)) = work_queue.pop_first() {
                 if pos == segment_bytes.len() {
                     for (tokenizer_state_id, nodes_with_tokens) in states_at_pos {
                         let entry = next_level_assoc.entry(tokenizer_state_id).or_default();
                         for (node, tokens) in nodes_with_tokens {
-                            entry
-                                .entry(node)
-                                .or_insert_with(LLMTokenBV::zeros)
-                                .bitor_assign(&tokens);
+                            entry.insert(node.clone());
                         }
                     }
                     continue;
@@ -2080,10 +2084,7 @@ impl<'r> Precomputer0<'r> {
                         }
                         let entry = next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default();
                         for (node, tokens) in precompute_nodes_with_tokens {
-                            entry
-                                .entry(node.clone())
-                                .or_insert_with(LLMTokenBV::zeros)
-                                .bitor_assign(&tokens);
+                            entry.insert(node.clone());
                         }
                     }
                 }
