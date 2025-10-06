@@ -1512,49 +1512,66 @@ fn test_constraint_expression_cycle() {
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
 }
 
-#[test]
-fn test_precompute_self_loop_panic() {
-    // This test is designed to trigger a panic in Precomputer0::dfs.
-    // The panic occurs when the algorithm tries to add a self-loop to a trie node.
-    // This happens when a node that is currently being processed as a source
-    // also appears in the set of candidate destination nodes for an edge
-    // originating from itself.
 
-    // A tokenizer with two states and looping behavior can create complex sharing
-    // in the precomputation trie.
+#[test]
+fn test_precompute_self_loop_from_shared_states() {
+    // This test is designed to reproduce a panic in `Precomputer0::dfs` where
+    // the algorithm attempts to create a self-loop on a trie node.
+    //
+    // The scenario is based on the user's description:
+    // - A vocabulary with shared prefixes ("za", "zaabm", "zaabn").
+    // - A stateful tokenizer (e.g., for `a+`) that can lead to complex
+    //   sharing of trie nodes across different tokenizer states during precomputation.
+    //
+    // The combination can lead to a situation where a trie node `N` is being
+    // processed as a source for a new edge, while `N` itself is already present
+    // in the queue of candidate destination nodes for the next position in the
+    // vocabulary segment. This causes the algorithm to select `N` as its own
+    // child, triggering an `assert_ne!` panic.
+
+    // 1. Tokenizer with a stateful component (`a+`)
     let tokenizer_expr = groups![
-        // Group 0: one or more 'a's
-        repeat1_fast(eat_u8(b'a')),
-        // Group 1: one or more 'b's
-        repeat1_fast(eat_u8(b'b')),
+        eat_u8(b'z'),                    // Group 0: Z_T
+        repeat1_fast(eat_u8(b'a')),      // Group 1: A_PLUS_T (stateful)
+        eat_u8(b'b'),                    // Group 2: B_T
+        eat_u8(b'm'),                    // Group 3: M_T
+        eat_u8(b'n'),                    // Group 4: N_T
     ];
     let tokenizer = tokenizer_expr.build();
 
-    // LLM vocabulary that forces processing of segments that can be extended.
-    // "a" and "b" are simple, "ab" forces a transition.
+    // 2. LLM Vocabulary with shared prefixes
     let mut llm_token_map = LLMTokenMap::new();
-    llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
-    llm_token_map.insert(b"b".to_vec(), LLMTokenID(1));
-    llm_token_map.insert(b"ab".to_vec(), LLMTokenID(2));
+    llm_token_map.insert(b"za".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"zaabm".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"zaabn".to_vec(), LLMTokenID(2));
     let max_original_llm_token_id = 2;
 
-    // A simple grammar that uses the tokens.
+    // 3. Grammar using the tokens
     let productions = vec![
-        prod("S", vec![t("A"), t("B")]),
+        prod("S", vec![t("Z_T"), t("A_PLUS_T"), t("B_T"), t("M_T")]),
+        prod("S", vec![t("Z_T"), t("A_PLUS_T"), t("B_T"), t("N_T")]),
     ];
 
+    // 4. Mappings
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(regex_name("A"), TerminalID(0));
-    grammar_token_map.insert(regex_name("B"), TerminalID(1));
+    grammar_token_map.insert(regex_name("Z_T"), TerminalID(0));
+    grammar_token_map.insert(regex_name("A_PLUS_T"), TerminalID(1));
+    grammar_token_map.insert(regex_name("B_T"), TerminalID(2));
+    grammar_token_map.insert(regex_name("M_T"), TerminalID(3));
+    grammar_token_map.insert(regex_name("N_T"), TerminalID(4));
 
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
     let mut token_name_map = BiBTreeMap::new();
-    token_name_map.insert(regex_name("A"), 0);
-    token_name_map.insert(regex_name("B"), 1);
+    token_name_map.insert(regex_name("Z_T"), 0);
+    token_name_map.insert(regex_name("A_PLUS_T"), 1);
+    token_name_map.insert(regex_name("B_T"), 2);
+    token_name_map.insert(regex_name("M_T"), 3);
+    token_name_map.insert(regex_name("N_T"), 4);
 
-    // The creation of the GrammarConstraint will run the precomputation.
-    // We expect this to panic if the bug is present.
+    // 5. Run precomputation and check for panics
+    // We expect this to fail with a panic until the bug is fixed.
+    // The test asserts that it *should not* panic.
     let result = std::panic::catch_unwind(|| {
         let _ = GrammarConstraint::new(
             tokenizer,
