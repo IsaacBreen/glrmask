@@ -1965,13 +1965,13 @@ impl<'r> Precomputer0<'r> {
                         let next_pos = pos + match_info.width;
 
                         let mut disallowed_tokenizer_state_info = None;
-                        if let Some(end_state_val) = exec_result.end_state {
-                            let end_tokenizer_state_id = TokenizerStateID(end_state_val);
-                            let terminals_accessible = self.tokenizer.tokens_accessible_from_state(end_tokenizer_state_id);
-                            if terminals_accessible.contains(&terminal_id) {
-                                disallowed_tokenizer_state_info = Some(end_tokenizer_state_id);
-                            }
-                        }
+                        // if let Some(end_state_val) = exec_result.end_state {
+                        //     let end_tokenizer_state_id = TokenizerStateID(end_state_val);
+                        //     let terminals_accessible = self.tokenizer.tokens_accessible_from_state(end_tokenizer_state_id);
+                        //     if terminals_accessible.contains(&terminal_id) {
+                        //         disallowed_tokenizer_state_info = Some(end_tokenizer_state_id);
+                        //     }
+                        // }
 
                         for (src_node_wrapper, src_contextual_tokens) in &precompute_nodes_with_tokens {
                             if next_pos == segment_bytes.len() {
