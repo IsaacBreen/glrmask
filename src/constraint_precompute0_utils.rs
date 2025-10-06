@@ -837,9 +837,7 @@ impl<'r> Precomputer0<'r> {
                                     edge_key,
                                     edge_bv,
                                     |e, n| *e |= n,
-                                    |node_value, edge_value| {
-                                        node_value.live_tokens |= edge_value;
-                                    },
+                                    |node_value, edge_value| node_value.live_tokens |= edge_value,
                                     |ev, t| *ev &= &t.live_tokens,
                                 );
                                 let end_idx = {
