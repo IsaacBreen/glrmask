@@ -390,3 +390,6 @@ class BruteForceModel(GraphProvider):
     def finalize(self):
         print("\n--- Final Stats Report from BruteForceModel ---")
         Stats.get().report()
+
+
+Model = BruteForceModel
