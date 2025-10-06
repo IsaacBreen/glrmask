@@ -1144,6 +1144,9 @@ where
         if self.result.is_some() {
             return self; // Already found a destination
         }
+        if destination == self.source_idx {
+            return self; // Do not create self-loops
+        }
 
         let mut update_info: Option<(Trie2Index, EV)> = None;
 
