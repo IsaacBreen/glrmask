@@ -2079,10 +2079,7 @@ impl<'r> Precomputer0<'r> {
                             let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
                             assert_ne!(&actual_dst, src_node_wrapper);
                         }
-                        let entry = next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default();
-                        for (node, tokens) in precompute_nodes_with_tokens {
-                            entry.insert(node.clone());
-                        }
+                        next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes_with_tokens.keys().cloned());
                     }
                 }
             }
