@@ -1,4 +1,5 @@
-use crate::constraint::{GrammarConstraintConfig, LLMTokenBV, PrecomputeNode1Index, PrecomputeNode2, PrecomputeNode2Index, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie2GodWrapper, Trie3GodWrapper};
+use crate::constraint::{GrammarConstraintConfig, PrecomputeNode2, PrecomputeNode2Index, PrecomputeNode3, PrecomputeNode3Index, PrecomputeNode1Index, StateIDBV, Trie2GodWrapper, Trie3GodWrapper};
+use crate::datastructures::gss::{LLMTokenBV, PrecomputedNodeContents};
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::{ArcPtrWrapper, EntryApi};

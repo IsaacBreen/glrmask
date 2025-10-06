@@ -1,6 +1,6 @@
-use crate::constraint::{LLMTokenBV, LLMVocab, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, Trie3GodWrapper};
-use crate::datastructures::gss_leveled_adapter::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
-use crate::datastructures::gss_leveled_adapter::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
+use crate::constraint::{LLMVocab, PrecomputeNode3, PrecomputeNode3Index, StateIDBV, Trie3God, Trie3GodWrapper};
+use crate::datastructures::gss::{find_longest_path, gather_gss_stats, DestKey, GSSNode, GSSPeek, GSSStats, LLMTokenBV, NodeMap, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
+use crate::datastructures::gss::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, PrecomputedNodeContents};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
@@ -27,8 +27,9 @@ use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use crate::datastructures::trie::{God, GodWrapper};
-use crate::datastructures::gss_leveled_adapter::{is_simple_gss, PruneAndTransformRecursiveMemo};
-use crate::datastructures::leveled_gss::Merge;
+// Added for deep-add of precompute trie edges
+use crate::datastructures::gss::{is_simple_gss};
+use crate::datastructures::gss::PruneAndTransformRecursiveMemo;
 
 // A single combined action for a given (state,row) and token:
 // - Normal(...) is a concrete per-token action from the row's action map
@@ -144,9 +145,9 @@ pub struct ParseState {
 impl ParseState {
     pub fn new() -> Self {
         ParseState {
-            stack: Arc::new(GSSNode::new_dead()),
+            stack: Arc::new(GSSNode::new_fresh()),
             accepted_state: None,
-            prev_accepted_state: Arc::new(GSSNode::new_dead()),
+            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
             trie2_god: None,
         }
     }
@@ -155,7 +156,7 @@ impl ParseState {
         ParseState {
             stack,
             accepted_state: None,
-            prev_accepted_state: Arc::new(GSSNode::new_dead()),
+            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
             trie2_god: None,
         }
     }
@@ -490,7 +491,7 @@ impl GLRParser {
         ParseState {
             stack: Arc::new(stack_top),
             accepted_state: None,
-            prev_accepted_state: Arc::new(GSSNode::new_dead()),
+            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
             trie2_god: None,
         }
     }
@@ -515,7 +516,7 @@ impl GLRParser {
         ParseState {
             stack,
             accepted_state: None,
-            prev_accepted_state: Arc::new(GSSNode::new_dead()),
+            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
             trie2_god: None,
         }
     }
@@ -531,7 +532,7 @@ impl GLRParser {
         ParseState {
             stack: Arc::new(GSSNode::new_fresh().push(initial_content)), // pushed node has initial_acc
             accepted_state: None,
-            prev_accepted_state: Arc::new(GSSNode::new_dead()),
+            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
             trie2_god: None,
         }
     }
@@ -845,7 +846,7 @@ impl Display for GLRParserState<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         // TODO: this is bad. make this better
         // Display the stack
-        self._log_gss("    ", TerminalID(0), false, false);
+        self.log_gss("    ", TerminalID(0), false, false);
         Ok(())
     }
 }
@@ -1016,7 +1017,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                     if !accepted_s_new_arc.is_empty() {
                         let accepted_parse_state = ParseState {
-                            stack: Arc::new(GSSNode::new_dead()),
+                            stack: Arc::new(GSSNode::new_fresh()),
                             accepted_state: Some(accepted_s_new_arc),
                             prev_accepted_state: state.prev_accepted_state.clone(),
                             trie2_god: state.trie2_god.clone(),
@@ -1059,7 +1060,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                                 if !accepted_s_new_arc.is_empty() {
                                     let accepted_parse_state = ParseState {
-                                        stack: Arc::new(GSSNode::new_dead()),
+                                        stack: Arc::new(GSSNode::new_fresh()),
                                         accepted_state: Some(accepted_s_new_arc),
                                         prev_accepted_state: state.prev_accepted_state.clone(),
                                         trie2_god: state.trie2_god.clone(),
@@ -1177,7 +1178,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             std::iter::once((0..=usize::MAX, disallowed_terminals_bv))
                         );
 
-                        crate::datastructures::gss_leveled_adapter::disallow_terminals_and_prune_arc(
+                        crate::datastructures::gss::disallow_terminals_and_prune_arc(
                             &mut constrained_state.stack,
                             &disallowed_l2,
                             &mut HashMap::new(),
@@ -1208,7 +1209,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                             if !accepted_s_new_arc.is_empty() {
                                 let accepted_parse_state = ParseState {
-                                    stack: Arc::new(GSSNode::new_dead()),
+                                    stack: Arc::new(GSSNode::new_fresh()),
                                     accepted_state: Some(accepted_s_new_arc),
                                     prev_accepted_state: state.prev_accepted_state.clone(),
                                     trie2_god: state.trie2_god.clone(),
@@ -1719,7 +1720,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // Consolidate all shifted states into the new active_state for phase 3
         crate::debug!(4, "Phase 2 completed, consolidating {} shifted states into active state", shifted_states_todo.len());
         let mut next_active = ParseState {
-            stack: Arc::new(GSSNode::new_dead()),
+            stack: Arc::new(GSSNode::new_fresh()),
             accepted_state: None,
             prev_accepted_state: self.active_state.prev_accepted_state.clone(),
             trie2_god: self.active_state.trie2_god.clone(),
@@ -1733,7 +1734,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.active_state = next_active;
 
         // Move current accepted state to previous, and reset current.
-        self.active_state.prev_accepted_state = self.active_state.accepted_state.take().unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
+        self.active_state.prev_accepted_state = self.active_state.accepted_state.take().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
         self.active_state.accepted_state = None;
 
         self.log_gss("Phase1/2-end", token_id, false, false);
@@ -2129,14 +2130,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
         self.active_state.accepted_state.as_ref().map_or(false, |s| !s.is_empty())
     }
+
     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
         if !GSS_LOGGING_ENABLED {
             return;
         }
-        self._log_gss(phase, token, explain_states, generate_dot);
-    }
-
-    pub fn _log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
         // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
         const MAX: usize = 100;
         const PANIC_THRESHOLD: usize = 1_000_000;
@@ -2296,7 +2294,7 @@ impl GLRParser {
 
             // Define the GSS node if it hasn't been visited yet
             if visited_nodes.insert(node_ptr) {
-                let acc_str = crate::datastructures::gss_leveled_adapter::format_acc(
+                let acc_str = crate::datastructures::gss::format_acc(
                     &node_arc,
                     &self.terminal_map,
                     original_internal_bimap,
@@ -2432,3 +2430,134 @@ fn default_reduce_chain(
     final_goto_state_ids
 }
 
+/// Recursively traverses a GSS, and for each node (both internal and root) that has
+/// `stored_trie_nodes`, it:
+/// 1. Gets a new destination trie node from `destination_provider`.
+/// 2. Adds edges from all of the node's `stored_trie_nodes` to this new destination.
+/// 3. Replaces the node's `stored_trie_nodes` with a set containing only the new destination.
+///
+/// This is used to apply shared constraints (like a StateID bitvector) across an entire GSS branch
+/// by adding a filtered edge to the underlying precomputation trie.
+#[time_it]
+pub(crate) fn deep_add_precompute_trie_edges(
+    root_arc: &mut Arc<GSSNode>,
+    god: &StoredTrieGodWrapper,
+    edge_key: &(usize, LLMTokenBV),
+    edge_value: &StateIDBV,
+    tokens_for_update: &LLMTokenBV,
+    destination_provider: &mut impl FnMut() -> PrecomputeNode3Index,
+    memo: &mut PruneAndTransformRecursiveMemo,
+) {
+    if let Some(new_root) = deep_add_precompute_trie_edges_recursive(
+        root_arc,
+        god,
+        edge_key,
+        edge_value,
+        tokens_for_update,
+        destination_provider,
+        memo,
+    ) {
+        *root_arc = new_root;
+    } else {
+        // This function should not prune the root unless it becomes completely empty.
+        // If all paths are pruned, it becomes a fresh root.
+        *root_arc = Arc::new(GSSNode::new_fresh());
+    }
+}
+
+fn deep_add_precompute_trie_edges_recursive(
+    node_arc: &Arc<GSSNode>,
+    god: &StoredTrieGodWrapper,
+    edge_key: &(usize, LLMTokenBV),
+    edge_value: &StateIDBV,
+    tokens_for_update: &LLMTokenBV,
+    destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
+    memo: &mut PruneAndTransformRecursiveMemo,
+) -> Option<Arc<GSSNode>> {
+    let node_ptr = Arc::as_ptr(node_arc);
+    if let Some(cached_result) = memo.get(&node_ptr) {
+        return cached_result.clone();
+    }
+
+    // 1. Process the current node's Acc
+    let local_acc = node_arc.local_acc();
+    let (new_acc_arc, acc_changed) = if !local_acc.stored_trie_nodes().is_empty() {
+        let destination = destination_provider();
+
+        for source_wrapper in local_acc.stored_trie_nodes() {
+            let source_arc = source_wrapper.as_arc().clone();
+
+            let inserter = EdgeInserter::new(
+                god,
+                source_arc,
+                edge_key.clone(),
+                edge_value.clone(),
+                |e, n| *e |= n,
+                |node_value, _edge_value| node_value.live_tokens |= tokens_for_update,
+                |_, _| {}, // Unconditional insertion
+            );
+            inserter.try_destination(destination.clone()).expect("Cycle detected when adding precompute trie edges");
+        }
+
+        destination.write(god).expect("poison").value.live_tokens |= tokens_for_update;
+
+        let mut new_acc = (*local_acc).clone();
+        *new_acc.stored_trie_nodes_mut() = BTreeSet::from([destination]);
+        (Arc::new(new_acc), true)
+    } else {
+        (local_acc.clone(), false)
+    };
+
+    // 2. Recurse into children (for internal nodes) and rebuild the node
+    let result = match node_arc.as_ref() {
+        GSSNode::Root(_) => {
+            if acc_changed {
+                Some(Arc::new(GSSNode::new((*new_acc_arc).clone())))
+            } else {
+                Some(node_arc.clone())
+            }
+        }
+        GSSNode::Internal(internal) => {
+            let mut any_child_changed = false;
+            let mut new_predecessors_map: NodeMap = BTreeMap::new();
+
+            for (edge_val, preds_by_depth) in &internal.predecessors {
+                let mut new_preds_by_depth: BTreeMap<DestKey, Vec<Arc<GSSNode>>> = BTreeMap::new();
+                for (dest_key, pred_vec) in preds_by_depth {
+                    let mut new_vec: Vec<Arc<GSSNode>> = Vec::with_capacity(pred_vec.len());
+                    for pred_arc in pred_vec {
+                        if let Some(new_pred_arc) = deep_add_precompute_trie_edges_recursive(
+                            pred_arc, god, edge_key, edge_value, tokens_for_update, destination_provider, memo
+                        ) {
+                            if !Arc::ptr_eq(&new_pred_arc, pred_arc) {
+                                any_child_changed = true;
+                            }
+                            new_vec.push(new_pred_arc);
+                        } else {
+                            any_child_changed = true; // Child was pruned
+                        }
+                    }
+                    if !new_vec.is_empty() {
+                        new_preds_by_depth.insert(*dest_key, new_vec);
+                    }
+                }
+                if !new_preds_by_depth.is_empty() {
+                    new_predecessors_map.insert(edge_val.clone(), new_preds_by_depth);
+                }
+            }
+
+            if new_predecessors_map.is_empty() {
+                // All children pruned, so this node becomes a root with its (possibly new) acc.
+                Some(Arc::new(GSSNode::new((*new_acc_arc).clone())))
+            } else if !any_child_changed && !acc_changed {
+                Some(node_arc.clone())
+            } else {
+                let transformed_node = GSSNode::new_with_map(new_acc_arc, new_predecessors_map);
+                Some(Arc::new(transformed_node))
+            }
+        }
+    };
+
+    memo.insert(node_ptr, result.clone());
+    result
+}
