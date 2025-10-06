@@ -637,10 +637,10 @@ impl JSONConvertible for GrammarConstraint {
     }
 }
 
-impl GrammarConstraint {
-    type CycleReport0 = (Vec<(PrecomputeNode0Index, Option<Option<(GrammarTokenID, Option<TokenizerStateID>)>>)>, LLMTokenID);
-    type CycleReport1 = (Vec<(PrecomputeNode1Index, Option<Option<GrammarTokenID>>)>, LLMTokenID);
+type CycleReport0 = (Vec<(PrecomputeNode0Index, Option<Option<(GrammarTokenID, Option<TokenizerStateID>)>>)>, LLMTokenID);
+type CycleReport1 = (Vec<(PrecomputeNode1Index, Option<Option<GrammarTokenID>>)>, LLMTokenID);
 
+impl GrammarConstraint {
     pub fn from_compiled_grammar(
         compiled_grammar: CompiledGrammar,
         llm_token_map: LLMTokenMap,
@@ -1025,7 +1025,7 @@ impl GrammarConstraint {
         recursion_stack: &mut HashMap<PrecomputeNode0Index, (LLMTokenBV, usize)>,
         visited: &mut HashMap<PrecomputeNode0Index, LLMTokenBV>,
         path: &mut Vec<(PrecomputeNode0Index, Option<Option<(GrammarTokenID, Option<TokenizerStateID>)>>)>,
-    ) -> Option<Self::CycleReport0> {
+    ) -> Option<CycleReport0> {
         path.push((node_idx, edge_key_opt));
 
         if let Some((tokens_on_stack, path_start_idx)) = recursion_stack.get(&node_idx) {
@@ -1128,7 +1128,7 @@ impl GrammarConstraint {
         recursion_stack: &mut HashMap<PrecomputeNode1Index, (LLMTokenBV, usize)>,
         visited: &mut HashMap<PrecomputeNode1Index, LLMTokenBV>,
         path: &mut Vec<(PrecomputeNode1Index, Option<Option<GrammarTokenID>>)>,
-    ) -> Option<Self::CycleReport1> {
+    ) -> Option<CycleReport1> {
         path.push((node_idx, edge_key_opt));
 
         if let Some((tokens_on_stack, path_start_idx)) = recursion_stack.get(&node_idx) {
