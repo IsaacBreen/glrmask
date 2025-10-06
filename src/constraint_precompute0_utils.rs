@@ -16,7 +16,7 @@ impl<'r> Precomputer0<'r> {
         print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
 
         self.replace_ignore_token_edges_with_none_edges();
-        self.simplify_none_edges(); // This can invalidate max_depth.
+        // self.simplify_none_edges(); // This can invalidate max_depth.
 
         // Recompute all max_depth values after major graph surgery.
         Trie::recompute_all_max_depths(&self.trie0_god, &self.roots.values().cloned().collect::<Vec<_>>());
