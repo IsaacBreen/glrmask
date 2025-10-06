@@ -1512,6 +1512,80 @@ fn test_constraint_expression_cycle() {
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
 }
 
+#[test]
+fn test_precompute_self_loop_panic() {
+    // This test is designed to trigger a panic in Precomputer0::dfs.
+    // The panic occurs when the algorithm tries to add a self-loop to a trie node.
+    // This happens when a node that is currently being processed as a source
+    // also appears in the set of candidate destination nodes for an edge
+    // originating from itself.
+
+    // A tokenizer with two states and looping behavior can create complex sharing
+    // in the precomputation trie.
+    let tokenizer_expr = groups![
+        // Group 0: one or more 'a's
+        repeat1_fast(eat_u8(b'a')),
+        // Group 1: one or more 'b's
+        repeat1_fast(eat_u8(b'b')),
+    ];
+    let tokenizer = tokenizer_expr.build();
+
+    // LLM vocabulary that forces processing of segments that can be extended.
+    // "a" and "b" are simple, "ab" forces a transition.
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"ab".to_vec(), LLMTokenID(2));
+    let max_original_llm_token_id = 2;
+
+    // A simple grammar that uses the tokens.
+    let productions = vec![
+        prod("S", vec![t("A"), t("B")]),
+    ];
+
+    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
+    grammar_token_map.insert(regex_name("A"), TerminalID(0));
+    grammar_token_map.insert(regex_name("B"), TerminalID(1));
+
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+
+    let mut token_name_map = BiBTreeMap::new();
+    token_name_map.insert(regex_name("A"), 0);
+    token_name_map.insert(regex_name("B"), 1);
+
+    // The creation of the GrammarConstraint will run the precomputation.
+    // We expect this to panic if the bug is present.
+    let result = std::panic::catch_unwind(|| {
+        let _ = GrammarConstraint::new(
+            tokenizer,
+            parser,
+            llm_token_map,
+            token_name_map,
+            max_original_llm_token_id,
+        );
+    });
+
+    assert!(result.is_err(), "The precomputation should have panicked due to a self-loop assertion.");
+    
+    let panic_info = match result.err() {
+        Some(e) => {
+            if let Some(s) = e.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = e.downcast_ref::<&'static str>() {
+                s.to_string()
+            } else {
+                format!("{:?}", e)
+            }
+        },
+        None => "".to_string(),
+    };
+
+    assert!(
+        panic_info.contains("assertion `left != right` failed"),
+        "Panic message should indicate an assertion failure on equality. Got: {}", panic_info
+    );
+}
+
 #[ignore]
 #[test]
 fn test_js_full_grammar_gss_explosion() -> Result<(), Box<dyn std::error::Error>> {
