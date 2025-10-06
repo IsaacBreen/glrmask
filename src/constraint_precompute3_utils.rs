@@ -1108,14 +1108,12 @@ fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3
 
     for class_id in 0..num_classes {
         if let Some(rep_idx) = representatives[class_id] {
+            let u_dense = final_partition.iter().position(|&c| c == class_id).unwrap();
+
             let mut aggr: BTreeMap<(usize, LLMTokenBV, usize), StateIDBV> = BTreeMap::new();
-            for (u_dense, &c) in final_partition.iter().enumerate() {
-                if c == class_id {
-                    for (p, bv_key, v_dense, sids) in &raw_edges[u_dense] {
-                        let dest_class = final_partition[*v_dense];
-                        aggr.entry((*p, bv_key.clone(), dest_class)).and_modify(|e| *e |= sids).or_insert_with(|| sids.clone());
-                    }
-                }
+            for (p, bv_key, v_dense, sids) in &raw_edges[u_dense] {
+                let dest_class = final_partition[*v_dense];
+                aggr.entry((*p, bv_key.clone(), dest_class)).and_modify(|e| *e |= sids).or_insert_with(|| sids.clone());
             }
 
             let mut new_children = BTreeMap::new();
@@ -1462,34 +1460,31 @@ pub fn merge_nodes_trie3_ultrafast(
     let it = rep_set.iter();
     for rep_dense in it {
         let rep_idx = old_of[*rep_dense as usize];
-        let class_id = prev_class[*rep_dense as usize];
-
+        let mut w = rep_idx.write(trie3_god).expect("write");
         let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
-        let mut new_live = LLMTokenBV::zeros();
 
-        // Aggregate children and live tokens from all nodes in the class
-        for (u_dense, &c) in prev_class.iter().enumerate() {
-            if c == class_id {
-                let u_idx = old_of[u_dense];
-                // It's safe to read here because we only take write locks later, one by one.
-                let g = u_idx.read(trie3_god).expect("read");
-                new_live |= &g.value.live_tokens;
-                for (ek, dm) in g.children() {
-                    let (pop, llm_bv) = ek;
-                    let dest_map_for_key = new_children.entry((pop.clone(), llm_bv.clone())).or_default();
-                    for (dst, sids) in dm {
-                        let dst_dense = *dense_of.get(dst).unwrap() as usize;
-                        let rep_dst_dense = node_to_rep_dense[dst_dense] as usize;
-                        let rep_dst_idx = old_of[rep_dst_dense];
-                        dest_map_for_key.entry(rep_dst_idx)
-                            .and_modify(|v| *v |= sids)
-                            .or_insert_with(|| sids.clone());
-                    }
-                }
+        // Build new children by remapping destinations to their representatives
+        for (ek, dm) in w.children().clone() {
+            let (pop, llm_bv) = ek;
+            let mut dest_map = OrderedHashMap::new();
+            for (dst, sids) in dm {
+                let dst_dense = *dense_of.get(&dst).expect("dense of dst") as usize;
+                let rep_dst_dense = node_to_rep_dense[dst_dense] as usize;
+                let rep_dst_idx = old_of[rep_dst_dense];
+                dest_map.entry(rep_dst_idx)
+                    .and_modify(|v| *v |= &sids)
+                    .or_insert(sids);
+            }
+            if !dest_map.is_empty() {
+                new_children.insert((pop, llm_bv), dest_map);
             }
         }
 
-        let mut w = rep_idx.write(trie3_god).expect("write");
+        // Recompute live tokens as union of outgoing LLM masks
+        let mut new_live = LLMTokenBV::zeros();
+        for ((_, llm_bv), _) in &new_children {
+            new_live |= llm_bv;
+        }
         *w.children_mut() = new_children;
         w.value.live_tokens = new_live;
     }
