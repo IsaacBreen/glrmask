@@ -410,7 +410,7 @@ pub fn optimize_trie1_size(
     // }
     // constrain_bitvecs_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>(), internal_max_llm_token);
     // prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
-    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+    // prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
     // prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
 
     // === Pass 2: Minimization and further cleanup ===
@@ -420,22 +420,22 @@ pub fn optimize_trie1_size(
     // if !config.optimize_trie1_early_flatten_epsilon {
     //     flatten_all_none_edges_trie1(precomputed1, trie1_god);
     // }
-    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+    // prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
     // prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
 
     // === Pass 3: Token-level optimizations ===
-    if config.optimize_trie1_merge_equivalent_llm_tokens {
-        merge_equivalent_llm_tokens_trie1(precomputed1, trie1_god, stage_vocab);
-    }
-    if config.optimize_trie1_reorder_llm_tokens {
-        reorder_llm_tokens_for_range_minimization_trie1(precomputed1, trie1_god, stage_vocab);
-    }
+    // if config.optimize_trie1_merge_equivalent_llm_tokens {
+    //     merge_equivalent_llm_tokens_trie1(precomputed1, trie1_god, stage_vocab);
+    // }
+    // if config.optimize_trie1_reorder_llm_tokens {
+    //     reorder_llm_tokens_for_range_minimization_trie1(precomputed1, trie1_god, stage_vocab);
+    // }
 
     // === Pass 4: Final Minimization and GC ===
     // if config.optimize_trie1_minimize_by_signature {
     //     merge_nodes_trie1(precomputed1, trie1_god);
     // }
-    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+    // prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
     // prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
     Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
     Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
