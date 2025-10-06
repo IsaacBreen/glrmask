@@ -2008,7 +2008,8 @@ impl<'r> Precomputer0<'r> {
                             edge_bv &= src_contextual_tokens;
                             // edge_bv &= src_node_wrapper.as_arc().read(&self.trie0_god).unwrap().value.live_tokens.clone();
 
-                            if edge_bv.is_empty() { continue; }
+                            let edge_bv_for_inserter = &edge_bv & src_contextual_tokens;
+                            if edge_bv_for_inserter.is_empty() { continue; }
 
                             // NOTE: It is likely wrong to just use disallowed_tokenizer_state_info as-is here.
                             //  The actual disallowed state can vary by LLM token. But we don't capture that here.
