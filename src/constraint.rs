@@ -638,6 +638,9 @@ impl JSONConvertible for GrammarConstraint {
 }
 
 impl GrammarConstraint {
+    type CycleReport0 = (Vec<(PrecomputeNode0Index, Option<Option<(GrammarTokenID, Option<TokenizerStateID>)>>)>, LLMTokenID);
+    type CycleReport1 = (Vec<(PrecomputeNode1Index, Option<Option<GrammarTokenID>>)>, LLMTokenID);
+
     pub fn from_compiled_grammar(
         compiled_grammar: CompiledGrammar,
         llm_token_map: LLMTokenMap,
@@ -971,12 +974,8 @@ impl GrammarConstraint {
         helper.run_dfs();
         // helper.optimize();
         let (precomputed0, trie0_god) = helper.finish();
-
-        // Check for LLM-compatible cycles.
         let roots: Vec<_> = precomputed0.values().cloned().collect();
-        if Self::has_llm_compatible_cycle0(&trie0_god, &roots, internal_max_llm_token) {
-            panic!("LLM-compatible cycle detected in precompute0 trie. This can lead to infinite loops during mask generation.");
-        }
+        Self::has_llm_compatible_cycle0(&trie0_god, &roots, internal_max_llm_token);
 
         (precomputed0, trie0_god)
     }
@@ -985,168 +984,206 @@ impl GrammarConstraint {
         arena: &Trie0GodWrapper,
         roots: &[PrecomputeNode0Index],
         internal_max_llm_token: usize,
-    ) -> bool {
+    ) {
         let mut visited: HashMap<PrecomputeNode0Index, LLMTokenBV> = HashMap::new();
         let initial_tokens = LLMTokenBV::ones(internal_max_llm_token + 1);
 
         for &root in roots {
-            if Self::detect_cycle_recursive0(
+            if let Some((cycle_path, llm_token_id)) = Self::detect_cycle_recursive0(
                 root,
+                None,
                 initial_tokens.clone(),
                 arena,
-                &mut HashMap::new(), // recursion_stack
+                &mut HashMap::new(),
                 &mut visited,
+                &mut Vec::new(),
             ) {
-                return true;
+                let mut report = format!(
+                    "LLM-compatible cycle detected in precompute0 trie for internal LLM token ID {}.\nCycle path:\n",
+                    llm_token_id.0
+                );
+                for i in 0..cycle_path.len() {
+                    let (node_idx, _) = cycle_path[i];
+                    let next_i = (i + 1) % cycle_path.len();
+                    let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
+                    let edge_str = edge_to_next_opt.as_ref().map_or_else(
+                        || " (root edge)".to_string(),
+                        |ek| format!("{:?}", ek),
+                    );
+                    report.push_str(&format!("  {} --[{}]--> {}\n", node_idx, edge_str, next_node_idx));
+                }
+                panic!("{}", report);
             }
         }
-        false
     }
 
     fn detect_cycle_recursive0(
         node_idx: PrecomputeNode0Index,
+        edge_key_opt: Option<Option<(GrammarTokenID, Option<TokenizerStateID>)>>,
         current_tokens: LLMTokenBV,
         arena: &Trie0GodWrapper,
-        recursion_stack: &mut HashMap<PrecomputeNode0Index, LLMTokenBV>,
+        recursion_stack: &mut HashMap<PrecomputeNode0Index, (LLMTokenBV, usize)>,
         visited: &mut HashMap<PrecomputeNode0Index, LLMTokenBV>,
-    ) -> bool {
-        // Check for cycle: if we're re-visiting a node on the current path with compatible tokens.
-        if let Some(tokens_on_stack) = recursion_stack.get(&node_idx) {
-            if !(&current_tokens & tokens_on_stack).is_empty() {
-                return true; // Cycle detected
+        path: &mut Vec<(PrecomputeNode0Index, Option<Option<(GrammarTokenID, Option<TokenizerStateID>)>>)>,
+    ) -> Option<Self::CycleReport0> {
+        path.push((node_idx, edge_key_opt));
+
+        if let Some((tokens_on_stack, path_start_idx)) = recursion_stack.get(&node_idx) {
+            let intersection = &current_tokens & tokens_on_stack;
+            if !intersection.is_empty() {
+                let cycle_llm_token = intersection.iter().next().unwrap();
+                let cycle_path = path[*path_start_idx..].to_vec();
+                path.pop();
+                return Some((cycle_path, LLMTokenID(cycle_llm_token)));
             }
         }
 
-        // Pruning based on globally visited nodes.
         let new_tokens_to_process = match visited.entry(node_idx) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let previously_visited_tokens = entry.get_mut();
                 let new_unseen_tokens = &current_tokens - &*previously_visited_tokens;
                 if new_unseen_tokens.is_empty() {
-                    return false; // Already explored from this node with a superset of tokens.
+                    path.pop();
+                    return None;
                 }
-                // Record that we've now seen the current tokens at this node.
                 *previously_visited_tokens |= &current_tokens;
                 new_unseen_tokens
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(current_tokens.clone());
-                current_tokens.clone() // All current tokens are new for this node.
+                current_tokens.clone()
             }
         };
 
-        // Add to recursion stack for this path.
-        recursion_stack.insert(node_idx, current_tokens);
+        recursion_stack.insert(node_idx, (current_tokens, path.len() - 1));
 
         let children_to_visit = if let Some(guard) = node_idx.read(arena) {
             guard.children().clone()
         } else {
-            // Should not happen in a well-formed trie. Restore stack and return.
             recursion_stack.remove(&node_idx);
-            return false;
+            path.pop();
+            return None;
         };
 
-        for (_edge_key, dest_map) in children_to_visit.iter() {
+        for (edge_key, dest_map) in children_to_visit.iter() {
             for (child_idx, edge_tokens) in dest_map.iter() {
                 let next_tokens = &new_tokens_to_process & edge_tokens;
                 if !next_tokens.is_empty() {
-                    if Self::detect_cycle_recursive0(*child_idx, next_tokens, arena, recursion_stack, visited) {
-                        // Cycle found, restore stack and propagate true.
-                        recursion_stack.remove(&node_idx);
-                        return true;
+                    if let Some(report) = Self::detect_cycle_recursive0(
+                        *child_idx, Some(edge_key.clone()), next_tokens, arena, recursion_stack, visited, path,
+                    ) {
+                        return Some(report);
                     }
                 }
             }
         }
 
-        // Backtrack: restore recursion stack.
         recursion_stack.remove(&node_idx);
-
-        false
+        path.pop();
+        None
     }
 
     fn has_llm_compatible_cycle(
         arena: &Trie1GodWrapper,
         roots: &[PrecomputeNode1Index],
         internal_max_llm_token: usize,
-    ) -> bool {
+    ) {
         let mut visited: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
         let initial_tokens = LLMTokenBV::ones(internal_max_llm_token + 1);
 
         for &root in roots {
-            if Self::detect_cycle_recursive(
+            if let Some((cycle_path, llm_token_id)) = Self::detect_cycle_recursive(
                 root,
+                None,
                 initial_tokens.clone(),
                 arena,
-                &mut HashMap::new(), // recursion_stack
+                &mut HashMap::new(),
                 &mut visited,
+                &mut Vec::new(),
             ) {
-                return true;
+                let mut report = format!(
+                    "LLM-compatible cycle detected in precompute1 trie for internal LLM token ID {}.\nCycle path:\n",
+                    llm_token_id.0
+                );
+                for i in 0..cycle_path.len() {
+                    let (node_idx, _) = cycle_path[i];
+                    let next_i = (i + 1) % cycle_path.len();
+                    let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
+                    let edge_str = edge_to_next_opt.as_ref().map_or_else(
+                        || " (root edge)".to_string(),
+                        |ek| format!("{:?}", ek),
+                    );
+                    report.push_str(&format!("  {} --[{}]--> {}\n", node_idx, edge_str, next_node_idx));
+                }
+                panic!("{}", report);
             }
         }
-        false
     }
 
     fn detect_cycle_recursive(
         node_idx: PrecomputeNode1Index,
+        edge_key_opt: Option<Option<GrammarTokenID>>,
         current_tokens: LLMTokenBV,
         arena: &Trie1GodWrapper,
-        recursion_stack: &mut HashMap<PrecomputeNode1Index, LLMTokenBV>,
+        recursion_stack: &mut HashMap<PrecomputeNode1Index, (LLMTokenBV, usize)>,
         visited: &mut HashMap<PrecomputeNode1Index, LLMTokenBV>,
-    ) -> bool {
-        // Check for cycle: if we're re-visiting a node on the current path with compatible tokens.
-        if let Some(tokens_on_stack) = recursion_stack.get(&node_idx) {
-            if !(&current_tokens & tokens_on_stack).is_empty() {
-                return true; // Cycle detected
+        path: &mut Vec<(PrecomputeNode1Index, Option<Option<GrammarTokenID>>)>,
+    ) -> Option<Self::CycleReport1> {
+        path.push((node_idx, edge_key_opt));
+
+        if let Some((tokens_on_stack, path_start_idx)) = recursion_stack.get(&node_idx) {
+            let intersection = &current_tokens & tokens_on_stack;
+            if !intersection.is_empty() {
+                let cycle_llm_token = intersection.iter().next().unwrap();
+                let cycle_path = path[*path_start_idx..].to_vec();
+                path.pop();
+                return Some((cycle_path, LLMTokenID(cycle_llm_token)));
             }
         }
 
-        // Pruning based on globally visited nodes.
         let new_tokens_to_process = match visited.entry(node_idx) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let previously_visited_tokens = entry.get_mut();
                 let new_unseen_tokens = &current_tokens - &*previously_visited_tokens;
                 if new_unseen_tokens.is_empty() {
-                    return false; // Already explored from this node with a superset of tokens.
+                    path.pop();
+                    return None;
                 }
-                // Record that we've now seen the current tokens at this node.
                 *previously_visited_tokens |= &current_tokens;
                 new_unseen_tokens
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(current_tokens.clone());
-                current_tokens.clone() // All current tokens are new for this node.
+                current_tokens.clone()
             }
         };
 
-        // Add to recursion stack for this path.
-        recursion_stack.insert(node_idx, current_tokens);
+        recursion_stack.insert(node_idx, (current_tokens, path.len() - 1));
 
         let children_to_visit = if let Some(guard) = node_idx.read(arena) {
             guard.children().clone()
         } else {
-            // Should not happen in a well-formed trie. Restore stack and return.
             recursion_stack.remove(&node_idx);
-            return false;
+            path.pop();
+            return None;
         };
 
-        for (_edge_key, dest_map) in children_to_visit.iter() {
+        for (edge_key, dest_map) in children_to_visit.iter() {
             for (child_idx, edge_tokens) in dest_map.iter() {
                 let next_tokens = &new_tokens_to_process & edge_tokens;
                 if !next_tokens.is_empty() {
-                    if Self::detect_cycle_recursive(*child_idx, next_tokens, arena, recursion_stack, visited) {
-                        // Cycle found, restore stack and propagate true.
-                        recursion_stack.remove(&node_idx);
-                        return true;
+                    if let Some(report) = Self::detect_cycle_recursive(
+                        *child_idx, Some(edge_key.clone()), next_tokens, arena, recursion_stack, visited, path,
+                    ) {
+                        return Some(report);
                     }
                 }
             }
         }
 
-        // Backtrack: restore recursion stack.
         recursion_stack.remove(&node_idx);
-
-        false
+        path.pop();
+        None
     }
 
     pub fn precompute1(
@@ -1243,10 +1280,7 @@ impl GrammarConstraint {
 
         // Check for LLM-compatible cycles.
         let roots: Vec<_> = precomputed1.values().cloned().collect();
-        if Self::has_llm_compatible_cycle(&trie1_god, &roots, internal_max_llm_token) {
-            // This is a hard error for now. In the future we might want to handle it.
-            panic!("LLM-compatible cycle detected in precompute1 trie. This can lead to infinite loops during mask generation.");
-        }
+        Self::has_llm_compatible_cycle(&trie1_god, &roots, internal_max_llm_token);
 
         // Optimizations, similar to precompute0
         let ignore_terminal_id = parser.and_then(|p| p.ignore_terminal_id);
