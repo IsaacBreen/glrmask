@@ -971,7 +971,7 @@ impl GrammarConstraint {
         );
 
         helper.run_dfs();
-        // helper.optimize();
+        helper.optimize();
         let (precomputed0, trie0_god) = helper.finish();
         let roots: Vec<_> = precomputed0.values().cloned().collect();
         Self::has_llm_compatible_cycle0(&trie0_god, &roots, internal_max_llm_token);

@@ -400,8 +400,8 @@ pub fn optimize_trie1_size(
     crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, trie1_god);
 
     // === Pass 1: Initial Simplification and Pruning ===
-    // simplify_none_edges_to_former_end_nodes_trie1(precomputed1, trie1_god, trie0_god, node0_to_node1_map);
-    // replace_ignore_token_edges_with_none_edges_trie1(precomputed1, trie1_god, ignore_terminal_id);
+    simplify_none_edges_to_former_end_nodes_trie1(precomputed1, trie1_god, trie0_god, node0_to_node1_map);
+    replace_ignore_token_edges_with_none_edges_trie1(precomputed1, trie1_god, ignore_terminal_id);
     // if config.optimize_trie1_early_flatten_epsilon {
     //     flatten_all_none_edges_trie1(precomputed1, trie1_god);
     // } else {
