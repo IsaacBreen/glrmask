@@ -172,7 +172,8 @@ impl<'r> Precomputer0<'r> {
     }
 
     fn get_end_node(&self, final_sid: TokenizerStateID) -> PrecomputeNode0Index {
-        self.end_nodes[&final_sid].clone()
+        // self.end_nodes[&final_sid].clone()
+        self.end_nodes[&TokenizerStateID(0)].clone() // Temporary hack: use state 0 for all final states
     }
 
     fn possible_matches(&self, vocab_node: &VocabPrefixTreeNode, tokenizer_state_id: TokenizerStateID) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
@@ -889,23 +890,23 @@ impl<'r> Precomputer0<'r> {
                     }
 
                     if let Some(end_state_val) = exec_result.end_state {
-                        for src_node_wrapper in &precompute_nodes {
-                            let llm_token_id = child_vocab_node.token_id();
-                            let mut edge_bv = HybridBitset::zeros();
-                            edge_bv.insert(llm_token_id);
-                            let edge_key = None;
-                            let mut inserter = EdgeInserter::new(
-                                &self.trie0_god,
-                                src_node_wrapper.as_arc().clone(),
-                                edge_key,
-                                edge_bv,
-                                |e, n| *e |= n,
-                                |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                |ev, t| *ev &= &t.live_tokens,
-                            );
-                            let end_idx = self.get_end_node(TokenizerStateID(end_state_val));
-                            inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
-                        }
+                    //     for src_node_wrapper in &precompute_nodes {
+                    //         let llm_token_id = child_vocab_node.token_id();
+                    //         let mut edge_bv = HybridBitset::zeros();
+                    //         edge_bv.insert(llm_token_id);
+                    //         let edge_key = None;
+                    //         let mut inserter = EdgeInserter::new(
+                    //             &self.trie0_god,
+                    //             src_node_wrapper.as_arc().clone(),
+                    //             edge_key,
+                    //             edge_bv,
+                    //             |e, n| *e |= n,
+                    //             |node_value, edge_value| node_value.live_tokens |= edge_value,
+                    //             |ev, t| *ev &= &t.live_tokens,
+                    //         );
+                    //         let end_idx = self.get_end_node(TokenizerStateID(end_state_val));
+                    //         inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                    //     }
                         next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
                     }
                 }
