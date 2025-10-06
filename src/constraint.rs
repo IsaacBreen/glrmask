@@ -1933,10 +1933,10 @@ impl<'r> Precomputer0<'r> {
                 BTreeMap<TokenizerStateID, OrderedHashMap<PrecomputeNode0Index, LLMTokenBV>>,
             > = BTreeMap::new();
             let work_queue_value = assoc_by_state.iter().map(|(sid, nodes)| {
-                let mut ohm: OrderedHashMap<PrecomputeNode0Index, LLMTokenBV> = OrderedHashMap::new();
-                for n in nodes {
-                    ohm.insert(n.clone(), LLMTokenBV::zeros());
-                }
+                let ohm: OrderedHashMap<PrecomputeNode0Index, LLMTokenBV> = nodes
+                    .iter()
+                    .map(|n| (n.clone(), LLMTokenBV::zeros()))
+                    .collect();
                 (*sid, ohm)
             }).collect();
             work_queue.insert(0, work_queue_value);
