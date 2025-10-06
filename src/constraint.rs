@@ -2018,7 +2018,7 @@ impl<'r> Precomputer0<'r> {
                                 &self.trie0_god,
                                 src_node_wrapper.as_arc().clone(),
                                 edge_key,
-                                edge_bv.clone(),
+                                edge_bv_for_inserter.clone(),
                                 |e, n| *e |= n,
                                 |node_value, edge_value| node_value.live_tokens |= edge_value,
                                 |ev, t| *ev &= &t.live_tokens,
@@ -2031,7 +2031,7 @@ impl<'r> Precomputer0<'r> {
                                 if dest_node.read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_some() {
                                     return None;
                                 }
-                                let risky_tokens = &edge_bv - dest_contextual_tokens;
+                                let risky_tokens = &edge_bv_for_inserter - dest_contextual_tokens;
                                 if risky_tokens.is_empty() {
                                     return Some(dest_node.clone());
                                 }
@@ -2051,14 +2051,14 @@ impl<'r> Precomputer0<'r> {
                                     if guard.value.final_tokenizer_state.is_some() {
                                         return false;
                                     }
-                                    (&guard.value.live_tokens & &edge_bv).is_empty()
+                                    (&guard.value.live_tokens & &edge_bv_for_inserter).is_empty()
                                 }).cloned();
                                 inserter = inserter.try_destinations_iter(eligible_children);
                             }
 
                             let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents0::internal()).unwrap();
                             assert_ne!(&result_node, src_node_wrapper);
-                            dest_nodes_in_queue.entry(result_node.clone()).or_insert_with(LLMTokenBV::zeros).bitor_assign(&edge_bv);
+                            dest_nodes_in_queue.entry(result_node.clone()).or_insert_with(LLMTokenBV::zeros).bitor_assign(&edge_bv_for_inserter);
                         }
                     }
 
@@ -2067,7 +2067,6 @@ impl<'r> Precomputer0<'r> {
                             let llm_token_id = child_vocab_node.token_id();
                             let mut edge_bv = HybridBitset::zeros();
                             edge_bv.insert(llm_token_id);
-                            edge_bv &= src_contextual_tokens;
                             let edge_key = None;
                             let mut inserter = EdgeInserter::new(
                                 &self.trie0_god,
