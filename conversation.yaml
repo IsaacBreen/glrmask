@@ -527,6 +527,58 @@ local_system:
                   false
               }
           }
+
+          /// Detects if there are any cycles in the graph reachable from the given roots.
+          /// This uses a depth-first search approach.
+          pub fn has_cycle(
+              arena: &Arena<Trie<EK, EV, T>>,
+              roots: impl IntoIterator<Item = Trie2Index>,
+          ) -> bool {
+              let mut visiting = HashSet::new(); // Gray set: nodes currently in the recursion stack.
+              let mut visited = HashSet::new();  // Black set: nodes that have been fully explored.
+
+              for root in roots {
+                  if !visited.contains(&root.as_usize()) {
+                      if Self::detect_cycle_recursive(root, arena, &mut visiting, &mut visited) {
+                          return true;
+                      }
+                  }
+              }
+              false
+          }
+
+          /// Recursive helper for cycle detection.
+          fn detect_cycle_recursive(
+              node_idx: Trie2Index,
+              arena: &Arena<Trie<EK, EV, T>>,
+              visiting: &mut HashSet<usize>,
+              visited: &mut HashSet<usize>,
+          ) -> bool {
+              let u = node_idx.as_usize();
+              visiting.insert(u);
+
+              let children_indices: Vec<Trie2Index> = if let Some(guard) = node_idx.read(arena) {
+                  guard.children.values().flat_map(|m| m.keys().cloned()).collect()
+              } else {
+                  Vec::new()
+              };
+
+              for child_idx in children_indices {
+                  let v = child_idx.as_usize();
+                  if visiting.contains(&v) {
+                      return true; // Cycle detected: found a back edge to a node in the current recursion stack.
+                  }
+                  if !visited.contains(&v) {
+                      if Self::detect_cycle_recursive(child_idx, arena, visiting, visited) {
+                          return true;
+                      }
+                  }
+              }
+
+              visiting.remove(&u);
+              visited.insert(u);
+              false
+          }
       }
 
       // Add this impl block for the recursive comparison helper (index-based)
@@ -2832,6 +2884,7 @@ local_system:
               }
 
               let mut update_info: Option<(Trie2Index, EV)> = None;
+              let mut is_new_edge = false;
 
               { // Scope for source_guard
                   let mut source_guard = self.source_idx
@@ -2855,7 +2908,15 @@ local_system:
                       source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination);
                       self.result = Some(destination);
                       update_info = Some((destination, edge_val_clone));
+                      is_new_edge = true;
                   }
+              }
+
+              if is_new_edge {
+                  debug_assert!(
+                      !Trie::has_cycle(self.arena, std::iter::once(self.source_idx)),
+                      "Cycle detected after edge insertion!"
+                  );
               }
 
               if let Some((dest_idx, ev)) = update_info {
@@ -2950,6 +3011,11 @@ local_system:
                   source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_idx);
                   self.result = Some(new_node_idx);
               }
+
+              debug_assert!(
+                  !Trie::has_cycle(self.arena, std::iter::once(self.source_idx)),
+                  "Cycle detected after inserting edge to new node (should be impossible)!"
+              );
 
               if let Some(dest_idx) = self.result {
                   let mut dest_w = dest_idx.write(self.arena).expect("Arena write");
@@ -3977,6 +4043,58 @@ messages:
               } else {
                   false
               }
+          }
+
+          /// Detects if there are any cycles in the graph reachable from the given roots.
+          /// This uses a depth-first search approach.
+          pub fn has_cycle(
+              arena: &Arena<Trie<EK, EV, T>>,
+              roots: impl IntoIterator<Item = Trie2Index>,
+          ) -> bool {
+              let mut visiting = HashSet::new(); // Gray set: nodes currently in the recursion stack.
+              let mut visited = HashSet::new();  // Black set: nodes that have been fully explored.
+
+              for root in roots {
+                  if !visited.contains(&root.as_usize()) {
+                      if Self::detect_cycle_recursive(root, arena, &mut visiting, &mut visited) {
+                          return true;
+                      }
+                  }
+              }
+              false
+          }
+
+          /// Recursive helper for cycle detection.
+          fn detect_cycle_recursive(
+              node_idx: Trie2Index,
+              arena: &Arena<Trie<EK, EV, T>>,
+              visiting: &mut HashSet<usize>,
+              visited: &mut HashSet<usize>,
+          ) -> bool {
+              let u = node_idx.as_usize();
+              visiting.insert(u);
+
+              let children_indices: Vec<Trie2Index> = if let Some(guard) = node_idx.read(arena) {
+                  guard.children.values().flat_map(|m| m.keys().cloned()).collect()
+              } else {
+                  Vec::new()
+              };
+
+              for child_idx in children_indices {
+                  let v = child_idx.as_usize();
+                  if visiting.contains(&v) {
+                      return true; // Cycle detected: found a back edge to a node in the current recursion stack.
+                  }
+                  if !visited.contains(&v) {
+                      if Self::detect_cycle_recursive(child_idx, arena, visiting, visited) {
+                          return true;
+                      }
+                  }
+              }
+
+              visiting.remove(&u);
+              visited.insert(u);
+              false
           }
       }
 
@@ -5136,8 +5254,7 @@ messages:
       ```
     metadata:
       filename: src/datastructures/trie.rs
-  - user: Add a simple function to trie.rs that detects cycles. It should take an
-      iterable of root nodes.
+  - user: After every edge insertion, assert there are no cycles.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -5156,140 +5273,73 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add a cycle detection function to `trie.rs`, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to add cycle detection assertions after every edge insertion, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/datastructures/trie.rs`**.
+      I will modify the `EdgeInserter` methods in `src/datastructures/trie.rs` to perform a cycle check using `debug_assert!` after a new edge is created. This ensures that in debug builds, the program will panic if an insertion creates a cycle.
 
-      2.  **Navigate to the `impl<EK: Ord + Clone, EV, T> Trie<EK, EV, T>` block.**
-          Inside this block, locate the end of the `recompute_max_depth` function, which is around line 518.
+      #### File: `src/datastructures/trie.rs`
 
-      3.  **Insert the new code.**
-          Add the following two functions, `has_cycle` and its helper `detect_cycle_recursive`, immediately after the `recompute_max_depth` function.
+      1.  **Modify `EdgeInserter::try_destination`:**
+          *   At the beginning of the function, I'll introduce a boolean flag `is_new_edge` to track if a new edge is actually inserted (as opposed to just merging with an existing one).
+          *   This flag will be set to `true` only when `source_guard.try_insert(...)` is called.
+          *   After the write lock on the source node is released, I will add a `debug_assert!` that calls `Trie::has_cycle` if `is_new_edge` is true.
 
-          ```rust
-              /// Detects if there are any cycles in the graph reachable from the given roots.
-              /// This uses a depth-first search approach.
-              pub fn has_cycle(
-                  arena: &Arena<Trie<EK, EV, T>>,
-                  roots: impl IntoIterator<Item = Trie2Index>,
-              ) -> bool {
-                  let mut visiting = HashSet::new(); // Gray set: nodes currently in the recursion stack.
-                  let mut visited = HashSet::new();  // Black set: nodes that have been fully explored.
-          
-                  for root in roots {
-                      if !visited.contains(&root.as_usize()) {
-                          if Self::detect_cycle_recursive(root, arena, &mut visiting, &mut visited) {
-                              return true;
-                          }
-                      }
-                  }
-                  false
-              }
-          
-              /// Recursive helper for cycle detection.
-              fn detect_cycle_recursive(
-                  node_idx: Trie2Index,
-                  arena: &Arena<Trie<EK, EV, T>>,
-                  visiting: &mut HashSet<usize>,
-                  visited: &mut HashSet<usize>,
-              ) -> bool {
-                  let u = node_idx.as_usize();
-                  visiting.insert(u);
-          
-                  let children_indices: Vec<Trie2Index> = if let Some(guard) = node_idx.read(arena) {
-                      guard.children.values().flat_map(|m| m.keys().cloned()).collect()
-                  } else {
-                      Vec::new()
-                  };
-          
-                  for child_idx in children_indices {
-                      let v = child_idx.as_usize();
-                      if visiting.contains(&v) {
-                          return true; // Cycle detected: found a back edge to a node in the current recursion stack.
-                      }
-                      if !visited.contains(&v) {
-                          if Self::detect_cycle_recursive(child_idx, arena, visiting, visited) {
-                              return true;
-                          }
-                      }
-                  }
-          
-                  visiting.remove(&u);
-                  visited.insert(u);
-                  false
-              }
-          ```
+      2.  **Modify `EdgeInserter::else_create_destination_with_value`:**
+          *   This method always creates a new edge.
+          *   After the write lock on the source node is released, I will add a `debug_assert!` that calls `Trie::has_cycle`. Since the edge points to a newly created node with no children, this assertion should never fail, but it fulfills the requirement to check after every insertion.
 
       ### Git Diff
 
-      Here is the git diff for the changes:
+      Here is the git diff to apply these changes:
 
       ```diff
       diff --git a/src/datastructures/trie.rs b/src/datastructures/trie.rs
-      index 371714b..0459341 100644
+      index 0e35967..85078d1 100644
       --- a/src/datastructures/trie.rs
       +++ b/src/datastructures/trie.rs
-      @@ -518,6 +518,52 @@
-                   false
+      @@ -1016,7 +1016,8 @@
+                   return self; // Already found a destination
                }
-           }
-      +
-      +    /// Detects if there are any cycles in the graph reachable from the given roots.
-      +    /// This uses a depth-first search approach.
-      +    pub fn has_cycle(
-      +        arena: &Arena<Trie<EK, EV, T>>,
-      +        roots: impl IntoIterator<Item = Trie2Index>,
-      +    ) -> bool {
-      +        let mut visiting = HashSet::new(); // Gray set: nodes currently in the recursion stack.
-      +        let mut visited = HashSet::new();  // Black set: nodes that have been fully explored.
-      +
-      +        for root in roots {
-      +            if !visited.contains(&root.as_usize()) {
-      +                if Self::detect_cycle_recursive(root, arena, &mut visiting, &mut visited) {
-      +                    return true;
-      +                }
-      +            }
-      +        }
-      +        false
-      +    }
-      +
-      +    /// Recursive helper for cycle detection.
-      +    fn detect_cycle_recursive(
-      +        node_idx: Trie2Index,
-      +        arena: &Arena<Trie<EK, EV, T>>,
-      +        visiting: &mut HashSet<usize>,
-      +        visited: &mut HashSet<usize>,
-      +    ) -> bool {
-      +        let u = node_idx.as_usize();
-      +        visiting.insert(u);
-      +
-      +        let children_indices: Vec<Trie2Index> = if let Some(guard) = node_idx.read(arena) {
-      +            guard.children.values().flat_map(|m| m.keys().cloned()).collect()
-      +        } else {
-      +            Vec::new()
-      +        };
-      +
-      +        for child_idx in children_indices {
-      +            let v = child_idx.as_usize();
-      +            if visiting.contains(&v) {
-      +                return true; // Cycle detected: found a back edge to a node in the current recursion stack.
-      +            }
-      +            if !visited.contains(&v) {
-      +                if Self::detect_cycle_recursive(child_idx, arena, visiting, visited) {
-      +                    return true;
-      +                }
-      +            }
-      +        }
-      +
-      +        visiting.remove(&u);
-      +        visited.insert(u);
-      +        false
-      +    }
-       }
        
-       // Add this impl block for the recursive comparison helper (index-based)
+      -        let mut update_info: Option<(Trie2Index, EV)> = None;
+      +        let mut update_info: Option<(Trie2Index, EV)> = None;
+      +        let mut is_new_edge = false;
+       
+               { // Scope for source_guard
+                   let mut source_guard = self.source_idx
+      @@ -1036,10 +1037,19 @@
+                       crate::debug!(7, "Inserting edge {:?} with value {:?} to node {}", self.edge_key, edge_val_clone, destination.as_usize());
+                       source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination);
+                       self.result = Some(destination);
+                       update_info = Some((destination, edge_val_clone));
+      +                is_new_edge = true;
+                   }
+               }
+       
+      +        if is_new_edge {
+      +            debug_assert!(
+      +                !Trie::has_cycle(self.arena, std::iter::once(self.source_idx)),
+      +                "Cycle detected after edge insertion!"
+      +            );
+      +        }
+      +
+               if let Some((dest_idx, ev)) = update_info {
+                   crate::debug!(7, "Updating node value for destination {} with edge value {:?}. self.edge_value: {:?}", dest_idx.as_usize(), ev, self.edge_value);
+                   let mut dest_w = dest_idx.write(self.arena).expect("Arena write");
+      @@ -1112,6 +1122,11 @@
+                   self.result = Some(new_node_idx);
+               }
+       
+      +        debug_assert!(
+      +            !Trie::has_cycle(self.arena, std::iter::once(self.source_idx)),
+      +            "Cycle detected after inserting edge to new node (should be impossible)!"
+      +        );
+      +
+               if let Some(dest_idx) = self.result {
+                   let mut dest_w = dest_idx.write(self.arena).expect("Arena write");
+                   (self.update_node_value)(&mut dest_w.value, &edge_val_clone);
 
       ```
     metadata:
@@ -5302,7 +5352,7 @@ messages:
       Applying patch to 'src/datastructures/trie.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/trie.rs.
     metadata:
-  - user: 'Changes committed with message: "feat(trie): Add cycle detection utility
-      functions"'
+  - user: 'Changes committed with message: "Trie: Add debug assertions to check for
+      cycles after every edge insertion"'
     metadata:
 ...

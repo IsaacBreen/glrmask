@@ -1146,6 +1146,7 @@ where
         }
 
         let mut update_info: Option<(Trie2Index, EV)> = None;
+        let mut is_new_edge = false;
 
         { // Scope for source_guard
             let mut source_guard = self.source_idx
@@ -1169,7 +1170,15 @@ where
                 source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, destination);
                 self.result = Some(destination);
                 update_info = Some((destination, edge_val_clone));
+                is_new_edge = true;
             }
+        }
+
+        if is_new_edge {
+            debug_assert!(
+                !Trie::has_cycle(self.arena, std::iter::once(self.source_idx)),
+                "Cycle detected after edge insertion!"
+            );
         }
 
         if let Some((dest_idx, ev)) = update_info {
@@ -1264,6 +1273,11 @@ where
             source_guard.try_insert(self.edge_key.clone(), &mut self.edge_value, new_node_idx);
             self.result = Some(new_node_idx);
         }
+
+        debug_assert!(
+            !Trie::has_cycle(self.arena, std::iter::once(self.source_idx)),
+            "Cycle detected after inserting edge to new node (should be impossible)!"
+        );
 
         if let Some(dest_idx) = self.result {
             let mut dest_w = dest_idx.write(self.arena).expect("Arena write");
