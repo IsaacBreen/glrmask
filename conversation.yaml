@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - python/aug25/models/precompute3_model_pure_python_opt3.py
-    - python/aug25/models/brute_force_model.py
+    - python/aug25/models/bruteforce_model.py
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -1127,7 +1127,7 @@ local_system:
               """Called at the end of a benchmark run to perform any final actions, like printing stats."""
               print("\n--- Final Stats Report from Model ---")
               Stats.get().report()
-    python/aug25/models/brute_force_model.py: |
+    python/aug25/models/bruteforce_model.py: |
       from __future__ import annotations
 
       import collections
@@ -1143,9 +1143,11 @@ local_system:
       from ..stats import Stats
       from ..range_set import FFIRangeSet as RangeSet
       from ..range_set import SetRangeSet as RangeSetOut
+      from ..range_set import SetRangeSet as RangeSetStates
 
       # Type Aliases
       LLMTokenSet = RangeSet
+      StateIDSet = RangeSetStates
       TerminalIdSet = RangeSet
 
       def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
@@ -1188,6 +1190,7 @@ local_system:
           transitions: Dict[int, int]
           finalizers: Set[int]
           possible_future_group_ids: Set[int]
+
 
       @dataclass(frozen=True)
       class PyTokenizer:
@@ -1277,11 +1280,7 @@ local_system:
               )
 
       @dataclass
-      class Model(GraphProvider):
-          stats = Stats.get()
-          stats.add_group('get_mask')
-          stats.add_group('commit')
-
+      class BruteForceModel(GraphProvider):
           parser_table: ParserTable
           tokenizer: PyTokenizer
           tokenizer_initial_state: int
@@ -1290,12 +1289,16 @@ local_system:
           all_internal_llm_tokens_bitset: LLMTokenSet
           ignore_terminal_id: Optional[int]
           state: Dict[int, GSS]
-          suppress_stats_report: bool = True
+          mode: str
+          internal_to_representative_original: Optional[Dict[int, int]] = None
 
           @staticmethod
-          def from_json_string(s: str) -> 'Model':
+          def from_json_string(s: str, mode: str = 'internal') -> 'BruteForceModel':
               Stats.get().reset()
               data = json.loads(s)
+
+              if mode not in ['internal', 'original']:
+                  raise ValueError(f"Mode must be 'internal' or 'original', got {mode}")
 
               # Tokenizer
               dfa_data = data['tokenizer']['dfa']
@@ -1318,39 +1321,56 @@ local_system:
                   py_table[state_id] = py_row
               parser_table = ParserTable(parser_data['start_state_id'], py_table)
 
-              # Vocab and maps
+              # Misc data
               constraint = ffi.GrammarConstraint.from_json_string(s)
               vocab = data['precompute3_vocab']
               all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
+              id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+              internal_to_original_map = {int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()}
+
+              # Build representative map for internal mode
+              internal_to_rep = None
+              if mode == 'internal':
+                  internal_to_rep = {}
+                  print("Building internal-to-representative token map...")
+                  for internal_id, original_ids_rs in tqdm(internal_to_original_map.items()):
+                      best_orig_id = -1
+                      min_len = float('inf')
+                      for orig_id in original_ids_rs.iter_indices():
+                          token_len = len(id_to_token.get(orig_id, b''))
+                          if token_len < min_len:
+                              min_len = token_len
+                              best_orig_id = orig_id
+                      if best_orig_id != -1:
+                          internal_to_rep[internal_id] = best_orig_id
 
               # Initial state
               initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
               initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
 
-              model = Model(
+              return BruteForceModel(
                   parser_table=parser_table,
-                  tokenizer=tokenizer, tokenizer_initial_state=tokenizer.initial_state_id(),
-                  id_to_token={v: bytes(k) for k, v in data['llm_token_map']},
-                  internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
+                  tokenizer=tokenizer,
+                  tokenizer_initial_state=tokenizer.initial_state_id(),
+                  id_to_token=id_to_token,
+                  internal_to_original_map=internal_to_original_map,
                   all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
                   ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
                   state={tokenizer.initial_state_id(): initial_gss},
+                  mode=mode,
+                  internal_to_representative_original=internal_to_rep,
               )
-              return model
 
           def make_initial_state(self) -> Dict[int, GSS]:
-              """Create a fresh initial state without reloading models."""
               initial_acc = PyAcc({}, self.all_internal_llm_tokens_bitset)
               initial_gss = GSS.from_stacks([([], initial_acc)]).push(self.parser_table.start_state_id)
               return {self.tokenizer_initial_state: initial_gss}
 
           def reset_state(self) -> None:
-              """Reset to initial state."""
               self.state = self.make_initial_state()
 
-          def clone_sharing_structure(self) -> "Model":
-              """Create a new Model instance sharing static structures and with a fresh initial state."""
-              return Model(
+          def clone_sharing_structure(self) -> "BruteForceModel":
+              return BruteForceModel(
                   parser_table=self.parser_table,
                   tokenizer=self.tokenizer,
                   tokenizer_initial_state=self.tokenizer_initial_state,
@@ -1359,24 +1379,30 @@ local_system:
                   all_internal_llm_tokens_bitset=self.all_internal_llm_tokens_bitset,
                   ignore_terminal_id=self.ignore_terminal_id,
                   state=self.make_initial_state(),
-                  suppress_stats_report=self.suppress_stats_report,
+                  mode=self.mode,
+                  internal_to_representative_original=self.internal_to_representative_original,
               )
 
-          def commit(self, token_id: int):
-              stats = Stats.get()
-              stats.start('commit')
+          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+              term_rs = RangeSet.from_indices([terminal_id])
+              @_acc_memoize(use_value_cache=False)
+              def apply_disallow(acc: PyAcc) -> PyAcc:
+                  current = acc.terminals_union.get(state_id, RangeSet.empty())
+                  if current.contains(terminal_id): return acc
+                  new_map = acc.terminals_union.copy()
+                  new_map[state_id] = current.union(term_rs)
+                  return PyAcc(new_map, acc.llm_mask)
+              return gss.apply(apply_disallow)
+
+          def _commit_on_state(self, state: Dict[int, GSS], token_id: int) -> Dict[int, GSS]:
               token_bytes = self.id_to_token[token_id]
 
-              stats.start('commit.build_tokenizer_maps')
-              stats.inc('commit.tokenizer_states_in', len(self.state))
               terminals_map, state_map = {}, {}
-              for tsid in self.state:
+              for tsid in state:
                   end_state, matches = self.tokenizer.execute_from_state(token_bytes, tsid)
                   if end_state is not None: state_map[tsid] = end_state
                   terminals_map[tsid] = RangeSet.from_indices([m[0] for m in matches])
-              stats.stop('commit.build_tokenizer_maps')
 
-              stats.start('commit.prune_and_map_gss')
               @_acc_memoize()
               def mutator(acc: PyAcc) -> Optional[PyAcc]:
                   for tsid, matched in terminals_map.items():
@@ -1387,11 +1413,9 @@ local_system:
                   return PyAcc(dict(new_bvs), acc.llm_mask)
 
               cache = {}
-              current = {tsid: g.apply_and_prune(mutator, cache) for tsid, g in self.state.items()}
+              current = {tsid: g.apply_and_prune(mutator, cache) for tsid, g in state.items()}
               current = {tsid: g for tsid, g in current.items() if not g.is_empty()}
-              stats.stop('commit.prune_and_map_gss')
 
-              stats.start('commit.main_loop')
               new_states = collections.defaultdict(list)
               work = {(0, tsid): gss for tsid, gss in current.items()}
               q = collections.deque(work.keys())
@@ -1415,24 +1439,16 @@ local_system:
                                   work[key] = proc_gss
                                   q.append(key)
                   if end_state is not None: new_states[end_state].append(gss)
-              stats.stop('commit.main_loop')
 
-              stats.start('commit.merge_states')
               merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
               merged = {sid: g for sid, g in merged.items() if not g.is_empty()}
-              stats.stop('commit.merge_states')
+              return merged
 
-              stats.inc('commit.tokenizer_states_out', len(merged))
-              self.state = merged
-              stats.stop('commit')
+          def commit(self, token_id: int):
+              self.state = self._commit_on_state(self.state, token_id)
 
           def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-              stats = Stats.get()
-              p = 'commit.main_loop._process_token'
-              stats.start(f'{p}.total')
-
               if self.ignore_terminal_id == terminal_id:
-                  stats.stop(f'{p}.total')
                   return gss
 
               heads_by_state = collections.defaultdict(list)
@@ -1464,68 +1480,46 @@ local_system:
                                   goto_id = self.parser_table.table[from_id].gotos[nt_id]
                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
 
-              result = GSS.merge_many(shifted)
-              stats.stop(f'{p}.total')
-              return result
-
-          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
-              term_rs = RangeSet.from_indices([terminal_id])
-              @_acc_memoize(use_value_cache=False)
-              def apply_disallow(acc: PyAcc) -> PyAcc:
-                  current = acc.terminals_union.get(state_id, RangeSet.empty())
-                  if current.contains(terminal_id): return acc
-                  new_map = acc.terminals_union.copy()
-                  new_map[state_id] = current.union(term_rs)
-                  return PyAcc(new_map, acc.llm_mask)
-              return gss.apply(apply_disallow)
+              return GSS.merge_many(shifted)
 
           def get_mask(self) -> RangeSetOut:
-              """
-              Calculates the allowed token mask by brute force.
-              For every possible token, it clones the current state and runs `commit`.
-              If the resulting state is not empty, the token is added to the mask.
-              """
               stats = Stats.get()
               stats.start('get_mask')
-
-              allowed_original_tokens = RangeSetOut.empty()
               
-              # Iterate over all known internal tokens
-              token_ids_to_check = list(self.id_to_token.keys())
+              allowed_mask = RangeSetOut.empty()
 
-              for token_id in tqdm(token_ids_to_check, desc="[BruteForce] Checking tokens", disable=True):
-                  # Create a temporary model instance with a copy of the current state.
-                  # This is slow but simple and correct.
-                  temp_model = self.clone_sharing_structure()
-                  temp_model.state = self.state.copy() # Shallow copy is sufficient
+              if self.mode == 'internal':
+                  if self.internal_to_representative_original is None:
+                      raise RuntimeError("Model not initialized for 'internal' mode.")
+                  
+                  iterable = self.internal_to_representative_original.items()
+                  for internal_id, rep_orig_id in tqdm(iterable, desc="get_mask (internal)"):
+                      if rep_orig_id in self.id_to_token:
+                          new_state = self._commit_on_state(self.state, rep_orig_id)
+                          if new_state:
+                              allowed_mask |= self.internal_to_original_map[internal_id]
 
-                  # Run commit on the temporary model
-                  temp_model.commit(token_id)
-
-                  # If the commit results in a valid (non-empty) state, the token is allowed
-                  if temp_model.state:
-                      original_ids = self.internal_to_original_map.get(token_id)
-                      if original_ids:
-                          allowed_original_tokens |= original_ids
+              elif self.mode == 'original':
+                  iterable = self.id_to_token.keys()
+                  for original_id in tqdm(iterable, desc="get_mask (original)"):
+                      new_state = self._commit_on_state(self.state, original_id)
+                      if new_state:
+                          allowed_mask.add(original_id)
+              else:
+                  raise ValueError(f"Unknown mode: {self.mode}")
 
               stats.stop('get_mask')
-              return allowed_original_tokens
+              return allowed_mask
 
-          # --- Dummy/Simple implementations for the GraphProvider interface ---
-          def get_last_get_mask_cost(self) -> int: return 0
-          def get_last_get_mask_metrics(self) -> Dict[str, float]: return {}
-          def default_variations(self) -> List: return []
-          def select_hot_steps(self, aggregated_costs: List[float], k: int = 1) -> List[int]: return []
-          def get_benchmark_config(self) -> Dict: return {}
-          def iter_edges(self, node, token): return iter([])
-          def get_root(self, state_id: int): return 0
-          def is_end(self, node) -> bool: return False
+          def get_last_get_mask_cost(self) -> int:
+              return 0
+
+          def get_last_get_mask_metrics(self) -> Dict[str, float]:
+              return {}
 
           def finalize(self):
-              """Called at the end of a benchmark run to perform any final actions."""
-              if not self.suppress_stats_report:
-                  print("\n--- Final Stats Report from BruteForce Model ---")
-                  Stats.get().report()
+              print("\n--- Final Stats Report from BruteForceModel ---")
+              Stats.get().report()
   prev_file_contents:
     python/aug25/models/precompute3_model_pure_python_opt3.py: |
       from __future__ import annotations
@@ -2649,7 +2643,7 @@ local_system:
               """Called at the end of a benchmark run to perform any final actions, like printing stats."""
               print("\n--- Final Stats Report from Model ---")
               Stats.get().report()
-    python/aug25/models/brute_force_model.py: |
+    python/aug25/models/bruteforce_model.py: |
       from __future__ import annotations
 
       import collections
@@ -2665,9 +2659,11 @@ local_system:
       from ..stats import Stats
       from ..range_set import FFIRangeSet as RangeSet
       from ..range_set import SetRangeSet as RangeSetOut
+      from ..range_set import SetRangeSet as RangeSetStates
 
       # Type Aliases
       LLMTokenSet = RangeSet
+      StateIDSet = RangeSetStates
       TerminalIdSet = RangeSet
 
       def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
@@ -2710,6 +2706,7 @@ local_system:
           transitions: Dict[int, int]
           finalizers: Set[int]
           possible_future_group_ids: Set[int]
+
 
       @dataclass(frozen=True)
       class PyTokenizer:
@@ -2799,11 +2796,7 @@ local_system:
               )
 
       @dataclass
-      class Model(GraphProvider):
-          stats = Stats.get()
-          stats.add_group('get_mask')
-          stats.add_group('commit')
-
+      class BruteForceModel(GraphProvider):
           parser_table: ParserTable
           tokenizer: PyTokenizer
           tokenizer_initial_state: int
@@ -2812,12 +2805,16 @@ local_system:
           all_internal_llm_tokens_bitset: LLMTokenSet
           ignore_terminal_id: Optional[int]
           state: Dict[int, GSS]
-          suppress_stats_report: bool = True
+          mode: str
+          internal_to_representative_original: Optional[Dict[int, int]] = None
 
           @staticmethod
-          def from_json_string(s: str) -> 'Model':
+          def from_json_string(s: str, mode: str = 'internal') -> 'BruteForceModel':
               Stats.get().reset()
               data = json.loads(s)
+
+              if mode not in ['internal', 'original']:
+                  raise ValueError(f"Mode must be 'internal' or 'original', got {mode}")
 
               # Tokenizer
               dfa_data = data['tokenizer']['dfa']
@@ -2840,39 +2837,56 @@ local_system:
                   py_table[state_id] = py_row
               parser_table = ParserTable(parser_data['start_state_id'], py_table)
 
-              # Vocab and maps
+              # Misc data
               constraint = ffi.GrammarConstraint.from_json_string(s)
               vocab = data['precompute3_vocab']
               all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
+              id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+              internal_to_original_map = {int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()}
+
+              # Build representative map for internal mode
+              internal_to_rep = None
+              if mode == 'internal':
+                  internal_to_rep = {}
+                  print("Building internal-to-representative token map...")
+                  for internal_id, original_ids_rs in tqdm(internal_to_original_map.items()):
+                      best_orig_id = -1
+                      min_len = float('inf')
+                      for orig_id in original_ids_rs.iter_indices():
+                          token_len = len(id_to_token.get(orig_id, b''))
+                          if token_len < min_len:
+                              min_len = token_len
+                              best_orig_id = orig_id
+                      if best_orig_id != -1:
+                          internal_to_rep[internal_id] = best_orig_id
 
               # Initial state
               initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
               initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
 
-              model = Model(
+              return BruteForceModel(
                   parser_table=parser_table,
-                  tokenizer=tokenizer, tokenizer_initial_state=tokenizer.initial_state_id(),
-                  id_to_token={v: bytes(k) for k, v in data['llm_token_map']},
-                  internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
+                  tokenizer=tokenizer,
+                  tokenizer_initial_state=tokenizer.initial_state_id(),
+                  id_to_token=id_to_token,
+                  internal_to_original_map=internal_to_original_map,
                   all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
                   ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
                   state={tokenizer.initial_state_id(): initial_gss},
+                  mode=mode,
+                  internal_to_representative_original=internal_to_rep,
               )
-              return model
 
           def make_initial_state(self) -> Dict[int, GSS]:
-              """Create a fresh initial state without reloading models."""
               initial_acc = PyAcc({}, self.all_internal_llm_tokens_bitset)
               initial_gss = GSS.from_stacks([([], initial_acc)]).push(self.parser_table.start_state_id)
               return {self.tokenizer_initial_state: initial_gss}
 
           def reset_state(self) -> None:
-              """Reset to initial state."""
               self.state = self.make_initial_state()
 
-          def clone_sharing_structure(self) -> "Model":
-              """Create a new Model instance sharing static structures and with a fresh initial state."""
-              return Model(
+          def clone_sharing_structure(self) -> "BruteForceModel":
+              return BruteForceModel(
                   parser_table=self.parser_table,
                   tokenizer=self.tokenizer,
                   tokenizer_initial_state=self.tokenizer_initial_state,
@@ -2881,24 +2895,30 @@ local_system:
                   all_internal_llm_tokens_bitset=self.all_internal_llm_tokens_bitset,
                   ignore_terminal_id=self.ignore_terminal_id,
                   state=self.make_initial_state(),
-                  suppress_stats_report=self.suppress_stats_report,
+                  mode=self.mode,
+                  internal_to_representative_original=self.internal_to_representative_original,
               )
 
-          def commit(self, token_id: int):
-              stats = Stats.get()
-              stats.start('commit')
+          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+              term_rs = RangeSet.from_indices([terminal_id])
+              @_acc_memoize(use_value_cache=False)
+              def apply_disallow(acc: PyAcc) -> PyAcc:
+                  current = acc.terminals_union.get(state_id, RangeSet.empty())
+                  if current.contains(terminal_id): return acc
+                  new_map = acc.terminals_union.copy()
+                  new_map[state_id] = current.union(term_rs)
+                  return PyAcc(new_map, acc.llm_mask)
+              return gss.apply(apply_disallow)
+
+          def _commit_on_state(self, state: Dict[int, GSS], token_id: int) -> Dict[int, GSS]:
               token_bytes = self.id_to_token[token_id]
 
-              stats.start('commit.build_tokenizer_maps')
-              stats.inc('commit.tokenizer_states_in', len(self.state))
               terminals_map, state_map = {}, {}
-              for tsid in self.state:
+              for tsid in state:
                   end_state, matches = self.tokenizer.execute_from_state(token_bytes, tsid)
                   if end_state is not None: state_map[tsid] = end_state
                   terminals_map[tsid] = RangeSet.from_indices([m[0] for m in matches])
-              stats.stop('commit.build_tokenizer_maps')
 
-              stats.start('commit.prune_and_map_gss')
               @_acc_memoize()
               def mutator(acc: PyAcc) -> Optional[PyAcc]:
                   for tsid, matched in terminals_map.items():
@@ -2909,11 +2929,9 @@ local_system:
                   return PyAcc(dict(new_bvs), acc.llm_mask)
 
               cache = {}
-              current = {tsid: g.apply_and_prune(mutator, cache) for tsid, g in self.state.items()}
+              current = {tsid: g.apply_and_prune(mutator, cache) for tsid, g in state.items()}
               current = {tsid: g for tsid, g in current.items() if not g.is_empty()}
-              stats.stop('commit.prune_and_map_gss')
 
-              stats.start('commit.main_loop')
               new_states = collections.defaultdict(list)
               work = {(0, tsid): gss for tsid, gss in current.items()}
               q = collections.deque(work.keys())
@@ -2937,24 +2955,16 @@ local_system:
                                   work[key] = proc_gss
                                   q.append(key)
                   if end_state is not None: new_states[end_state].append(gss)
-              stats.stop('commit.main_loop')
 
-              stats.start('commit.merge_states')
               merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
               merged = {sid: g for sid, g in merged.items() if not g.is_empty()}
-              stats.stop('commit.merge_states')
+              return merged
 
-              stats.inc('commit.tokenizer_states_out', len(merged))
-              self.state = merged
-              stats.stop('commit')
+          def commit(self, token_id: int):
+              self.state = self._commit_on_state(self.state, token_id)
 
           def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-              stats = Stats.get()
-              p = 'commit.main_loop._process_token'
-              stats.start(f'{p}.total')
-
               if self.ignore_terminal_id == terminal_id:
-                  stats.stop(f'{p}.total')
                   return gss
 
               heads_by_state = collections.defaultdict(list)
@@ -2986,68 +2996,46 @@ local_system:
                                   goto_id = self.parser_table.table[from_id].gotos[nt_id]
                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
 
-              result = GSS.merge_many(shifted)
-              stats.stop(f'{p}.total')
-              return result
-
-          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
-              term_rs = RangeSet.from_indices([terminal_id])
-              @_acc_memoize(use_value_cache=False)
-              def apply_disallow(acc: PyAcc) -> PyAcc:
-                  current = acc.terminals_union.get(state_id, RangeSet.empty())
-                  if current.contains(terminal_id): return acc
-                  new_map = acc.terminals_union.copy()
-                  new_map[state_id] = current.union(term_rs)
-                  return PyAcc(new_map, acc.llm_mask)
-              return gss.apply(apply_disallow)
+              return GSS.merge_many(shifted)
 
           def get_mask(self) -> RangeSetOut:
-              """
-              Calculates the allowed token mask by brute force.
-              For every possible token, it clones the current state and runs `commit`.
-              If the resulting state is not empty, the token is added to the mask.
-              """
               stats = Stats.get()
               stats.start('get_mask')
-
-              allowed_original_tokens = RangeSetOut.empty()
               
-              # Iterate over all known internal tokens
-              token_ids_to_check = list(self.id_to_token.keys())
+              allowed_mask = RangeSetOut.empty()
 
-              for token_id in tqdm(token_ids_to_check, desc="[BruteForce] Checking tokens", disable=True):
-                  # Create a temporary model instance with a copy of the current state.
-                  # This is slow but simple and correct.
-                  temp_model = self.clone_sharing_structure()
-                  temp_model.state = self.state.copy() # Shallow copy is sufficient
+              if self.mode == 'internal':
+                  if self.internal_to_representative_original is None:
+                      raise RuntimeError("Model not initialized for 'internal' mode.")
+                  
+                  iterable = self.internal_to_representative_original.items()
+                  for internal_id, rep_orig_id in tqdm(iterable, desc="get_mask (internal)"):
+                      if rep_orig_id in self.id_to_token:
+                          new_state = self._commit_on_state(self.state, rep_orig_id)
+                          if new_state:
+                              allowed_mask |= self.internal_to_original_map[internal_id]
 
-                  # Run commit on the temporary model
-                  temp_model.commit(token_id)
-
-                  # If the commit results in a valid (non-empty) state, the token is allowed
-                  if temp_model.state:
-                      original_ids = self.internal_to_original_map.get(token_id)
-                      if original_ids:
-                          allowed_original_tokens |= original_ids
+              elif self.mode == 'original':
+                  iterable = self.id_to_token.keys()
+                  for original_id in tqdm(iterable, desc="get_mask (original)"):
+                      new_state = self._commit_on_state(self.state, original_id)
+                      if new_state:
+                          allowed_mask.add(original_id)
+              else:
+                  raise ValueError(f"Unknown mode: {self.mode}")
 
               stats.stop('get_mask')
-              return allowed_original_tokens
+              return allowed_mask
 
-          # --- Dummy/Simple implementations for the GraphProvider interface ---
-          def get_last_get_mask_cost(self) -> int: return 0
-          def get_last_get_mask_metrics(self) -> Dict[str, float]: return {}
-          def default_variations(self) -> List: return []
-          def select_hot_steps(self, aggregated_costs: List[float], k: int = 1) -> List[int]: return []
-          def get_benchmark_config(self) -> Dict: return {}
-          def iter_edges(self, node, token): return iter([])
-          def get_root(self, state_id: int): return 0
-          def is_end(self, node) -> bool: return False
+          def get_last_get_mask_cost(self) -> int:
+              return 0
+
+          def get_last_get_mask_metrics(self) -> Dict[str, float]:
+              return {}
 
           def finalize(self):
-              """Called at the end of a benchmark run to perform any final actions."""
-              if not self.suppress_stats_report:
-                  print("\n--- Final Stats Report from BruteForce Model ---")
-                  Stats.get().report()
+              print("\n--- Final Stats Report from BruteForceModel ---")
+              Stats.get().report()
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: simple
@@ -4216,10 +4204,9 @@ messages:
       ```
     metadata:
       filename: python/aug25/models/precompute3_model_pure_python_opt3.py
-  - user: Add a new, rudimentary model that doesn't even try to do anything clever
-      in `get_mask`, it just runs clones the state and runs `commit` on every possible
-      (original, not internal) token, making *that* the mask. Brute force `get_mask`.
-      The code overall should be quite a lot simpler. Add it to a different file.
+  - user: |-
+      Add a new, rudimentary model that doesn't even try to do anything clever in `get_mask`, it just runs clones the state and runs `commit` on every possible (original, not internal) token, making *that* the mask. Brute force `get_mask`. The code overall should be quite a lot simpler. Add it to a different file. Use tqdm when looping over the tokens.
+      And actually have two modes: one that loop over precompute3 internal tokens, using the shortest representative available for each internal-to-original group, before converting to original tokens before returning; and one that just loops over originals.
     metadata:
   - user: |-
       Mode instruction: For this turn, output the full, final contents of any created or modified files.
@@ -4238,7 +4225,7 @@ messages:
       mode: simple
       phase: default
   - assistant: |-
-      ```python "python/aug25/models/brute_force_model.py"
+      ```python "python/aug25/models/bruteforce_model.py"
       from __future__ import annotations
 
       import collections
@@ -4254,9 +4241,11 @@ messages:
       from ..stats import Stats
       from ..range_set import FFIRangeSet as RangeSet
       from ..range_set import SetRangeSet as RangeSetOut
+      from ..range_set import SetRangeSet as RangeSetStates
 
       # Type Aliases
       LLMTokenSet = RangeSet
+      StateIDSet = RangeSetStates
       TerminalIdSet = RangeSet
 
       def _acc_memoize(stats_prefix: Optional[str] = None, use_value_cache: bool = True):
@@ -4299,6 +4288,7 @@ messages:
           transitions: Dict[int, int]
           finalizers: Set[int]
           possible_future_group_ids: Set[int]
+
 
       @dataclass(frozen=True)
       class PyTokenizer:
@@ -4388,11 +4378,7 @@ messages:
               )
 
       @dataclass
-      class Model(GraphProvider):
-          stats = Stats.get()
-          stats.add_group('get_mask')
-          stats.add_group('commit')
-
+      class BruteForceModel(GraphProvider):
           parser_table: ParserTable
           tokenizer: PyTokenizer
           tokenizer_initial_state: int
@@ -4401,12 +4387,16 @@ messages:
           all_internal_llm_tokens_bitset: LLMTokenSet
           ignore_terminal_id: Optional[int]
           state: Dict[int, GSS]
-          suppress_stats_report: bool = True
+          mode: str
+          internal_to_representative_original: Optional[Dict[int, int]] = None
 
           @staticmethod
-          def from_json_string(s: str) -> 'Model':
+          def from_json_string(s: str, mode: str = 'internal') -> 'BruteForceModel':
               Stats.get().reset()
               data = json.loads(s)
+
+              if mode not in ['internal', 'original']:
+                  raise ValueError(f"Mode must be 'internal' or 'original', got {mode}")
 
               # Tokenizer
               dfa_data = data['tokenizer']['dfa']
@@ -4429,39 +4419,56 @@ messages:
                   py_table[state_id] = py_row
               parser_table = ParserTable(parser_data['start_state_id'], py_table)
 
-              # Vocab and maps
+              # Misc data
               constraint = ffi.GrammarConstraint.from_json_string(s)
               vocab = data['precompute3_vocab']
               all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
+              id_to_token = {v: bytes(k) for k, v in data['llm_token_map']}
+              internal_to_original_map = {int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()}
+
+              # Build representative map for internal mode
+              internal_to_rep = None
+              if mode == 'internal':
+                  internal_to_rep = {}
+                  print("Building internal-to-representative token map...")
+                  for internal_id, original_ids_rs in tqdm(internal_to_original_map.items()):
+                      best_orig_id = -1
+                      min_len = float('inf')
+                      for orig_id in original_ids_rs.iter_indices():
+                          token_len = len(id_to_token.get(orig_id, b''))
+                          if token_len < min_len:
+                              min_len = token_len
+                              best_orig_id = orig_id
+                      if best_orig_id != -1:
+                          internal_to_rep[internal_id] = best_orig_id
 
               # Initial state
               initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
               initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
 
-              model = Model(
+              return BruteForceModel(
                   parser_table=parser_table,
-                  tokenizer=tokenizer, tokenizer_initial_state=tokenizer.initial_state_id(),
-                  id_to_token={v: bytes(k) for k, v in data['llm_token_map']},
-                  internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
+                  tokenizer=tokenizer,
+                  tokenizer_initial_state=tokenizer.initial_state_id(),
+                  id_to_token=id_to_token,
+                  internal_to_original_map=internal_to_original_map,
                   all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
                   ignore_terminal_id=constraint.glr_parser().ignore_terminal_id,
                   state={tokenizer.initial_state_id(): initial_gss},
+                  mode=mode,
+                  internal_to_representative_original=internal_to_rep,
               )
-              return model
 
           def make_initial_state(self) -> Dict[int, GSS]:
-              """Create a fresh initial state without reloading models."""
               initial_acc = PyAcc({}, self.all_internal_llm_tokens_bitset)
               initial_gss = GSS.from_stacks([([], initial_acc)]).push(self.parser_table.start_state_id)
               return {self.tokenizer_initial_state: initial_gss}
 
           def reset_state(self) -> None:
-              """Reset to initial state."""
               self.state = self.make_initial_state()
 
-          def clone_sharing_structure(self) -> "Model":
-              """Create a new Model instance sharing static structures and with a fresh initial state."""
-              return Model(
+          def clone_sharing_structure(self) -> "BruteForceModel":
+              return BruteForceModel(
                   parser_table=self.parser_table,
                   tokenizer=self.tokenizer,
                   tokenizer_initial_state=self.tokenizer_initial_state,
@@ -4470,24 +4477,30 @@ messages:
                   all_internal_llm_tokens_bitset=self.all_internal_llm_tokens_bitset,
                   ignore_terminal_id=self.ignore_terminal_id,
                   state=self.make_initial_state(),
-                  suppress_stats_report=self.suppress_stats_report,
+                  mode=self.mode,
+                  internal_to_representative_original=self.internal_to_representative_original,
               )
 
-          def commit(self, token_id: int):
-              stats = Stats.get()
-              stats.start('commit')
+          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
+              term_rs = RangeSet.from_indices([terminal_id])
+              @_acc_memoize(use_value_cache=False)
+              def apply_disallow(acc: PyAcc) -> PyAcc:
+                  current = acc.terminals_union.get(state_id, RangeSet.empty())
+                  if current.contains(terminal_id): return acc
+                  new_map = acc.terminals_union.copy()
+                  new_map[state_id] = current.union(term_rs)
+                  return PyAcc(new_map, acc.llm_mask)
+              return gss.apply(apply_disallow)
+
+          def _commit_on_state(self, state: Dict[int, GSS], token_id: int) -> Dict[int, GSS]:
               token_bytes = self.id_to_token[token_id]
 
-              stats.start('commit.build_tokenizer_maps')
-              stats.inc('commit.tokenizer_states_in', len(self.state))
               terminals_map, state_map = {}, {}
-              for tsid in self.state:
+              for tsid in state:
                   end_state, matches = self.tokenizer.execute_from_state(token_bytes, tsid)
                   if end_state is not None: state_map[tsid] = end_state
                   terminals_map[tsid] = RangeSet.from_indices([m[0] for m in matches])
-              stats.stop('commit.build_tokenizer_maps')
 
-              stats.start('commit.prune_and_map_gss')
               @_acc_memoize()
               def mutator(acc: PyAcc) -> Optional[PyAcc]:
                   for tsid, matched in terminals_map.items():
@@ -4498,11 +4511,9 @@ messages:
                   return PyAcc(dict(new_bvs), acc.llm_mask)
 
               cache = {}
-              current = {tsid: g.apply_and_prune(mutator, cache) for tsid, g in self.state.items()}
+              current = {tsid: g.apply_and_prune(mutator, cache) for tsid, g in state.items()}
               current = {tsid: g for tsid, g in current.items() if not g.is_empty()}
-              stats.stop('commit.prune_and_map_gss')
 
-              stats.start('commit.main_loop')
               new_states = collections.defaultdict(list)
               work = {(0, tsid): gss for tsid, gss in current.items()}
               q = collections.deque(work.keys())
@@ -4526,24 +4537,16 @@ messages:
                                   work[key] = proc_gss
                                   q.append(key)
                   if end_state is not None: new_states[end_state].append(gss)
-              stats.stop('commit.main_loop')
 
-              stats.start('commit.merge_states')
               merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
               merged = {sid: g for sid, g in merged.items() if not g.is_empty()}
-              stats.stop('commit.merge_states')
+              return merged
 
-              stats.inc('commit.tokenizer_states_out', len(merged))
-              self.state = merged
-              stats.stop('commit')
+          def commit(self, token_id: int):
+              self.state = self._commit_on_state(self.state, token_id)
 
           def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
-              stats = Stats.get()
-              p = 'commit.main_loop._process_token'
-              stats.start(f'{p}.total')
-
               if self.ignore_terminal_id == terminal_id:
-                  stats.stop(f'{p}.total')
                   return gss
 
               heads_by_state = collections.defaultdict(list)
@@ -4575,83 +4578,61 @@ messages:
                                   goto_id = self.parser_table.table[from_id].gotos[nt_id]
                                   heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
 
-              result = GSS.merge_many(shifted)
-              stats.stop(f'{p}.total')
-              return result
-
-          def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
-              term_rs = RangeSet.from_indices([terminal_id])
-              @_acc_memoize(use_value_cache=False)
-              def apply_disallow(acc: PyAcc) -> PyAcc:
-                  current = acc.terminals_union.get(state_id, RangeSet.empty())
-                  if current.contains(terminal_id): return acc
-                  new_map = acc.terminals_union.copy()
-                  new_map[state_id] = current.union(term_rs)
-                  return PyAcc(new_map, acc.llm_mask)
-              return gss.apply(apply_disallow)
+              return GSS.merge_many(shifted)
 
           def get_mask(self) -> RangeSetOut:
-              """
-              Calculates the allowed token mask by brute force.
-              For every possible token, it clones the current state and runs `commit`.
-              If the resulting state is not empty, the token is added to the mask.
-              """
               stats = Stats.get()
               stats.start('get_mask')
-
-              allowed_original_tokens = RangeSetOut.empty()
               
-              # Iterate over all known internal tokens
-              token_ids_to_check = list(self.id_to_token.keys())
+              allowed_mask = RangeSetOut.empty()
 
-              for token_id in tqdm(token_ids_to_check, desc="[BruteForce] Checking tokens", disable=True):
-                  # Create a temporary model instance with a copy of the current state.
-                  # This is slow but simple and correct.
-                  temp_model = self.clone_sharing_structure()
-                  temp_model.state = self.state.copy() # Shallow copy is sufficient
+              if self.mode == 'internal':
+                  if self.internal_to_representative_original is None:
+                      raise RuntimeError("Model not initialized for 'internal' mode.")
+                  
+                  iterable = self.internal_to_representative_original.items()
+                  for internal_id, rep_orig_id in tqdm(iterable, desc="get_mask (internal)"):
+                      if rep_orig_id in self.id_to_token:
+                          new_state = self._commit_on_state(self.state, rep_orig_id)
+                          if new_state:
+                              allowed_mask |= self.internal_to_original_map[internal_id]
 
-                  # Run commit on the temporary model
-                  temp_model.commit(token_id)
-
-                  # If the commit results in a valid (non-empty) state, the token is allowed
-                  if temp_model.state:
-                      original_ids = self.internal_to_original_map.get(token_id)
-                      if original_ids:
-                          allowed_original_tokens |= original_ids
+              elif self.mode == 'original':
+                  iterable = self.id_to_token.keys()
+                  for original_id in tqdm(iterable, desc="get_mask (original)"):
+                      new_state = self._commit_on_state(self.state, original_id)
+                      if new_state:
+                          allowed_mask.add(original_id)
+              else:
+                  raise ValueError(f"Unknown mode: {self.mode}")
 
               stats.stop('get_mask')
-              return allowed_original_tokens
+              return allowed_mask
 
-          # --- Dummy/Simple implementations for the GraphProvider interface ---
-          def get_last_get_mask_cost(self) -> int: return 0
-          def get_last_get_mask_metrics(self) -> Dict[str, float]: return {}
-          def default_variations(self) -> List: return []
-          def select_hot_steps(self, aggregated_costs: List[float], k: int = 1) -> List[int]: return []
-          def get_benchmark_config(self) -> Dict: return {}
-          def iter_edges(self, node, token): return iter([])
-          def get_root(self, state_id: int): return 0
-          def is_end(self, node) -> bool: return False
+          def get_last_get_mask_cost(self) -> int:
+              return 0
+
+          def get_last_get_mask_metrics(self) -> Dict[str, float]:
+              return {}
 
           def finalize(self):
-              """Called at the end of a benchmark run to perform any final actions."""
-              if not self.suppress_stats_report:
-                  print("\n--- Final Stats Report from BruteForce Model ---")
-                  Stats.get().report()
+              print("\n--- Final Stats Report from BruteForceModel ---")
+              Stats.get().report()
       ```
     metadata:
   - user: |
-      Identified target file 'python/aug25/models/brute_force_model.py' on fence open line 1:
-      ```python "python/aug25/models/brute_force_model.py"
+      Identified target file 'python/aug25/models/bruteforce_model.py' on fence open line 1:
+      ```python "python/aug25/models/bruteforce_model.py"
       Found 1 code blocks.
       Matching against available files:
         1: python/aug25/models/precompute3_model_pure_python_opt3.py
       --- Phase 1: Processing explicit file paths in fences ---
-      Assigned block to NEW file python/aug25/models/brute_force_model.py based on explicit fence path.
+      Assigned block to NEW file python/aug25/models/bruteforce_model.py based on explicit fence path.
       Remaining unassigned blocks: 0, Available files: 1
       --- Phase 6: Applying changes to assigned files ---
-      Successfully created new file: python/aug25/models/brute_force_model.py
+      Successfully created new file: python/aug25/models/bruteforce_model.py
     metadata:
-  - user: 'Changes committed with message: "Add new brute-force model implementation
-      for get_mask"'
+  - user: "Changes committed with message: \"Add new brute-force model implementation
+      with 'internal' and 'original' token iteration modes\""
     metadata:
 ...
