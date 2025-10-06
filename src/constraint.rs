@@ -722,6 +722,7 @@ impl GrammarConstraint {
         original_to_internal_id_bimap
     }
 
+    // NOTE: We keep the PrePre tree builder (below) for potential diagnostics, but we won't use its splitters anymore.
     // Build a minimal "preprecompute" tree plus collect splitter bitsets used for partition refinement.
     // - tokenizer: used to execute segment matches from each tokenizer state
     // - vocab_root: a VocabPrefixTree built using ORIGINAL token IDs
@@ -825,23 +826,56 @@ impl GrammarConstraint {
         (tree, splitters)
     }
 
-    // Partition refinement over original token IDs, using splitters derived from the pre-pre tree.
+    // Partition refinement over original token IDs, using grammar-aware splitters:
+    //   - From possible_matches computed with ORIGINAL token IDs: for each tokenizer state and terminal,
+    //     the set of tokens that can yield that terminal.
+    //   - From tokenizer state mapping (start->end) for each token: tokens mapping to a particular pair.
     // Returns original_id -> canonical internal_id (dense [0..k-1]).
     fn preprecompute_canonicalize_tokens(
         tokenizer: &Regex,
         vocab_root_original: &VocabPrefixTreeNode,
         max_original_llm_token_id: usize,
     ) -> BTreeMap<usize, usize> {
-        let (_tree, splitters_vec) = Self::build_prepre_tree_and_splitters(tokenizer, vocab_root_original);
-
-        // Deduplicate splitter bitsets to reduce work
-        let mut seen: HashSet<LLMTokenBV> = HashSet::new();
+        // 1) Collect splitters from possible_matches on ORIGINAL IDs
+        let mut pm_cache: HashMap<
+            (*const VocabPrefixTreeNode, TokenizerStateID),
+            BTreeMap<GrammarTokenID, LLMTokenBV>
+        > = HashMap::new();
+        let mut splitter_set: HashSet<LLMTokenBV> = HashSet::new();
         let mut splitters: Vec<LLMTokenBV> = Vec::new();
-        for bv in splitters_vec {
-            if !bv.is_empty() && seen.insert(bv.clone()) {
+        for sid in tokenizer.iter_states() {
+            let matches_for_sid = Self::compute_possible_matches_for_vocab_node(
+                tokenizer,
+                vocab_root_original,
+                sid,
+                &mut pm_cache,
+            );
+            for (_tid, bv) in matches_for_sid {
+                if !bv.is_empty() && splitter_set.insert(bv.clone()) {
+                    splitters.push(bv);
+                }
+            }
+        }
+
+        // 2) Collect splitters from tokenizer state mapping per token (start_state -> end_state)
+        //    This further separates tokens that end in different tokenizer states.
+        let state_map_by_llm = Self::build_state_map_by_llm(tokenizer, vocab_root_original);
+        let mut pair_to_tokens: HashMap<(TokenizerStateID, TokenizerStateID), LLMTokenBV> = HashMap::new();
+        for (tok_id, per_state_map) in state_map_by_llm.iter() {
+            let tok = tok_id.0;
+            for (start, end) in per_state_map {
+                pair_to_tokens
+                    .entry((*start, *end))
+                    .or_insert_with(LLMTokenBV::zeros)
+                    .insert(tok);
+            }
+        }
+        for (_pair, bv) in pair_to_tokens {
+            if !bv.is_empty() && splitter_set.insert(bv.clone()) {
                 splitters.push(bv);
             }
         }
+        crate::debug!(2, "Preprecompute: collected {} grammar-aware splitters for canonicalization", splitters.len());
 
         // Universe of tokens = all tokens present under the original vocab root
         let universe = vocab_root_original.reachable_token_ids();
@@ -902,6 +936,7 @@ impl GrammarConstraint {
         }
 
         // Assign dense internal IDs [0..k-1] with deterministic order:
+        // Deterministic by representative original token id (smallest).
         // sort classes by their representative (smallest original token id).
         let mut classes: Vec<(usize, Vec<usize>)> = class_to_tokens
             .into_iter()
@@ -961,6 +996,7 @@ impl GrammarConstraint {
             &vocab_for_prepre.root,
             max_original_llm_token_id,
         );
+        // Note: The canonicalization above uses grammar-aware splitters; expect large reductions here.
         let tokens_before = llm_token_map.len();
         let internal_max_llm_token = original_to_internal_map.values().copied().max().unwrap_or(0);
         let tokens_after = internal_max_llm_token + 1;
