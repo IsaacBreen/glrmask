@@ -1846,8 +1846,7 @@ impl<'r> Precomputer0<'r> {
     }
 
     fn get_end_node(&self, final_sid: TokenizerStateID) -> PrecomputeNode0Index {
-        // self.end_nodes[&final_sid].clone()
-        self.end_nodes[&TokenizerStateID(0)].clone() // Temporary hack: use state 0 for all final states
+        self.end_nodes[&final_sid].clone()
     }
 
     fn finish(
