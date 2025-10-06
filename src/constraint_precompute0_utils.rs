@@ -534,25 +534,28 @@ impl<'r> Precomputer0<'r> {
         visited.insert(node_ptr, node_arc.clone());
 
         // Post-order traversal: first, canonicalize all children.
+        // By collecting children first, we avoid holding a lock on `node_arc` during recursion,
+        // which prevents deadlocks.
+        let children_to_process = {
+            node_arc.read(&self.trie0_god).unwrap().children().clone()
+        };
+
         let mut new_children_map = BTreeMap::new();
         let mut children_changed = false;
 
-        {
-            let node_guard = node_arc.read(&self.trie0_god).unwrap();
-            for (edge_key, dest_map) in node_guard.children() {
-                let mut new_dest_map = OrderedHashMap::new();
-                for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                    let child_arc = node_ptr_wrapper.as_arc().clone();
-                    let canonical_child_arc = self.deduplicate_recursive(child_arc.clone(), canonical_nodes, visited);
-                    if &child_arc != &canonical_child_arc {
-                        children_changed = true;
-                    }
-                    let new_node_ptr_wrapper = canonical_child_arc;
-                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
+        for (edge_key, dest_map) in &children_to_process {
+            let mut new_dest_map = OrderedHashMap::new();
+            for (node_ptr_wrapper, edge_val) in dest_map.iter() {
+                let child_arc = node_ptr_wrapper.as_arc().clone();
+                let canonical_child_arc = self.deduplicate_recursive(child_arc.clone(), canonical_nodes, visited);
+                if &child_arc != &canonical_child_arc {
+                    children_changed = true;
                 }
-                if !new_dest_map.is_empty() {
-                    new_children_map.insert(edge_key.clone(), new_dest_map);
-                }
+                let new_node_ptr_wrapper = canonical_child_arc;
+                new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
+            }
+            if !new_dest_map.is_empty() {
+                new_children_map.insert(edge_key.clone(), new_dest_map);
             }
         }
 
