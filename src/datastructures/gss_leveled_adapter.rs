@@ -18,10 +18,6 @@ use crate::tokenizer::LLMTokenID;
 pub type StoredPrecomputeNodeIndex = crate::constraint::PrecomputeNode3Index;
 pub type StoredTrieGodWrapper = crate::constraint::Trie3GodWrapper;
 
-// Compat aliases for types used in parser.rs signatures
-pub type DestKey = usize;
-pub type NodeMap = BTreeMap<ParseStateEdgeContent, BTreeMap<DestKey, Vec<Arc<GSSNode>>>>;
-
 // --- Acc type compatible with LeveledGSS A ---
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Acc {
@@ -339,8 +335,41 @@ impl GSSNode {
         }
     }
 
-    pub fn predecessors(&self) -> &NodeMap {
-        todo!()
+    pub fn predecessors(&self) -> BTreeMap<ParseStateEdgeContent, BTreeMap<isize, Vec<Arc<GSSNode>>>> {
+        let mut result = BTreeMap::new();
+        match &*self.inner.inner {
+            crate::datastructures::leveled_gss::Upper::Branch(b) => {
+                for (edge_val, children_by_depth) in &b.children {
+                    let mut preds_by_depth = BTreeMap::new();
+                    for (depth, child_upper_arc) in children_by_depth {
+                        let gss_node = Arc::new(GSSNode {
+                            inner: crate::datastructures::leveled_gss::LeveledGSS { inner: child_upper_arc.clone() },
+                        });
+                        preds_by_depth.entry(*depth).or_insert_with(Vec::new).push(gss_node);
+                    }
+                    result.insert(edge_val.clone(), preds_by_depth);
+                }
+            }
+            crate::datastructures::leveled_gss::Upper::Interface(i) => {
+                for (edge_val, children_by_depth) in &i.children {
+                    let mut preds_by_depth = BTreeMap::new();
+                    for (depth, child_lower_arc) in children_by_depth {
+                        let empty = if child_lower_arc.empty { Some(i.acc.clone()) } else { None };
+                        let new_interface_upper = crate::datastructures::leveled_gss::new_interface(
+                            child_lower_arc.children.clone(),
+                            i.acc.clone(),
+                            empty,
+                        );
+                        let gss_node = Arc::new(GSSNode {
+                            inner: crate::datastructures::leveled_gss::LeveledGSS { inner: new_interface_upper },
+                        });
+                        preds_by_depth.entry(*depth).or_insert_with(Vec::new).push(gss_node);
+                    }
+                    result.insert(edge_val.clone(), preds_by_depth);
+                }
+            }
+        }
+        result
     }
 
     pub fn num_predecessors(&self) -> usize {

@@ -29,10 +29,10 @@ pub trait Merge: Clone {
 type Children<T, N> = IHashMap<T, OrdMap<isize, Arc<N>>>;
 
 #[derive(Clone)]
-struct Lower<T: Clone + Eq + Hash + Ord> {
-    children: Children<T, Lower<T>>,
-    empty: bool,
-    max_depth: isize,
+pub(crate) struct Lower<T: Clone + Eq + Hash + Ord> {
+    pub(crate) children: Children<T, Lower<T>>,
+    pub(crate) empty: bool,
+    pub(crate) max_depth: isize,
 }
 
 impl<T: Clone + Eq + Hash + Ord> PartialEq for Lower<T> {
@@ -62,11 +62,11 @@ impl<T: Clone + Eq + Hash + Ord> Hash for Lower<T> {
 }
 
 #[derive(Clone)]
-struct Interface<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
-    children: Children<T, Lower<T>>,
-    acc: A,
-    empty: Option<A>,
-    max_depth: isize,
+pub(crate) struct Interface<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
+    pub(crate) children: Children<T, Lower<T>>,
+    pub(crate) acc: A,
+    pub(crate) empty: Option<A>,
+    pub(crate) max_depth: isize,
 }
 
 impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> PartialEq for Interface<T, A> {
@@ -96,10 +96,10 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Hash for In
 }
 
 #[derive(Clone)]
-struct UpperBranch<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
-    children: Children<T, Upper<T, A>>,
-    empty: Option<A>,
-    max_depth: isize,
+pub(crate) struct UpperBranch<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
+    pub(crate) children: Children<T, Upper<T, A>>,
+    pub(crate) empty: Option<A>,
+    pub(crate) max_depth: isize,
 }
 
 impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> PartialEq for UpperBranch<T, A> {
@@ -121,7 +121,7 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Hash for Up
 }
 
 #[derive(Clone)]
-enum Upper<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
+pub(crate) enum Upper<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
     Branch(Arc<UpperBranch<T, A>>),
     Interface(Arc<Interface<T, A>>),
 }
@@ -238,7 +238,7 @@ fn new_lower<T: Clone + Eq + Hash + Ord>(children: Children<T, Lower<T>>, empty:
     })
 }
 
-fn new_interface<T, A>(
+pub(crate) fn new_interface<T, A>(
     children: Children<T, Lower<T>>,
     acc: A,
     empty: Option<A>,
@@ -587,7 +587,7 @@ where
 
 #[derive(Clone)]
 pub struct LeveledGSS<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
-    inner: Arc<Upper<T, A>>,
+    pub(crate) inner: Arc<Upper<T, A>>,
 }
 
 impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> PartialEq for LeveledGSS<T, A> {
