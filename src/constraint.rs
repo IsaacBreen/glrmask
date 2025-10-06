@@ -741,18 +741,12 @@ impl GrammarConstraint {
         let mut key_to_id: HashMap<NodeKey, usize> = HashMap::new();
         let mut q: VecDeque<NodeKey> = VecDeque::new();
 
-        // Helper to allocate a new node
-        let mut new_node = |end_state: Option<TokenizerStateID>| -> usize {
-            let id = next_id;
-            next_id = next_id.checked_add(1).expect("PrePreTree NodeID overflow");
-            tree.nodes.insert(id, PrePreNodeData { end_state, edges: HashMap::new() });
-            id
-        };
-
         // Initialize a root per tokenizer state
         let root_ptr: *const VocabPrefixTreeNode = vocab_root as *const VocabPrefixTreeNode;
         for sid in tokenizer.iter_states() {
-            let nid = new_node(None);
+            let nid = next_id;
+            next_id = next_id.checked_add(1).expect("PrePreTree NodeID overflow");
+            tree.nodes.insert(nid, PrePreNodeData { end_state: None, edges: HashMap::new() });
             tree.roots.insert(sid, nid);
             key_to_id.insert((root_ptr, sid), nid);
             q.push_back((root_ptr, sid));
@@ -780,7 +774,9 @@ impl GrammarConstraint {
                 let dest_id_after_terminal = if let Some(&id) = key_to_id.get(&dest_key_after_terminal) {
                     id
                 } else {
-                    let id = new_node(None);
+                    let id = next_id;
+                    next_id = next_id.checked_add(1).expect("PrePreTree NodeID overflow");
+                    tree.nodes.insert(id, PrePreNodeData { end_state: None, edges: HashMap::new() });
                     key_to_id.insert(dest_key_after_terminal, id);
                     q.push_back(dest_key_after_terminal);
                     id
@@ -812,7 +808,9 @@ impl GrammarConstraint {
                     let end_id = if let Some(&id) = key_to_id.get(&end_key) {
                         id
                     } else {
-                        let id = new_node(Some(end_state));
+                        let id = next_id;
+                        next_id = next_id.checked_add(1).expect("PrePreTree NodeID overflow");
+                        tree.nodes.insert(id, PrePreNodeData { end_state: Some(end_state), edges: HashMap::new() });
                         key_to_id.insert(end_key, id);
                         q.push_back(end_key);
                         id
