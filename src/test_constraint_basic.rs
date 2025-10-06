@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use bimap::BiBTreeMap;
 use reqwest::blocking;
 use serde_json;
-use crate::constraint::{GrammarConstraint};
+use crate::constraint::{GrammarConstraint, GrammarConstraintState};
 use crate::datastructures::trie::Trie;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 // Already a main dependency, but good to be explicit if used directly
@@ -32,7 +32,7 @@ use rand::seq::SliceRandom;
 use crate::glr::analyze::{filter_productions_by_reachability, remove_productions_with_undefined_nonterminals};
 use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
 use std::collections::HashMap;
-use crate::datastructures::gss::{gather_gss_stats, reset_llm_tokens};
+use crate::datastructures::gss::{gather_gss_stats};
 // For the symbol removal helper
 
 #[test]
@@ -73,7 +73,8 @@ fn test_trivial() {
         token_name_map,
         1, // max_original_llm_token_id
     );
-    // constraint.dump_precomputed();
+    constraint.dump_precomputed0();
+    constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
     constraint.dump_precomputed3();
 
@@ -147,7 +148,7 @@ fn test_constraint_simple() {
         token_name_map,
         3, // max_llm_token_id should be 3 for 0, 1, 2
     );
-    // constraint.dump_precomputed();
+    // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
 
     let mut constraint_state = constraint.init();
@@ -248,7 +249,7 @@ fn test_constraint_simple_simplified() {
         token_name_map,
         1, // max_llm_token_id should be 1 for 0, 1
     );
-    // constraint.dump_precomputed();
+    // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
 
     let mut constraint_state = constraint.init();
@@ -348,7 +349,7 @@ fn test_constraint_expression() {
         token_name_map,
         7, // max_llm_token_id should be 7 for IDs 0-6
     );
-    // constraint.dump_precomputed(); // Commented out dump for cleaner test output
+    // constraint.dump_precomputed1(); // Commented out dump for cleaner test output
     // constraint.dump_precomputed2(); // Commented out dump for cleaner test output
     constraint.dump_precomputed3();
 
@@ -507,6 +508,7 @@ fn test_aborted_tokenizer_restart_equivalence() {
         ]
     ];
     let tokenizer = tokenizer_expr.build();
+    println!("Tokenizer: {}", tokenizer);
 
     // Grammar: S -> HASH_OPT_A_T | HASH_OPT_A_T A_T
     // Terminals in grammar:
@@ -554,6 +556,9 @@ fn test_aborted_tokenizer_restart_equivalence() {
         token_name_map_for_constraint,
         max_original_llm_token_id,
     );
+    println!("Vocab: {:?}", constraint.llm_vocab);
+    println!("Precompute0 vocab: {:?}", constraint.precompute0_vocab);
+    constraint.dump_precomputed0();
 
     // Scenario 1: Commit "#", then "a"
     let mut constraint_state1 = constraint.init();
@@ -642,7 +647,7 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
         token_name_map_for_constraint,
         max_original_llm_token_id,
     );
-    constraint.dump_precomputed();
+    constraint.dump_precomputed1();
 
     // Scenario 1: Commit "#", then "a"
     let mut constraint_state3 = constraint.init();
@@ -733,6 +738,7 @@ fn test_a_plus_commit_equivalence() {
         token_name_map,
         max_original_llm_token_id,
     );
+    constraint.dump_precomputed0();
 
     // Scenario 1: Commit "a" three times
     let mut state1 = constraint.init();
@@ -813,8 +819,11 @@ fn test_ignore_token() {
         token_name_map,
         3, // max_original_llm_token_id
     );
-    // constraint.dump_precomputed();
+    // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
+    constraint.dump_precomputed0();
+    constraint.dump_precomputed1();
+    constraint.dump_precomputed3();
 
     // --- Runtime check ---
     // Scenario 1: commit "a", then " ", then "b"
@@ -935,7 +944,7 @@ fn test_simple_def_match_non_zero_llm_id() {
         max_original_llm_token_id,
     );
 
-    // constraint.dump_precomputed(); // Optional: for debugging precomputation
+    // constraint.dump_precomputed1(); // Optional: for debugging precomputation
 
     // 7. Initialize the constraint state.
     //    This calls constraint.init() internally.
@@ -991,13 +1000,13 @@ fn test_precompute_a_plus_tokenizer() {
         token_name_map,
         max_original_llm_token_id,
     );
-    // constraint.dump_precomputed();
+    // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
 
     // --- Verification ---
     // assert_eq!(constraint.precomputed.len(), 1, "Expected precomputed trie for only one tokenizer state");
     let initial_state_id = tokenizer.initial_state_id();
-    let root_node = constraint.precomputed.get(&initial_state_id).expect("No precomputed trie for initial state").read(&constraint.trie1_god).unwrap();
+    let root_node = constraint.precomputed1.get(&initial_state_id).expect("No precomputed trie for initial state").read(&constraint.trie1_god).unwrap();
 
     // 1. Check root node's clean_end
     let root_value = &root_node.value;
@@ -1065,14 +1074,14 @@ fn test_precompute_x_eq() {
         token_name_map,
         max_original_llm_token_id,
     );
-    // constraint.dump_precomputed();
+    // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
 
     // LLM token "x" should result in one edge in the root precompute node for state 0 with the terminal for `X`.
     // LLM token " =" should result in one edge in the root precompute node for state 0 with the terminal for `SPACE` and a subsequent edge from its destination with the terminal for `EQUALS`.
     // --- Verification ---
     let initial_state_id = tokenizer.initial_state_id();
-    let root_arc = constraint.precomputed.get(&initial_state_id)
+    let root_arc = constraint.precomputed1.get(&initial_state_id)
         .expect("No precomputed trie for initial tokenizer state");
     let root_node = root_arc.read(&constraint.trie1_god).unwrap();
 
@@ -1086,14 +1095,15 @@ fn test_precompute_x_eq() {
     let equals_tid = *grammar_token_map.get_by_left(&regex_name("EQUALS")).unwrap();
 
     // Get the LLM token IDs
-    let x_llm_id = constraint.original_id_to_internal(*llm_token_map.get_by_left(b"x".as_ref()).unwrap()).unwrap().0;
-    let space_equals_llm_id = constraint.original_id_to_internal(*llm_token_map.get_by_left(b" =".as_ref()).unwrap()).unwrap().0;
+    let x_llm_id = constraint.internal_to_original_precompute1(*llm_token_map.get_by_left(b"x".as_ref()).unwrap()).unwrap();
+    let space_equals_llm_id = constraint.internal_to_original_precompute1(*llm_token_map.get_by_left(b" =".as_ref()).unwrap()).unwrap();
 
     // 1. Verify the edge for 'X'
     let x_dests = root_node.get(&Some(x_tid)).expect("No edge for terminal 'X'");
     assert_eq!(x_dests.len(), 1, "Should be one destination for 'X' edge");
     let (x_dest_wrapper, x_edge_bv) = x_dests.iter().next().unwrap();
-    assert_eq!(*x_edge_bv, HybridBitset::from_iter(vec![x_llm_id]), "Edge for 'X' has wrong LLM token bitset");let binding = x_dest_wrapper.as_arc().clone();
+    assert_eq!(*x_edge_bv, x_llm_id.clone(), "Edge for 'X' has wrong LLM token bitset");
+    let binding = x_dest_wrapper.as_arc().clone();
     let x_dest_node = binding.read(&constraint.trie1_god).unwrap();
     assert!(x_dest_node.value.end, "Destination for 'X' edge should be an end node");
     drop(x_dest_node);
@@ -1102,7 +1112,7 @@ fn test_precompute_x_eq() {
     let space_dests = root_node.get(&Some(space_tid)).expect("No edge for terminal 'SPACE'");
     assert_eq!(space_dests.len(), 1, "Should be one destination for 'SPACE' edge");
     let (space_dest_wrapper, space_edge_bv) = space_dests.iter().next().unwrap();
-    assert_eq!(*space_edge_bv, HybridBitset::from_iter(vec![space_equals_llm_id]), "Edge for 'SPACE' has wrong LLM token bitset");let binding = space_dest_wrapper.as_arc().clone();
+    assert_eq!(*space_edge_bv, space_equals_llm_id.clone(), "Edge for 'SPACE' has wrong LLM token bitset");let binding = space_dest_wrapper.as_arc().clone();
     let node_after_space = binding.read(&constraint.trie1_god).unwrap();
     assert!(!node_after_space.value.end, "Destination for 'SPACE' should not be an end node");
 
@@ -1111,7 +1121,8 @@ fn test_precompute_x_eq() {
     let (equals_edge_key, equals_dests) = node_after_space.children().iter().next().unwrap();
     assert_eq!(*equals_edge_key, Some(equals_tid), "Edge from intermediate node should be for 'EQUALS'");
     let (equals_dest_wrapper, equals_edge_bv) = equals_dests.iter().next().unwrap();
-    assert_eq!(*equals_edge_bv, HybridBitset::from_iter(vec![space_equals_llm_id]), "Edge for 'EQUALS' has wrong LLM token bitset");let binding = equals_dest_wrapper.as_arc().clone();
+    assert_eq!(*equals_edge_bv, space_equals_llm_id.clone(), "Edge for 'EQUALS' has wrong LLM token bitset");
+    let binding = equals_dest_wrapper.as_arc().clone();
     let equals_dest_node = binding.read(&constraint.trie1_god).unwrap();
     assert!(equals_dest_node.value.end, "Destination for 'EQUALS' edge should be an end node");
 
@@ -1414,7 +1425,7 @@ fn test_constraint_expression_unbalanced_parens() {
         token_name_map,
         3,
     );
-    // constraint.dump_precomputed();
+    // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
 
     // Initial state and step
@@ -1478,7 +1489,7 @@ fn test_constraint_expression_cycle() {
         token_name_map,
         1, // max_original_llm_token_id
     );
-    // constraint.dump_precomputed();
+    // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
 
     // Initial state and step
@@ -1680,9 +1691,7 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     assert!(constraint_state.is_active());
     println!("After first chunk '{}'", String::from_utf8_lossy(repeating_chunk));
     constraint_state.print_gss_stats();
-    let nodes1 = gather_gss_stats(
-        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-    ).unique_nodes;
+    let nodes1 = constraint_state.num_unique_nodes();
     constraint_state.print_gss();
 
     // Second chunk
@@ -1692,9 +1701,7 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     assert!(constraint_state.is_active());
     println!("\nAfter second chunk '{}'", String::from_utf8_lossy(repeating_chunk));
     constraint_state.print_gss_stats();
-    let nodes2 = gather_gss_stats(
-        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-    ).unique_nodes;
+    let nodes2 = constraint_state.num_unique_nodes();
     constraint_state.print_gss();
 
     // Third chunk
@@ -1704,9 +1711,7 @@ IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     assert!(constraint_state.is_active());
     println!("\nAfter third chunk '{}'", String::from_utf8_lossy(repeating_chunk));
     constraint_state.print_gss_stats();
-    let nodes3 = gather_gss_stats(
-        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-    ).unique_nodes;
+    let nodes3 = constraint_state.num_unique_nodes();
     constraint_state.print_gss();
 
     let increase1 = nodes2 - nodes1;
@@ -1798,27 +1803,21 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
     assert!(constraint_state.is_active());
     println!("After first single '{{': {} states", constraint_state.state.len());
     constraint_state.print_gss();
-    let nodes1 = gather_gss_stats(
-        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-    ).unique_nodes;
+    let nodes1 = constraint_state.num_unique_nodes();
 
     // Second single '{' commit$
     constraint_state.commit_bytes(b"{");
     assert!(constraint_state.is_active());
     println!("After second single '{{': {} states", constraint_state.state.len());
     constraint_state.print_gss();
-    let nodes2 = gather_gss_stats(
-        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-    ).unique_nodes;
+    let nodes2 = constraint_state.num_unique_nodes();
 
     // Third single '{' commit
     constraint_state.commit_bytes(b"{");
     assert!(constraint_state.is_active());
     println!("After third single '{{': {} states", constraint_state.state.len());
     constraint_state.print_gss();
-    let nodes3 = gather_gss_stats(
-        &constraint_state.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-    ).unique_nodes;
+    let nodes3 = constraint_state.num_unique_nodes();
 
     let increase1 = nodes2 - nodes1;
     let increase2 = nodes3 - nodes2;
@@ -1939,7 +1938,7 @@ fn test_constraint_repetition_a() {
         token_name_map,
         0, // max_original_llm_token_id
     );
-    // constraint.dump_precomputed();
+    // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
 
     // Initial state and step
@@ -2000,7 +1999,7 @@ fn test_constraint_expression_split_token() {
         token_name_map,
         1, // max_original_llm_token_id
     );
-    // constraint.dump_precomputed();
+    // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
 
     // Initial state and step
@@ -2061,7 +2060,7 @@ fn test_constraint_expression_trivial_indirect() {
         token_name_map,
         3,
     );
-    // constraint.dump_precomputed();
+    // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
 
     // Initial state and step
@@ -2127,7 +2126,7 @@ fn test_constraint_expression_trivial_direct() {
         token_name_map,
         3,
     );
-    // constraint.dump_precomputed();
+    // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
 
     // Initial state and step
@@ -2194,7 +2193,7 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
         token_name_map,
         3,
     );
-    // constraint.dump_precomputed();
+    // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
     constraint.dump_precomputed3();
 

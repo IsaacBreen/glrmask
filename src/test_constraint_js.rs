@@ -812,7 +812,7 @@ fn test_js_constraint_isolated_and_minimized() -> Result<(), Box<dyn std::error:
     );
 
     println!("\n--- Created GrammarConstraint ---");
-    constraint.dump_precomputed();
+    constraint.dump_precomputed1();
 
     println!("\n--- Running Constraint with Minimized Grammar (Step-by-Step) ---");
 
@@ -915,7 +915,7 @@ fn test_template_from_minimized_ebnf_for_constraint() -> Result<(), Box<dyn std:
     );
 
     println!("\n--- Created GrammarConstraint ---");
-    constraint.dump_precomputed();
+    constraint.dump_precomputed1();
 
     println!("\n--- Running Constraint with Loaded Grammar (Step-by-Step) ---");
 
@@ -1016,7 +1016,7 @@ fn test_template_from_minimized_ebnf_for_constraint_28_jul_2025() -> Result<(), 
     );
 
     println!("\n--- Created GrammarConstraint ---");
-    constraint.dump_precomputed();
+    constraint.dump_precomputed1();
 
     println!("\n--- Running Constraint with Loaded Grammar (Step-by-Step) ---");
 
