@@ -124,8 +124,7 @@ pub fn optimize_trie3_size(
 		run_pass!("Merging nodes (ultrafast DAG pre-pass)", {
 			// Extremely fast, bottom-up, exact equivalence using fingerprint + structural check.
 			merge_nodes_trie3_ultrafast(roots, trie3_god);
-            merge_nodes_trie3_fast(roots, trie3_god);
-        });
+		});
 	}
 
 
