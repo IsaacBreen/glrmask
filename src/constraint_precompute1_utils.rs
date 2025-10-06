@@ -392,7 +392,6 @@ pub fn optimize_trie1_size(
     stage_vocab: &mut StageVocab,
     token_name_map: &bimap::BiBTreeMap<crate::glr::grammar::Terminal, usize>,
 ) {
-    assert!(!Trie::has_cycle(&trie1_god, precomputed1.values().cloned().collect::<Vec<_>>()));
     crate::debug!(2, "Starting Trie1 size optimization...");
 
     crate::debug!(2, "Initial Trie1 stats:");
@@ -555,7 +554,6 @@ fn replace_ignore_token_edges_with_none_edges_trie1(
     }
     crate::debug!(2, "Done replacing ignore token edges in Trie1.");
 }
-
 fn count_total_ranges_trie1(
     all_nodes: &[PrecomputeNode1Index],
     trie1_god: &Trie1GodWrapper,

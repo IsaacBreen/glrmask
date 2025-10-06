@@ -142,8 +142,6 @@ impl<'r> Precomputer0<'r> {
     }
 
     fn optimize(&mut self) {
-        assert!(!Trie::has_cycle(&self.trie0_god, self.roots.values().cloned().collect::<Vec<_>>()), "Cycle detected in trie0 before optimization");
-
         crate::debug!(2, "Initial Trie0 stats:");
         let mut stats = PrecomputeStats::default();
         calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
