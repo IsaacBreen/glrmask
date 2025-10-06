@@ -194,15 +194,15 @@ impl<'r> Precomputer0<'r> {
                 *result_map.entry(grammar_token_id).or_insert_with(LLMTokenBV::zeros) |= applicable_tokens;
             }
             if let Some(final_state_val) = exec_result.end_state {
-                let matches_possible_from_tokenizer_state: BTreeSet<_> = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(final_state_val)).into_iter().collect();
-                let matches_here: BTreeSet<_> = exec_result.matches.iter().map(|m| GrammarTokenID(m.id)).collect();
-                let possible_new_matches = &matches_possible_from_tokenizer_state - &matches_here;
-                if !possible_new_matches.is_empty() {
+                // let matches_possible_from_tokenizer_state: BTreeSet<_> = self.tokenizer.tokens_accessible_from_state(TokenizerStateID(final_state_val)).into_iter().collect();
+                // let matches_here: BTreeSet<_> = exec_result.matches.iter().map(|m| GrammarTokenID(m.id)).collect();
+                // let possible_new_matches = &matches_possible_from_tokenizer_state - &matches_here;
+                // if !possible_new_matches.is_empty() {
                     let next_results = self.possible_matches(child_vocab_node, TokenizerStateID(final_state_val));
                     for (token, bv) in next_results {
                         *result_map.entry(token).or_insert_with(LLMTokenBV::zeros) |= bv;
                     }
-                }
+                // }
             }
         }
 
