@@ -688,6 +688,7 @@ impl GrammarConstraint {
         );
 
         helper.run_dfs();
+        assert!(!helper.has_llm_compatible_cycle(), "Cycle detected in precompute1 trie after construction");
         // helper.optimize_precomputed_via_substring_parser();
         helper.replace_ignore_token_edges_with_none_edges();
         helper.simplify_none_edges(); // This can invalidate max_depth.
@@ -1171,6 +1172,90 @@ impl<'r> Precomputer<'r> {
         crate::debug!(2, "Finished precompute DFS");
         self.pb.finish_with_message("Precomputation complete");
         crate::debug!(2, "Precomputation complete");
+    }
+
+    fn has_llm_compatible_cycle(&self) -> bool {
+        let arena = &self.trie1_god;
+        let roots: Vec<PrecomputeNode1Index> = self.roots.values().cloned().collect();
+        let internal_max_llm_token = self.all_llm_tokens.len() - 1;
+
+        let mut visited: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
+        let initial_tokens = LLMTokenBV::ones(internal_max_llm_token + 1);
+
+        for root in roots {
+            if Self::detect_cycle_recursive(
+                root,
+                initial_tokens.clone(),
+                arena,
+                &mut HashMap::new(), // recursion_stack
+                &mut visited,
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn detect_cycle_recursive(
+        node_idx: PrecomputeNode1Index,
+        current_tokens: LLMTokenBV,
+        arena: &Trie1GodWrapper,
+        recursion_stack: &mut HashMap<PrecomputeNode1Index, LLMTokenBV>,
+        visited: &mut HashMap<PrecomputeNode1Index, LLMTokenBV>,
+    ) -> bool {
+        // Check for cycle: if we're re-visiting a node on the current path with compatible tokens.
+        if let Some(tokens_on_stack) = recursion_stack.get(&node_idx) {
+            if !(&current_tokens & tokens_on_stack).is_empty() {
+                return true; // Cycle detected
+            }
+        }
+
+        // Pruning based on globally visited nodes.
+        let new_tokens_to_process = match visited.entry(node_idx) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let previously_visited_tokens = entry.get_mut();
+                let new_unseen_tokens = &current_tokens - &*previously_visited_tokens;
+                if new_unseen_tokens.is_empty() {
+                    return false; // Already explored from this node with a superset of tokens.
+                }
+                // Record that we've now seen the current tokens at this node.
+                *previously_visited_tokens |= &current_tokens;
+                new_unseen_tokens
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(current_tokens.clone());
+                current_tokens.clone() // All current tokens are new for this node.
+            }
+        };
+
+        // Add to recursion stack for this path.
+        let original_tokens_on_stack = recursion_stack.insert(node_idx, current_tokens);
+
+        let children_to_visit = if let Some(guard) = node_idx.read(arena) {
+            guard.children().clone()
+        } else {
+            // Should not happen in a well-formed trie. Restore stack and return.
+            if let Some(original) = original_tokens_on_stack { recursion_stack.insert(node_idx, original); } else { recursion_stack.remove(&node_idx); }
+            return false;
+        };
+
+        for (_edge_key, dest_map) in children_to_visit.iter() {
+            for (child_idx, edge_tokens) in dest_map.iter() {
+                let next_tokens = &new_tokens_to_process & edge_tokens;
+                if !next_tokens.is_empty() {
+                    if Self::detect_cycle_recursive(*child_idx, next_tokens, arena, recursion_stack, visited) {
+                        // Cycle found, restore stack and propagate true.
+                        if let Some(original) = original_tokens_on_stack { recursion_stack.insert(node_idx, original); } else { recursion_stack.remove(&node_idx); }
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Backtrack: remove from recursion stack.
+        if let Some(original) = original_tokens_on_stack { recursion_stack.insert(node_idx, original); } else { recursion_stack.remove(&node_idx); }
+
+        false
     }
 
     fn replace_ignore_token_edges_with_none_edges(&mut self) {
