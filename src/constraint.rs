@@ -1191,6 +1191,7 @@ impl GrammarConstraint {
                     glr_s.active_state.trie2_god.as_ref().unwrap(),
                 );
                 let keep_going = glr_s.is_ok();
+                println!("{}", glr_s);
                 if precomputed_node_data.value.end {
                     for (_last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
                         for gss_root_acc in gss_root_accs {
