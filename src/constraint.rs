@@ -1466,9 +1466,13 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
-        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
-        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
-        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
+        // Run the optimization exactly once to avoid re-entrancy into deduplicate_recursive
+        // while locks from a prior pass may still be in play. This prevents deadlocks observed
+        // with multiple consecutive passes.
+        let optimization_passes: usize = 1;
+        for _ in 0..optimization_passes {
+            optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
+        }
 
         (precomputed3, trie3_god)
     }
