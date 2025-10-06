@@ -312,7 +312,21 @@ class BruteForceModel(GraphProvider):
 
         merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
         merged = {sid: g for sid, g in merged.items() if not g.is_empty()}
-        return merged
+
+        if not merged:
+            return merged
+
+        # Check if any of the resulting states can lead to a valid parse state.
+        # We only need one valid path forward from one of the states.
+        for tsid, gss in merged.items():
+            possible_terminals = self.tokenizer.states[tsid].possible_future_group_ids
+            for terminal_id in possible_terminals:
+                if not self._process_token(gss, terminal_id).is_empty():
+                    # Found a viable path, so the state after commit is valid.
+                    return merged
+
+        # No viable path found from any of the resulting states. This token leads to a dead end.
+        return {}
 
     def commit(self, token_id: int):
         self.state = self._commit_on_state(self.state, token_id)
