@@ -331,7 +331,7 @@ impl GSSNode {
             }
             Arc::new(acc)
         } else {
-            Arc::new(GSSNode::new_fresh())
+            Arc::new(GSSNode::new_dead())
         }
     }
 

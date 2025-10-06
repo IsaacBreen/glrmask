@@ -144,9 +144,9 @@ pub struct ParseState {
 impl ParseState {
     pub fn new() -> Self {
         ParseState {
-            stack: Arc::new(GSSNode::new_fresh()),
+            stack: Arc::new(GSSNode::new_dead()),
             accepted_state: None,
-            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
+            prev_accepted_state: Arc::new(GSSNode::new_dead()),
             trie2_god: None,
         }
     }
@@ -155,7 +155,7 @@ impl ParseState {
         ParseState {
             stack,
             accepted_state: None,
-            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
+            prev_accepted_state: Arc::new(GSSNode::new_dead()),
             trie2_god: None,
         }
     }
@@ -490,7 +490,7 @@ impl GLRParser {
         ParseState {
             stack: Arc::new(stack_top),
             accepted_state: None,
-            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
+            prev_accepted_state: Arc::new(GSSNode::new_dead()),
             trie2_god: None,
         }
     }
@@ -515,7 +515,7 @@ impl GLRParser {
         ParseState {
             stack,
             accepted_state: None,
-            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
+            prev_accepted_state: Arc::new(GSSNode::new_dead()),
             trie2_god: None,
         }
     }
@@ -531,7 +531,7 @@ impl GLRParser {
         ParseState {
             stack: Arc::new(GSSNode::new_fresh().push(initial_content)), // pushed node has initial_acc
             accepted_state: None,
-            prev_accepted_state: Arc::new(GSSNode::new_fresh()),
+            prev_accepted_state: Arc::new(GSSNode::new_dead()),
             trie2_god: None,
         }
     }
@@ -1016,7 +1016,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                     if !accepted_s_new_arc.is_empty() {
                         let accepted_parse_state = ParseState {
-                            stack: Arc::new(GSSNode::new_fresh()),
+                            stack: Arc::new(GSSNode::new_dead()),
                             accepted_state: Some(accepted_s_new_arc),
                             prev_accepted_state: state.prev_accepted_state.clone(),
                             trie2_god: state.trie2_god.clone(),
@@ -1059,7 +1059,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                                 if !accepted_s_new_arc.is_empty() {
                                     let accepted_parse_state = ParseState {
-                                        stack: Arc::new(GSSNode::new_fresh()),
+                                        stack: Arc::new(GSSNode::new_dead()),
                                         accepted_state: Some(accepted_s_new_arc),
                                         prev_accepted_state: state.prev_accepted_state.clone(),
                                         trie2_god: state.trie2_god.clone(),
@@ -1208,7 +1208,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                             if !accepted_s_new_arc.is_empty() {
                                 let accepted_parse_state = ParseState {
-                                    stack: Arc::new(GSSNode::new_fresh()),
+                                    stack: Arc::new(GSSNode::new_dead()),
                                     accepted_state: Some(accepted_s_new_arc),
                                     prev_accepted_state: state.prev_accepted_state.clone(),
                                     trie2_god: state.trie2_god.clone(),
@@ -1719,7 +1719,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // Consolidate all shifted states into the new active_state for phase 3
         crate::debug!(4, "Phase 2 completed, consolidating {} shifted states into active state", shifted_states_todo.len());
         let mut next_active = ParseState {
-            stack: Arc::new(GSSNode::new_fresh()),
+            stack: Arc::new(GSSNode::new_dead()),
             accepted_state: None,
             prev_accepted_state: self.active_state.prev_accepted_state.clone(),
             trie2_god: self.active_state.trie2_god.clone(),
@@ -1733,7 +1733,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.active_state = next_active;
 
         // Move current accepted state to previous, and reset current.
-        self.active_state.prev_accepted_state = self.active_state.accepted_state.take().unwrap_or_else(|| Arc::new(GSSNode::new_fresh()));
+        self.active_state.prev_accepted_state = self.active_state.accepted_state.take().unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
         self.active_state.accepted_state = None;
 
         self.log_gss("Phase1/2-end", token_id, false, false);
