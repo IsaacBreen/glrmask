@@ -1935,10 +1935,6 @@ impl<'r> Precomputer0<'r> {
             > = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
 
-            // Slot-aware live-token tracker for this segment:
-            // (destination node, tokenizer state id, segment position within current segment_bytes) -> live tokens at that slot
-            let mut slot_live: HashMap<(PrecomputeNode0Index, TokenizerStateID, usize), LLMTokenBV> = HashMap::new();
-
             let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
 
             while let Some((pos, states_at_pos)) = work_queue.pop_first() {
@@ -2003,101 +1999,43 @@ impl<'r> Precomputer0<'r> {
                                 edge_bv -= matches_for_terminal;
                             }
 
-
                             if edge_bv.is_empty() { continue; }
+
+                            // NOTE: It is likely wrong to just use disallowed_tokenizer_state_info as-is here.
+                            //  The actual disallowed state can vary by LLM token. But we don't capture that here.
+                            //  We're doing it in a way that's local to the segment. This is wrong.
+                            let edge_key = Some((terminal_id, None));
+                            let mut inserter = EdgeInserter::new(
+                                &self.trie0_god,
+                                src_node_wrapper.as_arc().clone(),
+                                edge_key,
+                                edge_bv.clone(),
+                                |e, n| *e |= n,
+                                |node_value, edge_value| node_value.live_tokens |= edge_value,
+                                |ev, t| *ev &= &t.live_tokens,
+                            );
 
                             let next_tokenizer_state = self.tokenizer.initial_state_id();
                             let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
 
-                            // New slot-aware routing:
-                            // Split edge_bv across existing queued nodes and existing children
-                            // but only for tokens that are already alive at the same (tsid, pos) in those destinations.
-                            let mut remaining_bv = edge_bv.clone();
-                            let edge_key = Some((terminal_id, None));
+                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| w.read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_none()));
 
-                            // Phase 1: reuse queued destinations that already carry these tokens at this slot.
-                            {
-                                let queue_candidates: Vec<PrecomputeNode0Index> = dest_nodes_in_queue.iter().cloned().collect();
-                                for dst in queue_candidates {
-                                    if remaining_bv.is_empty() { break; }
-                                    // Only non-end nodes are valid in-between destinations.
-                                    if dst.as_arc().read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_some() {
-                                        continue;
-                                    }
-                                    let key = (dst, next_tokenizer_state, next_pos);
-                                    if let Some(existing_bv) = slot_live.get(&key) {
-                                        let subset = &remaining_bv & existing_bv;
-                                        if !subset.is_empty() {
-                                            let mut inserter_subset = EdgeInserter::new(
-                                                &self.trie0_god,
-                                                src_node_wrapper.as_arc().clone(),
-                                                edge_key.clone(),
-                                                subset.clone(),
-                                                |e, n| *e |= n,
-                                                |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                                |ev, t| *ev &= &t.live_tokens,
-                                            );
-                                            inserter_subset = inserter_subset.try_destination(dst);
-                                            dest_nodes_in_queue.insert(dst);
-                                            slot_live.entry(key).and_modify(|bv| *bv |= &subset).or_insert_with(|| subset.clone());
-                                            remaining_bv -= &subset;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Phase 2: try existing children of the source node that already carry these tokens at this slot.
-                            if !remaining_bv.is_empty() {
+                            if true {
                                 let children_of_src: Vec<_> = src_node_wrapper.as_arc().read(&self.trie0_god).unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
-                                for dst in children_of_src {
-                                    if remaining_bv.is_empty() { break; }
-                                    if dst.as_arc().read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_some() {
-                                        continue;
-                                    }
-                                    let key = (dst, next_tokenizer_state, next_pos);
-                                    if let Some(existing_bv) = slot_live.get(&key) {
-                                        let subset = &remaining_bv & existing_bv;
-                                        if !subset.is_empty() {
-                                            let mut inserter_subset = EdgeInserter::new(
-                                                &self.trie0_god,
-                                                src_node_wrapper.as_arc().clone(),
-                                                edge_key.clone(),
-                                                subset.clone(),
-                                                |e, n| *e |= n,
-                                                |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                                |ev, t| *ev &= &t.live_tokens,
-                                            );
-                                            inserter_subset = inserter_subset.try_destination(dst);
-                                            dest_nodes_in_queue.insert(dst);
-                                            slot_live.entry(key).and_modify(|bv| *bv |= &subset).or_insert_with(|| subset.clone());
-                                            remaining_bv -= &subset;
-                                        }
-                                    }
-                                }
+                                let eligible_children = children_of_src.iter().map(|child_node_ptr| {
+                                    child_node_ptr.as_arc().clone()
+                                }).filter(|child_arc| {
+                                    (child_arc.read(&self.trie0_god).unwrap().value.live_tokens.clone() & &edge_bv).is_empty() && child_arc.read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_none()
+                                });
+                                inserter = inserter.try_destinations_iter(eligible_children);
                             }
 
-                            // Phase 3: if any tokens remain, create a new destination node and seed its slot-live entry.
-                            if !remaining_bv.is_empty() {
-                                let mut inserter_new = EdgeInserter::new(
-                                    &self.trie0_god,
-                                    src_node_wrapper.as_arc().clone(),
-                                    edge_key,
-                                    remaining_bv.clone(),
-                                    |e, n| *e |= n,
-                                    |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                    |ev, t| *ev &= &t.live_tokens,
-                                );
-                                let result_node = inserter_new.else_create_destination_with_value(PrecomputedNodeContents0::internal()).unwrap();
-                                assert_ne!(&result_node, src_node_wrapper);
-                                let result_node_ptr = result_node.clone();
-                                dest_nodes_in_queue.insert(result_node_ptr.clone());
-                                let key = (result_node_ptr, next_tokenizer_state, next_pos);
-                                slot_live.entry(key).and_modify(|bv| *bv |= &remaining_bv).or_insert_with(|| remaining_bv.clone());
-                            }
+                            let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents0::internal()).unwrap();
+                            assert_ne!(&result_node, src_node_wrapper);
+                            let result_node_ptr = result_node.clone();
+                            dest_nodes_in_queue.insert(result_node_ptr.clone());
                         }
-
                     }
-
 
                     if let Some(end_state_val) = exec_result.end_state {
                         for src_node_wrapper in &precompute_nodes {
