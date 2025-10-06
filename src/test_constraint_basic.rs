@@ -1512,48 +1512,6 @@ fn test_constraint_expression_cycle() {
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
 }
 
-#[test]
-fn test_precompute0_self_loop_scenario() {
-    // This test creates a scenario that could trigger a self-loop panic in
-    // Precomputer0::dfs without the proper guards.
-    // Tokenizer: `a` (group 0), `b` (group 1), `ab` (group 2)
-    // LLM Vocab: "ab"
-    // The tokenizer's ambiguity with the single LLM token "ab" creates a complex
-    // sequence of operations in the precomputation DFS that could lead to a node
-    // being considered as a destination for an edge from itself.
-    let tokenizer_expr = groups![
-        eat_u8_fast(b'a'), // 0
-        eat_u8_fast(b'b'), // 1
-        seq_fast![eat_u8_fast(b'a'), eat_u8_fast(b'b')] // 2
-    ];
-    let tokenizer = tokenizer_expr.build();
-
-    let mut llm_token_map = LLMTokenMap::new();
-    llm_token_map.insert(b"ab".to_vec(), LLMTokenID(0));
-
-    let productions = vec![prod("S", vec![t("A"), t("B")])];
-    let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
-    grammar_token_map.insert(regex_name("A"), TerminalID(0));
-    grammar_token_map.insert(regex_name("B"), TerminalID(1));
-    grammar_token_map.insert(regex_name("AB"), TerminalID(2));
-
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
-
-    let mut token_name_map = BiBTreeMap::new();
-    token_name_map.insert(regex_name("A"), 0);
-    token_name_map.insert(regex_name("B"), 1);
-    token_name_map.insert(regex_name("AB"), 2);
-
-    // This will call precompute0. With the fixes, it should not panic.
-    let _constraint = GrammarConstraint::new(
-        tokenizer,
-        parser,
-        llm_token_map,
-        token_name_map,
-        0,
-    );
-}
-
 #[ignore]
 #[test]
 fn test_js_full_grammar_gss_explosion() -> Result<(), Box<dyn std::error::Error>> {

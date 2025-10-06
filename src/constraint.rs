@@ -1987,10 +1987,8 @@ impl<'r> Precomputer0<'r> {
                                     let s0 = self.tokenizer.initial_state_id();
                                     self.get_end_node(s0)
                                 };
-                                let inserter_result = inserter.try_destination(end_idx.as_arc().clone());
-                                if let Some(actual_dst) = inserter_result.into_option() {
-                                    assert_ne!(&actual_dst, src_node_wrapper.as_arc());
-                                }
+                                let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                                assert_ne!(&actual_dst, src_node_wrapper);
                             }
 
                             let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
@@ -2020,12 +2018,11 @@ impl<'r> Precomputer0<'r> {
                             let next_tokenizer_state = self.tokenizer.initial_state_id();
                             let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
 
-                            let src_idx_usize = src_node_wrapper.as_arc().as_usize();
-                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().filter(move |w| w.as_usize() != src_idx_usize).map(|w| w.as_arc().clone()).filter(|w| w.read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_none()));
+                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| w.read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_none()));
 
                             if true {
                                 let children_of_src: Vec<_> = src_node_wrapper.as_arc().read(&self.trie0_god).unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
-                                let eligible_children = children_of_src.iter().filter(move |c| c.as_usize() != src_idx_usize).map(|child_node_ptr| {
+                                let eligible_children = children_of_src.iter().map(|child_node_ptr| {
                                     child_node_ptr.as_arc().clone()
                                 }).filter(|child_arc| {
                                     (child_arc.read(&self.trie0_god).unwrap().value.live_tokens.clone() & &edge_bv).is_empty() && child_arc.read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_none()
@@ -2056,10 +2053,8 @@ impl<'r> Precomputer0<'r> {
                                 |ev, t| *ev &= &t.live_tokens,
                             );
                             let end_idx = self.get_end_node(TokenizerStateID(end_state_val));
-                            let inserter_result = inserter.try_destination(end_idx.as_arc().clone());
-                            if let Some(actual_dst) = inserter_result.into_option() {
-                                assert_ne!(&actual_dst, src_node_wrapper.as_arc());
-                            }
+                            let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                            assert_ne!(&actual_dst, src_node_wrapper);
                         }
                         next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
                     }
