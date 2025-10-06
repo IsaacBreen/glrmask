@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use crate::constraint::{PrecomputeNode0, PrecomputeNode0Index, Precomputer0, Trie0GodWrapper};
+use ordered_hash_map::OrderedHashMap;
+use crate::constraint::{PrecomputeNode0, PrecomputeNode0Index, PrecomputedNodeContents0, Precomputer0, Trie0GodWrapper};
 use crate::constraint::LLMTokenBV;
 use crate::datastructures::trie::Trie;
 use crate::tokenizer::TokenizerStateID;
@@ -236,7 +237,8 @@ impl<'r> Precomputer0<'r> {
             .map(|root_arc| (root_arc.clone(), None))
             .collect();
 
-        type NodePtr = *const PrecomputeNode0; let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<(GrammarTokenID, Option<TokenizerStateID>)>>> = HashMap::new();
+        type NodePtr = *const PrecomputeNode0;
+        let mut edges_to_keep: HashMap<NodePtr, BTreeSet<Option<(GrammarTokenID, Option<TokenizerStateID>)>>> = HashMap::new();
 
         Trie::special_map(
             &self.trie0_god,
@@ -532,31 +534,31 @@ impl<'r> Precomputer0<'r> {
 
         {
             let node_guard = node_arc.read(&self.trie0_god).unwrap();
-        for (edge_key, dest_map) in node_guard.children() {
-            let mut new_dest_map = OrderedHashMap::new();
-            for (node_ptr_wrapper, edge_val) in dest_map.iter() {
-                let child_arc = node_ptr_wrapper.as_arc().clone();
-                let canonical_child_arc = self.deduplicate_recursive(child_arc.clone(), canonical_nodes, visited);
-                if &child_arc != &canonical_child_arc {
-                    children_changed = true;
+            for (edge_key, dest_map) in node_guard.children() {
+                let mut new_dest_map = OrderedHashMap::new();
+                for (node_ptr_wrapper, edge_val) in dest_map.iter() {
+                    let child_arc = node_ptr_wrapper.as_arc().clone();
+                    let canonical_child_arc = self.deduplicate_recursive(child_arc.clone(), canonical_nodes, visited);
+                    if &child_arc != &canonical_child_arc {
+                        children_changed = true;
+                    }
+                    let new_node_ptr_wrapper = canonical_child_arc;
+                    new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
                 }
-                let new_node_ptr_wrapper = canonical_child_arc;
-                new_dest_map.insert(new_node_ptr_wrapper, edge_val.clone());
-            }
-            if !new_dest_map.is_empty() {
-                new_children_map.insert(edge_key.clone(), new_dest_map);
+                if !new_dest_map.is_empty() {
+                    new_children_map.insert(edge_key.clone(), new_dest_map);
                 }
             }
         }
 
-    if children_changed {
-        let mut node_guard = node_arc.write(&self.trie0_god).unwrap();
-        *node_guard.children_mut() = new_children_map;
-        node_guard.recompute_max_depth(&self.trie0_god);
-        // The live_tokens field will be recomputed by prune_dead_paths after merging.
-    }
+        if children_changed {
+            let mut node_guard = node_arc.write(&self.trie0_god).unwrap();
+            *node_guard.children_mut() = new_children_map;
+            node_guard.recompute_max_depth(&self.trie0_god);
+            // The live_tokens field will be recomputed by prune_dead_paths after merging.
+        }
 
-    let canonical_arc = {
+        let canonical_arc = {
             let node_guard = node_arc.read(&self.trie0_god).unwrap();
             let node_content = (*node_guard).clone();
             canonical_nodes.entry(node_content).or_insert_with(|| node_arc.clone()).clone()
@@ -572,148 +574,4 @@ impl<'r> Precomputer0<'r> {
         let roots: Vec<_> = self.roots.values().cloned().collect();
         Trie::gc(&self.trie0_god, &roots);
     }
-
-    fn finish(
-        self,
-    ) -> (BTreeMap<TokenizerStateID, PrecomputeNode0Index>, Trie0GodWrapper) {
-        (self.roots, self.trie0_god)
-    }
-
-    fn dfs(
-        &self,
-        vocab_node: &VocabPrefixTreeNode,
-        assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
-    ) {
-        self.pb.inc(1);
-
-        for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let mut work_queue: BTreeMap<
-                usize,
-                BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
-            > = BTreeMap::new();
-            work_queue.insert(0, assoc_by_state.clone());
-
-            let mut next_level_assoc: BTreeMap<_, OrderedHashSet<_>> = BTreeMap::new();
-
-            while let Some((pos, states_at_pos)) = work_queue.pop_first() {
-                if pos == segment_bytes.len() {
-                    for (tokenizer_state_id, nodes) in states_at_pos {
-                        next_level_assoc.entry(tokenizer_state_id).or_default().extend(nodes);
-                    }
-                    continue;
-                }
-
-                for (tokenizer_state_id, precompute_nodes) in states_at_pos {
-                    let exec_result = self.tokenizer.execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
-
-                    let possible_matches_at_end = if let Some(end_state_val) = exec_result.end_state {
-                        self.possible_matches(child_vocab_node, TokenizerStateID(end_state_val))
-                    } else {
-                        BTreeMap::new()
-                    };
-
-                    for match_info in &exec_result.matches {
-                        let terminal_id = GrammarTokenID(match_info.id);
-                        let next_pos = pos + match_info.width;
-
-                        let mut disallowed_tokenizer_state_info = None;
-                        if let Some(end_state_val) = exec_result.end_state {
-                            let end_tokenizer_state_id = TokenizerStateID(end_state_val);
-                            let terminals_accessible = self.tokenizer.tokens_accessible_from_state(end_tokenizer_state_id);
-                            if terminals_accessible.contains(&terminal_id) {
-                                disallowed_tokenizer_state_info = Some(end_tokenizer_state_id);
-                            }
-                        }
-
-                        for src_node_wrapper in &precompute_nodes {
-                            if next_pos == segment_bytes.len() {
-                                // Exact end-of-segment terminal match: finishing LLM token here goes to tokenizer initial state.
-                                let llm_token_id = child_vocab_node.token_id();
-                                let mut edge_bv = HybridBitset::zeros();
-                                edge_bv.insert(llm_token_id);
-                                let edge_key = Some((terminal_id, disallowed_tokenizer_state_info));
-                                let mut inserter = EdgeInserter::new(
-                                    &self.trie0_god,
-                                    src_node_wrapper.as_arc().clone(),
-                                    edge_key,
-                                    edge_bv,
-                                    |e, n| *e |= n,
-                                    |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                    |ev, t| *ev &= &t.live_tokens,
-                                );
-                                let end_idx = {
-                                    let s0 = self.tokenizer.initial_state_id();
-                                    self.get_end_node(s0)
-                                };
-                                inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
-                            }
-
-                            let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
-                            if next_pos == segment_bytes.len() {
-                                edge_bv.set(child_vocab_node.token_id(), false);
-                            }
-                            if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
-                                edge_bv -= matches_for_terminal;
-                            }
-
-                            if edge_bv.is_empty() { continue; }
-
-                            // NOTE: It is likely wrong to just use disallowed_tokenizer_state_info as-is here.
-                            //  The actual disallowed state can vary by LLM token. But we don't capture that here.
-                            //  We're doing it in a way that's local to the segment. This is wrong.
-                            let edge_key = Some((terminal_id, None));
-                            let mut inserter = EdgeInserter::new(
-                                &self.trie0_god,
-                                src_node_wrapper.as_arc().clone(),
-                                edge_key,
-                                edge_bv.clone(),
-                                |e, n| *e |= n,
-                                |node_value, edge_value| node_value.live_tokens |= edge_value,
-                                |ev, t| *ev &= &t.live_tokens,
-                            );
-
-                            let next_tokenizer_state = self.tokenizer.initial_state_id();
-                            let dest_nodes_in_queue = work_queue.entry(next_pos).or_default().entry(next_tokenizer_state).or_default();
-
-                            inserter = inserter.try_destinations_iter(dest_nodes_in_queue.iter().map(|w| w.as_arc().clone()).filter(|w| w.read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_none()));
-
-                            let children_of_src: Vec<_> = src_node_wrapper.as_arc().read(&self.trie0_god).unwrap().children().values().flat_map(|m| m.keys().cloned()).collect();
-                            let eligible_children = children_of_src.iter().map(|child_node_ptr| {
-                                child_node_ptr.as_arc().clone()
-                            }).filter(|child_arc| {
-                                (child_arc.read(&self.trie0_god).unwrap().value.live_tokens.clone() & &edge_bv).is_empty() && child_arc.read(&self.trie0_god).unwrap().value.final_tokenizer_state.is_none()
-                            });
-                            inserter = inserter.try_destinations_iter(eligible_children);
-
-                            let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents0::internal()).unwrap();
-                            let result_node_ptr = result_node.clone();
-                            dest_nodes_in_queue.insert(result_node_ptr.clone());
-                        }
-                    }
-
-                    if let Some(end_state_val) = exec_result.end_state {
-                    //     for src_node_wrapper in &precompute_nodes {
-                    //         let llm_token_id = child_vocab_node.token_id();
-                    //         let mut edge_bv = HybridBitset::zeros();
-                    //         edge_bv.insert(llm_token_id);
-                    //         let edge_key = None;
-                    //         let mut inserter = EdgeInserter::new(
-                    //             &self.trie0_god,
-                    //             src_node_wrapper.as_arc().clone(),
-                    //             edge_key,
-                    //             edge_bv,
-                    //             |e, n| *e |= n,
-                    //             |node_value, edge_value| node_value.live_tokens |= edge_value,
-                    //             |ev, t| *ev &= &t.live_tokens,
-                    //         );
-                    //         let end_idx = self.get_end_node(TokenizerStateID(end_state_val));
-                    //         inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
-                    //     }
-                        next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
-                    }
-                }
-            }
-
-            if !next_level_assoc.is_empty() {
-                self.dfs(child_vocab_node, next_level_assoc);
-            }
+}

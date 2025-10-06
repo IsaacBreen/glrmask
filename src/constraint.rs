@@ -856,6 +856,7 @@ impl GrammarConstraint {
             precompute0_vocab.internal_max_llm_token,
             &terminal_follow_map,
             parser.ignore_terminal_id,
+            &mut computed_possible_matches,
         );
 
         let (precomputed1, trie1_god) = Self::precompute1(
