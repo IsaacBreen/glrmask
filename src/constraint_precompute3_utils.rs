@@ -120,6 +120,13 @@ pub fn optimize_trie3_size(
 	// These passes are expensive but have a huge impact on the initial massive graph.
 	// They are essential to run first to make subsequent passes feasible.
 
+	if config.optimize_trie2_merge_nodes {
+		run_pass!("Merging nodes (fast pre-pass)", {
+			merge_nodes_trie3_fast(roots, trie3_god);
+		});
+	}
+
+
 	if config.optimize_trie2_prune_dead_paths { // Reusing config flag
 		run_pass!("Pruning dead paths", {
 			prune_dead_paths_trie3(roots, &trie3_god);
@@ -1000,8 +1007,18 @@ pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
     crate::debug!(2, "Finished pruning dead paths from trie 3.");
 }
 
+pub fn merge_nodes_trie3_fast(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
+    merge_nodes_trie3_impl(roots, trie3_god, 2);
+}
+
 pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
-    crate::debug!(2, "Merging identical subtrees in precomputed trie 3.");
+    const MAX_ITERS: usize = 40;
+    merge_nodes_trie3_impl(roots, trie3_god, MAX_ITERS);
+}
+
+fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {
+    crate::debug!(2, "Merging identical subtrees in precomputed trie 3 (max_iters={}).", max_iters);
+
 
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
@@ -1033,8 +1050,7 @@ pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3I
 
     let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
 
-    const MAX_ITERS: usize = 40;
-    for it in 0..MAX_ITERS {
+    for it in 0..max_iters {
         type AggregatedEdge3 = ((usize, LLMTokenBV, usize), StateIDBV);
         type Signature3 = (bool, Vec<AggregatedEdge3>);
 
