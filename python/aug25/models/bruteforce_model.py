@@ -308,7 +308,7 @@ class BruteForceModel(GraphProvider):
                         else:
                             work[key] = proc_gss
                             q.append(key)
-            if end_state is not None: new_states[end_state].append(gss)
+            if end_state is not None and not matches: new_states[end_state].append(gss)
 
         merged = {sid: GSS.merge_many(gssl) for sid, gssl in new_states.items() if gssl}
         merged = {sid: g for sid, g in merged.items() if not g.is_empty()}
