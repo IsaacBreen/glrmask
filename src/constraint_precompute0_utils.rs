@@ -27,7 +27,7 @@ impl<'r> Precomputer0<'r> {
         // New: prune using substring parser in "everything state" mode
         // self.prune_with_substring_everything_state();
         // self.prune_dead_paths(); // Clean up after GLR-based pruning
-        self.factor_common_destinations();
+        // self.factor_common_destinations();
         self.merge_nodes();
         // self.merge_nodes_basic();
         self.gc();
