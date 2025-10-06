@@ -127,6 +127,29 @@ pub struct StageVocab {
 	pub internal_max_llm_token: usize,
 }
 
+// Lightweight "preprecompute" structures for early token canonicalization.
+// This is a barebones tree keyed by NodeID, where each node has:
+// - end_state: Option<TokenizerStateID> (if reaching this node can end the current LLM token in that tokenizer state)
+// - edges: map from grammar TerminalID to a single child NodeID
+// The tree is keyed by (vocab node pointer, tokenizer state) pairs internally during construction,
+// but exposed as a flat NodeID->NodeData map for simplicity.
+#[derive(Debug, Clone)]
+struct PrePreNodeData {
+    end_state: Option<TokenizerStateID>,
+    edges: HashMap<GrammarTokenID, usize>, // terminal -> child NodeID
+}
+
+#[derive(Debug, Clone)]
+struct PrePreTree {
+    nodes: HashMap<usize, PrePreNodeData>,
+    roots: BTreeMap<TokenizerStateID, usize>,
+}
+
+impl PrePreTree {
+    fn new() -> Self {
+        Self { nodes: HashMap::new(), roots: BTreeMap::new() }
+    }
+}
 
 impl JSONConvertible for StageVocab {
     fn to_json(&self) -> JSONNode {
@@ -699,6 +722,204 @@ impl GrammarConstraint {
         original_to_internal_id_bimap
     }
 
+    // Build a minimal "preprecompute" tree plus collect splitter bitsets used for partition refinement.
+    // - tokenizer: used to execute segment matches from each tokenizer state
+    // - vocab_root: a VocabPrefixTree built using ORIGINAL token IDs
+    //
+    // The returned splitters are LLMTokenBV bitsets (over original token IDs) that indicate
+    // groups of tokens that share the same subtree under a particular segment.
+    // We use these splitters to refine an initial partition of all tokens into equivalence classes.
+    fn build_prepre_tree_and_splitters(
+        tokenizer: &Regex,
+        vocab_root: &VocabPrefixTreeNode,
+    ) -> (PrePreTree, Vec<LLMTokenBV>) {
+        let mut tree = PrePreTree::new();
+        let mut next_id: usize = 0;
+
+        // Map "node key" -> NodeID. Node key is (vocab node raw ptr, tokenizer state).
+        type NodeKey = (*const VocabPrefixTreeNode, TokenizerStateID);
+        let mut key_to_id: HashMap<NodeKey, usize> = HashMap::new();
+        let mut q: VecDeque<NodeKey> = VecDeque::new();
+
+        // Helper to allocate a new node
+        let mut new_node = |end_state: Option<TokenizerStateID>| -> usize {
+            let id = next_id;
+            next_id = next_id.checked_add(1).expect("PrePreTree NodeID overflow");
+            tree.nodes.insert(id, PrePreNodeData { end_state, edges: HashMap::new() });
+            id
+        };
+
+        // Initialize a root per tokenizer state
+        let root_ptr: *const VocabPrefixTreeNode = vocab_root as *const VocabPrefixTreeNode;
+        for sid in tokenizer.iter_states() {
+            let nid = new_node(None);
+            tree.roots.insert(sid, nid);
+            key_to_id.insert((root_ptr, sid), nid);
+            q.push_back((root_ptr, sid));
+        }
+
+        // Collect all splitters (token sets) while we expand the minimal tree.
+        let mut splitters: Vec<LLMTokenBV> = Vec::new();
+
+        while let Some((node_ptr, tok_state)) = q.pop_front() {
+            // Safety: node_ptr comes from a live VocabPrefixTree
+            let node_ref: &VocabPrefixTreeNode = unsafe { &*node_ptr };
+            let cur_id = *key_to_id.get(&(node_ptr, tok_state)).expect("node must exist");
+
+            for (segment_bytes, child_node) in node_ref.iter_children() {
+                let exec = tokenizer.execute_from_state(&segment_bytes, tok_state);
+                let child_ptr: *const VocabPrefixTreeNode = child_node as *const VocabPrefixTreeNode;
+
+                // For every terminal that matches at the start of 'segment_bytes', add an edge.
+                // After consuming a grammar terminal from a segment, we reset the tokenizer for
+                // the next segment to tokenizer.initial_state_id (coarse but sound for our purposes).
+                let dest_state_after_terminal = tokenizer.initial_state_id();
+
+                // Ensure destination node for (child_ptr, initial tokenizer state)
+                let dest_key_after_terminal = (child_ptr, dest_state_after_terminal);
+                let dest_id_after_terminal = if let Some(&id) = key_to_id.get(&dest_key_after_terminal) {
+                    id
+                } else {
+                    let id = new_node(None);
+                    key_to_id.insert(dest_key_after_terminal, id);
+                    q.push_back(dest_key_after_terminal);
+                    id
+                };
+
+                // Record a splitter for all tokens in the child's subtree
+                // (tokens whose bytes start with this segment).
+                let tokens_under_child = child_node.reachable_token_ids();
+                if !tokens_under_child.is_empty() {
+                    splitters.push(tokens_under_child.clone());
+                }
+
+                // Add one edge per matching terminal
+                if !exec.matches.is_empty() {
+                    let cur_node = tree.nodes.get_mut(&cur_id).expect("current node must exist");
+                    for m in &exec.matches {
+                        let tid = GrammarTokenID(m.id);
+                        // As per the simplified tree spec: one child per edge key (terminal).
+                        cur_node.edges.entry(tid).or_insert(dest_id_after_terminal);
+                    }
+                }
+
+                // If the segment can end in some tokenizer state, mark the node for that state
+                // and enqueue it as needed. This captures the possibility that the whole segment
+                // completes an LLM token in that tokenizer state.
+                if let Some(end_state_val) = exec.end_state {
+                    let end_state = TokenizerStateID(end_state_val);
+                    let end_key = (child_ptr, end_state);
+                    let end_id = if let Some(&id) = key_to_id.get(&end_key) {
+                        id
+                    } else {
+                        let id = new_node(Some(end_state));
+                        key_to_id.insert(end_key, id);
+                        q.push_back(end_key);
+                        id
+                    };
+                    // Ensure the node is marked as end (idempotent)
+                    let end_node = tree.nodes.get_mut(&end_id).expect("end node must exist");
+                    end_node.end_state = Some(end_state);
+                }
+            }
+        }
+
+        (tree, splitters)
+    }
+
+    // Partition refinement over original token IDs, using splitters derived from the pre-pre tree.
+    // Returns original_id -> canonical internal_id (dense [0..k-1]).
+    fn preprecompute_canonicalize_tokens(
+        tokenizer: &Regex,
+        vocab_root_original: &VocabPrefixTreeNode,
+        max_original_llm_token_id: usize,
+    ) -> BTreeMap<usize, usize> {
+        let (_tree, splitters_vec) = Self::build_prepre_tree_and_splitters(tokenizer, vocab_root_original);
+
+        // Deduplicate splitter bitsets to reduce work
+        let mut seen: HashSet<LLMTokenBV> = HashSet::new();
+        let mut splitters: Vec<LLMTokenBV> = Vec::new();
+        for bv in splitters_vec {
+            if !bv.is_empty() && seen.insert(bv.clone()) {
+                splitters.push(bv);
+            }
+        }
+
+        // Universe of tokens = all tokens present under the original vocab root
+        let universe = vocab_root_original.reachable_token_ids();
+        if universe.is_empty() {
+            return BTreeMap::new();
+        }
+        let tokens_present: Vec<usize> = universe.iter().collect();
+
+        // token -> class (for present tokens only). Start with all in class 0.
+        let mut token_to_class: HashMap<usize, usize> = HashMap::new();
+        let mut class_to_tokens: HashMap<usize, Vec<usize>> = HashMap::new();
+        for &t in &tokens_present {
+            if t <= max_original_llm_token_id {
+                token_to_class.insert(t, 0);
+            }
+        }
+        class_to_tokens.insert(0, tokens_present.clone());
+        let mut num_classes = 1usize;
+
+        // Refine by each splitter: tokens inside the splitter "S" split each affected class.
+        for S in splitters {
+            if S.is_all() {
+                // All-present splitter doesn't refine
+                continue;
+            }
+            // Gather tokens that are both present and in S
+            let mut members_by_class: HashMap<usize, Vec<usize>> = HashMap::new();
+            for t in S.iter() {
+                if t <= max_original_llm_token_id && universe.contains(t) {
+                    let cid = *token_to_class.get(&t).unwrap_or(&0);
+                    members_by_class.entry(cid).or_default().push(t);
+                }
+            }
+            // For every class impacted by this splitter, split into (in S) and (not in S).
+            for (old_cid, subset) in members_by_class {
+                if subset.is_empty() {
+                    continue;
+                }
+                let old_tokens = class_to_tokens.get(&old_cid).cloned().unwrap_or_default();
+                if subset.len() >= old_tokens.len() {
+                    // Either equal or superset; no proper split
+                    continue;
+                }
+                // Create a new class for "subset"
+                let new_cid = num_classes;
+                num_classes += 1;
+                for &t in &subset {
+                    token_to_class.insert(t, new_cid);
+                }
+                // Old class becomes "old - subset"
+                let subset_set: HashSet<usize> = subset.iter().cloned().collect();
+                let mut remaining = old_tokens.clone();
+                remaining.retain(|t| !subset_set.contains(t));
+
+                class_to_tokens.insert(old_cid, remaining);
+                class_to_tokens.insert(new_cid, subset);
+            }
+        }
+
+        // Assign dense internal IDs [0..k-1] with deterministic order:
+        // sort classes by their representative (smallest original token id).
+        let mut classes: Vec<(usize, Vec<usize>)> = class_to_tokens
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
+        classes.sort_by_key(|(_, v)| v.iter().min().cloned().unwrap_or(usize::MAX));
+
+        let mut original_to_internal: BTreeMap<usize, usize> = BTreeMap::new();
+        for (new_internal_id, (_cid, members)) in classes.into_iter().enumerate() {
+            for t in members {
+                original_to_internal.insert(t, new_internal_id);
+            }
+        }
+        original_to_internal
+    }
+
     pub fn new(
         tokenizer:        Regex,
         parser:           GLRParser,
@@ -727,16 +948,34 @@ impl GrammarConstraint {
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
         let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
         assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
-        let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map);
+        // Build a vocab tree using ORIGINAL token IDs for the preprecompute canonicalization
+        let original_tokens_for_vocab: Vec<(usize, Vec<u8>)> = llm_token_map
+            .iter()
+            .map(|(bytes, original_id)| (original_id.0 as usize, bytes.clone()))
+            .collect();
+        crate::debug!(2, "Building vocab prefix tree (original IDs) for preprecompute canonicalization");
+        let vocab_for_prepre = VocabPrefixTree::build(&original_tokens_for_vocab);
+        crate::debug!(2, "Done building vocab prefix tree (original IDs)");
 
+        // Early, trie-free token canonicalization via partition refinement on splitters
+        let original_to_internal_map = Self::preprecompute_canonicalize_tokens(
+            &tokenizer,
+            &vocab_for_prepre.root,
+            max_original_llm_token_id,
+        );
+        let tokens_before = llm_token_map.len();
+        let internal_max_llm_token = original_to_internal_map.values().copied().max().unwrap_or(0);
+        let tokens_after = internal_max_llm_token + 1;
+        crate::debug!(2, "Preprecompute canonicalization: tokens {} -> {} (reduction: {})",
+            tokens_before, tokens_after, tokens_before.saturating_sub(tokens_after));
 
-		let internal_max_llm_token = original_to_internal_map.values().copied().max().unwrap_or(0);
-		// Build reverse mapping for global vocab
-		let mut internal_to_original_map: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
-		for (orig, int_id) in &original_to_internal_map {
-			internal_to_original_map.entry(*int_id).or_default().insert(*orig);
-		}
+        // Build reverse mapping for global vocab (stage-local mapping for subsequent stages)
+        let mut internal_to_original_map: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+        for (orig, int_id) in &original_to_internal_map {
+            internal_to_original_map.entry(*int_id).or_default().insert(*orig);
+        }
 
+        // Build internal token map (bytes -> canonical internal id) for precomputations
         let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
         for (bytes, original_id) in llm_token_map.iter() {
             if let Some(internal_id_val) = original_to_internal_map.get(&original_id.0) {
@@ -749,12 +988,8 @@ impl GrammarConstraint {
             .iter()
             .map(|(bytes, id)| (id.0 as usize, bytes.clone()))
             .collect();
-        // Note: The tokenizer parameter to `new` is shadowed here by the struct field.
-        // We need to use the parameter `tokenizer` for the computation.
-        // Let's rename the parameter to avoid confusion, or be careful.
-        // Assuming `tokenizer` in `Self { tokenizer, ... }` refers to the parameter, it's fine.
 
-        crate::debug!(2, "Building vocab prefix tree for possible_matches computation");
+        crate::debug!(2, "Building vocab prefix tree for possible_matches computation (canonical internal IDs)");
         let vocab_for_possible_matches = VocabPrefixTree::build(&internal_tokens_for_vocab);
         crate::debug!(2, "Done building vocab prefix tree for possible_matches computation");
 
@@ -814,7 +1049,7 @@ impl GrammarConstraint {
             max_original_llm_token_id,
         });
 
-        // Initialize per-stage vocabularies (start identical to global)
+        // Initialize per-stage vocabularies (start with canonicalized mapping)
         let mut precompute0_vocab = StageVocab {
             original_to_internal: original_to_internal_map.clone(),
             internal_to_original: internal_to_original_map.clone(),
