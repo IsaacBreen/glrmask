@@ -1984,7 +1984,7 @@ impl<'r> Precomputer0<'r> {
                                     &self.trie0_god,
                                     src_node_wrapper.as_arc().clone(),
                                     edge_key,
-                                    &edge_bv & src_contextual_tokens,
+                                    edge_bv,
                                     |e, n| *e |= n,
                                     |node_value, edge_value| node_value.live_tokens |= edge_value,
                                     |ev, t| *ev &= &t.live_tokens,
@@ -2005,7 +2005,7 @@ impl<'r> Precomputer0<'r> {
                                 edge_bv -= matches_for_terminal;
                             }
 
-                            let edge_bv_for_inserter = &edge_bv & src_contextual_tokens;
+                            let edge_bv_for_inserter = edge_bv;
                             if edge_bv_for_inserter.is_empty() { continue; }
 
                             // NOTE: It is likely wrong to just use disallowed_tokenizer_state_info as-is here.
@@ -2070,7 +2070,7 @@ impl<'r> Precomputer0<'r> {
                                 &self.trie0_god,
                                 src_node_wrapper.as_arc().clone(),
                                 edge_key,
-                                &edge_bv & src_contextual_tokens,
+                                edge_bv,
                                 |e, n| *e |= n,
                                 |node_value, edge_value| node_value.live_tokens |= edge_value,
                                 |ev, t| *ev &= &t.live_tokens,
