@@ -1036,14 +1036,19 @@ impl GrammarConstraint {
         };
 
         // Add to recursion stack for this path.
-        let original_tokens_on_stack = recursion_stack.insert(node_idx, current_tokens);
+        // Add to recursion stack for this path, accumulating tokens.
+        let original_tokens_on_stack = recursion_stack.get(&node_idx).cloned();
+        recursion_stack
+            .entry(node_idx)
+            .or_default()
+            .bitor_assign(&current_tokens);
 
         let children_to_visit = if let Some(guard) = node_idx.read(arena) {
             guard.children().clone()
         } else {
             // Should not happen in a well-formed trie. Restore stack and return.
             if let Some(original) = original_tokens_on_stack {
-                recursion_stack.insert(node_idx, original);
+                *recursion_stack.get_mut(&node_idx).unwrap() = original;
             } else {
                 recursion_stack.remove(&node_idx);
             }
@@ -1056,15 +1061,21 @@ impl GrammarConstraint {
                 if !next_tokens.is_empty() {
                     if Self::detect_cycle_recursive0(*child_idx, next_tokens, arena, recursion_stack, visited) {
                         // Cycle found, restore stack and propagate true.
-                        if let Some(original) = original_tokens_on_stack { recursion_stack.insert(node_idx, original); } else { recursion_stack.remove(&node_idx); }
+                        if let Some(original) = original_tokens_on_stack { *recursion_stack.get_mut(&node_idx).unwrap() = original; } else { recursion_stack.remove(&node_idx); }
                         return true;
                     }
                 }
             }
         }
 
-        // Backtrack: remove from recursion stack.
-        if let Some(original) = original_tokens_on_stack { recursion_stack.insert(node_idx, original); } else { recursion_stack.remove(&node_idx); }
+        // Backtrack: restore recursion stack.
+        if let Some(original) = original_tokens_on_stack {
+            // The key was present before, restore its old value.
+            *recursion_stack.get_mut(&node_idx).unwrap() = original;
+        } else {
+            // The key was not present, so remove it.
+            recursion_stack.remove(&node_idx);
+        }
 
         false
     }
@@ -1124,14 +1135,19 @@ impl GrammarConstraint {
         };
 
         // Add to recursion stack for this path.
-        let original_tokens_on_stack = recursion_stack.insert(node_idx, current_tokens);
+        // Add to recursion stack for this path, accumulating tokens.
+        let original_tokens_on_stack = recursion_stack.get(&node_idx).cloned();
+        recursion_stack
+            .entry(node_idx)
+            .or_default()
+            .bitor_assign(&current_tokens);
 
         let children_to_visit = if let Some(guard) = node_idx.read(arena) {
             guard.children().clone()
         } else {
             // Should not happen in a well-formed trie. Restore stack and return.
             if let Some(original) = original_tokens_on_stack {
-                recursion_stack.insert(node_idx, original);
+                *recursion_stack.get_mut(&node_idx).unwrap() = original;
             } else {
                 recursion_stack.remove(&node_idx);
             }
@@ -1144,15 +1160,21 @@ impl GrammarConstraint {
                 if !next_tokens.is_empty() {
                     if Self::detect_cycle_recursive(*child_idx, next_tokens, arena, recursion_stack, visited) {
                         // Cycle found, restore stack and propagate true.
-                        if let Some(original) = original_tokens_on_stack { recursion_stack.insert(node_idx, original); } else { recursion_stack.remove(&node_idx); }
+                        if let Some(original) = original_tokens_on_stack { *recursion_stack.get_mut(&node_idx).unwrap() = original; } else { recursion_stack.remove(&node_idx); }
                         return true;
                     }
                 }
             }
         }
 
-        // Backtrack: remove from recursion stack.
-        if let Some(original) = original_tokens_on_stack { recursion_stack.insert(node_idx, original); } else { recursion_stack.remove(&node_idx); }
+        // Backtrack: restore recursion stack.
+        if let Some(original) = original_tokens_on_stack {
+            // The key was present before, restore its old value.
+            *recursion_stack.get_mut(&node_idx).unwrap() = original;
+        } else {
+            // The key was not present, so remove it.
+            recursion_stack.remove(&node_idx);
+        }
 
         false
     }
