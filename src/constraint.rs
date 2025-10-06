@@ -1987,7 +1987,8 @@ impl<'r> Precomputer0<'r> {
                                     let s0 = self.tokenizer.initial_state_id();
                                     self.get_end_node(s0)
                                 };
-                                inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                                let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                                assert_ne!(&actual_dst, src_node_wrapper);
                             }
 
                             let mut edge_bv = child_vocab_node.reachable_token_ids().clone();
@@ -2030,6 +2031,7 @@ impl<'r> Precomputer0<'r> {
                             }
 
                             let result_node = inserter.else_create_destination_with_value(PrecomputedNodeContents0::internal()).unwrap();
+                            assert_ne!(&result_node, src_node_wrapper);
                             let result_node_ptr = result_node.clone();
                             dest_nodes_in_queue.insert(result_node_ptr.clone());
                         }
@@ -2051,7 +2053,8 @@ impl<'r> Precomputer0<'r> {
                                 |ev, t| *ev &= &t.live_tokens,
                             );
                             let end_idx = self.get_end_node(TokenizerStateID(end_state_val));
-                            inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                            let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
+                            assert_ne!(&actual_dst, src_node_wrapper);
                         }
                         next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes.iter().cloned());
                     }
