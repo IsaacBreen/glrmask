@@ -1899,14 +1899,14 @@ impl<'r> Precomputer0<'r> {
     fn run_dfs(&mut self) {
         let mut assoc: BTreeMap<
             TokenizerStateID,
-            OrderedHashSet<PrecomputeNode0Index>,
+            OrderedHashMap<PrecomputeNode0Index, LLMTokenBV>,
         > = BTreeMap::new();
 
         for (sid, arc) in &self.roots {
             assoc
                 .entry(*sid)
                 .or_default()
-                .insert(arc.clone());
+                .insert(arc.clone(), self.all_llm_tokens.clone());
         }
 
         crate::debug!(2, "Starting precompute DFS");
@@ -1923,7 +1923,7 @@ impl<'r> Precomputer0<'r> {
     fn dfs(
         &self,
         vocab_node: &VocabPrefixTreeNode,
-        assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashSet<PrecomputeNode0Index>>,
+        assoc_by_state: BTreeMap<TokenizerStateID, OrderedHashMap<PrecomputeNode0Index, LLMTokenBV>>,
     ) {
         self.pb.inc(1);
 
@@ -1932,21 +1932,20 @@ impl<'r> Precomputer0<'r> {
                 usize,
                 BTreeMap<TokenizerStateID, OrderedHashMap<PrecomputeNode0Index, LLMTokenBV>>,
             > = BTreeMap::new();
-            let work_queue_value = assoc_by_state.iter().map(|(sid, nodes)| {
-                let ohm: OrderedHashMap<PrecomputeNode0Index, LLMTokenBV> = nodes
-                    .iter()
-                    .map(|n| (n.clone(), HybridBitset::max_ones()))
-                    .collect();
-                (*sid, ohm)
-            }).collect();
-            work_queue.insert(0, work_queue_value);
+            work_queue.insert(0, assoc_by_state.clone());
 
-            let mut next_level_assoc: BTreeMap<_, OrderedHashSet<PrecomputeNode0Index>> = BTreeMap::new();
+            let mut next_level_assoc: BTreeMap<_, OrderedHashMap<_, _>> = BTreeMap::new();
 
             while let Some((pos, states_at_pos)) = work_queue.pop_first() {
                 if pos == segment_bytes.len() {
-                    for (tokenizer_state_id, nodes) in states_at_pos {
-                        next_level_assoc.entry(tokenizer_state_id).or_default().extend(nodes.keys());
+                    for (tokenizer_state_id, nodes_with_tokens) in states_at_pos {
+                        let entry = next_level_assoc.entry(tokenizer_state_id).or_default();
+                        for (node, tokens) in nodes_with_tokens {
+                            entry
+                                .entry(node)
+                                .or_insert_with(LLMTokenBV::zeros)
+                                .bitor_assign(&tokens);
+                        }
                     }
                     continue;
                 }
@@ -1984,7 +1983,7 @@ impl<'r> Precomputer0<'r> {
                                     &self.trie0_god,
                                     src_node_wrapper.as_arc().clone(),
                                     edge_key,
-                                    &edge_bv & src_contextual_tokens & src_node_wrapper.read(&self.trie0_god).unwrap().value.live_tokens.clone() & src_node_wrapper.read(&self.trie0_god).unwrap().value.live_tokens.clone(),
+                                    &edge_bv & src_contextual_tokens,
                                     |e, n| *e |= n,
                                     |node_value, edge_value| node_value.live_tokens |= edge_value,
                                     |ev, t| *ev &= &t.live_tokens,
@@ -2005,7 +2004,7 @@ impl<'r> Precomputer0<'r> {
                                 edge_bv -= matches_for_terminal;
                             }
 
-                            let edge_bv_for_inserter = &edge_bv & src_contextual_tokens & src_node_wrapper.read(&self.trie0_god).unwrap().value.live_tokens.clone();
+                            let edge_bv_for_inserter = &edge_bv & src_contextual_tokens;
                             if edge_bv_for_inserter.is_empty() { continue; }
 
                             // NOTE: It is likely wrong to just use disallowed_tokenizer_state_info as-is here.
@@ -2070,7 +2069,7 @@ impl<'r> Precomputer0<'r> {
                                 &self.trie0_god,
                                 src_node_wrapper.as_arc().clone(),
                                 edge_key,
-                                &edge_bv & src_contextual_tokens & src_node_wrapper.read(&self.trie0_god).unwrap().value.live_tokens.clone(),
+                                &edge_bv & src_contextual_tokens,
                                 |e, n| *e |= n,
                                 |node_value, edge_value| node_value.live_tokens |= edge_value,
                                 |ev, t| *ev &= &t.live_tokens,
@@ -2079,7 +2078,13 @@ impl<'r> Precomputer0<'r> {
                             let actual_dst = inserter.try_destination(end_idx.as_arc().clone()).expect("Failed to insert end node for terminal at end of segment");
                             assert_ne!(&actual_dst, src_node_wrapper);
                         }
-                        next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default().extend(precompute_nodes_with_tokens.keys().cloned());
+                        let entry = next_level_assoc.entry(TokenizerStateID(end_state_val)).or_default();
+                        for (node, tokens) in precompute_nodes_with_tokens {
+                            entry
+                                .entry(node.clone())
+                                .or_insert_with(LLMTokenBV::zeros)
+                                .bitor_assign(&tokens);
+                        }
                     }
                 }
             }
