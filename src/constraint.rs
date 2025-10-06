@@ -2004,6 +2004,7 @@ impl<'r> Precomputer0<'r> {
                             if let Some(matches_for_terminal) = possible_matches_at_end.get(&terminal_id) {
                                 edge_bv -= matches_for_terminal;
                             }
+                            edge_bv &= &src_node_wrapper.read(&self.trie0_god).unwrap().value.live_tokens;
 
                             if edge_bv.is_empty() { continue; }
 
