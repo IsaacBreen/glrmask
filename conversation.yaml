@@ -978,14 +978,12 @@ local_system:
               );
 
               helper.run_dfs();
-              let roots_before: Vec<_> = helper.roots.values().cloned().collect();
-              Self::has_llm_compatible_cycle0(&helper.trie0_god, &roots_before, internal_max_llm_token);
               helper.optimize();
               helper.optimize();
               helper.optimize();
               let (precomputed0, trie0_god) = helper.finish();
-              let roots_after: Vec<_> = precomputed0.values().cloned().collect();
-              Self::has_llm_compatible_cycle0(&trie0_god, &roots_after, internal_max_llm_token);
+              let roots: Vec<_> = precomputed0.values().cloned().collect();
+              Self::has_llm_compatible_cycle0(&trie0_god, &roots, internal_max_llm_token);
 
               (precomputed0, trie0_god)
           }
@@ -4985,13 +4983,9 @@ local_system:
 
               crate::debug!(2, "Finished precomputing Trie 3.");
               let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
-              // Run the optimization exactly once to avoid re-entrancy into deduplicate_recursive
-              // while locks from a prior pass may still be in play. This prevents deadlocks observed
-              // with multiple consecutive passes.
-              let optimization_passes: usize = 1;
-              for _ in 0..optimization_passes {
-                  optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
-              }
+              optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
+              optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
+              optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
 
               (precomputed3, trie3_god)
           }
@@ -7041,7 +7035,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -8047,14 +8041,12 @@ messages:
               );
 
               helper.run_dfs();
-              let roots_before: Vec<_> = helper.roots.values().cloned().collect();
-              Self::has_llm_compatible_cycle0(&helper.trie0_god, &roots_before, internal_max_llm_token);
               helper.optimize();
               helper.optimize();
               helper.optimize();
               let (precomputed0, trie0_god) = helper.finish();
-              let roots_after: Vec<_> = precomputed0.values().cloned().collect();
-              Self::has_llm_compatible_cycle0(&trie0_god, &roots_after, internal_max_llm_token);
+              let roots: Vec<_> = precomputed0.values().cloned().collect();
+              Self::has_llm_compatible_cycle0(&trie0_god, &roots, internal_max_llm_token);
 
               (precomputed0, trie0_god)
           }
@@ -10587,7 +10579,8 @@ messages:
       ```
     metadata:
       filename: src/constraint.rs
-  - user: Somewhere in `deduplicate_recursive` we're getting a deadlock. Fix it.
+  - user: Make it so cycle detection is done right before `helper.optimize();`. And
+      also after.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -10606,69 +10599,70 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below is a minimal, safe fix to eliminate the deadlock by avoiding repeated deduplication passes that re-enter the same trie while locks from a prior pass can still be in play. This is a pragmatic change that removes the repeated passes and runs the optimization exactly once. It resolves the deadlock while keeping the core optimization in place.
+      Of course! Here are the step-by-step instructions to add cycle detection before and after the optimization step, followed by the corresponding git diff.
 
-      If you want to fully harden deduplication in the future, I’ve added notes after the patch that explain how to adjust the deduplication routine so it never holds a write-lock across recursive calls (snapshot → recurse → relink). That change belongs in the trie’s deduplication implementation (likely in src/datastructures/trie.rs or constraint_precompute3_utils.rs) and can be done later.
+      ### Step-by-step Instructions
 
-      Step-by-step instructions
+      1.  **Open the file `src/constraint.rs`**.
 
-      1) Edit src/constraint.rs, function GrammarConstraint::precompute3:
-         - Near the end of the function, we currently call optimize_trie3_size three times in a row. Replace those three calls with a single pass (or a loop that runs exactly once).
-         - Rationale: multiple consecutive optimization passes may cause the deduplication routine to re-enter while locks held by earlier steps haven’t yet been dropped in all call-paths, resulting in deadlock. Running a single pass eliminates the deadlock while preserving optimization.
+      2.  **Locate the `precompute0` function** within the `impl GrammarConstraint` block.
 
-      2) (Optional, future-proofing) If you need multiple passes, convert the loop to a small number of passes after you rework the deduplicate_recursive implementation to use the snapshot → recurse → relink pattern (i.e., never hold a write-lock across recursion; take a read/snapshot, drop the guard, recurse, then reacquire write to relink), and optionally include a “visiting” set to short-circuit cycles.
+      3.  Find the following section of code inside the function:
+          ```rust
+              helper.run_dfs();
+              helper.optimize();
+              helper.optimize();
+              helper.optimize();
+              let (precomputed0, trie0_god) = helper.finish();
+              let roots: Vec<_> = precomputed0.values().cloned().collect();
+              Self::has_llm_compatible_cycle0(&trie0_god, &roots, internal_max_llm_token);
 
-      3) No cache or local configuration changes are necessary.
+              (precomputed0, trie0_god)
+          ```
 
-      Git diffs
+      4.  **Modify this code** to insert a new cycle detection call before the `helper.optimize()` calls and adjust the variable names to avoid conflicts. The final code block should look like this:
+          ```rust
+              helper.run_dfs();
+              let roots_before: Vec<_> = helper.roots.values().cloned().collect();
+              Self::has_llm_compatible_cycle0(&helper.trie0_god, &roots_before, internal_max_llm_token);
+              helper.optimize();
+              helper.optimize();
+              helper.optimize();
+              let (precomputed0, trie0_god) = helper.finish();
+              let roots_after: Vec<_> = precomputed0.values().cloned().collect();
+              Self::has_llm_compatible_cycle0(&trie0_god, &roots_after, internal_max_llm_token);
+
+              (precomputed0, trie0_god)
+          ```
+
+      ### Git Diff
+
+      Here is the git diff for the changes:
 
       ```diff
       diff --git a/src/constraint.rs b/src/constraint.rs
-      index 1f5d3b3..b9d2a7c 100644
+      index 455447a..9f46401 100644
       --- a/src/constraint.rs
       +++ b/src/constraint.rs
-      @@ -812,11 +812,12 @@ impl GrammarConstraint {
-               Trie::special_map_grouped(
-                   &trie1_god,
-                   initial_values_for_map,
-                   |current_glr_state, edge_grammar_token_opt, destinations_map| {
-                       reset();
-                       let mut glr_s = current_glr_state.clone();
-                       let mut edge_bv = LLMTokenBV::zeros();
-                       for bv in destinations_map.values() {
-                           edge_bv |= bv;
-                       }
-                       allow_only_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_bv, &mut HashMap::new());
-      @@ -1003,10 +1004,13 @@ impl GrammarConstraint {
+      @@ -1026,14 +1026,14 @@
+               );
        
-               crate::debug!(2, "Finished precomputing Trie 3.");
-               let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
-      -        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
-      -        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
-      -        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
-      +        // Run the optimization exactly once to avoid re-entrancy into deduplicate_recursive
-      +        // while locks from a prior pass may still be in play. This prevents deadlocks observed
-      +        // with multiple consecutive passes.
-      +        let optimization_passes: usize = 1;
-      +        for _ in 0..optimization_passes {
-      +            optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
-      +        }
+               helper.run_dfs();
+      +        let roots_before: Vec<_> = helper.roots.values().cloned().collect();
+      +        Self::has_llm_compatible_cycle0(&helper.trie0_god, &roots_before, internal_max_llm_token);
+               helper.optimize();
+               helper.optimize();
+               helper.optimize();
+               let (precomputed0, trie0_god) = helper.finish();
+      -        let roots: Vec<_> = precomputed0.values().cloned().collect();
+      -        Self::has_llm_compatible_cycle0(&trie0_god, &roots, internal_max_llm_token);
+      +        let roots_after: Vec<_> = precomputed0.values().cloned().collect();
+      +        Self::has_llm_compatible_cycle0(&trie0_god, &roots_after, internal_max_llm_token);
        
-               (precomputed3, trie3_god)
+               (precomputed0, trie0_god)
            }
+
       ```
-
-      Notes for a full, robust deduplicate_recursive fix (for a follow-up patch):
-
-      - Snapshot → recurse → relink:
-        - Under a read-lock, take a shallow snapshot of the node’s children (clone edge keys and (child, edge) pairs) and the node’s value if needed for signatures. Immediately drop the guard.
-        - Recursively deduplicate all child nodes using only the snapshot, so no lock is held while recursing.
-        - Reacquire a write-lock for the current node and rebuild its children map using the deduplicated children (coalescing edges as needed).
-      - Never invoke user callbacks (like value hashing/signature generation) while holding a write-lock; do work with snapshots.
-      - Add a “visiting” HashSet (or thread-local) keyed by node ID/index to short-circuit true cycles. If the current node is already in “visiting,” return it (or a stable canonical placeholder) to avoid attempting to re-lock the same RwLock re-entrantly.
-      - If you need multiple optimization passes, place them in a small loop around the now-safe deduplication.
-
-      This staged approach keeps your system unblocked now (no deadlocks) and provides a clear path to a fully robust deduplication later.
     metadata:
   - user: |
       Apply result (git-llm mode):
@@ -10679,7 +10673,7 @@ messages:
       Applying patch to 'src/constraint.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint.rs.
     metadata:
-  - user: 'Changes committed with message: "Fix: Reduce Trie 3 optimization passes
-      to one to prevent deadlock in deduplication"'
+  - user: 'Changes committed with message: "Add cycle detection before and after helper
+      optimization in precompute0"'
     metadata:
 ...
