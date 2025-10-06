@@ -281,7 +281,7 @@ impl GSSNode {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.inner.is_empty() || self.inner.max_depth() == 0
     }
     pub fn is_alive(&self) -> bool {
         !self.is_empty() && !self.allowed_llm_tokens().is_empty()

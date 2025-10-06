@@ -970,6 +970,10 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> LeveledGSS<
         }
     }
 
+    pub fn max_depth(&self) -> isize {
+        self.inner.max_depth()
+    }
+
     pub fn isolate(&self, value: Option<T>) -> Self {
         let new_inner = if let Some(val) = value {
             match &*self.inner {
