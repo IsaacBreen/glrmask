@@ -1507,7 +1507,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     //     crate::debug!(9, "  GOTO to state {:?}, accept: {}, filter: {:?}", goto.state_id, goto.accept, maybe_filter);
                     // }
 
-                    timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto", {
+                    timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto", { // SLOW POINT, ~5k calls
                     for (goto, maybe_filter) in gotos_with_filters {
                         if !seen_gotos.insert(goto) {
                             continue;
@@ -1604,9 +1604,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // --- NEW CACHING LOGIC ---
         let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
         if let Some(god) = self.active_state.trie2_god.as_ref() {
-            timeit!("GLRParserState::reduce_and_goto::Caching", {
+            timeit!("GLRParserState::reduce_and_goto::Caching", { // ~600 calls
             for gss_arc in out {
-                timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", {
+                timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", { // SLOW POINT, ~20k calls
                 if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
                     let cache_key = BelowBottomCacheKey {
                         nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
@@ -1729,12 +1729,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
             prev_accepted_state: self.active_state.prev_accepted_state.clone(),
             trie2_god: self.active_state.trie2_god.clone(),
         };
+        timeit!("GLRParserState::process_token_advanced::MergeShiftedStates", {
         for state in shifted_states_todo {
             next_active.merge(state);
         }
         for state in accepted_states_todo {
             next_active.merge(state);
         }
+        });
         self.active_state = next_active;
 
         // Move current accepted state to previous, and reset current.
