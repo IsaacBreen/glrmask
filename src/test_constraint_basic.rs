@@ -1515,14 +1515,6 @@ fn test_constraint_expression_cycle() {
 #[test]
 fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar string
-    // This test prunes the original complex grammar that failed to the smallest
-    // subset that still demonstrates the failure. The key structure is a
-    // recursive, optional list: `program -> list? -> item+ -> block -> list?`.
-    //
-    // The failure condition is that when the LLM vocabulary contains a token for
-    // the `IGNORE` rule (` `) but *not* for the terminals that can start the
-    // main grammar rule (`{`), the initial mask is incorrectly empty instead of
-    // allowing the `IGNORE` token.
     let ebnf_grammar = r#"
 program ::= IGNORE;
 IGNORE ::= ' ' | '//@';
@@ -1575,7 +1567,7 @@ IGNORE ::= ' ';
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
 
-    // 3. Define the LLM vocabulary (same "trap" vocab as the failing test)
+    // 3. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
     let space_token_id = LLMTokenID(0);
     let at_token_id = LLMTokenID(1);
