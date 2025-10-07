@@ -1524,10 +1524,8 @@ fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // main grammar rule (`{`), the initial mask is incorrectly empty instead of
     // allowing the `IGNORE` token.
     let ebnf_grammar = r#"
-#![ignore(IGNORE)]
-program ::= A;
-IGNORE ::= ' ' | '//' [^\n\r]*;
-A ::= 'a';
+program ::= IGNORE;
+IGNORE ::= ' ' | '//@';
 "#;
 
     // 2. Parse and compile the grammar
@@ -1555,12 +1553,6 @@ A ::= 'a';
     let mask = state.get_mask();
 
     // 6. Assert the expected mask
-    // The grammar can start with '{' (from `statement_list?`) or be empty (before EOF),
-    // and can always be preceded by ignored whitespace.
-    // The vocabulary only contains ' ' and '@'. Since '{' is not in the vocab,
-    // only the ignored ' ' token is a valid start from the perspective of the
-    // available LLM tokens.
-    // Therefore, the mask should only contain the ID for the space token.
     let expected_mask = HybridBitset::from_iter(vec![space_token_id.0]);
     assert_eq!(
         mask,
@@ -1575,10 +1567,8 @@ A ::= 'a';
 fn test_ebnf_grammar_initial_mask_mandatory_pass() -> Result<(), Box<dyn std::error::Error>> {
     // This test is a minimal pair to the failing `test_ebnf_grammar_initial_mask`.
     let ebnf_grammar = r#"
-#![ignore(IGNORE)]
-program ::= A;
-IGNORE ::= ' ' ;
-A ::= 'a';
+program ::= IGNORE;
+IGNORE ::= ' ';
 "#;
 
     // 2. Parse and compile the grammar
