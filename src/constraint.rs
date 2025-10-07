@@ -1387,15 +1387,15 @@ impl GrammarConstraint {
                     let mut glr_s_copy = glr_s.clone();
                     // println!("At edge {:?} with tokens {:?}", edge_grammar_token_opt, edge_bv);
                     // println!("Flat:");
-                    for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
+                    // for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
                         // println!("  {}: {:?}", i, p);
-                    }
+                    // }
                     // allow_only_llm_tokens_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new());
                     allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new(), glr_s_copy.active_state.trie2_god.as_ref().unwrap());
                     // println!("After pruning to edge tokens:");
-                    for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
+                    // for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
                         // println!("  {}: {:?}", i, p);
-                    }
+                    // }
                     out.push((dst_node_wrapper.clone(), glr_s_copy));
                 }
                 print_summary();
@@ -1406,18 +1406,18 @@ impl GrammarConstraint {
                 reset();
                 // println!("Merging GLR states:");
                 // println!("  Flat 1:");
-                for (i, p) in glr_s1.active_state.stack.flatten().iter().enumerate() {
+                // for (i, p) in glr_s1.active_state.stack.flatten().iter().enumerate() {
                     // println!("    {}: {:?}", i, p);
-                }
+                // }
                 // println!("  Flat 2:");
-                for (i, p) in glr_s2.active_state.stack.flatten().iter().enumerate() {
+                // for (i, p) in glr_s2.active_state.stack.flatten().iter().enumerate() {
                     // println!("    {}: {:?}", i, p);
-                }
+                // }
                 glr_s1.merge_with(glr_s2);
                 // println!("After merge, flat:");
-                for (i, p) in glr_s1.active_state.stack.flatten().iter().enumerate() {
+                // for (i, p) in glr_s1.active_state.stack.flatten().iter().enumerate() {
                     // println!("    {}: {:?}", i, p);
-                }
+                // }
                 // print_summary();
                 reset();
             },
@@ -1434,9 +1434,9 @@ impl GrammarConstraint {
                     // println!("At end.");
                     // println!("GSS: {}", glr_s);
                     // println!("Flat:");
-                    for (i, p) in glr_s.active_state.stack.flatten().iter().enumerate() {
+                    // for (i, p) in glr_s.active_state.stack.flatten().iter().enumerate() {
                         // println!("  {}: {:?}", i, p);
-                    }
+                    // }
                     // println!("Roots:");
                     for (_last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
                         for gss_root_acc in gss_root_accs {
