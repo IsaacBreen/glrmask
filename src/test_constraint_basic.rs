@@ -1515,26 +1515,25 @@ fn test_constraint_expression_cycle() {
 #[test]
 fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar string
-    // This test prunes the original complex grammar that failed to the smallest
-    // subset that still demonstrates the failure. The key structure is a
-    // recursive, optional list: `program -> list? -> item+ -> block -> list?`.
+    // This is the definitive minimal reproduction of the bug.
+    // The key structure is an optional top-level rule (`list?`) which contains a
+    // repetition (`block+`), where the repeated element (`block`) is recursive,
+    // containing the optional top-level rule again (`list?`).
     //
-    // The failure condition is that when the LLM vocabulary contains a token for
-    // the `IGNORE` rule (` `) but *not* for the terminals that can start the
-    // main grammar rule (`{`), the initial mask is incorrectly empty instead of
-    // allowing the `IGNORE` token.
+    // This distillation proves the bug is in the grammar analysis and not related
+    // to the complexity of the IGNORE rule itself, as a simple `WS` rule is used here.
+    //
+    // The failure is that the parser incorrectly allows an unrelated token (`@`)
+    // when it correctly determines that an empty string is a valid parse.
     let ebnf_grammar = r#"
-#![ignore(IGNORE)]
+#![ignore(WS)]
 
-program ::= statement_list? EOF;
+program ::= list? EOF;
 EOF ::= '<|EOF|>';
+WS ::= ' '+;
 
-// The original, more complex IGNORE rule is kept, as simpler versions passed.
-IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
-
-statement_list ::= statement+ ;
-statement ::= block ;
-block ::= '{' statement_list? '}' ;
+list ::= block+;
+block ::= '{' list? '}';
 "#;
 
     // 2. Parse and compile the grammar
@@ -1562,12 +1561,11 @@ block ::= '{' statement_list? '}' ;
     let mask = state.get_mask();
 
     // 6. Assert the expected mask
-    // The grammar can start with '{' (from `statement_list?`) or be empty (before EOF),
+    // The grammar can start with '{' (from `list?`) or be empty (before EOF),
     // and can always be preceded by ignored whitespace.
     // The vocabulary only contains ' ' and '@'. Since '{' is not in the vocab,
-    // only the ignored ' ' token is a valid start from the perspective of the
-    // available LLM tokens.
-    // Therefore, the mask should only contain the ID for the space token.
+    // only the ignored ' ' token should be allowed. The bug is that the unrelated
+    // '@' token is also incorrectly allowed.
     let expected_mask = HybridBitset::from_iter(vec![space_token_id.0]);
     assert_eq!(
         mask,
