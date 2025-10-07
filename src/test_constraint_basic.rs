@@ -1540,6 +1540,7 @@ IGNORE ::= ' ' | '$@';
         max_original_llm_token_id,
         &GrammarConstraintConfig::off(),
     );
+    println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed0();
     // constraint.dump_precomputed1();
     constraint.dump_precomputed3();
@@ -1587,6 +1588,7 @@ IGNORE ::= ' ';
         max_original_llm_token_id,
         &GrammarConstraintConfig::off(),
     );
+    println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed0();
     // constraint.dump_precomputed1();
     constraint.dump_precomputed3();
