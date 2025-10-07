@@ -141,6 +141,10 @@ class RangeSet(ABC, Generic[T]):
             result = result.union(s)
         return result
 
+    def add(self, x: T) -> None:
+        """Add a single element to the set."""
+        self.union_update(self.from_indices([x]))
+
     @abstractmethod
     def to_ranges(self) -> List[Tuple[T]]:
         """Returns the intervals as a list of lists for JSON serialization."""
