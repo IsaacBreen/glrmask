@@ -1381,19 +1381,19 @@ impl GrammarConstraint {
                 }
 
                 let mut out = Vec::new();
-                println!("At node with GLR state: {}", glr_s);
+                // println!("At node with GLR state: {}", glr_s);
                 for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
                     let mut glr_s_copy = glr_s.clone();
-                    println!("At edge {:?} with tokens {:?}", edge_grammar_token_opt, edge_bv);
-                    println!("Flat:");
+                    // println!("At edge {:?} with tokens {:?}", edge_grammar_token_opt, edge_bv);
+                    // println!("Flat:");
                     for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
-                        println!("  {}: {:?}", i, p);
+                        // println!("  {}: {:?}", i, p);
                     }
                     allow_only_llm_tokens_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new());
                     allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new(), glr_s_copy.active_state.trie2_god.as_ref().unwrap());
-                    println!("After pruning to edge tokens:");
+                    // println!("After pruning to edge tokens:");
                     for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
-                        println!("  {}: {:?}", i, p);
+                        // println!("  {}: {:?}", i, p);
                     }
                     out.push((dst_node_wrapper.clone(), glr_s_copy));
                 }
@@ -1403,19 +1403,19 @@ impl GrammarConstraint {
             },
             |glr_s1, glr_s2| {
                 reset();
-                println!("Merging GLR states:");
-                println!("  Flat 1:");
+                // println!("Merging GLR states:");
+                // println!("  Flat 1:");
                 for (i, p) in glr_s1.active_state.stack.flatten().iter().enumerate() {
-                    println!("    {}: {:?}", i, p);
+                    // println!("    {}: {:?}", i, p);
                 }
-                println!("  Flat 2:");
+                // println!("  Flat 2:");
                 for (i, p) in glr_s2.active_state.stack.flatten().iter().enumerate() {
-                    println!("    {}: {:?}", i, p);
+                    // println!("    {}: {:?}", i, p);
                 }
                 glr_s1.merge_with(glr_s2);
-                println!("After merge, flat:");
+                // println!("After merge, flat:");
                 for (i, p) in glr_s1.active_state.stack.flatten().iter().enumerate() {
-                    println!("    {}: {:?}", i, p);
+                    // println!("    {}: {:?}", i, p);
                 }
                 // print_summary();
                 reset();
@@ -1430,21 +1430,21 @@ impl GrammarConstraint {
                 );
                 let keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
-                    println!("At end.");
-                    println!("GSS: {}", glr_s);
-                    println!("Flat:");
+                    // println!("At end.");
+                    // println!("GSS: {}", glr_s);
+                    // println!("Flat:");
                     for (i, p) in glr_s.active_state.stack.flatten().iter().enumerate() {
-                        println!("  {}: {:?}", i, p);
+                        // println!("  {}: {:?}", i, p);
                     }
-                    println!("Roots:");
+                    // println!("Roots:");
                     for (_last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
                         for gss_root_acc in gss_root_accs {
-                            println!("  Acc: {:?}", gss_root_acc);
-                            println!("  Stored trie nodes:");
+                            // println!("  Acc: {:?}", gss_root_acc);
+                            // println!("  Stored trie nodes:");
                             for sn in gss_root_acc.stored_trie_nodes().iter() {
-                                println!("    {:?}", sn);
+                                // println!("    {:?}", sn);
                             }
-                            println!("  Union LLM tokens: {:?}", gss_root_acc.union_llm_tokens());
+                            // println!("  Union LLM tokens: {:?}", gss_root_acc.union_llm_tokens());
                         }
                     }
                     for (_last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
