@@ -30,12 +30,13 @@ def _normalize_intervals(ranges: Optional[List[List[int]]]) -> Tuple[Tuple[int, 
     return tuple(merged)
 
 
-def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None):
+def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None, skip_plots: bool = False):
     """
     Loads benchmark results from JSON files, computes statistics, compares masks against a chosen baseline,
     and generates plots.
     """
     all_data_rows = []
+
     commit_timings_by_model: Dict[str, List[List[float]]] = {}
     masks_by_model: Dict[str, List[List[Tuple[Tuple[int, int], ...]]]] = {}
     get_mask_timings_by_model: Dict[str, List[List[float]]] = {}
@@ -265,11 +266,19 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
     print("✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch")
     sys.stdout.flush()
 
+    if skip_plots:
+        print("\nSkipping plot generation as requested.")
+        return
+
     # --- Defer slow imports until after summary is printed ---
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    from matplotlib.colors import to_rgba
-    import colorsys
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        from matplotlib.colors import to_rgba
+        import colorsys
+    except ImportError:
+        print("\nWarning: Plotting libraries (matplotlib, seaborn) not found. Skipping plot generation.")
+        return
 
     # --- Generate Plots ---
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -537,6 +546,11 @@ def main():
         default=None,
         help="Aggregation method for repeated runs. If not set, runs are plotted individually."
     )
+    parser.add_argument(
+        "--skip-plots",
+        action='store_true',
+        help="If set, skips the generation of all plots."
+    )
     args = parser.parse_args()
 
     result_files: List[Path] = []
@@ -551,7 +565,12 @@ def main():
         print(f"Error: No .json files found in the specified paths.")
         return
 
-    analyze_results(sorted(list(set(result_files))), Path(args.output_dir), baseline_key=args.baseline, agg_method=args.agg_method)
+    analyze_results(
+        sorted(list(set(result_files))),
+        Path(args.output_dir),
+        baseline_key=args.baseline,
+        agg_method=args.agg_method,
+        skip_plots=args.skip_plots)
 
 
 if __name__ == "__main__":

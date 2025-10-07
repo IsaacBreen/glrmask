@@ -35,6 +35,7 @@ set -euo pipefail
 : "${SKIP_RUST:=0}" # Set to 1 to disable Rust compilation
 : "${REPEAT:=1}"
 : "${AGG_METHOD:=""}"
+: "${SKIP_PLOTS:=0}" # Set to 1 to skip plot generation
 
 # --- PYTHONPATH setup ---
 # The script is run from the project root. The python modules are in the 'python' directory.
@@ -268,6 +269,10 @@ cmd=(python -m python.aug25.benchmark_analyzer
 
 if [[ -n "$AGG_METHOD" ]]; then
   cmd+=(--agg-method "$AGG_METHOD")
+fi
+
+if [[ "${SKIP_PLOTS}" == "1" ]]; then
+  cmd+=(--skip-plots)
 fi
 
 echo "${cmd[*]}"
