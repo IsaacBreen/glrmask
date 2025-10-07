@@ -17,15 +17,40 @@ use crate::tokenizer::TokenizerStateID;
 use crate::profiler::PROGRESS_BAR_ENABLED;
 
 #[derive(Debug, Clone)]
+pub struct Trie3MergeConfig {
+    pub enabled: bool,
+    pub exact_max_iters: usize,
+}
+
+impl Default for Trie3MergeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            exact_max_iters: 40,
+        }
+    }
+}
+
+impl Trie3MergeConfig {
+    pub fn off() -> Self {
+        Self {
+            enabled: false,
+            exact_max_iters: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Trie3Config {
     pub enabled: bool,
+    pub num_passes: usize,
     pub merge_equivalent_llm_tokens: bool,
     pub reorder_llm_tokens: bool,
     pub constrain_bitvecs: bool,
     pub gc: bool,
     pub prune_dead_paths: bool,
     pub compress_edges: bool,
-    pub merge_nodes_exact: bool,
+    pub merge_nodes_exact: Trie3MergeConfig,
     pub merge_nodes_ultrafast: bool,
     pub prune_nodes_not_reaching_end: bool,
     pub simplify_llm_token_bvs: bool,
@@ -36,13 +61,14 @@ impl Default for Trie3Config {
     fn default() -> Self {
         Self {
             enabled: true,
+            num_passes: 1,
             merge_equivalent_llm_tokens: true,
             reorder_llm_tokens: true,
             constrain_bitvecs: true,
             gc: true,
             prune_dead_paths: true,
             compress_edges: true,
-            merge_nodes_exact: true,
+            merge_nodes_exact: Trie3MergeConfig::default(),
             merge_nodes_ultrafast: false,
             prune_nodes_not_reaching_end: false,
             simplify_llm_token_bvs: false,
@@ -55,13 +81,14 @@ impl Trie3Config {
     pub fn off() -> Self {
         Self {
             enabled: false,
+            num_passes: 0,
             merge_equivalent_llm_tokens: false,
             reorder_llm_tokens: false,
             constrain_bitvecs: false,
             gc: false,
             prune_dead_paths: false,
             compress_edges: false,
-            merge_nodes_exact: false,
+            merge_nodes_exact: Trie3MergeConfig::off(),
             merge_nodes_ultrafast: false,
             prune_nodes_not_reaching_end: false,
             simplify_llm_token_bvs: false,
@@ -109,6 +136,11 @@ pub fn optimize_trie3_size(
 
 	crate::debug!(2, "Initial stats:");
 	compute_and_print_precompute_stats3(roots, trie3_god);
+
+	for pass_num in 0..config.num_passes {
+		if config.num_passes > 1 {
+			crate::debug!(2, "--- Starting optimization super-pass {}/{} ---", pass_num + 1, config.num_passes);
+		}
 
 	let mut step_counter = 1;
 	macro_rules! run_pass {
@@ -201,9 +233,9 @@ pub fn optimize_trie3_size(
 		});
 	}
 
-	if config.merge_nodes_exact {
+	if config.merge_nodes_exact.enabled {
 		run_pass!("Merging nodes", {
-			merge_nodes_trie3(roots, &trie3_god);
+			merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
 		});
 	}
 
@@ -222,9 +254,9 @@ pub fn optimize_trie3_size(
 		});
 	}
 
-	if config.merge_nodes_exact {
+	if config.merge_nodes_exact.enabled {
 		run_pass!("Merging nodes (post-compress)", {
-			merge_nodes_trie3(roots, &trie3_god);
+			merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
 		});
 	}
 
@@ -251,6 +283,7 @@ pub fn optimize_trie3_size(
 		run_pass!("Reordering LLM tokens (final pass)", {
 			reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
 		});
+	}
 	}
 
 	run_pass!("Recomputing max depths", {
@@ -1023,9 +1056,8 @@ pub fn merge_nodes_trie3_fast(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
     merge_nodes_trie3_impl(roots, trie3_god, 2);
 }
 
-pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
-    const MAX_ITERS: usize = 40;
-    merge_nodes_trie3_impl(roots, trie3_god, MAX_ITERS);
+pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {
+    merge_nodes_trie3_impl(roots, trie3_god, max_iters);
 }
 
 fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {

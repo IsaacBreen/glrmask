@@ -4172,6 +4172,10 @@ local_system:
           pub minimize_by_signature: bool,
           pub merge_equivalent_llm_tokens: bool,
           pub reorder_llm_tokens: bool,
+          pub prune_on_no_terminal_follow: bool,
+          pub prune_nodes_not_reaching_end: bool,
+          pub prune_dead_paths: bool,
+          pub gc: bool,
       }
 
       impl Default for Trie1Config {
@@ -4182,6 +4186,10 @@ local_system:
                   minimize_by_signature: true,
                   merge_equivalent_llm_tokens: true,
                   reorder_llm_tokens: true,
+                  prune_on_no_terminal_follow: true,
+                  prune_nodes_not_reaching_end: true,
+                  prune_dead_paths: true,
+                  gc: true,
               }
           }
       }
@@ -4194,6 +4202,10 @@ local_system:
                   minimize_by_signature: false,
                   merge_equivalent_llm_tokens: false,
                   reorder_llm_tokens: false,
+                  prune_on_no_terminal_follow: false,
+                  prune_nodes_not_reaching_end: false,
+                  prune_dead_paths: false,
+                  gc: false,
               }
           }
       }
@@ -4589,9 +4601,15 @@ local_system:
               shortcut_none_chains_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
           }
           constrain_bitvecs_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>(), internal_max_llm_token);
-          prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
-          prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-          prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+          if config.prune_on_no_terminal_follow {
+              prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
+          }
+          if config.prune_nodes_not_reaching_end {
+              prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+          }
+          if config.prune_dead_paths {
+              prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+          }
 
           // === Pass 2: Minimization and further cleanup ===
           if config.minimize_by_signature {
@@ -4600,8 +4618,12 @@ local_system:
           if !config.early_flatten_epsilon {
               flatten_all_none_edges_trie1(precomputed1, trie1_god);
           }
-          prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-          prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+          if config.prune_nodes_not_reaching_end {
+              prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+          }
+          if config.prune_dead_paths {
+              prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+          }
 
           // === Pass 3: Token-level optimizations ===
           if config.merge_equivalent_llm_tokens {
@@ -4615,9 +4637,15 @@ local_system:
           if config.minimize_by_signature {
               merge_nodes_trie1(precomputed1, trie1_god);
           }
-          prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-          prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
-          Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+          if config.prune_nodes_not_reaching_end {
+              prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+          }
+          if config.prune_dead_paths {
+              prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+          }
+          if config.gc {
+              Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+          }
           Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
 
           crate::debug!(2, "Final Trie1 stats:");
@@ -6412,7 +6440,11 @@ local_system:
           pub gc: bool,
           pub prune_dead_paths: bool,
           pub compress_edges: bool,
-          pub merge_nodes: bool,
+          pub merge_nodes_exact: bool,
+          pub merge_nodes_ultrafast: bool,
+          pub prune_nodes_not_reaching_end: bool,
+          pub simplify_llm_token_bvs: bool,
+          pub factor_common_destinations: bool,
       }
 
       impl Default for Trie3Config {
@@ -6425,7 +6457,11 @@ local_system:
                   gc: true,
                   prune_dead_paths: true,
                   compress_edges: true,
-                  merge_nodes: true,
+                  merge_nodes_exact: true,
+                  merge_nodes_ultrafast: false,
+                  prune_nodes_not_reaching_end: false,
+                  simplify_llm_token_bvs: false,
+                  factor_common_destinations: false,
               }
           }
       }
@@ -6440,7 +6476,11 @@ local_system:
                   gc: false,
                   prune_dead_paths: false,
                   compress_edges: false,
-                  merge_nodes: false,
+                  merge_nodes_exact: false,
+                  merge_nodes_ultrafast: false,
+                  prune_nodes_not_reaching_end: false,
+                  simplify_llm_token_bvs: false,
+                  factor_common_destinations: false,
               }
           }
       }
@@ -6502,7 +6542,7 @@ local_system:
       	// --- Phase 1: Initial Pruning & Vocab Reduction ---
       	// These passes are expensive but have a huge impact on the initial massive graph.
       	// They are essential to run first to make subsequent passes feasible.
-      	if config.merge_nodes {
+      	if config.merge_nodes_ultrafast {
       		run_pass!("Merging nodes (fast pre-pass)", {
       			merge_nodes_trie3_ultrafast(roots, trie3_god);
       		});
@@ -6515,11 +6555,11 @@ local_system:
       		});
       	}
 
-      	// if config.optimize_trie2_prune_dead_paths { // Reusing config flag
-      	// 	run_pass!("Pruning nodes that do not reach end", {
-      	// 		prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-      	// 	});
-      	// }
+      	if config.prune_nodes_not_reaching_end {
+      		run_pass!("Pruning nodes that do not reach end", {
+      			prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
+      		});
+      	}
 
       	if config.merge_equivalent_llm_tokens {
       		run_pass!("Merging equivalent LLM tokens", {
@@ -6546,9 +6586,17 @@ local_system:
       	// Now that the graph is smaller and token sets are simpler, we can apply
       	// heavy structural optimizations.
 
-      	// run_pass!("Simplifying LLM token bitsets", {
-      	// 	simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
-      	// });
+      	if config.simplify_llm_token_bvs {
+      		run_pass!("Simplifying LLM token bitsets", {
+      			simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
+      		});
+      	}
+
+      	if config.factor_common_destinations {
+      		run_pass!("Factoring common destinations", {
+      			factor_common_destinations_trie3(roots, trie3_god, max_llm_token_id, max_state_id);
+      		});
+      	}
 
       	if config.compress_edges {
       		run_pass!("Compressing edges", {
@@ -6568,7 +6616,7 @@ local_system:
       		});
       	}
 
-      	if config.merge_nodes {
+      	if config.merge_nodes_exact {
       		run_pass!("Merging nodes", {
       			merge_nodes_trie3(roots, &trie3_god);
       		});
@@ -6577,11 +6625,11 @@ local_system:
       	// --- Phase 3: Iterative Refinement ---
       	// A few rounds of compression and merging on the now much smaller graph.
 
-      	// if config.optimize_trie2_prune_dead_paths { // Reusing config flag
-      	// 	run_pass!("Pruning nodes that do not reach end (post-merge)", {
-      	// 		prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-      	// 	});
-      	// }
+      	if config.prune_nodes_not_reaching_end {
+      		run_pass!("Pruning nodes that do not reach end (post-merge)", {
+      			prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
+      		});
+      	}
 
       	if config.compress_edges {
       		run_pass!("Compressing edges (post-merge)", {
@@ -6589,7 +6637,7 @@ local_system:
       		});
       	}
 
-      	if config.merge_nodes {
+      	if config.merge_nodes_exact {
       		run_pass!("Merging nodes (post-compress)", {
       			merge_nodes_trie3(roots, &trie3_god);
       		});
@@ -7031,7 +7079,6 @@ local_system:
           trie3_god: &Trie3GodWrapper,
           max_llm_token_id: usize,
       ) {
-          return;
           crate::debug!(2, "Simplifying LLM token bitsets in Trie3 to reduce range counts...");
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
@@ -7079,7 +7126,6 @@ local_system:
           roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
           trie3_god: &Trie3GodWrapper,
       ) {
-          return;
           crate::debug!(2, "Pruning Trie3 nodes that cannot reach any end node (reverse reachability)...");
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           if roots_vec.is_empty() {
@@ -7171,7 +7217,6 @@ local_system:
           max_llm_token_id: usize,
           max_state_id: usize,
       ) {
-          return;
           crate::debug!(2, "Factoring out common destinations in Trie3.");
           const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
 
@@ -14679,15 +14724,40 @@ local_system:
       use crate::profiler::PROGRESS_BAR_ENABLED;
 
       #[derive(Debug, Clone)]
+      pub struct Trie3MergeConfig {
+          pub enabled: bool,
+          pub exact_max_iters: usize,
+      }
+
+      impl Default for Trie3MergeConfig {
+          fn default() -> Self {
+              Self {
+                  enabled: true,
+                  exact_max_iters: 40,
+              }
+          }
+      }
+
+      impl Trie3MergeConfig {
+          pub fn off() -> Self {
+              Self {
+                  enabled: false,
+                  exact_max_iters: 0,
+              }
+          }
+      }
+
+      #[derive(Debug, Clone)]
       pub struct Trie3Config {
           pub enabled: bool,
+          pub num_passes: usize,
           pub merge_equivalent_llm_tokens: bool,
           pub reorder_llm_tokens: bool,
           pub constrain_bitvecs: bool,
           pub gc: bool,
           pub prune_dead_paths: bool,
           pub compress_edges: bool,
-          pub merge_nodes_exact: bool,
+          pub merge_nodes_exact: Trie3MergeConfig,
           pub merge_nodes_ultrafast: bool,
           pub prune_nodes_not_reaching_end: bool,
           pub simplify_llm_token_bvs: bool,
@@ -14698,13 +14768,14 @@ local_system:
           fn default() -> Self {
               Self {
                   enabled: true,
+                  num_passes: 1,
                   merge_equivalent_llm_tokens: true,
                   reorder_llm_tokens: true,
                   constrain_bitvecs: true,
                   gc: true,
                   prune_dead_paths: true,
                   compress_edges: true,
-                  merge_nodes_exact: true,
+                  merge_nodes_exact: Trie3MergeConfig::default(),
                   merge_nodes_ultrafast: false,
                   prune_nodes_not_reaching_end: false,
                   simplify_llm_token_bvs: false,
@@ -14717,13 +14788,14 @@ local_system:
           pub fn off() -> Self {
               Self {
                   enabled: false,
+                  num_passes: 0,
                   merge_equivalent_llm_tokens: false,
                   reorder_llm_tokens: false,
                   constrain_bitvecs: false,
                   gc: false,
                   prune_dead_paths: false,
                   compress_edges: false,
-                  merge_nodes_exact: false,
+                  merge_nodes_exact: Trie3MergeConfig::off(),
                   merge_nodes_ultrafast: false,
                   prune_nodes_not_reaching_end: false,
                   simplify_llm_token_bvs: false,
@@ -14771,6 +14843,11 @@ local_system:
 
       	crate::debug!(2, "Initial stats:");
       	compute_and_print_precompute_stats3(roots, trie3_god);
+
+      	for pass_num in 0..config.num_passes {
+      		if config.num_passes > 1 {
+      			crate::debug!(2, "--- Starting optimization super-pass {}/{} ---", pass_num + 1, config.num_passes);
+      		}
 
       	let mut step_counter = 1;
       	macro_rules! run_pass {
@@ -14863,9 +14940,9 @@ local_system:
       		});
       	}
 
-      	if config.merge_nodes_exact {
+      	if config.merge_nodes_exact.enabled {
       		run_pass!("Merging nodes", {
-      			merge_nodes_trie3(roots, &trie3_god);
+      			merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
       		});
       	}
 
@@ -14884,9 +14961,9 @@ local_system:
       		});
       	}
 
-      	if config.merge_nodes_exact {
+      	if config.merge_nodes_exact.enabled {
       		run_pass!("Merging nodes (post-compress)", {
-      			merge_nodes_trie3(roots, &trie3_god);
+      			merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
       		});
       	}
 
@@ -14913,6 +14990,7 @@ local_system:
       		run_pass!("Reordering LLM tokens (final pass)", {
       			reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
       		});
+      	}
       	}
 
       	run_pass!("Recomputing max depths", {
@@ -15685,9 +15763,8 @@ local_system:
           merge_nodes_trie3_impl(roots, trie3_god, 2);
       }
 
-      pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
-          const MAX_ITERS: usize = 40;
-          merge_nodes_trie3_impl(roots, trie3_god, MAX_ITERS);
+      pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {
+          merge_nodes_trie3_impl(roots, trie3_god, max_iters);
       }
 
       fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {
@@ -20760,6 +20837,10 @@ messages:
           pub minimize_by_signature: bool,
           pub merge_equivalent_llm_tokens: bool,
           pub reorder_llm_tokens: bool,
+          pub prune_on_no_terminal_follow: bool,
+          pub prune_nodes_not_reaching_end: bool,
+          pub prune_dead_paths: bool,
+          pub gc: bool,
       }
 
       impl Default for Trie1Config {
@@ -20770,6 +20851,10 @@ messages:
                   minimize_by_signature: true,
                   merge_equivalent_llm_tokens: true,
                   reorder_llm_tokens: true,
+                  prune_on_no_terminal_follow: true,
+                  prune_nodes_not_reaching_end: true,
+                  prune_dead_paths: true,
+                  gc: true,
               }
           }
       }
@@ -20782,6 +20867,10 @@ messages:
                   minimize_by_signature: false,
                   merge_equivalent_llm_tokens: false,
                   reorder_llm_tokens: false,
+                  prune_on_no_terminal_follow: false,
+                  prune_nodes_not_reaching_end: false,
+                  prune_dead_paths: false,
+                  gc: false,
               }
           }
       }
@@ -21177,9 +21266,15 @@ messages:
               shortcut_none_chains_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
           }
           constrain_bitvecs_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>(), internal_max_llm_token);
-          prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
-          prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-          prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+          if config.prune_on_no_terminal_follow {
+              prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
+          }
+          if config.prune_nodes_not_reaching_end {
+              prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+          }
+          if config.prune_dead_paths {
+              prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+          }
 
           // === Pass 2: Minimization and further cleanup ===
           if config.minimize_by_signature {
@@ -21188,8 +21283,12 @@ messages:
           if !config.early_flatten_epsilon {
               flatten_all_none_edges_trie1(precomputed1, trie1_god);
           }
-          prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-          prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+          if config.prune_nodes_not_reaching_end {
+              prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+          }
+          if config.prune_dead_paths {
+              prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+          }
 
           // === Pass 3: Token-level optimizations ===
           if config.merge_equivalent_llm_tokens {
@@ -21203,9 +21302,15 @@ messages:
           if config.minimize_by_signature {
               merge_nodes_trie1(precomputed1, trie1_god);
           }
-          prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-          prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
-          Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+          if config.prune_nodes_not_reaching_end {
+              prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+          }
+          if config.prune_dead_paths {
+              prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+          }
+          if config.gc {
+              Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+          }
           Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
 
           crate::debug!(2, "Final Trie1 stats:");
@@ -23010,7 +23115,11 @@ messages:
           pub gc: bool,
           pub prune_dead_paths: bool,
           pub compress_edges: bool,
-          pub merge_nodes: bool,
+          pub merge_nodes_exact: bool,
+          pub merge_nodes_ultrafast: bool,
+          pub prune_nodes_not_reaching_end: bool,
+          pub simplify_llm_token_bvs: bool,
+          pub factor_common_destinations: bool,
       }
 
       impl Default for Trie3Config {
@@ -23023,7 +23132,11 @@ messages:
                   gc: true,
                   prune_dead_paths: true,
                   compress_edges: true,
-                  merge_nodes: true,
+                  merge_nodes_exact: true,
+                  merge_nodes_ultrafast: false,
+                  prune_nodes_not_reaching_end: false,
+                  simplify_llm_token_bvs: false,
+                  factor_common_destinations: false,
               }
           }
       }
@@ -23038,7 +23151,11 @@ messages:
                   gc: false,
                   prune_dead_paths: false,
                   compress_edges: false,
-                  merge_nodes: false,
+                  merge_nodes_exact: false,
+                  merge_nodes_ultrafast: false,
+                  prune_nodes_not_reaching_end: false,
+                  simplify_llm_token_bvs: false,
+                  factor_common_destinations: false,
               }
           }
       }
@@ -23100,7 +23217,7 @@ messages:
       	// --- Phase 1: Initial Pruning & Vocab Reduction ---
       	// These passes are expensive but have a huge impact on the initial massive graph.
       	// They are essential to run first to make subsequent passes feasible.
-      	if config.merge_nodes {
+      	if config.merge_nodes_ultrafast {
       		run_pass!("Merging nodes (fast pre-pass)", {
       			merge_nodes_trie3_ultrafast(roots, trie3_god);
       		});
@@ -23113,11 +23230,11 @@ messages:
       		});
       	}
 
-      	// if config.optimize_trie2_prune_dead_paths { // Reusing config flag
-      	// 	run_pass!("Pruning nodes that do not reach end", {
-      	// 		prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-      	// 	});
-      	// }
+      	if config.prune_nodes_not_reaching_end {
+      		run_pass!("Pruning nodes that do not reach end", {
+      			prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
+      		});
+      	}
 
       	if config.merge_equivalent_llm_tokens {
       		run_pass!("Merging equivalent LLM tokens", {
@@ -23144,9 +23261,17 @@ messages:
       	// Now that the graph is smaller and token sets are simpler, we can apply
       	// heavy structural optimizations.
 
-      	// run_pass!("Simplifying LLM token bitsets", {
-      	// 	simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
-      	// });
+      	if config.simplify_llm_token_bvs {
+      		run_pass!("Simplifying LLM token bitsets", {
+      			simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
+      		});
+      	}
+
+      	if config.factor_common_destinations {
+      		run_pass!("Factoring common destinations", {
+      			factor_common_destinations_trie3(roots, trie3_god, max_llm_token_id, max_state_id);
+      		});
+      	}
 
       	if config.compress_edges {
       		run_pass!("Compressing edges", {
@@ -23166,7 +23291,7 @@ messages:
       		});
       	}
 
-      	if config.merge_nodes {
+      	if config.merge_nodes_exact {
       		run_pass!("Merging nodes", {
       			merge_nodes_trie3(roots, &trie3_god);
       		});
@@ -23175,11 +23300,11 @@ messages:
       	// --- Phase 3: Iterative Refinement ---
       	// A few rounds of compression and merging on the now much smaller graph.
 
-      	// if config.optimize_trie2_prune_dead_paths { // Reusing config flag
-      	// 	run_pass!("Pruning nodes that do not reach end (post-merge)", {
-      	// 		prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-      	// 	});
-      	// }
+      	if config.prune_nodes_not_reaching_end {
+      		run_pass!("Pruning nodes that do not reach end (post-merge)", {
+      			prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
+      		});
+      	}
 
       	if config.compress_edges {
       		run_pass!("Compressing edges (post-merge)", {
@@ -23187,7 +23312,7 @@ messages:
       		});
       	}
 
-      	if config.merge_nodes {
+      	if config.merge_nodes_exact {
       		run_pass!("Merging nodes (post-compress)", {
       			merge_nodes_trie3(roots, &trie3_god);
       		});
@@ -23629,7 +23754,6 @@ messages:
           trie3_god: &Trie3GodWrapper,
           max_llm_token_id: usize,
       ) {
-          return;
           crate::debug!(2, "Simplifying LLM token bitsets in Trie3 to reduce range counts...");
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
@@ -23677,7 +23801,6 @@ messages:
           roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
           trie3_god: &Trie3GodWrapper,
       ) {
-          return;
           crate::debug!(2, "Pruning Trie3 nodes that cannot reach any end node (reverse reachability)...");
           let roots_vec: Vec<_> = roots.values().cloned().collect();
           if roots_vec.is_empty() {
@@ -23769,7 +23892,6 @@ messages:
           max_llm_token_id: usize,
           max_state_id: usize,
       ) {
-          return;
           crate::debug!(2, "Factoring out common destinations in Trie3.");
           const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
 
@@ -24856,10 +24978,10 @@ messages:
       ```
     metadata:
       filename: src/constraint_precompute3_utils.rs
-  - user: |-
-      Refine the four optimization configs.
-      There are a bunch of optimizations I've commented out. Uncomment those and make them configurable. Set them as OFF by default, so the behaviour of the program now is unchanged.
-      There is some overlap between optimizations, e.g. merge ultrafast should be different from merge and separately configurable.
+  - user: It should be possible to configure additional stuff in the optimizations.
+      eg number of passes to do overall (right now 1, but maybe we wanna repeat for
+      some reason). And maybe individual passes can have their own configurations.
+      Make a struct for the opt pass in such cases. eg for merging, max iterations.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -24878,319 +25000,519 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions and corresponding git diffs to refine the optimization configurations.
+      Of course. Here are the step-by-step instructions to add more configuration options for the Trie3 optimization passes, followed by the git diff.
 
       ### Step-by-step Instructions
 
-      #### File: `src/constraint_precompute1_utils.rs`
-
-      1.  **Modify `Trie1Config` struct:**
-          In `src/constraint_precompute1_utils.rs`, locate the `Trie1Config` struct definition. Add four new boolean fields: `prune_on_no_terminal_follow`, `prune_nodes_not_reaching_end`, `prune_dead_paths`, and `gc`.
-
-      2.  **Update `Trie1Config::default()`:**
-          In the `impl Default for Trie1Config` block, update the `default()` function to initialize the new fields to `true`, matching the current behavior.
-
-      3.  **Update `Trie1Config::off()`:**
-          In the `impl Trie1Config` block, update the `off()` function to initialize the new fields to `false`.
-
-      4.  **Update `optimize_trie1_size` function:**
-          In the `optimize_trie1_size` function, wrap the calls to `prune_on_no_terminal_follow_trie1`, `prune_nodes_not_reaching_end_trie1`, `prune_dead_paths_trie1`, and `Trie::gc` in `if` blocks controlled by their respective new config flags.
-
       #### File: `src/constraint_precompute3_utils.rs`
 
-      1.  **Modify `Trie3Config` struct:**
-          In `src/constraint_precompute3_utils.rs`, locate the `Trie3Config` struct. Rename the `merge_nodes` field to `merge_nodes_exact`. Then, add four new boolean fields: `merge_nodes_ultrafast`, `prune_nodes_not_reaching_end`, `simplify_llm_token_bvs`, and `factor_common_destinations`.
+      1.  **Add a new configuration struct for merging.**
+          At the top of the file, before the `Trie3Config` struct definition, add the following new struct `Trie3MergeConfig`:
 
-      2.  **Update `Trie3Config::default()`:**
-          Update the `default()` function to reflect the renamed field and initialize the new fields. `merge_nodes_exact` will remain `true` by default, while the new experimental flags will be set to `false`.
+          ```rust
+          #[derive(Debug, Clone)]
+          pub struct Trie3MergeConfig {
+              pub enabled: bool,
+              pub exact_max_iters: usize,
+          }
 
-      3.  **Update `Trie3Config::off()`:**
-          Update the `off()` function to set all fields, including the new ones, to `false`.
+          impl Default for Trie3MergeConfig {
+              fn default() -> Self {
+                  Self {
+                      enabled: true,
+                      exact_max_iters: 40,
+                  }
+              }
+          }
 
-      4.  **Update `optimize_trie3_size` function:**
-          In `optimize_trie3_size`, adjust the optimization passes to use the new config flags:
-          -   Change the first merge pass to be controlled by `config.merge_nodes_ultrafast`.
-          -   Change the subsequent merge passes to be controlled by `config.merge_nodes_exact`.
-          -   Uncomment the `prune_nodes_not_reaching_end` passes and place them under an `if config.prune_nodes_not_reaching_end` check.
-          -   Add new passes for `simplify_llm_token_bvs` and `factor_common_destinations` controlled by their respective flags.
+          impl Trie3MergeConfig {
+              pub fn off() -> Self {
+                  Self {
+                      enabled: false,
+                      exact_max_iters: 0,
+                  }
+              }
+          }
+          ```
 
-      5.  **Enable Optimization Functions:**
-          Find the following functions and remove the `return;` statement at the beginning of each to enable their logic:
-          -   `simplify_llm_token_bvs_trie3`
-          -   `prune_nodes_not_reaching_end_trie3`
-          -   `factor_common_destinations_trie3`
+      2.  **Update the `Trie3Config` struct.**
+          Modify the `Trie3Config` struct to include a `num_passes` field for repeating the optimization cycle and to use the new `Trie3MergeConfig` for merge settings.
 
-      ---
+          *From:*
+          ```rust
+          #[derive(Debug, Clone)]
+          pub struct Trie3Config {
+              pub enabled: bool,
+              pub merge_equivalent_llm_tokens: bool,
+              pub reorder_llm_tokens: bool,
+              pub constrain_bitvecs: bool,
+              pub gc: bool,
+              pub prune_dead_paths: bool,
+              pub compress_edges: bool,
+              pub merge_nodes_exact: bool,
+              pub merge_nodes_ultrafast: bool,
+              pub prune_nodes_not_reaching_end: bool,
+              pub simplify_llm_token_bvs: bool,
+              pub factor_common_destinations: bool,
+          }
+          ```
+
+          *To:*
+          ```rust
+          #[derive(Debug, Clone)]
+          pub struct Trie3Config {
+              pub enabled: bool,
+              pub num_passes: usize,
+              pub merge_equivalent_llm_tokens: bool,
+              pub reorder_llm_tokens: bool,
+              pub constrain_bitvecs: bool,
+              pub gc: bool,
+              pub prune_dead_paths: bool,
+              pub compress_edges: bool,
+              pub merge_nodes_exact: Trie3MergeConfig,
+              pub merge_nodes_ultrafast: bool,
+              pub prune_nodes_not_reaching_end: bool,
+              pub simplify_llm_token_bvs: bool,
+              pub factor_common_destinations: bool,
+          }
+          ```
+
+      3.  **Update the `default()` implementation for `Trie3Config`.**
+          Modify the `default()` function to initialize the new and changed fields.
+
+          *From:*
+          ```rust
+          impl Default for Trie3Config {
+              fn default() -> Self {
+                  Self {
+                      enabled: true,
+                      merge_equivalent_llm_tokens: true,
+                      reorder_llm_tokens: true,
+                      constrain_bitvecs: true,
+                      gc: true,
+                      prune_dead_paths: true,
+                      compress_edges: true,
+                      merge_nodes_exact: true,
+                      merge_nodes_ultrafast: false,
+                      prune_nodes_not_reaching_end: false,
+                      simplify_llm_token_bvs: false,
+                      factor_common_destinations: false,
+                  }
+              }
+          }
+          ```
+
+          *To:*
+          ```rust
+          impl Default for Trie3Config {
+              fn default() -> Self {
+                  Self {
+                      enabled: true,
+                      num_passes: 1,
+                      merge_equivalent_llm_tokens: true,
+                      reorder_llm_tokens: true,
+                      constrain_bitvecs: true,
+                      gc: true,
+                      prune_dead_paths: true,
+                      compress_edges: true,
+                      merge_nodes_exact: Trie3MergeConfig::default(),
+                      merge_nodes_ultrafast: false,
+                      prune_nodes_not_reaching_end: false,
+                      simplify_llm_token_bvs: false,
+                      factor_common_destinations: false,
+                  }
+              }
+          }
+          ```
+
+      4.  **Update the `off()` implementation for `Trie3Config`.**
+          Similarly, update the `off()` function.
+
+          *From:*
+          ```rust
+          impl Trie3Config {
+              pub fn off() -> Self {
+                  Self {
+                      enabled: false,
+                      merge_equivalent_llm_tokens: false,
+                      reorder_llm_tokens: false,
+                      constrain_bitvecs: false,
+                      gc: false,
+                      prune_dead_paths: false,
+                      compress_edges: false,
+                      merge_nodes_exact: false,
+                      merge_nodes_ultrafast: false,
+                      prune_nodes_not_reaching_end: false,
+                      simplify_llm_token_bvs: false,
+                      factor_common_destinations: false,
+                  }
+              }
+          }
+          ```
+
+          *To:*
+          ```rust
+          impl Trie3Config {
+              pub fn off() -> Self {
+                  Self {
+                      enabled: false,
+                      num_passes: 0,
+                      merge_equivalent_llm_tokens: false,
+                      reorder_llm_tokens: false,
+                      constrain_bitvecs: false,
+                      gc: false,
+                      prune_dead_paths: false,
+                      compress_edges: false,
+                      merge_nodes_exact: Trie3MergeConfig::off(),
+                      merge_nodes_ultrafast: false,
+                      prune_nodes_not_reaching_end: false,
+                      simplify_llm_token_bvs: false,
+                      factor_common_destinations: false,
+                  }
+              }
+          }
+          ```
+
+      5.  **Update the `merge_nodes_trie3` function.**
+          Change its signature to accept `max_iters` and pass it to the implementation function.
+
+          *From:*
+          ```rust
+          pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
+              const MAX_ITERS: usize = 40;
+              merge_nodes_trie3_impl(roots, trie3_god, MAX_ITERS);
+          }
+          ```
+
+          *To:*
+          ```rust
+          pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {
+              merge_nodes_trie3_impl(roots, trie3_god, max_iters);
+          }
+          ```
+
+      6.  **Update the `optimize_trie3_size` function.**
+          Wrap the main optimization logic in a loop controlled by `config.num_passes` and update the call to `merge_nodes_trie3` to use the new configuration.
+
+          -   Find the `optimize_trie3_size` function.
+          -   Add a `for` loop that iterates `config.num_passes` times around the main body of optimization passes (from "Phase 1" to "Phase 4"). The final `run_pass!` for "Recomputing max depths" should remain outside and after the loop.
+          -   Inside the loop, add a log message to indicate the start of a "super-pass" if more than one pass is configured.
+          -   Locate the `if config.merge_nodes_exact` blocks and change the condition to `if config.merge_nodes_exact.enabled`.
+          -   Inside those blocks, change the call from `merge_nodes_trie3(roots, &trie3_god);` to `merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);`.
 
       ### Git Diffs
 
-      ```diff
-      diff --git a/src/constraint_precompute1_utils.rs b/src/constraint_precompute1_utils.rs
-      --- a/src/constraint_precompute1_utils.rs
-      +++ b/src/constraint_precompute1_utils.rs
-      @@ -17,6 +17,10 @@
-           pub minimize_by_signature: bool,
-           pub merge_equivalent_llm_tokens: bool,
-           pub reorder_llm_tokens: bool,
-      +    pub prune_on_no_terminal_follow: bool,
-      +    pub prune_nodes_not_reaching_end: bool,
-      +    pub prune_dead_paths: bool,
-      +    pub gc: bool,
-       }
-       
-       impl Default for Trie1Config {
-      @@ -27,6 +31,10 @@
-                   minimize_by_signature: true,
-                   merge_equivalent_llm_tokens: true,
-                   reorder_llm_tokens: true,
-      +            prune_on_no_terminal_follow: true,
-      +            prune_nodes_not_reaching_end: true,
-      +            prune_dead_paths: true,
-      +            gc: true,
-               }
-           }
-       }
-      @@ -39,6 +47,10 @@
-                   minimize_by_signature: false,
-                   merge_equivalent_llm_tokens: false,
-                   reorder_llm_tokens: false,
-      +            prune_on_no_terminal_follow: false,
-      +            prune_nodes_not_reaching_end: false,
-      +            prune_dead_paths: false,
-      +            gc: false,
-               }
-           }
-       }
-      @@ -300,22 +312,30 @@
-               flatten_all_none_edges_trie1(precomputed1, trie1_god);
-           } else {
-               shortcut_none_chains_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
-           }
-           constrain_bitvecs_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>(), internal_max_llm_token);
-      -    prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
-      -    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-      -    prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
-      +    if config.prune_on_no_terminal_follow {
-      +        prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
-      +    }
-      +    if config.prune_nodes_not_reaching_end {
-      +        prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-      +    }
-      +    if config.prune_dead_paths {
-      +        prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
-      +    }
-       
-           // === Pass 2: Minimization and further cleanup ===
-           if config.minimize_by_signature {
-               merge_nodes_trie1(precomputed1, trie1_god);
-           }
-           if !config.early_flatten_epsilon {
-               flatten_all_none_edges_trie1(precomputed1, trie1_god);
-           }
-      -    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-      -    prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
-      +    if config.prune_nodes_not_reaching_end {
-      +        prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-      +    }
-      +    if config.prune_dead_paths {
-      +        prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
-      +    }
-       
-           // === Pass 3: Token-level optimizations ===
-           if config.merge_equivalent_llm_tokens {
-      @@ -328,9 +348,15 @@
-           if config.minimize_by_signature {
-               merge_nodes_trie1(precomputed1, trie1_god);
-           }
-      -    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-      -    prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
-      -    Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
-      +    if config.prune_nodes_not_reaching_end {
-      +        prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-      +    }
-      +    if config.prune_dead_paths {
-      +        prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
-      +    }
-      +    if config.gc {
-      +        Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
-      +    }
-           Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
-       
-           crate::debug!(2, "Final Trie1 stats:");
+      Here is the git diff for the changes:
 
-      ```
       ```diff
       diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
+      index 9111111..2222222 100644
       --- a/src/constraint_precompute3_utils.rs
       +++ b/src/constraint_precompute3_utils.rs
-      @@ -18,7 +18,11 @@
+      @@ -11,10 +11,29 @@
+       
+       use crate::profiler::PROGRESS_BAR_ENABLED;
+       
+      +#[derive(Debug, Clone)]
+      +pub struct Trie3MergeConfig {
+      +    pub enabled: bool,
+      +    pub exact_max_iters: usize,
+      +}
+      +
+      +impl Default for Trie3MergeConfig {
+      +    fn default() -> Self {
+      +        Self {
+      +            enabled: true,
+      +            exact_max_iters: 40,
+      +        }
+      +    }
+      +}
+      +
+      +impl Trie3MergeConfig {
+      +    pub fn off() -> Self {
+      +        Self {
+      +            enabled: false,
+      +            exact_max_iters: 0,
+      +        }
+      +    }
+      +}
+      +
+       #[derive(Debug, Clone)]
+       pub struct Trie3Config {
+           pub enabled: bool,
+      +    pub num_passes: usize,
+           pub merge_equivalent_llm_tokens: bool,
+           pub reorder_llm_tokens: bool,
+           pub constrain_bitvecs: bool,
            pub gc: bool,
            pub prune_dead_paths: bool,
            pub compress_edges: bool,
-      -    pub merge_nodes: bool,
-      +    pub merge_nodes_exact: bool,
-      +    pub merge_nodes_ultrafast: bool,
-      +    pub prune_nodes_not_reaching_end: bool,
-      +    pub simplify_llm_token_bvs: bool,
-      +    pub factor_common_destinations: bool,
-       }
-       
-       impl Default for Trie3Config {
-      @@ -31,7 +35,11 @@
+      -    pub merge_nodes_exact: bool,
+      +    pub merge_nodes_exact: Trie3MergeConfig,
+           pub merge_nodes_ultrafast: bool,
+           pub prune_nodes_not_reaching_end: bool,
+           pub simplify_llm_token_bvs: bool,
+      @@ -26,13 +45,14 @@
+           fn default() -> Self {
+               Self {
+                   enabled: true,
+      +            num_passes: 1,
+                   merge_equivalent_llm_tokens: true,
+                   reorder_llm_tokens: true,
+                   constrain_bitvecs: true,
                    gc: true,
                    prune_dead_paths: true,
                    compress_edges: true,
-      -            merge_nodes: true,
-      +            merge_nodes_exact: true,
-      +            merge_nodes_ultrafast: false,
-      +            prune_nodes_not_reaching_end: false,
-      +            simplify_llm_token_bvs: false,
-      +            factor_common_destinations: false,
-               }
-           }
-       }
-      @@ -46,7 +54,11 @@
+      -            merge_nodes_exact: true,
+      +            merge_nodes_exact: Trie3MergeConfig::default(),
+                   merge_nodes_ultrafast: false,
+                   prune_nodes_not_reaching_end: false,
+                   simplify_llm_token_bvs: false,
+      @@ -45,13 +65,14 @@
+           pub fn off() -> Self {
+               Self {
+                   enabled: false,
+      +            num_passes: 0,
+                   merge_equivalent_llm_tokens: false,
+                   reorder_llm_tokens: false,
+                   constrain_bitvecs: false,
                    gc: false,
                    prune_dead_paths: false,
                    compress_edges: false,
-      -            merge_nodes: false,
-      +            merge_nodes_exact: false,
-      +            merge_nodes_ultrafast: false,
-      +            prune_nodes_not_reaching_end: false,
-      +            simplify_llm_token_bvs: false,
-      +            factor_common_destinations: false,
-               }
-           }
-       }
-      @@ -93,22 +105,22 @@
-       	// --- Phase 1: Initial Pruning & Vocab Reduction ---
-       	// These passes are expensive but have a huge impact on the initial massive graph.
-       	// They are essential to run first to make subsequent passes feasible.
-      -	if config.merge_nodes {
-      +	if config.merge_nodes_ultrafast {
-       		run_pass!("Merging nodes (fast pre-pass)", {
-       			merge_nodes_trie3_ultrafast(roots, trie3_god);
-       		});
-       	}
+      -            merge_nodes_exact: false,
+      +            merge_nodes_exact: Trie3MergeConfig::off(),
+                   merge_nodes_ultrafast: false,
+                   prune_nodes_not_reaching_end: false,
+                   simplify_llm_token_bvs: false,
+      @@ -94,6 +115,12 @@
+       	crate::debug!(2, "Initial stats:");
+       	compute_and_print_precompute_stats3(roots, trie3_god);
        
-       
-       	if config.prune_dead_paths {
-       		run_pass!("Pruning dead paths", {
-       			prune_dead_paths_trie3(roots, &trie3_god);
-       		});
-       	}
-       
-      -	// if config.optimize_trie2_prune_dead_paths { // Reusing config flag
-      -	// 	run_pass!("Pruning nodes that do not reach end", {
-      -	// 		prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-      -	// 	});
-      -	// }
-      +	if config.prune_nodes_not_reaching_end {
-      +		run_pass!("Pruning nodes that do not reach end", {
-      +			prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-      +		});
-      +	}
-       
-       	if config.merge_equivalent_llm_tokens {
-       		run_pass!("Merging equivalent LLM tokens", {
-      @@ -131,9 +143,15 @@
-       	// Now that the graph is smaller and token sets are simpler, we can apply
-       	// heavy structural optimizations.
-       
-      -	// run_pass!("Simplifying LLM token bitsets", {
-      -	// 	simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
-      -	// });
-      +	if config.simplify_llm_token_bvs {
-      +		run_pass!("Simplifying LLM token bitsets", {
-      +			simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
-      +		});
-      +	}
+      +	for pass_num in 0..config.num_passes {
+      +		if config.num_passes > 1 {
+      +			crate::debug!(2, "--- Starting optimization super-pass {}/{} ---", pass_num + 1, config.num_passes);
+      +		}
       +
-      +	if config.factor_common_destinations {
-      +		run_pass!("Factoring common destinations", {
-      +			factor_common_destinations_trie3(roots, trie3_god, max_llm_token_id, max_state_id);
-      +		});
-      +	}
-       
-       	if config.compress_edges {
-       		run_pass!("Compressing edges", {
-      @@ -150,26 +168,26 @@
+      +
+       	let mut step_counter = 1;
+       	macro_rules! run_pass! {
+       		($name:expr, $code:block) => {
+      @@ -165,9 +192,9 @@
        		});
        	}
        
-      -	if config.merge_nodes {
-      +	if config.merge_nodes_exact {
+      -	if config.merge_nodes_exact {
+      +	if config.merge_nodes_exact.enabled {
        		run_pass!("Merging nodes", {
-       			merge_nodes_trie3(roots, &trie3_god);
+      -			merge_nodes_trie3(roots, &trie3_god);
+      +			merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
        		});
        	}
        
-       	// --- Phase 3: Iterative Refinement ---
-       	// A few rounds of compression and merging on the now much smaller graph.
+      @@ -183,9 +210,9 @@
+       		});
+       	}
        
-      -	// if config.optimize_trie2_prune_dead_paths { // Reusing config flag
-      -	// 	run_pass!("Pruning nodes that do not reach end (post-merge)", {
-      -	// 		prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-      -	// 	});
-      -	// }
-      +	if config.prune_nodes_not_reaching_end {
-      +		run_pass!("Pruning nodes that do not reach end (post-merge)", {
-      +			prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-      +		});
+      -	if config.merge_nodes_exact {
+      +	if config.merge_nodes_exact.enabled {
+       		run_pass!("Merging nodes (post-compress)", {
+      -			merge_nodes_trie3(roots, &trie3_god);
+      +			merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
+       		});
+       	}
+       
+      @@ -208,6 +235,7 @@
+       			reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
+       		});
+       	}
       +	}
        
-       	if config.compress_edges {
-       		run_pass!("Compressing edges (post-merge)", {
-       			compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+       	run_pass!("Recomputing max depths", {
+       		Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+      @@ -611,13 +639,11 @@
+           merge_nodes_trie3_impl(roots, trie3_god, 2);
+       }
+       
+      -pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
+      -    const MAX_ITERS: usize = 40;
+      -    merge_nodes_trie3_impl(roots, trie3_god, MAX_ITERS);
+      -}
+      -
+      -fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {
+      -    crate::debug!(2, "Merging identical subtrees in precomputed trie 3 (max_iters={}).", max_iters);
+      +pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {
+      +    merge_nodes_trie3_impl(roots, trie3_god, max_iters);
+      +}
+      +
+      +fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {
+      +    crate::debug!(2, "Merging identical subtrees in precomputed trie 3 (max_iters={}).", max_iters);
+       
+       
+           let roots_vec: Vec<_> = roots.values().cloned().collect();
+
+      ```
+    metadata:
+  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
+      applied now.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
+      index 9111111..2222222 100644
+      --- a/src/constraint_precompute3_utils.rs
+      +++ b/src/constraint_precompute3_utils.rs
+      @@ -11,10 +11,29 @@
+       
+       use crate::profiler::PROGRESS_BAR_ENABLED;
+       
+      +#[derive(Debug, Clone)]
+      +pub struct Trie3MergeConfig {
+      +    pub enabled: bool,
+      +    pub exact_max_iters: usize,
+      +}
+      +
+      +impl Default for Trie3MergeConfig {
+      +    fn default() -> Self {
+      +        Self {
+      +            enabled: true,
+      +            exact_max_iters: 40,
+      +        }
+      +    }
+      +}
+      +
+      +impl Trie3MergeConfig {
+      +    pub fn off() -> Self {
+      +        Self {
+      +            enabled: false,
+      +            exact_max_iters: 0,
+      +        }
+      +    }
+      +}
+      +
+       #[derive(Debug, Clone)]
+       pub struct Trie3Config {
+           pub enabled: bool,
+      +    pub num_passes: usize,
+           pub merge_equivalent_llm_tokens: bool,
+           pub reorder_llm_tokens: bool,
+           pub constrain_bitvecs: bool,
+           pub gc: bool,
+           pub prune_dead_paths: bool,
+           pub compress_edges: bool,
+      -    pub merge_nodes_exact: bool,
+      +    pub merge_nodes_exact: Trie3MergeConfig,
+           pub merge_nodes_ultrafast: bool,
+           pub prune_nodes_not_reaching_end: bool,
+           pub simplify_llm_token_bvs: bool,
+      @@ -26,13 +45,14 @@
+           fn default() -> Self {
+               Self {
+                   enabled: true,
+      +            num_passes: 1,
+                   merge_equivalent_llm_tokens: true,
+                   reorder_llm_tokens: true,
+                   constrain_bitvecs: true,
+                   gc: true,
+                   prune_dead_paths: true,
+                   compress_edges: true,
+      -            merge_nodes_exact: true,
+      +            merge_nodes_exact: Trie3MergeConfig::default(),
+                   merge_nodes_ultrafast: false,
+                   prune_nodes_not_reaching_end: false,
+                   simplify_llm_token_bvs: false,
+      @@ -45,13 +65,14 @@
+           pub fn off() -> Self {
+               Self {
+                   enabled: false,
+      +            num_passes: 0,
+                   merge_equivalent_llm_tokens: false,
+                   reorder_llm_tokens: false,
+                   constrain_bitvecs: false,
+                   gc: false,
+                   prune_dead_paths: false,
+                   compress_edges: false,
+      -            merge_nodes_exact: false,
+      +            merge_nodes_exact: Trie3MergeConfig::off(),
+                   merge_nodes_ultrafast: false,
+                   prune_nodes_not_reaching_end: false,
+                   simplify_llm_token_bvs: false,
+      @@ -137,10 +137,16 @@
+       	crate::debug!(2, "Initial stats:");
+       	compute_and_print_precompute_stats3(roots, trie3_god);
+       
+      +	for pass_num in 0..config.num_passes {
+      +		if config.num_passes > 1 {
+      +			crate::debug!(2, "--- Starting optimization super-pass {}/{} ---", pass_num + 1, config.num_passes);
+      +		}
+      +
+       	let mut step_counter = 1;
+       	macro_rules! run_pass {
+       		($name:expr, $code:block) => {
+      @@ -165,9 +192,9 @@
        		});
        	}
        
-      -	if config.merge_nodes {
-      +	if config.merge_nodes_exact {
-       		run_pass!("Merging nodes (post-compress)", {
-       			merge_nodes_trie3(roots, &trie3_god);
+      -	if config.merge_nodes_exact {
+      +	if config.merge_nodes_exact.enabled {
+       		run_pass!("Merging nodes", {
+      -			merge_nodes_trie3(roots, &trie3_god);
+      +			merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
        		});
-      @@ -361,7 +379,6 @@
-           max_llm_token_id: usize,
-       ) {
-      -    return;
-           crate::debug!(2, "Simplifying LLM token bitsets in Trie3 to reduce range counts...");
-           let roots_vec: Vec<_> = roots.values().cloned().collect();
-           let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-      @@ -404,7 +421,6 @@
-           roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
-           trie3_god: &Trie3GodWrapper,
-       ) {
-      -    return;
-           crate::debug!(2, "Pruning Trie3 nodes that cannot reach any end node (reverse reachability)...");
-           let roots_vec: Vec<_> = roots.values().cloned().collect();
-           if roots_vec.is_empty() {
-      @@ -481,7 +497,6 @@
-           max_llm_token_id: usize,
-           max_state_id: usize,
-       ) {
-      -    return;
-           crate::debug!(2, "Factoring out common destinations in Trie3.");
-           const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
+       	}
        
+      @@ -183,9 +210,9 @@
+       		});
+       	}
+       
+      -	if config.merge_nodes_exact {
+      +	if config.merge_nodes_exact.enabled {
+       		run_pass!("Merging nodes (post-compress)", {
+      -			merge_nodes_trie3(roots, &trie3_god);
+      +			merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
+       		});
+       	}
+       
+      @@ -208,6 +235,7 @@
+       			reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
+       		});
+       	}
+      +	}
+       
+       	run_pass!("Recomputing max depths", {
+       		Trie::recompute_all_max_depths(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+      @@ -611,13 +639,11 @@
+           merge_nodes_trie3_impl(roots, trie3_god, 2);
+       }
+       
+      -pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper) {
+      -    const MAX_ITERS: usize = 40;
+      -    merge_nodes_trie3_impl(roots, trie3_god, MAX_ITERS);
+      -}
+      -
+      -fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {
+      -    crate::debug!(2, "Merging identical subtrees in precomputed trie 3 (max_iters={}).", max_iters);
+      +pub fn merge_nodes_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {
+      +    merge_nodes_trie3_impl(roots, trie3_god, max_iters);
+      +}
+      +
+      +fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {
+      +    crate::debug!(2, "Merging identical subtrees in precomputed trie 3 (max_iters={}).", max_iters);
+       
+       
+           let roots_vec: Vec<_> = roots.values().cloned().collect();
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 2 diff block(s) to process using custom patcher.
+      Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/constraint_precompute1_utils.rs
-      Applying patch to 'src/constraint_precompute1_utils.rs' using custom patcher...
-      Successfully applied patch and wrote to src/constraint_precompute1_utils.rs.
-
-      --- Processing Diff Block 2 ---
       Identified target file: src/constraint_precompute3_utils.rs
       Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
       Successfully applied patch and wrote to src/constraint_precompute3_utils.rs.
     metadata:
-  - user: 'Changes committed with message: "Expose more Trie precomputation optimizations
-      as configurable flags in Trie1 and Trie3 configs"'
+  - user: 'Changes committed with message: "feat(trie3): Add configuration for multiple
+      optimization passes and merge iterations"'
     metadata:
 ...
