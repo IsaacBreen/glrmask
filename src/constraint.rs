@@ -1381,11 +1381,19 @@ impl GrammarConstraint {
                 }
 
                 let mut out = Vec::new();
-                println!("At node with GLR state:\n{}", glr_s);
+                println!("At node with GLR state: {}", glr_s);
                 for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
                     let mut glr_s_copy = glr_s.clone();
                     println!("At edge {:?} with tokens {:?}", edge_grammar_token_opt, edge_bv);
+                    println!("Flat:");
+                    for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
+                        println!("  {}: {:?}", i, p);
+                    }
                     allow_only_llm_tokens_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new());
+                    println!("After pruning to edge tokens:");
+                    for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
+                        println!("  {}: {:?}", i, p);
+                    }
                     out.push((dst_node_wrapper.clone(), glr_s_copy));
                 }
                 print_summary();
