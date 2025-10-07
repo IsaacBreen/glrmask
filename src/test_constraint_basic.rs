@@ -1542,7 +1542,7 @@ IGNORE ::= ' ' | '$@';
     );
     println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed0();
-    // constraint.dump_precomputed1();
+    constraint.dump_precomputed1();
     constraint.dump_precomputed3();
 
     // 5. Initialize state and get the initial mask
@@ -1590,7 +1590,7 @@ IGNORE ::= ' ';
     );
     println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed0();
-    // constraint.dump_precomputed1();
+    constraint.dump_precomputed1();
     constraint.dump_precomputed3();
 
     // 5. Initialize state and get the initial mask
