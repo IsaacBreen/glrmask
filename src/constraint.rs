@@ -414,49 +414,102 @@ impl Into<PrecomputedNodeContents> for PrecomputedNodeContents0 {
 
 
 #[derive(Debug, Clone)]
-pub struct GrammarConstraintConfig {
-    pub optimize_trie2_prune_dead_paths: bool,
-    pub optimize_trie2_merge_nodes: bool,
-    pub optimize_trie2_factor_common_destinations: bool,
-    pub optimize_trie2_compress_edges: bool,
-    pub optimize_trie2_gc: bool,
-    pub skip_precomputation: bool,
-    pub optimize_trie3_constrain_bitvecs: bool,
-    // Stage-level token optimizations (disabled by default to avoid changing
-    // global token-ID semantics until explicitly enabled).
-    pub optimize_trie1_merge_equivalent_llm_tokens: bool,
-    pub optimize_trie1_reorder_llm_tokens: bool,
-    pub optimize_trie3_merge_equivalent_llm_tokens: bool,
-    pub optimize_trie3_reorder_llm_tokens: bool,
-    pub optimize_trie1_minimize_by_signature: bool,
-    pub optimize_trie1_early_flatten_epsilon: bool,
+pub struct Trie0Config {
+    pub enabled: bool,
+    pub simplify_none_edges: bool,
+    pub prune_dead_paths: bool,
+    pub prune_on_no_terminal_follow: bool,
+    pub merge_nodes: bool,
+    pub gc: bool,
+    pub factor_common_destinations: bool,
 }
 
-impl Default for GrammarConstraintConfig {
+impl Default for Trie0Config {
     fn default() -> Self {
-        // Self {
-        //     optimize_trie2_prune_dead_paths: true,
-        //     optimize_trie2_merge_nodes: true,
-        //     optimize_trie2_factor_common_destinations: false,
-        //     optimize_trie2_compress_edges: true,
-        //     optimize_trie2_gc: true,
-        // }
         Self {
-            optimize_trie2_prune_dead_paths: true,
-            optimize_trie2_merge_nodes: true,
-            optimize_trie2_factor_common_destinations: false,
-            optimize_trie2_compress_edges: true,
-            optimize_trie2_gc: true,
-            skip_precomputation: false,
-            optimize_trie3_constrain_bitvecs: true,
-            optimize_trie1_merge_equivalent_llm_tokens: true,
-            optimize_trie1_reorder_llm_tokens: true,
-            optimize_trie3_merge_equivalent_llm_tokens: true,
-            optimize_trie3_reorder_llm_tokens: true,
-            optimize_trie1_minimize_by_signature: true,
-            optimize_trie1_early_flatten_epsilon: true,
+            enabled: true,
+            simplify_none_edges: false, // was commented out, seems risky
+            prune_dead_paths: true,
+            prune_on_no_terminal_follow: true,
+            merge_nodes: true,
+            gc: true,
+            factor_common_destinations: false, // was commented out
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct Trie1Config {
+    pub early_flatten_epsilon: bool,
+    pub minimize_by_signature: bool,
+    pub merge_equivalent_llm_tokens: bool,
+    pub reorder_llm_tokens: bool,
+}
+
+impl Default for Trie1Config {
+    fn default() -> Self {
+        Self {
+            early_flatten_epsilon: true,
+            minimize_by_signature: true,
+            merge_equivalent_llm_tokens: true,
+            reorder_llm_tokens: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Trie2Config {
+    pub prune_dead_paths: bool,
+    pub merge_nodes: bool,
+    pub factor_common_destinations: bool,
+    pub compress_edges: bool,
+    pub gc: bool,
+}
+
+impl Default for Trie2Config {
+    fn default() -> Self {
+        Self {
+            prune_dead_paths: true,
+            merge_nodes: true,
+            factor_common_destinations: false,
+            compress_edges: true,
+            gc: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Trie3Config {
+    pub merge_equivalent_llm_tokens: bool,
+    pub reorder_llm_tokens: bool,
+    pub constrain_bitvecs: bool,
+    pub gc: bool,
+    pub prune_dead_paths: bool,
+    pub compress_edges: bool,
+    pub merge_nodes: bool,
+}
+
+impl Default for Trie3Config {
+    fn default() -> Self {
+        Self {
+            merge_equivalent_llm_tokens: true,
+            reorder_llm_tokens: true,
+            constrain_bitvecs: true,
+            gc: true,
+            prune_dead_paths: true,
+            compress_edges: true,
+            merge_nodes: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GrammarConstraintConfig {
+    pub skip_precomputation: bool,
+    pub trie0: Trie0Config,
+    pub trie1: Trie1Config,
+    pub trie2: Trie2Config,
+    pub trie3: Trie3Config,
 }
 
 #[derive(Debug, Clone)]
@@ -860,6 +913,7 @@ impl GrammarConstraint {
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
         );
+        let (precomputed0, trie0_god) = Self::precompute0(&tokenizer, Some(&parser), Some(llm_vocab.clone()), &internal_llm_token_map_for_precompute, &token_name_map, precompute0_vocab.internal_max_llm_token, &terminal_follow_map, parser.ignore_terminal_id, &mut computed_possible_matches, config);
 
         let (precomputed1, trie1_god) = Self::precompute1(
             &precomputed0,
@@ -868,7 +922,7 @@ impl GrammarConstraint {
             Some(&parser),
             &terminal_follow_map,
             &mut precompute_vocab,
-            config,
+            &config.trie1,
             &token_name_map,
         );
 
@@ -888,7 +942,7 @@ impl GrammarConstraint {
             &terminal_follow_map,
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
-            config,
+            &config.trie2,
         );
 
         // let mut stats2 = PrecomputeStats::default();
@@ -906,7 +960,7 @@ impl GrammarConstraint {
             &precomputed1,
             &trie1_god,
             &tokenizer, Some(&parser), Some(llm_vocab.clone()), &internal_llm_token_map_for_precompute, &token_name_map, internal_max_llm_token, &terminal_follow_map, parser.ignore_terminal_id, &mut computed_possible_matches,
-            config, // TODO: fix this
+            &config.trie3,
             &mut precompute3_vocab,
         );
 
@@ -957,6 +1011,7 @@ impl GrammarConstraint {
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         _possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+        config: &GrammarConstraintConfig,
     ) -> (BTreeMap<TokenizerStateID, PrecomputeNode0Index>, Trie0GodWrapper) {
         let mut helper = Precomputer0::new(
             tokenizer,
@@ -973,9 +1028,9 @@ impl GrammarConstraint {
         helper.run_dfs();
         let roots_before: Vec<_> = helper.roots.values().cloned().collect();
         Self::has_llm_compatible_cycle0(&helper.trie0_god, &roots_before, internal_max_llm_token);
-        // helper.optimize();
-        // helper.optimize();
-        // helper.optimize();
+        if config.trie0.enabled {
+            helper.optimize(&config.trie0);
+        }
         let (precomputed0, trie0_god) = helper.finish();
         let roots_after: Vec<_> = precomputed0.values().cloned().collect();
         Self::has_llm_compatible_cycle0(&trie0_god, &roots_after, internal_max_llm_token);
@@ -1196,7 +1251,7 @@ impl GrammarConstraint {
         parser: Option<&GLRParser>,
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         stage_vocab: &mut StageVocab,
-        config: &GrammarConstraintConfig,
+        config: &Trie1Config,
         token_name_map: &BiBTreeMap<Terminal, usize>,
     ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
         let trie1_god = Trie1GodWrapper::new();
@@ -1288,18 +1343,18 @@ impl GrammarConstraint {
         // Optimizations, similar to precompute0
         let ignore_terminal_id = parser.and_then(|p| p.ignore_terminal_id);
 
-        // constraint_precompute1_utils::optimize_trie1_size(
-        //     &mut precomputed1,
-        //     &trie1_god,
-        //     trie0_god,
-        //     &node0_to_node1_map,
-        //     ignore_terminal_id,
-        //     internal_max_llm_token,
-        //     terminal_follow_map,
-        //     config,
-        //     stage_vocab,
-        //     token_name_map,
-        // );
+        constraint_precompute1_utils::optimize_trie1_size(
+            &mut precomputed1,
+            &trie1_god,
+            trie0_god,
+            &node0_to_node1_map,
+            ignore_terminal_id,
+            internal_max_llm_token,
+            terminal_follow_map,
+            config,
+            stage_vocab,
+            token_name_map,
+        );
 
         (precomputed1, trie1_god)
     }
@@ -1317,7 +1372,7 @@ impl GrammarConstraint {
         _terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         _ignore_terminal_id: Option<TerminalID>,
         _possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-        config: &GrammarConstraintConfig,
+        config: &Trie2Config,
     ) -> (Precomputed2, Trie2GodWrapper) {
         (BTreeMap::new(), Trie2GodWrapper::new())
     }
@@ -1334,7 +1389,7 @@ impl GrammarConstraint {
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         ignore_terminal_id: Option<TerminalID>,
         possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-        config: &GrammarConstraintConfig,
+        config: &Trie3Config,
         stage_vocab: &mut StageVocab,
     ) -> (Precomputed3, Trie3GodWrapper) {
         crate::debug!(2, "Precomputing Trie 3...");
@@ -1466,8 +1521,6 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
-        // optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
-        // optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
         optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
 
         (precomputed3, trie3_god)

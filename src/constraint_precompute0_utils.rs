@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use ordered_hash_map::OrderedHashMap;
-use crate::constraint::{PrecomputeNode0, PrecomputeNode0Index, PrecomputedNodeContents0, Precomputer0, Trie0GodWrapper};
+use crate::constraint::{PrecomputeNode0, PrecomputeNode0Index, PrecomputedNodeContents0, Precomputer0, Trie0GodWrapper, Trie0Config};
 use crate::constraint::LLMTokenBV;
 use crate::datastructures::trie::Trie;
 use crate::tokenizer::TokenizerStateID;
@@ -10,28 +10,33 @@ use crate::datastructures::ordered_hash_map::Retain;
 use kdam::tqdm;
 
 impl<'r> Precomputer0<'r> {
-    pub(crate) fn optimize(&mut self) {
+    pub(crate) fn optimize(&mut self, config: &Trie0Config) {
         crate::debug!(2, "Initial Trie0 stats:");
         let mut stats = PrecomputeStats::default();
         calculate_final_stats0(&self.roots, &mut stats, &self.trie0_god);
         print_precompute_stats0(&stats, self.token_name_map, &self.trie0_god);
 
         self.replace_ignore_token_edges_with_none_edges();
-        // self.simplify_none_edges(); // This can invalidate max_depth.
+        if config.simplify_none_edges {
+            self.simplify_none_edges(); // This can invalidate max_depth.
+        }
 
         // Recompute all max_depth values after major graph surgery.
         Trie::recompute_all_max_depths(&self.trie0_god, &self.roots.values().cloned().collect::<Vec<_>>());
 
-        self.prune_dead_paths();
-        self.prune_on_no_terminal_follow();
-        self.prune_dead_paths();
-        // New: prune using substring parser in "everything state" mode
-        // self.prune_with_substring_everything_state();
-        // self.prune_dead_paths(); // Clean up after GLR-based pruning
-        // self.factor_common_destinations();
-        self.merge_nodes();
-        // self.merge_nodes_basic();
-        self.gc();
+        if config.prune_dead_paths { self.prune_dead_paths(); }
+        if config.prune_on_no_terminal_follow { self.prune_on_no_terminal_follow(); }
+        if config.prune_dead_paths { self.prune_dead_paths(); }
+
+        if config.factor_common_destinations {
+            self.factor_common_destinations();
+        }
+        if config.merge_nodes {
+            self.merge_nodes();
+        }
+        if config.gc {
+            self.gc();
+        }
         Trie::recompute_all_max_depths(&self.trie0_god, &self.roots.values().cloned().collect::<Vec<_>>());
 
         crate::debug!(2, "Final Trie0 stats:");

@@ -1,4 +1,4 @@
-use crate::constraint::{GrammarConstraintConfig, LLMTokenBV, PrecomputeNode1Index, PrecomputeNode2, PrecomputeNode2Index, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie2GodWrapper, Trie3GodWrapper};
+use crate::constraint::{LLMTokenBV, PrecomputeNode1Index, PrecomputeNode2, PrecomputeNode2Index, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie2GodWrapper, Trie3GodWrapper, Trie2Config};
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::{ArcPtrWrapper, EntryApi};
@@ -427,32 +427,32 @@ pub fn simplify_trie2_factor_common_destinations(roots: &mut BTreeMap<TokenizerS
 pub fn optimize_trie2_size(
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode2Index>,
     trie2_god: &Trie2GodWrapper,
-    config: &GrammarConstraintConfig,
+    config: &Trie2Config,
 ) {
     crate::debug!(2, "Optimizing Trie 2 size...");
     // Pin all nodes to prevent dangling weak pointers while we rewire.
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes_pinner = Trie::all_nodes(&trie2_god, &roots_vec);
 
-    if config.optimize_trie2_prune_dead_paths {
+    if config.prune_dead_paths {
         prune_dead_paths_trie2(roots, &trie2_god);
     }
-    if config.optimize_trie2_merge_nodes {
+    if config.merge_nodes {
         merge_nodes_trie2(roots, &trie2_god);
     }
-    if config.optimize_trie2_factor_common_destinations {
+    if config.factor_common_destinations {
         simplify_trie2_factor_common_destinations(roots, &trie2_god);
     }
-    if config.optimize_trie2_compress_edges {
+    if config.compress_edges {
         compress_trie2_edges(roots, &trie2_god);
     }
-    if config.optimize_trie2_prune_dead_paths {
+    if config.prune_dead_paths {
         prune_dead_paths_trie2(roots, &trie2_god);
     }
-    if config.optimize_trie2_merge_nodes {
+    if config.merge_nodes {
         merge_nodes_trie2(roots, &trie2_god);
     }
-    if config.optimize_trie2_gc {
+    if config.gc {
         Trie::gc(&trie2_god, &roots.values().cloned().collect::<Vec<_>>());
     }
     Trie::recompute_all_max_depths(&trie2_god, &roots.values().cloned().collect::<Vec<_>>());

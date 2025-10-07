@@ -7,7 +7,7 @@ use range_set_blaze::RangeSetBlaze;
 use indicatif::{ProgressBar, ProgressStyle};
 use kdam::tqdm;
 use ordered_hash_map::OrderedHashMap;
-use crate::constraint::{GrammarConstraintConfig, PrecomputeNode3Index, StateIDBV, Trie3GodWrapper, StageVocab, PrecomputedNodeContents};
+use crate::constraint::{PrecomputeNode3Index, StateIDBV, Trie3GodWrapper, StageVocab, PrecomputedNodeContents, Trie3Config};
 use crate::constraint_extra::{calculate_final_stats3, print_precompute_stats3, PrecomputeStats};
 use crate::datastructures::EntryApi;
 use crate::constraint::LLMTokenBV;
@@ -43,7 +43,7 @@ fn compute_and_print_precompute_stats3(
 pub fn optimize_trie3_size(
     roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
-    config: &GrammarConstraintConfig,
+    config: &Trie3Config,
     max_state_id: usize,
     mut max_llm_token_id: usize,
     stage_vocab: &mut StageVocab,
@@ -67,67 +67,17 @@ pub fn optimize_trie3_size(
 		};
 	}
 
-	// if config.optimize_trie3_merge_equivalent_llm_tokens {
-	// 	run_pass!("Merging equivalent LLM tokens", {
-	// 		merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
-	// 	});
-	// }
-    //
-	// if config.optimize_trie2_gc {
-	// 	run_pass!("Garbage collection (pre-merge)", {
-	// 		Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
-	// 	});
-	// }
-
-	// // After compression, prune and GC before the expensive merge.
-	// if config.optimize_trie2_prune_dead_paths {
-	// 	run_pass!("Pruning dead paths (post-compress)", {
-	// 		prune_dead_paths_trie3(roots, &trie3_god);
-	// 	});
-	// }
-    //
-	// if config.optimize_trie3_constrain_bitvecs {
-	// 	let roots_vec: Vec<_> = roots.values().cloned().collect();
-	// 	let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
-	// 	run_pass!("Constraining bitvectors", {
-	// 		constrain_bitvecs_trie3(trie3_god, &roots_vec, max_state_id, max_llm_token_id);
-	// 	});
-	// }
-    //
-	// run_pass!("Simplifying LLM token bitsets", {
-	// 	simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
-	// });
-
-	// if config.optimize_trie2_compress_edges {
-	// 	run_pass!("Compressing edges", {
-	// 		compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
-	// 	});
-	// }
-
-	// // After compression, prune and GC before the expensive merge.
-	// if config.optimize_trie2_prune_dead_paths {
-	// 	run_pass!("Pruning dead paths (post-compress)", {
-	// 		prune_dead_paths_trie3(roots, &trie3_god);
-	// 	});
-	// }
-
-	// if config.optimize_trie2_merge_nodes {
-	// 	run_pass!("Merging nodes", {
-	// 		merge_nodes_trie3(roots, &trie3_god);
-	// 	});
-	// }
-
 	// --- Phase 1: Initial Pruning & Vocab Reduction ---
 	// These passes are expensive but have a huge impact on the initial massive graph.
 	// They are essential to run first to make subsequent passes feasible.
-	if config.optimize_trie2_merge_nodes {
+	if config.merge_nodes {
 		run_pass!("Merging nodes (fast pre-pass)", {
 			merge_nodes_trie3_ultrafast(roots, trie3_god);
 		});
 	}
 
 
-	if config.optimize_trie2_prune_dead_paths { // Reusing config flag
+	if config.prune_dead_paths {
 		run_pass!("Pruning dead paths", {
 			prune_dead_paths_trie3(roots, &trie3_god);
 		});
@@ -139,20 +89,20 @@ pub fn optimize_trie3_size(
 	// 	});
 	// }
 
-	if config.optimize_trie3_merge_equivalent_llm_tokens {
+	if config.merge_equivalent_llm_tokens {
 		run_pass!("Merging equivalent LLM tokens", {
 			merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
 		});
 	}
 
-	if config.optimize_trie3_reorder_llm_tokens {
+	if config.reorder_llm_tokens {
 		run_pass!("Reordering LLM tokens for range minimization", {
 			reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
 			max_llm_token_id = stage_vocab.internal_max_llm_token;
 		});
 	}
 
-	if config.optimize_trie3_constrain_bitvecs {
+	if config.constrain_bitvecs {
 		let roots_vec: Vec<_> = roots.values().cloned().collect();
 		let _all_nodes_pinner = Trie::all_nodes(&trie3_god, &roots_vec);
 		run_pass!("Constraining bitvectors", {
@@ -168,25 +118,25 @@ pub fn optimize_trie3_size(
 	// 	simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
 	// });
 
-	if config.optimize_trie2_compress_edges {
+	if config.compress_edges {
 		run_pass!("Compressing edges", {
 			compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
 		});
 	}
 
 	// After compression, prune and GC before the expensive merge.
-	if config.optimize_trie2_prune_dead_paths {
+	if config.prune_dead_paths {
 		run_pass!("Pruning dead paths (post-compress)", {
 			prune_dead_paths_trie3(roots, &trie3_god);
 		});
 	}
-	if config.optimize_trie2_gc {
+	if config.gc {
 		run_pass!("Garbage collection (pre-merge)", {
 			Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 		});
 	}
 
-	if config.optimize_trie2_merge_nodes {
+	if config.merge_nodes {
 		run_pass!("Merging nodes", {
 			merge_nodes_trie3(roots, &trie3_god);
 		});
@@ -201,13 +151,13 @@ pub fn optimize_trie3_size(
 	// 	});
 	// }
 
-	if config.optimize_trie2_compress_edges {
+	if config.compress_edges {
 		run_pass!("Compressing edges (post-merge)", {
 			compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
 		});
 	}
 
-	if config.optimize_trie2_merge_nodes {
+	if config.merge_nodes {
 		run_pass!("Merging nodes (post-compress)", {
 			merge_nodes_trie3(roots, &trie3_god);
 		});
@@ -215,24 +165,24 @@ pub fn optimize_trie3_size(
 
 	// --- Phase 4: Final Cleanup and Polish ---
 
-	if config.optimize_trie2_prune_dead_paths {
+	if config.prune_dead_paths {
 		run_pass!("Pruning dead paths (final)", {
 			prune_dead_paths_trie3(roots, &trie3_god);
 		});
 	}
 
-	if config.optimize_trie2_gc {
+	if config.gc {
 		run_pass!("Garbage collection (final)", {
 			Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
 		});
 	}
 
-	if config.optimize_trie3_merge_equivalent_llm_tokens {
+	if config.merge_equivalent_llm_tokens {
 		run_pass!("Merging equivalent LLM tokens (final pass)", {
 			merge_equivalent_llm_tokens_trie3(roots, trie3_god, stage_vocab);
 		});
 	}
-	if config.optimize_trie3_reorder_llm_tokens {
+	if config.reorder_llm_tokens {
 		run_pass!("Reordering LLM tokens (final pass)", {
 			reorder_llm_tokens_for_range_minimization_trie3(roots, trie3_god, stage_vocab);
 		});
