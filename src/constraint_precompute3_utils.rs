@@ -163,7 +163,7 @@ pub fn optimize_trie3_size(
         if config.merge_nodes_ultrafast {
             run_pass!("Merging nodes (fast pre-pass)", {
                 merge_nodes_trie3_ultrafast(roots, trie3_god);
-                merge_nodes_trie3_fast(roots, trie3_god);
+                merge_nodes_trie3(roots, trie3_god);
             });
         }
 
