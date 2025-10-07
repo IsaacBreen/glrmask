@@ -696,7 +696,13 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
     transform_all(root_arc, |a| {
         let mut na = a.clone();
         let new_stored_node = stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(crate::constraint::PrecomputedNodeContents::internal()));
+        let mut final_nodes = BTreeSet::new();
+        final_nodes.insert(Trie2Index::new(new_stored_node));
         for node in &a.stored_trie_nodes {
+            if node.as_arc().read(stored_trie_god).expect("poison").value.live_tokens.is_subset(allowed_tokens) {
+                final_nodes.insert(node.clone());
+                continue;
+            }
             // Make an edge from node to new_stored_node with allowed_tokens
             let inserter = crate::datastructures::trie::EdgeInserter::new(
                 stored_trie_god,
@@ -709,7 +715,7 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
             );
             inserter.try_destination(Trie2Index::new(new_stored_node)).expect("Cycle detected when adding allowed llm tokens on stored trie nodes");
         }
-        na.stored_trie_nodes = BTreeSet::from([Trie2Index::new(new_stored_node)]);
+        na.stored_trie_nodes = final_nodes;
         Some(na)
     });
 }
