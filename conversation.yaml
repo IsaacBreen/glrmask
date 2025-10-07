@@ -3908,10 +3908,10 @@ local_system:
           // gets stuck in the cycle and incorrectly prunes all paths, thereby failing
           // to allow the `ignore` token.
           let ebnf_grammar = r#"
-      #![ignore(WS)]
+      #![ignore(IGNORE)]
       program ::= item_list? EOF;
       EOF ::= '<|EOF|>';
-      WS ::= ' '+;
+      IGNORE ::= ( ' ' | '\t' )+;
       item_list ::= item+;
       item ::= 'a' | block;
       block ::= '{' item_list? '}';
@@ -7969,5 +7969,83 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Re-simplify test_ebnf_grammar_initial_mask
       with minimal optional-repetition-recursive grammar to isolate initial mask failure"'
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_basic.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: still passing
+    metadata:
+  - assistant: |-
+      I am truly sorry that my previous attempts have failed to reproduce the issue. Your persistence is appreciated, and it's clear that the bug is triggered by a more subtle interaction than my minimal examples could capture. Thank you for sticking with this.
+
+      My approach of building a minimal grammar from scratch has been unsuccessful. It's time for a new strategy: let's focus on the differences between the simplified grammars that pass and the original one that fails.
+
+      One significant difference we have not yet tested is the complexity of the `ignore` rule itself. The original rule was `IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;`. This involves choices, repetitions, and multiple alternatives. My minimal examples have all used a very simple `WS ::= ' '+;`. It is possible that the parser's initial state analysis interacts differently with a more complex `ignore` definition.
+
+      Let's test this hypothesis by making the `ignore` rule in our current test case more complex, mirroring a part of the original structure.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file `src/test_constraint_basic.rs`**.
+
+      2.  **Navigate to the test function `test_ebnf_grammar_initial_mask`**.
+
+      3.  **Modify the EBNF grammar string**. We will change the `ignore` directive and its corresponding rule to be more complex, introducing a choice inside a repetition.
+          -   Change the directive from `#![ignore(WS)]` to `#![ignore(IGNORE)]`.
+          -   Replace the rule `WS ::= ' '+;` with `IGNORE ::= ( ' ' | '\t' )+;`.
+
+          The `ebnf_grammar` variable should now look like this:
+          ```rust
+          let ebnf_grammar = r#"
+      #![ignore(IGNORE)]
+      program ::= item_list? EOF;
+      EOF ::= '<|EOF|>';
+      IGNORE ::= ( ' ' | '\t' )+;
+      item_list ::= item+;
+      item ::= 'a' | block;
+      block ::= '{' item_list? '}';
+      "#;
+          ```
+
+      The rest of the test, including the vocabulary and the assertion, remains correct for testing this specific scenario. The vocabulary only contains a token for `' '`, so the parser must correctly analyze the new, more complex `IGNORE` rule to permit it.
+
+      ### Git Diff
+
+      Here is the git patch that applies these changes to the current state of the file.
+
+      ```diff
+      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -1424,10 +1424,10 @@
+           // gets stuck in the cycle and incorrectly prunes all paths, thereby failing
+           // to allow the `ignore` token.
+           let ebnf_grammar = r#"
+      -#![ignore(WS)]
+      +#![ignore(IGNORE)]
+       program ::= item_list? EOF;
+       EOF ::= '<|EOF|>';
+      -WS ::= ' '+;
+      +IGNORE ::= ( ' ' | '\t' )+;
+       item_list ::= item+;
+       item ::= 'a' | block;
+       block ::= '{' item_list? '}';
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_basic.rs
+      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_basic.rs.
+    metadata:
+  - user: 'Changes committed with message: "Final minimal grammar for initial mask
+      test: model optional-repetition-recursive structure with complex ignore rule"'
     metadata:
 ...

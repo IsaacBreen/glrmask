@@ -1528,10 +1528,10 @@ fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // gets stuck in the cycle and incorrectly prunes all paths, thereby failing
     // to allow the `ignore` token.
     let ebnf_grammar = r#"
-#![ignore(WS)]
+#![ignore(IGNORE)]
 program ::= item_list? EOF;
 EOF ::= '<|EOF|>';
-WS ::= ' '+;
+IGNORE ::= ( ' ' | '\t' )+;
 item_list ::= item+;
 item ::= 'a' | block;
 block ::= '{' item_list? '}';
