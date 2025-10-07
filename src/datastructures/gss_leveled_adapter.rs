@@ -308,6 +308,9 @@ impl GSSNode {
             .max()
             .unwrap_or(0)
     }
+    pub fn flatten(&self) -> Vec<(Vec<ParseStateEdgeContent>, Acc)> {
+        self.inner.to_stacks()
+    }
 
     pub fn print(&self) -> String {
         let (s, _sid) = print_gss_forest(&[Arc::new(self.clone())], &BiBTreeMap::new(), &GSSPrintConfig::default());

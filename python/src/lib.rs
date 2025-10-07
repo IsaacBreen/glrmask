@@ -893,20 +893,8 @@ impl PyGSSNode {
         }
     }
 
-    fn is_root(&self) -> bool {
-        self.inner.is_root()
-    }
-
     fn depth(&self) -> usize {
         self.inner.max_depth()
-    }
-
-    fn local_acc_terminals_union(&self) -> PyHybridL2Bitset {
-        PyHybridL2Bitset { inner: self.inner.local_acc().terminals_union.clone() }
-    }
-
-    fn local_acc_llm_tokens_union(&self) -> PyHybridBitset {
-        PyHybridBitset { inner: self.inner.local_acc().llm_tokens_union.clone() }
     }
 
     fn predecessors(&self) -> Vec<(usize, PyGSSNode)> {
