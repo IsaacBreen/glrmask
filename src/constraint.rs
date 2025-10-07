@@ -438,6 +438,20 @@ impl Default for Trie0Config {
     }
 }
 
+impl Trie0Config {
+    pub fn off() -> Self {
+        Self {
+            enabled: false,
+            simplify_none_edges: false,
+            prune_dead_paths: false,
+            prune_on_no_terminal_follow: false,
+            merge_nodes: false,
+            gc: false,
+            factor_common_destinations: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Trie1Config {
     pub early_flatten_epsilon: bool,
@@ -453,6 +467,17 @@ impl Default for Trie1Config {
             minimize_by_signature: true,
             merge_equivalent_llm_tokens: true,
             reorder_llm_tokens: true,
+        }
+    }
+}
+
+impl Trie1Config {
+    pub fn off() -> Self {
+        Self {
+            early_flatten_epsilon: false,
+            minimize_by_signature: false,
+            merge_equivalent_llm_tokens: false,
+            reorder_llm_tokens: false,
         }
     }
 }
@@ -474,6 +499,18 @@ impl Default for Trie2Config {
             factor_common_destinations: false,
             compress_edges: true,
             gc: true,
+        }
+    }
+}
+
+impl Trie2Config {
+    pub fn off() -> Self {
+        Self {
+            prune_dead_paths: false,
+            merge_nodes: false,
+            factor_common_destinations: false,
+            compress_edges: false,
+            gc: false,
         }
     }
 }
@@ -503,6 +540,20 @@ impl Default for Trie3Config {
     }
 }
 
+impl Trie3Config {
+    pub fn off() -> Self {
+        Self {
+            merge_equivalent_llm_tokens: false,
+            reorder_llm_tokens: false,
+            constrain_bitvecs: false,
+            gc: false,
+            prune_dead_paths: false,
+            compress_edges: false,
+            merge_nodes: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintConfig {
     pub skip_precomputation: bool,
@@ -510,6 +561,30 @@ pub struct GrammarConstraintConfig {
     pub trie1: Trie1Config,
     pub trie2: Trie2Config,
     pub trie3: Trie3Config,
+}
+
+impl Default for GrammarConstraintConfig {
+    fn default() -> Self {
+        Self {
+            skip_precomputation: false,
+            trie0: Trie0Config::default(),
+            trie1: Trie1Config::default(),
+            trie2: Trie2Config::default(),
+            trie3: Trie3Config::default(),
+        }
+    }
+}
+
+impl GrammarConstraintConfig {
+    pub fn off() -> Self {
+        Self {
+            skip_precomputation: false,
+            trie0: Trie0Config::off(),
+            trie1: Trie1Config::off(),
+            trie2: Trie2Config::off(),
+            trie3: Trie3Config::off(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -912,8 +987,8 @@ impl GrammarConstraint {
             &terminal_follow_map,
             parser.ignore_terminal_id,
             &mut computed_possible_matches,
+            config
         );
-        let (precomputed0, trie0_god) = Self::precompute0(&tokenizer, Some(&parser), Some(llm_vocab.clone()), &internal_llm_token_map_for_precompute, &token_name_map, precompute0_vocab.internal_max_llm_token, &terminal_follow_map, parser.ignore_terminal_id, &mut computed_possible_matches, config);
 
         let (precomputed1, trie1_god) = Self::precompute1(
             &precomputed0,

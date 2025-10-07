@@ -60,8 +60,8 @@ fn assert_optimized_equivalent(
 
     // Apply optimization passes
     let mut optimization_config = GrammarConstraintConfig::default();
-    optimization_config.optimize_trie2_gc = false;
-    optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config);
+    optimization_config.trie2.gc = false;
+    optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config.trie2);
 
     println!("\n--- Stats for Optimized Precompute2 Tree ---");
     let mut stats_optimized = PrecomputeStats::default();
@@ -116,21 +116,7 @@ fn run_equivalence_test(ebnf: &str, llm_tokens: &[&str]) -> Result<(), Box<dyn E
     let (llm_token_map, max_original_llm_token_id) = make_llm_token_map(llm_tokens);
 
     // Create with optimizations OFF to get the baseline
-    let no_opt_config = GrammarConstraintConfig {
-        optimize_trie2_prune_dead_paths: false,
-        optimize_trie2_merge_nodes: false,
-        optimize_trie2_factor_common_destinations: false,
-        optimize_trie2_compress_edges: false,
-        optimize_trie2_gc: true,
-        skip_precomputation: false,
-        optimize_trie3_constrain_bitvecs: true,
-        optimize_trie1_merge_equivalent_llm_tokens: false,
-        optimize_trie1_reorder_llm_tokens: false,
-        optimize_trie3_merge_equivalent_llm_tokens: false,
-        optimize_trie3_reorder_llm_tokens: false,
-        optimize_trie1_minimize_by_signature: false,
-        optimize_trie1_early_flatten_epsilon: false,
-    };
+    let no_opt_config = GrammarConstraintConfig::off();
     let gc = GrammarConstraint::from_compiled_grammar_with_config(
         compiled,
         llm_token_map,
@@ -246,21 +232,7 @@ fn test_precompute_optimizations_are_equivalent_for_js() -> Result<(), Box<dyn s
         println!("Successfully loaded Precomputed2 from cache.");
     } else {
         println!("\nConstructing GrammarConstraint with optimizations OFF (will generate Precomputed2)...");
-        let no_opt_config = GrammarConstraintConfig {
-            optimize_trie2_prune_dead_paths: false,
-            optimize_trie2_merge_nodes: false,
-            optimize_trie2_factor_common_destinations: false,
-            optimize_trie2_compress_edges: false,
-            optimize_trie2_gc: true,
-            skip_precomputation: false,
-            optimize_trie3_constrain_bitvecs: true,
-            optimize_trie1_merge_equivalent_llm_tokens: false,
-            optimize_trie1_reorder_llm_tokens: false,
-            optimize_trie3_merge_equivalent_llm_tokens: false,
-            optimize_trie3_reorder_llm_tokens: false,
-            optimize_trie1_minimize_by_signature: false,
-            optimize_trie1_early_flatten_epsilon: false,
-        };
+        let no_opt_config = GrammarConstraintConfig::off();
         let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
             compiled_grammar.clone(),
             llm_token_map.clone(),
