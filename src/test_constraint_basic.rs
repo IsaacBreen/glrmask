@@ -1517,21 +1517,24 @@ fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar string
     // This is a minimal grammar to test the core issue from the original, more
     // complex grammar. The key features preserved are:
-    // 1. The grammar starts with an optional repetition (`statements?`, where
-    //    `statements` is `statement+`). This combination was present in the
-    //    original `program ::= statement_list?` and `statement_list ::= statement+`.
-    // 2. An `ignore` rule is active.
-    // 3. The LLM vocabulary contains a token for the `ignore` rule (` `) but not
-    //    for the terminals that can start the main grammar rule (`a`).
+    // 1. A top-level optional rule (`item_list?`).
+    // 2. That rule contains a repetition (`item+`).
+    // 3. The repeated element is a choice (`'a' | block`).
+    // 4. One of the choices is recursive (`block ::= '{' item_list? '}'`), creating
+    //    a cycle: `item_list -> item -> block -> item_list`.
+    // 5. The LLM vocabulary contains a token for the `ignore` rule (` `) but not
+    //    for the terminals that can start the main grammar rule (`a`, `{`).
     // This setup is designed to fail if the parser's initial state analysis
-    // incorrectly prunes all paths, thereby failing to allow the `ignore` token.
+    // gets stuck in the cycle and incorrectly prunes all paths, thereby failing
+    // to allow the `ignore` token.
     let ebnf_grammar = r#"
 #![ignore(WS)]
-program ::= statements? EOF;
+program ::= item_list? EOF;
 EOF ::= '<|EOF|>';
 WS ::= ' '+;
-statements ::= statement+;
-statement ::= 'a';
+item_list ::= item+;
+item ::= 'a' | block;
+block ::= '{' item_list? '}';
 "#;
 
     // 2. Parse and compile the grammar
@@ -1559,9 +1562,9 @@ statement ::= 'a';
     let mask = state.get_mask();
 
     // 6. Assert the expected mask
-    // The grammar can start with 'a' (from `statements?`) or be empty (before EOF),
+    // The grammar can start with 'a' or '{' (from `item_list?`) or be empty (before EOF),
     // and can always be preceded by ignored whitespace ' '.
-    // The vocabulary only contains ' ' and '@'. Since 'a' is not in the vocab,
+    // The vocabulary only contains ' ' and '@'. Since neither 'a' nor '{' is in the vocab,
     // only the ignored ' ' token is a valid start from the perspective of the
     // available LLM tokens.
     // Therefore, the mask should only contain the ID for the space token.
