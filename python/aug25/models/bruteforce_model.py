@@ -318,6 +318,8 @@ class BruteForceModel(GraphProvider):
 
         # Check if any of the resulting states can lead to a valid parse state.
         # We only need one valid path forward from one of the states.
+        if 0 in merged:
+            return merged
         for tsid, gss in merged.items():
             possible_terminals = self.tokenizer.states[tsid].possible_future_group_ids
             for terminal_id in possible_terminals:
