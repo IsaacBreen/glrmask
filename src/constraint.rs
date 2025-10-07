@@ -1364,6 +1364,7 @@ impl GrammarConstraint {
         let trie3_end = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::leaf())));
 
         crate::debug!(2, "Running special_map_grouped for Trie 3 precomputation");
+        // TODO: LLM tokens are now redundant; we do LLM token filtering now at the trie node level.
         Trie::special_map_grouped(
             &trie1_god,
             initial_values_for_map,
@@ -1374,7 +1375,7 @@ impl GrammarConstraint {
                 for bv in destinations_map.values() {
                     edge_bv |= bv;
                 }
-                allow_only_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_bv, &mut HashMap::new());
+                // allow_only_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_bv, &mut HashMap::new());
 
                 if let Some(gt) = edge_grammar_token_opt {
                     glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
@@ -1389,7 +1390,7 @@ impl GrammarConstraint {
                     for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
                         // println!("  {}: {:?}", i, p);
                     }
-                    allow_only_llm_tokens_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new());
+                    // allow_only_llm_tokens_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new());
                     allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new(), glr_s_copy.active_state.trie2_god.as_ref().unwrap());
                     // println!("After pruning to edge tokens:");
                     for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
@@ -1447,6 +1448,8 @@ impl GrammarConstraint {
                             // println!("  Union LLM tokens: {:?}", gss_root_acc.union_llm_tokens());
                         }
                     }
+                    // TODO: We don't even need to gather roots here. Can just get acc and its stored trie nodes.
+                    //  Reason: llm tokens is redundant... we do LLM token filtering now at the trie node level
                     for (_last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
                         for gss_root_acc in gss_root_accs {
                             let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
