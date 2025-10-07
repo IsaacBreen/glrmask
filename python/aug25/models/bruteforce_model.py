@@ -163,7 +163,7 @@ class BruteForceModel(GraphProvider):
     internal_to_representative_original: Optional[Dict[int, int]] = None
 
     @staticmethod
-    def from_json_string(s: str, mode: str = 'internal') -> 'BruteForceModel':
+    def from_json_string(s: str, mode: str = 'original') -> 'BruteForceModel':
         Stats.get().reset()
         data = json.loads(s)
 
