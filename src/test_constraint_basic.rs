@@ -1517,7 +1517,7 @@ fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar string
     let ebnf_grammar = r#"
 program ::= IGNORE;
-IGNORE ::= ' ' | '//@';
+IGNORE ::= ' ' | '$@';
 "#;
 
     // 2. Parse and compile the grammar
