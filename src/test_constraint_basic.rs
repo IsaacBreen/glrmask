@@ -1515,17 +1515,21 @@ fn test_constraint_expression_cycle() {
 #[test]
 fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar string
-    // This is a minimal grammar to test the core issue: a grammar that can start
-    // with an optional rule (`statement?`), with an `ignore` rule active.
-    // The LLM vocab is set up to contain a token matching `ignore` (` `) but NOT
-    // a token matching the optional rule (`a`), to check if `ignore` is handled
-    // correctly in this initial state.
+    // This is a minimal grammar to test the core issue from the original, more
+    // complex grammar. The key features preserved are:
+    // 1. The grammar starts with an optional, recursive non-terminal (`block?`).
+    // 2. An `ignore` rule is active.
+    // 3. The LLM vocabulary contains a token for the `ignore` rule (` `) but not
+    //    for the terminals that can start the main grammar rule (`{`).
+    // This setup is designed to fail if the parser's initial state analysis
+    // incorrectly prunes all paths due to the recursion, thereby failing to
+    // allow the `ignore` token.
     let ebnf_grammar = r#"
 #![ignore(WS)]
-program ::= statement? EOF;
+program ::= block? EOF;
 EOF ::= '<|EOF|>';
 WS ::= ' '+;
-statement ::= 'a';
+block ::= '{' block? '}';
 "#;
 
     // 2. Parse and compile the grammar
@@ -1553,9 +1557,10 @@ statement ::= 'a';
     let mask = state.get_mask();
 
     // 6. Assert the expected mask
-    // The grammar can start with 'a' (from `statement?`) or be empty (before EOF),
+    // The grammar can start with '{' (from `block?`) or be empty (before EOF),
     // and can always be preceded by ignored whitespace ' '.
-    // The vocabulary only contains ' ' and '@'. Only ' ' is valid.
+    // The vocabulary only contains ' ' and '@'. Since '{' is not in the vocab,
+    // only the ignored ' ' token is a valid start.
     // Therefore, the mask should only contain the ID for the space token.
     let expected_mask = HybridBitset::from_iter(vec![space_token_id.0]);
     assert_eq!(
