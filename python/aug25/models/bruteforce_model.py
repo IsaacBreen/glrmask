@@ -218,6 +218,12 @@ class BruteForceModel(GraphProvider):
         initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
         initial_gss = GSS.from_stacks([([], initial_acc)]).push(parser_table.start_state_id)
 
+        if len(id_to_token) < 300:
+            print("Vocab:")
+            for i, token in enumerate(id_to_token.values()):
+                print(f"{i}: {token}")
+            print()
+
         return BruteForceModel(
             parser_table=parser_table,
             tokenizer=tokenizer,
