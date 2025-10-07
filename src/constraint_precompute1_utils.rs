@@ -7,7 +7,7 @@ use bitvec::macros::internal::funty::Fundamental;
 use range_set_blaze::RangeSetBlaze;
 use ordered_hash_map::OrderedHashMap;
 use kdam::{tqdm};
-use crate::constraint::{PrecomputeNode0Index, PrecomputeNode1, PrecomputedNodeContents, Trie0GodWrapper, Trie1Config};
+use crate::constraint::{PrecomputeNode0Index, PrecomputeNode1, PrecomputedNodeContents, Trie0GodWrapper};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::constraint::{StageVocab, PrecomputeNode1Index, Trie1GodWrapper};
 use crate::constraint_extra::PrecomputeStats;
@@ -19,6 +19,39 @@ use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::tokenizer::TokenizerStateID;
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::ordered_hash_map::Retain;
+
+#[derive(Debug, Clone)]
+pub struct Trie1Config {
+    pub enabled: bool,
+    pub early_flatten_epsilon: bool,
+    pub minimize_by_signature: bool,
+    pub merge_equivalent_llm_tokens: bool,
+    pub reorder_llm_tokens: bool,
+}
+
+impl Default for Trie1Config {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            early_flatten_epsilon: true,
+            minimize_by_signature: true,
+            merge_equivalent_llm_tokens: true,
+            reorder_llm_tokens: true,
+        }
+    }
+}
+
+impl Trie1Config {
+    pub fn off() -> Self {
+        Self {
+            enabled: false,
+            early_flatten_epsilon: false,
+            minimize_by_signature: false,
+            merge_equivalent_llm_tokens: false,
+            reorder_llm_tokens: false,
+        }
+    }
+}
 
 fn constrain_bitvecs_trie1(
     trie1_god: &Trie1GodWrapper,
@@ -392,6 +425,9 @@ pub fn optimize_trie1_size(
     stage_vocab: &mut StageVocab,
     token_name_map: &bimap::BiBTreeMap<crate::glr::grammar::Terminal, usize>,
 ) {
+    if !config.enabled {
+        return;
+    }
     crate::debug!(2, "Starting Trie1 size optimization...");
 
     crate::debug!(2, "Initial Trie1 stats:");

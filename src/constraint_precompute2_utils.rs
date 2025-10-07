@@ -1,4 +1,4 @@
-use crate::constraint::{LLMTokenBV, PrecomputeNode1Index, PrecomputeNode2, PrecomputeNode2Index, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie2GodWrapper, Trie3GodWrapper, Trie2Config};
+use crate::constraint::{LLMTokenBV, PrecomputeNode1Index, PrecomputeNode2, PrecomputeNode2Index, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie2GodWrapper, Trie3GodWrapper};
 use crate::datastructures::ordered_hash_map::Retain;
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::{ArcPtrWrapper, EntryApi};
@@ -13,6 +13,42 @@ use rand::Rng;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::sync::{Arc, RwLock};
+
+#[derive(Debug, Clone)]
+pub struct Trie2Config {
+    pub enabled: bool,
+    pub prune_dead_paths: bool,
+    pub merge_nodes: bool,
+    pub factor_common_destinations: bool,
+    pub compress_edges: bool,
+    pub gc: bool,
+}
+
+impl Default for Trie2Config {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            prune_dead_paths: true,
+            merge_nodes: true,
+            factor_common_destinations: false,
+            compress_edges: true,
+            gc: true,
+        }
+    }
+}
+
+impl Trie2Config {
+    pub fn off() -> Self {
+        Self {
+            enabled: false,
+            prune_dead_paths: false,
+            merge_nodes: false,
+            factor_common_destinations: false,
+            compress_edges: false,
+            gc: false,
+        }
+    }
+}
 
 type NormalizedPath = Vec<(usize, StateID)>;
 type PathMap = BTreeMap<NormalizedPath, LLMTokenBV>;
@@ -429,6 +465,9 @@ pub fn optimize_trie2_size(
     trie2_god: &Trie2GodWrapper,
     config: &Trie2Config,
 ) {
+    if !config.enabled {
+        return;
+    }
     crate::debug!(2, "Optimizing Trie 2 size...");
     // Pin all nodes to prevent dangling weak pointers while we rewire.
     let roots_vec: Vec<_> = roots.values().cloned().collect();

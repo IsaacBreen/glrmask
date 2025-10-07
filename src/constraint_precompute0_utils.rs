@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use ordered_hash_map::OrderedHashMap;
-use crate::constraint::{PrecomputeNode0, PrecomputeNode0Index, PrecomputedNodeContents0, Precomputer0, Trie0GodWrapper, Trie0Config};
+use crate::constraint::{PrecomputeNode0, PrecomputeNode0Index, PrecomputedNodeContents0, Precomputer0, Trie0GodWrapper};
 use crate::constraint::LLMTokenBV;
 use crate::datastructures::trie::Trie;
 use crate::tokenizer::TokenizerStateID;
@@ -8,6 +8,45 @@ use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::constraint_extra::{calculate_final_stats0, print_precompute_stats0, PrecomputeStats};
 use crate::datastructures::ordered_hash_map::Retain;
 use kdam::tqdm;
+
+#[derive(Debug, Clone)]
+pub struct Trie0Config {
+    pub enabled: bool,
+    pub simplify_none_edges: bool,
+    pub prune_dead_paths: bool,
+    pub prune_on_no_terminal_follow: bool,
+    pub merge_nodes: bool,
+    pub gc: bool,
+    pub factor_common_destinations: bool,
+}
+
+impl Default for Trie0Config {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            simplify_none_edges: false, // was commented out, seems risky
+            prune_dead_paths: true,
+            prune_on_no_terminal_follow: true,
+            merge_nodes: true,
+            gc: true,
+            factor_common_destinations: false, // was commented out
+        }
+    }
+}
+
+impl Trie0Config {
+    pub fn off() -> Self {
+        Self {
+            enabled: false,
+            simplify_none_edges: false,
+            prune_dead_paths: false,
+            prune_on_no_terminal_follow: false,
+            merge_nodes: false,
+            gc: false,
+            factor_common_destinations: false,
+        }
+    }
+}
 
 impl<'r> Precomputer0<'r> {
     pub(crate) fn optimize(&mut self, config: &Trie0Config) {

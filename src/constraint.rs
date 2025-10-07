@@ -52,6 +52,10 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use ordered_hash_map::{OrderedHashMap, OrderedHashSet};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::constraint_precompute2_utils::optimize_trie2_size;
+pub use crate::constraint_precompute0_utils::Trie0Config;
+pub use crate::constraint_precompute1_utils::Trie1Config;
+pub use crate::constraint_precompute2_utils::Trie2Config;
+pub use crate::constraint_precompute3_utils::Trie3Config;
 pub(crate) use crate::constraint::constraint_precompute3_utils::clone_trie3_graph;
 use crate::constraint_precompute3_utils::optimize_trie3_size;
 use crate::datastructures::EntryApi;
@@ -408,149 +412,6 @@ impl JSONConvertible for PrecomputedNodeContents0 {
 impl Into<PrecomputedNodeContents> for PrecomputedNodeContents0 {
     fn into(self) -> PrecomputedNodeContents {
         PrecomputedNodeContents { end: self.final_tokenizer_state.is_some(), live_tokens: self.live_tokens }
-    }
-}
-
-
-
-#[derive(Debug, Clone)]
-pub struct Trie0Config {
-    pub enabled: bool,
-    pub simplify_none_edges: bool,
-    pub prune_dead_paths: bool,
-    pub prune_on_no_terminal_follow: bool,
-    pub merge_nodes: bool,
-    pub gc: bool,
-    pub factor_common_destinations: bool,
-}
-
-impl Default for Trie0Config {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            simplify_none_edges: false, // was commented out, seems risky
-            prune_dead_paths: true,
-            prune_on_no_terminal_follow: true,
-            merge_nodes: true,
-            gc: true,
-            factor_common_destinations: false, // was commented out
-        }
-    }
-}
-
-impl Trie0Config {
-    pub fn off() -> Self {
-        Self {
-            enabled: false,
-            simplify_none_edges: false,
-            prune_dead_paths: false,
-            prune_on_no_terminal_follow: false,
-            merge_nodes: false,
-            gc: false,
-            factor_common_destinations: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Trie1Config {
-    pub early_flatten_epsilon: bool,
-    pub minimize_by_signature: bool,
-    pub merge_equivalent_llm_tokens: bool,
-    pub reorder_llm_tokens: bool,
-}
-
-impl Default for Trie1Config {
-    fn default() -> Self {
-        Self {
-            early_flatten_epsilon: true,
-            minimize_by_signature: true,
-            merge_equivalent_llm_tokens: true,
-            reorder_llm_tokens: true,
-        }
-    }
-}
-
-impl Trie1Config {
-    pub fn off() -> Self {
-        Self {
-            early_flatten_epsilon: false,
-            minimize_by_signature: false,
-            merge_equivalent_llm_tokens: false,
-            reorder_llm_tokens: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Trie2Config {
-    pub prune_dead_paths: bool,
-    pub merge_nodes: bool,
-    pub factor_common_destinations: bool,
-    pub compress_edges: bool,
-    pub gc: bool,
-}
-
-impl Default for Trie2Config {
-    fn default() -> Self {
-        Self {
-            prune_dead_paths: true,
-            merge_nodes: true,
-            factor_common_destinations: false,
-            compress_edges: true,
-            gc: true,
-        }
-    }
-}
-
-impl Trie2Config {
-    pub fn off() -> Self {
-        Self {
-            prune_dead_paths: false,
-            merge_nodes: false,
-            factor_common_destinations: false,
-            compress_edges: false,
-            gc: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Trie3Config {
-    pub merge_equivalent_llm_tokens: bool,
-    pub reorder_llm_tokens: bool,
-    pub constrain_bitvecs: bool,
-    pub gc: bool,
-    pub prune_dead_paths: bool,
-    pub compress_edges: bool,
-    pub merge_nodes: bool,
-}
-
-impl Default for Trie3Config {
-    fn default() -> Self {
-        Self {
-            merge_equivalent_llm_tokens: true,
-            reorder_llm_tokens: true,
-            constrain_bitvecs: true,
-            gc: true,
-            prune_dead_paths: true,
-            compress_edges: true,
-            merge_nodes: true,
-        }
-    }
-}
-
-impl Trie3Config {
-    pub fn off() -> Self {
-        Self {
-            merge_equivalent_llm_tokens: false,
-            reorder_llm_tokens: false,
-            constrain_bitvecs: false,
-            gc: false,
-            prune_dead_paths: false,
-            compress_edges: false,
-            merge_nodes: false,
-        }
     }
 }
 
