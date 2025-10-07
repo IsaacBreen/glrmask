@@ -1279,6 +1279,10 @@ impl GrammarConstraint {
         // Optimizations, similar to precompute0
         let ignore_terminal_id = parser.and_then(|p| p.ignore_terminal_id);
 
+        let mut stats = PrecomputeStats::default();
+        crate::constraint_extra::calculate_final_stats1(&precomputed1, &mut stats, &trie1_god);
+        crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, &trie1_god);
+
         constraint_precompute1_utils::optimize_trie1_size(
             &mut precomputed1,
             &trie1_god,
@@ -1438,16 +1442,16 @@ impl GrammarConstraint {
                         // println!("  {}: {:?}", i, p);
                     // }
                     // println!("Roots:");
-                    for (_last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
-                        for gss_root_acc in gss_root_accs {
+                    // for (_last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
+                    //     for gss_root_acc in gss_root_accs {
                             // println!("  Acc: {:?}", gss_root_acc);
                             // println!("  Stored trie nodes:");
-                            for sn in gss_root_acc.stored_trie_nodes().iter() {
+                            // for sn in gss_root_acc.stored_trie_nodes().iter() {
                                 // println!("    {:?}", sn);
-                            }
+                            // }
                             // println!("  Union LLM tokens: {:?}", gss_root_acc.union_llm_tokens());
-                        }
-                    }
+                        // }
+                    // }
                     // TODO: We don't even need to gather roots here. Can just get acc and its stored trie nodes.
                     //  Reason: llm tokens is redundant... we do LLM token filtering now at the trie node level
                     for (_last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
