@@ -1515,26 +1515,26 @@ fn test_constraint_expression_cycle() {
 #[test]
 fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar string
-    // This is a minimal grammar to test the core issue from the original, more
-    // complex grammar. The key features preserved are:
-    // 1. A top-level optional rule (`item_list?`).
-    // 2. That rule contains a repetition (`item+`).
-    // 3. The repeated element is a choice (`'a' | block`).
-    // 4. One of the choices is recursive (`block ::= '{' item_list? '}'`), creating
-    //    a cycle: `item_list -> item -> block -> item_list`.
-    // 5. The LLM vocabulary contains a token for the `ignore` rule (` `) but not
-    //    for the terminals that can start the main grammar rule (`a`, `{`).
-    // This setup is designed to fail if the parser's initial state analysis
-    // gets stuck in the cycle and incorrectly prunes all paths, thereby failing
-    // to allow the `ignore` token.
+    // This test prunes the original complex grammar that failed to the smallest
+    // subset that still demonstrates the failure. The key structure is a
+    // recursive, optional list: `program -> list? -> item+ -> block -> list?`.
+    //
+    // The failure condition is that when the LLM vocabulary contains a token for
+    // the `IGNORE` rule (` `) but *not* for the terminals that can start the
+    // main grammar rule (`{`), the initial mask is incorrectly empty instead of
+    // allowing the `IGNORE` token.
     let ebnf_grammar = r#"
 #![ignore(IGNORE)]
-program ::= item_list? EOF;
+
+program ::= statement_list? EOF;
 EOF ::= '<|EOF|>';
-IGNORE ::= ( ' ' | '\t' )+;
-item_list ::= item+;
-item ::= 'a' | block;
-block ::= '{' item_list? '}';
+
+// The original, more complex IGNORE rule is kept, as simpler versions passed.
+IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
+
+statement_list ::= statement+ ;
+statement ::= block ;
+block ::= '{' statement_list? '}' ;
 "#;
 
     // 2. Parse and compile the grammar
@@ -1562,9 +1562,9 @@ block ::= '{' item_list? '}';
     let mask = state.get_mask();
 
     // 6. Assert the expected mask
-    // The grammar can start with 'a' or '{' (from `item_list?`) or be empty (before EOF),
-    // and can always be preceded by ignored whitespace ' '.
-    // The vocabulary only contains ' ' and '@'. Since neither 'a' nor '{' is in the vocab,
+    // The grammar can start with '{' (from `statement_list?`) or be empty (before EOF),
+    // and can always be preceded by ignored whitespace.
+    // The vocabulary only contains ' ' and '@'. Since '{' is not in the vocab,
     // only the ignored ' ' token is a valid start from the perspective of the
     // available LLM tokens.
     // Therefore, the mask should only contain the ID for the space token.
