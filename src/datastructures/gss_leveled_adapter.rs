@@ -693,28 +693,130 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
     _memo: &mut PruneAndTransformRecursiveMemo,
     stored_trie_god: &StoredTrieGodWrapper,
 ) {
+    // M: For this transform call, remember for each source node which destinations
+    //    we have already used for it.
+    let mut reuse_map: BTreeMap<StoredPrecomputeNodeIndex, BTreeSet<StoredPrecomputeNodeIndex>> = BTreeMap::new();
+    // Popularity of destinations (how many sources have used a destination) to bias reuse.
+    let mut dest_popularity: BTreeMap<StoredPrecomputeNodeIndex, usize> = BTreeMap::new();
+
     transform_all(root_arc, |a| {
-        let mut na = a.clone();
-        let new_stored_node = stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(crate::constraint::PrecomputedNodeContents::internal()));
-        let mut final_nodes = BTreeSet::new();
-        for node in &a.stored_trie_nodes {
-            if node.as_arc().read(stored_trie_god).expect("poison").value.live_tokens.is_subset(allowed_tokens) {
-                final_nodes.insert(node.clone());
-                continue;
+        // Partition: which nodes need edges vs can be kept as-is.
+        let mut needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
+        let mut keep: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
+
+        for node in a.stored_trie_nodes() {
+            let live = node
+                .as_arc()
+                .read(stored_trie_god)
+                .expect("poison")
+                .value
+                .live_tokens
+                .clone();
+            if live.is_subset(allowed_tokens) {
+                // No edge needed; keep this node unchanged.
+                keep.insert(node.clone());
+            } else {
+                // This node has tokens outside the allowed set; it needs an edge.
+                needs_edge.insert(node.clone());
             }
-            // Make an edge from node to new_stored_node with allowed_tokens
+        }
+
+        // If nothing needs change, keep the Acc unchanged.
+        if needs_edge.is_empty() {
+            return Some(a.clone());
+        }
+
+        // Choose a destination that minimizes new node creation:
+        // 1) Try to reuse a destination that is already common to all sources we have seen
+        //    (intersection of reuse_map entries for those sources).
+        let mut chosen: Option<StoredPrecomputeNodeIndex> = None;
+        {
+            let mut sets: Vec<BTreeSet<StoredPrecomputeNodeIndex>> = Vec::new();
+            for s in &needs_edge {
+                if let Some(ds) = reuse_map.get(s) {
+                    sets.push(ds.clone());
+                }
+            }
+            if !sets.is_empty() {
+                let mut inter = sets[0].clone();
+                for s in sets.iter().skip(1) {
+                    inter = inter.intersection(s).cloned().collect();
+                    if inter.is_empty() {
+                        break;
+                    }
+                }
+                if !inter.is_empty() {
+                    // Prefer the most popular destination among the intersection.
+                    let mut best: Option<StoredPrecomputeNodeIndex> = None;
+                    let mut best_pop = 0usize;
+                    for d in inter {
+                        let pop = dest_popularity.get(&d).cloned().unwrap_or(0);
+                        if best.is_none() || pop > best_pop {
+                            best = Some(d.clone());
+                            best_pop = pop;
+                        }
+                    }
+                    chosen = best;
+                }
+            }
+        }
+
+        // 2) Otherwise, reuse the most popular known destination overall (if any).
+        if chosen.is_none() && !dest_popularity.is_empty() {
+            let (d, _) = dest_popularity.iter().max_by_key(|(_, c)| **c).unwrap();
+            chosen = Some(d.clone());
+        }
+
+        // 3) If nothing appropriate exists, create a brand new destination node.
+        if chosen.is_none() {
+            let new_dest = StoredPrecomputeNodeIndex::new(
+                stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                    crate::constraint::PrecomputedNodeContents::internal(),
+                )),
+            );
+            dest_popularity.insert(new_dest.clone(), 0);
+            chosen = Some(new_dest);
+        }
+        let dest = chosen.unwrap();
+
+        // Insert edges from each source that needs it to the chosen destination.
+        let edge_key = (0, allowed_tokens.clone());
+        let edge_value = StateIDBV::max_ones();
+        for src in &needs_edge {
             let inserter = crate::datastructures::trie::EdgeInserter::new(
                 stored_trie_god,
-                node.as_arc().clone(),
-                (0, allowed_tokens.clone()),
-                StateIDBV::max_ones(),
+                src.as_arc().clone(),
+                edge_key.clone(),
+                edge_value.clone(),
                 |e, n| *e |= n,
                 |node_value, _edge_value| node_value.live_tokens |= allowed_tokens,
-                |_, _| {},
+                |_, _| {}, // Unconditional insertion
             );
-            inserter.try_destination(Trie2Index::new(new_stored_node)).expect("Cycle detected when adding allowed llm tokens on stored trie nodes");
-        final_nodes.insert(Trie2Index::new(new_stored_node));
+            inserter
+                .try_destination(dest.clone())
+                .expect("Cycle detected when adding allowed llm tokens on stored trie nodes");
+
+            reuse_map.entry(src.clone()).or_default().insert(dest.clone());
         }
+
+        // Ensure destination's live tokens reflect (at least) the allowed set.
+        dest.write(stored_trie_god)
+            .expect("poison")
+            .value
+            .live_tokens
+            |= allowed_tokens;
+
+        // Update popularity score for the chosen destination.
+        {
+            let c = dest_popularity.entry(dest.clone()).or_insert(0);
+            *c += needs_edge.len();
+        }
+
+        // Build the final set: keep unchanged nodes and add the chosen destination once.
+        let mut final_nodes = keep;
+        final_nodes.insert(dest.clone());
+
+        let mut na = a.clone();
         na.stored_trie_nodes = final_nodes;
         Some(na)
     });
