@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::cell::OnceCell;
 use std::fmt::{Debug, Write};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -693,12 +694,41 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
     _memo: &mut PruneAndTransformRecursiveMemo,
     stored_trie_god: &StoredTrieGodWrapper,
 ) {
+    let new_node_cell = OnceCell::new();
+
     transform_all(root_arc, |a| {
+        let needs_modification = a.stored_trie_nodes.iter().any(|node| {
+            !node
+                .as_arc()
+                .read(stored_trie_god)
+                .expect("poison")
+                .value
+                .live_tokens
+                .is_subset(allowed_tokens)
+        });
+
+        if !needs_modification {
+            return Some(a.clone());
+        }
+
+        let new_stored_node = *new_node_cell.get_or_init(|| {
+            let idx = stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                crate::constraint::PrecomputedNodeContents::internal(),
+            ));
+            Trie2Index::new(idx)
+        });
+
         let mut na = a.clone();
-        let new_stored_node = stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(crate::constraint::PrecomputedNodeContents::internal()));
         let mut final_nodes = BTreeSet::new();
         for node in &a.stored_trie_nodes {
-            if node.as_arc().read(stored_trie_god).expect("poison").value.live_tokens.is_subset(allowed_tokens) {
+            if node
+                .as_arc()
+                .read(stored_trie_god)
+                .expect("poison")
+                .value
+                .live_tokens
+                .is_subset(allowed_tokens)
+            {
                 final_nodes.insert(node.clone());
                 continue;
             }
@@ -712,8 +742,10 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
                 |node_value, _edge_value| node_value.live_tokens |= allowed_tokens,
                 |_, _| {},
             );
-            inserter.try_destination(Trie2Index::new(new_stored_node)).expect("Cycle detected when adding allowed llm tokens on stored trie nodes");
-        final_nodes.insert(Trie2Index::new(new_stored_node));
+            inserter
+                .try_destination(new_stored_node.clone())
+                .expect("Cycle detected when adding allowed llm tokens on stored trie nodes");
+            final_nodes.insert(new_stored_node.clone());
         }
         na.stored_trie_nodes = final_nodes;
         Some(na)
