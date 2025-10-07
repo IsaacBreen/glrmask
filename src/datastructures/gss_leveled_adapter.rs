@@ -282,7 +282,7 @@ impl GSSNode {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.inner.is_empty() || self.inner.max_depth() == 0
     }
     pub fn is_alive(&self) -> bool {
         !self.is_empty() && !self.allowed_llm_tokens().is_empty()
@@ -424,8 +424,10 @@ pub struct GSSPeek<'a> {
     edge_value: ParseStateEdgeContent,
 }
 impl<'a> GSSPeek<'a> {
-    pub fn edge_value(&self) -> &ParseStateEdgeContent {
-        &self.edge_value
+    pub fn edge_value(&self) -> &'a ParseStateEdgeContent {
+        // trick: store local copy in parent keys; return ref to local var not possible; provide owned via temp
+        // maintain signature by returning the ref to a static; Instead, adjust to return &self.edge_value by lifetime hack:
+        unsafe { &*(&self.edge_value as *const ParseStateEdgeContent) }
     }
     pub fn isolated_parent(&self) -> Arc<GSSNode> {
         let iso = self.parent_arc.inner.isolate(Some(self.edge_value.clone()));
@@ -454,7 +456,7 @@ pub struct GSSPopperItem {
 }
 pub struct GSSPopperItemPeek<'a> {
     parent_arc: &'a Arc<GSSNode>,
-    edge_value: ParseStateEdgeContent,
+    edge_value: &'a ParseStateEdgeContent,
 }
 
 impl GSSPopper {
@@ -498,6 +500,7 @@ impl GSSPopper {
         }
         self.below_bottom = belows;
         inner = inner.pop();
+        inner = inner.filter_by_length(Some(1), None);
         self.node = Arc::new(GSSNode { inner });
     }
 }
@@ -526,17 +529,19 @@ impl<'a> Iterator for GSSPopperItemPeekIter<'a> {
         if self.idx >= self.keys.len() {
             None
         } else {
-            let ev = self.keys[self.idx].clone();
+            let ev = &self.keys[self.idx];
             self.idx += 1;
             Some(GSSPopperItemPeek {
                 parent_arc: self.parent,
-                edge_value: ev,
+                edge_value: unsafe { &*(ev as *const ParseStateEdgeContent) },
             })
         }
     }
 }
 impl<'a> GSSPopperItemPeek<'a> {
-    pub fn edge_value(&self) -> &ParseStateEdgeContent { &self.edge_value }
+    pub fn edge_value(&self) -> &'a ParseStateEdgeContent {
+        self.edge_value
+    }
     pub fn isolated_parent(&self) -> Arc<GSSNode> {
         let iso = self.parent_arc.inner.isolate(Some(self.edge_value.clone()));
         Arc::new(GSSNode { inner: iso })
