@@ -5,6 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use bimap::BiBTreeMap;
+use profiler_macro::time_it;
 use crate::constraint::StateIDBV;
 use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
@@ -89,6 +90,7 @@ pub struct GSSStats {
     pub(crate) average_predecessors_with_values: f64,
 }
 
+#[time_it]
 pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
     let mut stats = GSSStats::default();
     stats.num_roots = roots.len();

@@ -1423,41 +1423,45 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut todo_map: BTreeMap<StateID, BTreeMap<*const GSSNode, Arc<GSSNode>>> = BTreeMap::new();
 
         // Handle "below bottom" (substring parsing continuation) first, adding to the todo list.
-        if !popper.below_bottom().is_empty() {
-            match config.below_bottom_mode {
-                BelowBottomReductionMode::Fail => {
-                    crate::debug!(5, "Popped below bottom, failing these parse paths.");
-                }
-                BelowBottomReductionMode::Panic => {
-                    panic!("A reduction popped below the bottom of the stack, and BelowBottomReductionMode was set to Panic.");
-                }
-                _ => {
-                    let below_accs = self.build_below_bottom_accs(&popper);
-                    let below_todo = self.handle_below_bottom(nt, below_accs, config);
-                    crate::debug!(5, "Popped below bottom, hallucinating {} new parse paths.", below_todo.len());
-                    for (predecessor_state_id, isolated_parent) in below_todo {
-                        let pred_ptr = Arc::as_ptr(&isolated_parent);
-                        todo_map.entry(predecessor_state_id)
-                            .or_default()
-                            .entry(pred_ptr)
-                            .or_insert(isolated_parent);
+        timeit!("GLRParserState::reduce_and_goto::HandleBelowBottom", {
+            if !popper.below_bottom().is_empty() {
+                match config.below_bottom_mode {
+                    BelowBottomReductionMode::Fail => {
+                        crate::debug!(5, "Popped below bottom, failing these parse paths.");
+                    }
+                    BelowBottomReductionMode::Panic => {
+                        panic!("A reduction popped below the bottom of the stack, and BelowBottomReductionMode was set to Panic.");
+                    }
+                    _ => {
+                        let below_accs = self.build_below_bottom_accs(&popper);
+                        let below_todo = self.handle_below_bottom(nt, below_accs, config);
+                        crate::debug!(5, "Popped below bottom, hallucinating {} new parse paths.", below_todo.len());
+                        for (predecessor_state_id, isolated_parent) in below_todo {
+                            let pred_ptr = Arc::as_ptr(&isolated_parent);
+                            todo_map.entry(predecessor_state_id)
+                                .or_default()
+                                .entry(pred_ptr)
+                                .or_insert(isolated_parent);
+                        }
                     }
                 }
             }
-        }
+        });
 
         // Standard reductions along in-graph paths
-        for popper_item in popper.iter() {
-            for peek2 in popper_item.peek_iter() {
-                let predecessor_state_id = peek2.edge_value().state_id;
-                let isolated_parent = peek2.isolated_parent();
-                let pred_ptr = Arc::as_ptr(&isolated_parent);
-                todo_map.entry(predecessor_state_id)
-                    .or_default()
-                    .entry(pred_ptr)
-                    .or_insert(isolated_parent);
+        timeit!("GLRParserState::reduce_and_goto::BuildTodoMap", {
+            for popper_item in popper.iter() {
+                for peek2 in popper_item.peek_iter() {
+                    let predecessor_state_id = peek2.edge_value().state_id;
+                    let isolated_parent = peek2.isolated_parent();
+                    let pred_ptr = Arc::as_ptr(&isolated_parent);
+                    todo_map.entry(predecessor_state_id)
+                        .or_default()
+                        .entry(pred_ptr)
+                        .or_insert(isolated_parent);
+                }
             }
-        }
+        });
 
         crate::debug!(4, "Total unique predecessor states to process for GOTO: {}", todo_map.len());
         for (predecessor_state_id, parents_map) in todo_map {
@@ -1679,8 +1683,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         // Merge results and return
-        let new_active = GSSNode::merge_many_with_depth(usize::MAX, final_out);
-        let new_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_out);
+        let new_active = timeit!("GLRParserState::reduce_and_goto::MergeActive", GSSNode::merge_many_with_depth(usize::MAX, final_out));
+        let new_accepted = timeit!("GLRParserState::reduce_and_goto::MergeAccepted", GSSNode::merge_many_with_depth(usize::MAX, accepted_out));
         (new_active, new_accepted)
         })
     }
