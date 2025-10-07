@@ -24,7 +24,7 @@ use sep1::interface::IncrementalParser;
 use sep1::json_serialization::{JSONConvertible, JSONNode};
 use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
 use sep1::datastructures::hybrid_l2_bitset::HybridL2Bitset as RustHybridL2Bitset;
-use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, gather_gss_stats, print_gss_forest};
+use sep1::datastructures::gss_leveled_adapter::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, gather_gss_stats, print_gss_forest};
 
 #[pyclass(name = "GrammarExpr")]
 #[derive(Clone)]
@@ -939,7 +939,7 @@ fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset
 #[pyfunction]
 fn gss_reset_llm_tokens(node: &mut PyGSSNode) {
     let mut arc = node.inner.clone();
-    sep1::datastructures::gss::reset_llm_tokens(&mut arc, &mut std::collections::HashMap::new());
+    sep1::datastructures::gss_leveled_adapter::reset_llm_tokens(&mut arc, &mut std::collections::HashMap::new());
     node.inner = arc;
 }
 
@@ -953,7 +953,7 @@ fn gss_prune_disallowed_terminals(node: &mut PyGSSNode, terminals_map: &Bound<'_
     }
 
     let mut arc = node.inner.clone();
-    sep1::datastructures::gss::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
+    sep1::datastructures::gss_leveled_adapter::prune_disallowed_terminals(&mut arc, &rust_terminals_map, &mut std::collections::HashMap::new());
     node.inner = arc;
     Ok(())
 }
@@ -974,7 +974,7 @@ fn gss_prune_llm_tokens_by_disallowed_terminals(node: &mut PyGSSNode, possible_m
     }
 
     let mut arc = node.inner.clone();
-    sep1::datastructures::gss::prune_llm_tokens_by_disallowed_terminals(
+    sep1::datastructures::gss_leveled_adapter::prune_llm_tokens_by_disallowed_terminals(
         &mut arc, &rust_possible_matches, &mut std::collections::HashMap::new()
     );
     node.inner = arc;
@@ -991,7 +991,7 @@ fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &
     }
 
     let mut arc = node.inner.clone();
-    sep1::datastructures::gss::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
+    sep1::datastructures::gss_leveled_adapter::map_allowed_terminals_tokenizer_states(&mut arc, &rust_state_map, &mut std::collections::HashMap::new());
     node.inner = arc;
     Ok(())
 }
@@ -999,7 +999,7 @@ fn gss_map_allowed_terminals_tokenizer_states(node: &mut PyGSSNode, state_map: &
 #[pyfunction]
 fn gss_fuse_predecessors(node: &mut PyGSSNode, levels: usize) {
     let mut arc = node.inner.clone();
-    arc = sep1::datastructures::gss::fuse_predecessors_recursive(&arc, levels, &mut std::collections::HashMap::new());
+    arc = sep1::datastructures::gss_leveled_adapter::fuse_predecessors_recursive(&arc, levels, &mut std::collections::HashMap::new());
     node.inner = arc;
 }
 
