@@ -762,12 +762,12 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
                 |_, _| {}, // unconditional insertion
             );
 
-            match inserter.try_destination(dst.clone()) {
-                Ok(()) => {
+            match inserter.try_destination(dst.clone()).into_option() {
+                Some(_) => {
                     src_to_dsts.entry(src.clone()).or_default().push(dst.clone());
                     final_nodes.insert(dst);
                 }
-                Err(_) => {
+                None => {
                     // Fallback: create a fresh destination for this source only (avoid cycles).
                     let raw = stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
                         crate::constraint::PrecomputedNodeContents::internal(),
