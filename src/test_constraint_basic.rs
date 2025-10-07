@@ -1578,6 +1578,67 @@ block ::= '{' statement_list? '}' ;
     Ok(())
 }
 
+#[test]
+fn test_ebnf_grammar_initial_mask_mandatory_pass() -> Result<(), Box<dyn std::error::Error>> {
+    // This test is a minimal pair to the failing `test_ebnf_grammar_initial_mask`.
+    // The only change is making the top-level rule mandatory (`statement_list`
+    // instead of `statement_list?`).
+    //
+    // By removing the optionality, we prevent the parser from considering an
+    // initial empty parse. This avoids the buggy logic path that incorrectly
+    // allows an unrelated token (`@`), causing the test to pass.
+    let ebnf_grammar = r#"
+#![ignore(IGNORE)]
+
+program ::= statement_list EOF;
+EOF ::= '<|EOF|>';
+
+// The original, more complex IGNORE rule is kept, as simpler versions passed.
+IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
+
+statement_list ::= statement+ ;
+statement ::= block ;
+block ::= '{' statement_list? '}' ;
+"#;
+
+    // 2. Parse and compile the grammar
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+
+    // 3. Define the LLM vocabulary (same "trap" vocab as the failing test)
+    let mut llm_token_map = LLMTokenMap::new();
+    let space_token_id = LLMTokenID(0);
+    let at_token_id = LLMTokenID(1);
+    llm_token_map.insert(b" ".to_vec(), space_token_id);
+    llm_token_map.insert(b"@".to_vec(), at_token_id);
+    let max_original_llm_token_id = 1;
+
+    // 4. Create the GrammarConstraint
+    let constraint = GrammarConstraint::from_compiled_grammar(
+        compiled_grammar,
+        llm_token_map,
+        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+        max_original_llm_token_id,
+    );
+
+    // 5. Initialize state and get the initial mask
+    let mut state = constraint.init();
+    let mask = state.get_mask();
+
+    // 6. Assert the expected mask
+    // The grammar now requires a '{' to start. Since '{' is not in the vocab,
+    // the only valid move is to consume an IGNORE token. The buggy path is not
+    // taken, so '@' is correctly excluded.
+    let expected_mask = HybridBitset::from_iter(vec![space_token_id.0]);
+    assert_eq!(
+        mask,
+        expected_mask,
+        "Mask should only allow the ignored space token"
+    );
+
+    Ok(())
+}
+
 
 #[test]
 fn test_precompute_self_loop_from_shared_states() {
