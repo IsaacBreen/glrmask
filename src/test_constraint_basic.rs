@@ -1540,6 +1540,7 @@ IGNORE ::= ' ' | '$@';
         max_original_llm_token_id,
         &GrammarConstraintConfig::off(),
     );
+    println!("Tokenizer: {}", constraint.tokenizer);
     println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed0();
     constraint.dump_precomputed1();
@@ -1588,6 +1589,7 @@ IGNORE ::= ' ';
         max_original_llm_token_id,
         &GrammarConstraintConfig::off(),
     );
+    println!("Tokenizer: {}", constraint.tokenizer);
     println!("Parser: {}", constraint.parser);
     constraint.dump_precomputed0();
     constraint.dump_precomputed1();

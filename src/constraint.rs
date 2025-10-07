@@ -1402,7 +1402,20 @@ impl GrammarConstraint {
             },
             |glr_s1, glr_s2| {
                 reset();
+                println!("Merging GLR states:");
+                println!("  Flat 1:");
+                for (i, p) in glr_s1.active_state.stack.flatten().iter().enumerate() {
+                    println!("    {}: {:?}", i, p);
+                }
+                println!("  Flat 2:");
+                for (i, p) in glr_s2.active_state.stack.flatten().iter().enumerate() {
+                    println!("    {}: {:?}", i, p);
+                }
                 glr_s1.merge_with(glr_s2);
+                println!("After merge, flat:");
+                for (i, p) in glr_s1.active_state.stack.flatten().iter().enumerate() {
+                    println!("    {}: {:?}", i, p);
+                }
                 // print_summary();
                 reset();
             },
