@@ -349,7 +349,7 @@ impl GSSNode {
 
     pub fn popn(&self, n: usize) -> GSSPopper {
         let mut popper = GSSPopper {
-            node: Arc::new(GSSNode { inner: self.inner.clone() }),
+            inner: self.inner.clone(),
             below_bottom: BTreeMap::new(),
         };
         popper.popn(n);
@@ -359,7 +359,7 @@ impl GSSNode {
     pub(crate) fn peek_iter(parent_arc: &Arc<GSSNode>) -> impl Iterator<Item = GSSPeek<'_>> {
         let keys: Vec<_> = parent_arc.inner.peek().into_iter().collect();
         GSSPeekIter {
-            parent: parent_arc,
+            parent: &parent_arc.inner,
             keys,
             idx: 0,
         }
@@ -384,8 +384,13 @@ impl GSSNode {
     }
 }
 
+// --- GSSPeek & iterator (updated to borrow LeveledGSS directly) ---
+pub struct GSSPeek<'a> {
+    parent_arc: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+    edge_value: ParseStateEdgeContent,
+}
 struct GSSPeekIter<'a> {
-    parent: &'a Arc<GSSNode>,
+    parent: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
     keys: Vec<ParseStateEdgeContent>,
     idx: usize,
 }
@@ -404,20 +409,12 @@ impl<'a> Iterator for GSSPeekIter<'a> {
         }
     }
 }
-
-// --- GSSPeek & related ---
-pub struct GSSPeek<'a> {
-    parent_arc: &'a Arc<GSSNode>,
-    edge_value: ParseStateEdgeContent,
-}
 impl<'a> GSSPeek<'a> {
-    pub fn edge_value(&self) -> &'a ParseStateEdgeContent {
-        // trick: store local copy in parent keys; return ref to local var not possible; provide owned via temp
-        // maintain signature by returning the ref to a static; Instead, adjust to return &self.edge_value by lifetime hack:
-        unsafe { &*(&self.edge_value as *const ParseStateEdgeContent) }
+    pub fn edge_value(&self) -> &ParseStateEdgeContent {
+        &self.edge_value
     }
     pub fn isolated_parent(&self) -> Arc<GSSNode> {
-        let iso = self.parent_arc.inner.isolate(Some(self.edge_value.clone()));
+        let iso = self.parent_arc.isolate(Some(self.edge_value.clone()));
         Arc::new(GSSNode { inner: iso })
     }
     pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
@@ -432,37 +429,36 @@ impl<'a> GSSPeek<'a> {
     }
 }
 
-// --- Popper ---
+// --- Popper (updated to avoid to_stacks/from_stacks and own LeveledGSS) ---
 pub struct GSSPopper {
-    node: Arc<GSSNode>,
-    below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>>,
+    inner: LeveledGSS<ParseStateEdgeContent, Acc>,
+    below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Acc>>,
 }
 pub struct GSSPopperItem {
-    node: Arc<GSSNode>,
-    acc: Acc,
+    inner: LeveledGSS<ParseStateEdgeContent, Acc>,
 }
 pub struct GSSPopperItemPeek<'a> {
-    parent_arc: &'a Arc<GSSNode>,
+    parent_arc: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
     edge_value: &'a ParseStateEdgeContent,
 }
 
 impl GSSPopper {
     pub fn new_from_node(node: Arc<GSSNode>, _acc: Arc<Acc>) -> Self {
-        GSSPopper { node, below_bottom: BTreeMap::new() }
+        GSSPopper { inner: node.inner.clone(), below_bottom: BTreeMap::new() }
     }
     pub fn iter(&self) -> impl Iterator<Item = GSSPopperItem> {
-        self.node.inner.to_stacks().into_iter().map(|(p, a)| {
-            let node = Arc::new(GSSNode {
-                inner: LeveledGSS::from_stacks(&[(p, a.clone())]),
-            });
-            GSSPopperItem { node, acc: a }
+        let keys: Vec<_> = self.inner.peek().into_iter().collect();
+        let parent = self.inner.clone();
+        keys.into_iter().map(move |edge| {
+            let iso = parent.isolate(Some(edge));
+            GSSPopperItem { inner: iso }
         })
     }
-    pub fn below_bottom(&self) -> &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>> {
+    pub fn below_bottom(&self) -> &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Acc>> {
         &self.below_bottom
     }
     pub fn num_predecessors(&self) -> usize {
-        self.node.inner.peek().len()
+        self.inner.peek().len()
     }
     pub fn popn(&mut self, n: usize) {
         for _ in 0..n {
@@ -470,7 +466,7 @@ impl GSSPopper {
         }
     }
     pub fn pop(&mut self) {
-        let mut inner = self.node.inner.clone();
+        let mut inner = self.inner.clone();
         let mut belows: BTreeMap<_, _> = self.below_bottom.iter().map(|(k, v)| (*k + 1, v.clone())).collect();
         let new_below_slice = inner.filter_by_length(Some(1), Some(1));
         if !new_below_slice.is_empty() {
@@ -478,7 +474,7 @@ impl GSSPopper {
             for edge in new_below_slice.peek() {
                 let isolated = new_below_slice.isolate(Some(edge.clone()));
                 if let Some(acc) = isolated.reduce_acc() {
-                    new_below_map.insert(edge, Arc::new(acc));
+                    new_below_map.insert(edge, acc);
                 }
             }
             if !new_below_map.is_empty() {
@@ -488,25 +484,25 @@ impl GSSPopper {
         self.below_bottom = belows;
         inner = inner.pop();
         inner = inner.filter_by_length(Some(1), None);
-        self.node = Arc::new(GSSNode { inner });
+        self.inner = inner;
     }
 }
 
 impl GSSPopperItem {
     pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
-        let keys: Vec<_> = self.node.inner.peek().into_iter().collect();
+        let keys: Vec<_> = self.inner.peek().into_iter().collect();
         GSSPopperItemPeekIter {
-            parent: &self.node,
+            parent: &self.inner,
             keys,
             idx: 0,
         }
     }
     pub(crate) fn resolved_acc(&self) -> Acc {
-        self.acc.clone()
+        self.inner.reduce_acc().unwrap_or_else(Acc::new_dead)
     }
 }
 struct GSSPopperItemPeekIter<'a> {
-    parent: &'a Arc<GSSNode>,
+    parent: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
     keys: Vec<ParseStateEdgeContent>,
     idx: usize,
 }
@@ -530,7 +526,7 @@ impl<'a> GSSPopperItemPeek<'a> {
         self.edge_value
     }
     pub fn isolated_parent(&self) -> Arc<GSSNode> {
-        let iso = self.parent_arc.inner.isolate(Some(self.edge_value.clone()));
+        let iso = self.parent_arc.isolate(Some(self.edge_value.clone()));
         Arc::new(GSSNode { inner: iso })
     }
     pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
@@ -539,15 +535,14 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 }
 
-// --- Roots & helpers ---
+// --- Roots & helpers (updated to avoid to_stacks/from_stacks) ---
 pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
     let mut out: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
     for n in nodes {
-        for (p, a) in n.inner.to_stacks() {
-            if let Some(last) = p.last() {
-                out.entry(last.clone())
-                    .or_default()
-                    .insert(Arc::new(a.clone()));
+        for edge in n.inner.peek() {
+            let iso = n.inner.isolate(Some(edge.clone()));
+            if let Some(acc) = iso.reduce_acc() {
+                out.entry(edge).or_default().insert(Arc::new(acc));
             }
         }
     }
