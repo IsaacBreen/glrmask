@@ -2137,7 +2137,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     pub fn _log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
-        // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
+        // crate::debug!(2, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
         const MAX: usize = 100;
         const PANIC_THRESHOLD: usize = 1_000_000;
 
@@ -2158,7 +2158,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let accepted_now = self.active_state.accepted_state.is_some();
         let accepted_prev = !self.active_state.prev_accepted_state.is_empty();
-        crate::debug!(3, "{} ({:?}) - accepted: now={}, prev={} - token '{}' ({}) - {}",
+        crate::debug!(2, "{} ({:?}) - accepted: now={}, prev={} - token '{}' ({}) - {}",
                       phase, self.phase, accepted_now, accepted_prev, self.parser.terminal_map.get_by_right(&token).expect_else(|| format!("Token {} not found in terminal map: {:?}", token.0, self.parser.terminal_map)), token.0, stats_breakdown);
 
         let mut gss_strings = vec![];
@@ -2214,7 +2214,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             panic!("GSS too big ({} nodes). {}", total_nodes, final_string);
         }
 
-        debug!(3, "{}", final_string);
+        debug!(2, "{}", final_string);
 
         if generate_dot {
             let dot_string = self.gss_to_dot();
