@@ -1407,7 +1407,7 @@ impl GrammarConstraint {
                 let keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
                     println!("At end.");
-                    println!("GSS: {:?}", glr_s.active_state.stack);
+                    println!("GSS: {}", glr_s);
                     println!("Flat:");
                     for (i, p) in glr_s.active_state.stack.flatten().iter().enumerate() {
                         println!("  {}: {:?}", i, p);
