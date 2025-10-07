@@ -973,9 +973,9 @@ impl GrammarConstraint {
         helper.run_dfs();
         let roots_before: Vec<_> = helper.roots.values().cloned().collect();
         Self::has_llm_compatible_cycle0(&helper.trie0_god, &roots_before, internal_max_llm_token);
-        helper.optimize();
-        helper.optimize();
-        helper.optimize();
+        // helper.optimize();
+        // helper.optimize();
+        // helper.optimize();
         let (precomputed0, trie0_god) = helper.finish();
         let roots_after: Vec<_> = precomputed0.values().cloned().collect();
         Self::has_llm_compatible_cycle0(&trie0_god, &roots_after, internal_max_llm_token);
@@ -1288,18 +1288,18 @@ impl GrammarConstraint {
         // Optimizations, similar to precompute0
         let ignore_terminal_id = parser.and_then(|p| p.ignore_terminal_id);
 
-        constraint_precompute1_utils::optimize_trie1_size(
-            &mut precomputed1,
-            &trie1_god,
-            trie0_god,
-            &node0_to_node1_map,
-            ignore_terminal_id,
-            internal_max_llm_token,
-            terminal_follow_map,
-            config,
-            stage_vocab,
-            token_name_map,
-        );
+        // constraint_precompute1_utils::optimize_trie1_size(
+        //     &mut precomputed1,
+        //     &trie1_god,
+        //     trie0_god,
+        //     &node0_to_node1_map,
+        //     ignore_terminal_id,
+        //     internal_max_llm_token,
+        //     terminal_follow_map,
+        //     config,
+        //     stage_vocab,
+        //     token_name_map,
+        // );
 
         (precomputed1, trie1_god)
     }
@@ -1466,8 +1466,8 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Finished precomputing Trie 3.");
         let max_state_id = parser.table.keys().map(|s| s.0).max().unwrap_or(0);
-        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
-        optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
+        // optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
+        // optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
         optimize_trie3_size(&mut precomputed3, &trie3_god, config, max_state_id, internal_max_llm_token, stage_vocab);
 
         (precomputed3, trie3_god)
