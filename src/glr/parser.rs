@@ -1309,7 +1309,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for (k, accs_by_edge) in popper.below_bottom() {
             let final_acc = accs_by_edge
                 .values()
-                .map(|arc| arc.as_ref())
+                .map(|arc| arc)
                 .fold(Acc::new_fresh(), |a, b| Acc::merge(&a, b));
             // Do not mutate stored_trie_nodes here; handled later.
             result.insert(*k, final_acc);
