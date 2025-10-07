@@ -1513,22 +1513,28 @@ fn test_constraint_expression_cycle() {
 }
 
 #[test]
-fn test_ebnf_grammar_initial_mask_simplified_fail() -> Result<(), Box<dyn std::error::Error>> {
+fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar string
-    // This is a distilled version of a failing test. The key ingredients for failure are:
-    // 1. An `ignore` directive is used.
-    // 2. The `IGNORE` rule contains a choice (`|`).
-    // 3. The main grammar rule (`rule`) is optional (`rule?`).
-    // 4. The LLM vocabulary contains a token for one branch of the `IGNORE` rule (' ')
-    //    but not for the token that starts the mandatory part of the grammar ('{').
-    // The expected behavior is that the initial mask should allow the ' ' token.
-    // The bug causes the initial mask to be empty.
+    // This test prunes the original complex grammar that failed to the smallest
+    // subset that still demonstrates the failure. The key structure is a
+    // recursive, optional list: `program -> list? -> item+ -> block -> list?`.
+    //
+    // The failure condition is that when the LLM vocabulary contains a token for
+    // the `IGNORE` rule (` `) but *not* for the terminals that can start the
+    // main grammar rule (`{`), the initial mask is incorrectly empty instead of
+    // allowing the `IGNORE` token.
     let ebnf_grammar = r#"
 #![ignore(IGNORE)]
-program ::= rule? EOF;
+
+program ::= statement_list? EOF;
 EOF ::= '<|EOF|>';
-IGNORE ::= ' ' | '#' ;
-rule ::= '{' ;
+
+// The original, more complex IGNORE rule is kept, as simpler versions passed.
+IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
+
+statement_list ::= statement+ ;
+statement ::= block ;
+block ::= '{' statement_list? '}' ;
 "#;
 
     // 2. Parse and compile the grammar
@@ -1556,9 +1562,11 @@ rule ::= '{' ;
     let mask = state.get_mask();
 
     // 6. Assert the expected mask
-    // The grammar can be empty (before EOF), so it can start with an IGNORE token.
-    // The vocabulary contains ' ' which matches the IGNORE rule.
-    // The grammar can also start with '{', but that's not in the vocabulary.
+    // The grammar can start with '{' (from `statement_list?`) or be empty (before EOF),
+    // and can always be preceded by ignored whitespace.
+    // The vocabulary only contains ' ' and '@'. Since '{' is not in the vocab,
+    // only the ignored ' ' token is a valid start from the perspective of the
+    // available LLM tokens.
     // Therefore, the mask should only contain the ID for the space token.
     let expected_mask = HybridBitset::from_iter(vec![space_token_id.0]);
     assert_eq!(
@@ -1571,17 +1579,20 @@ rule ::= '{' ;
 }
 
 #[test]
-fn test_ebnf_grammar_initial_mask_simplified_pass() -> Result<(), Box<dyn std::error::Error>> {
-    // This test is a minimal pair to `test_ebnf_grammar_initial_mask_simplified_fail`.
-    // The only difference is that the `IGNORE` rule does *not* contain a choice.
-    // This version passes, indicating the bug is related to how `ignore` rules
-    // with choices are handled during initial state analysis.
+fn test_ebnf_grammar_initial_mask_mandatory_pass() -> Result<(), Box<dyn std::error::Error>> {
+    // This test is a minimal pair to the failing `test_ebnf_grammar_initial_mask`.
     let ebnf_grammar = r#"
 #![ignore(IGNORE)]
-program ::= rule? EOF;
+
+program ::= statement_list? EOF;
 EOF ::= '<|EOF|>';
-IGNORE ::= ' ' ;
-rule ::= '{' ;
+
+// The original, more complex IGNORE rule is kept, as simpler versions passed.
+IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
+
+statement_list ::= statement+ ;
+statement ::= block ;
+block ::= '{' statement_list? '}' ;
 "#;
 
     // 2. Parse and compile the grammar
