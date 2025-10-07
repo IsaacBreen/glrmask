@@ -33,6 +33,7 @@ use crate::glr::analyze::{filter_productions_by_reachability, remove_productions
 use std::panic::{self, AssertUnwindSafe}; // Added for panic catching
 use std::collections::HashMap;
 use crate::datastructures::gss::{gather_gss_stats};
+use indoc::indoc;
 // For the symbol removal helper
 
 #[test]
@@ -1515,10 +1516,10 @@ fn test_constraint_expression_cycle() {
 #[test]
 fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar string
-    let ebnf_grammar = r#"
-program ::= IGNORE;
-IGNORE ::= ' ' | '$@';
-"#;
+    let ebnf_grammar = indoc! {r#"
+        program ::= IGNORE;
+        IGNORE ::= ' ' | '$@';
+    "#};
 
     // 2. Parse and compile the grammar
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
@@ -1564,10 +1565,10 @@ IGNORE ::= ' ' | '$@';
 #[test]
 fn test_ebnf_grammar_initial_mask_mandatory_pass() -> Result<(), Box<dyn std::error::Error>> {
     // This test is a minimal pair to the failing `test_ebnf_grammar_initial_mask`.
-    let ebnf_grammar = r#"
-program ::= IGNORE;
-IGNORE ::= ' ';
-"#;
+    let ebnf_grammar = indoc! {r#"
+        program ::= IGNORE;
+        IGNORE ::= ' ';
+    "#};
 
     // 2. Parse and compile the grammar
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
@@ -1817,16 +1818,17 @@ fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>
     // - 'if' literal overlaps with IDENTIFIER
     // - expression can be IDENTIFIER IDENTIFIER (so "if a" is a valid expression)
     // - block '{' statement* '}' is a shared continuation for both parses
-    let js_grammar_ebnf = r#"program ::= statement* EOF;
-EOF ::= '<|EOF|>';
+    let js_grammar_ebnf = indoc! {r#"
+        program ::= statement* EOF;
+        EOF ::= '<|EOF|>';
 
-statement ::= if_statement | expression | block ;
-block ::= '{' statement* '}' ;
-if_statement ::= 'if' expression statement ;
+        statement ::= if_statement | expression | block ;
+        block ::= '{' statement* '}' ;
+        if_statement ::= 'if' expression statement ;
 
-expression ::= IDENTIFIER IDENTIFIER | IDENTIFIER ;
-IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
-"#;
+        expression ::= IDENTIFIER IDENTIFIER | IDENTIFIER ;
+        IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+    "#};
     let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
     println!("Grammar compiled successfully.");
