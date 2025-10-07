@@ -693,65 +693,30 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
     _memo: &mut PruneAndTransformRecursiveMemo,
     stored_trie_god: &StoredTrieGodWrapper,
 ) {
-    // Cache destinations based on the set of allowed tokens. This allows reusing the
-    // same destination node for multiple source nodes that are being filtered by the
-    // same set of tokens across different Acc instances within this one GSS transformation.
-    let destination_cache = std::cell::RefCell::new(HashMap::<
-        LLMTokenBV,
-        StoredPrecomputeNodeIndex
-    >::new());
-
     transform_all(root_arc, |a| {
-        let mut needs_change = false;
-        for node in &a.stored_trie_nodes {
-            let node_live_tokens = node.as_arc().read(stored_trie_god).expect("poison").value.live_tokens.clone();
-            if !node_live_tokens.is_subset(allowed_tokens) {
-                needs_change = true;
-                break;
-            }
-        }
-
-        if !needs_change {
-            return Some(a.clone());
-        }
-
+        let mut na = a.clone();
+        let new_stored_node = stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(crate::constraint::PrecomputedNodeContents::internal()));
         let mut final_nodes = BTreeSet::new();
         for node in &a.stored_trie_nodes {
-            let node_live_tokens = node.as_arc().read(stored_trie_god).expect("poison").value.live_tokens.clone();
-
-            if node_live_tokens.is_subset(allowed_tokens) {
+            if node.as_arc().read(stored_trie_god).expect("poison").value.live_tokens.is_subset(allowed_tokens) {
                 final_nodes.insert(node.clone());
-            } else {
-                let mut cache = destination_cache.borrow_mut();
-                let destination_node = cache.entry(allowed_tokens.clone())
-                    .or_insert_with(|| {
-                        // Create a new destination node, once per `allowed_tokens` set.
-                        StoredPrecomputeNodeIndex::new(stored_trie_god.insert(
-                            crate::constraint::PrecomputeNode3::new(
-                                crate::constraint::PrecomputedNodeContents::internal()
-                            )
-                        ))
-                    });
-
-                // Add edge from source `node` to the (potentially shared) destination.
-                let inserter = crate::datastructures::trie::EdgeInserter::new(
-                    stored_trie_god,
-                    node.as_arc().clone(),
-                    (0, allowed_tokens.clone()),
-                    StateIDBV::max_ones(),
-                    |e, n| *e |= n,
-                    |node_value, _edge_value| node_value.live_tokens |= allowed_tokens,
-                    |_, _| {},
-                );
-                inserter.try_destination(destination_node.clone()).expect("Cycle detected when adding allowed llm tokens on stored trie nodes");
-
-                final_nodes.insert(destination_node.clone());
+                continue;
             }
+            // Make an edge from node to new_stored_node with allowed_tokens
+            let inserter = crate::datastructures::trie::EdgeInserter::new(
+                stored_trie_god,
+                node.as_arc().clone(),
+                (0, allowed_tokens.clone()),
+                StateIDBV::max_ones(),
+                |e, n| *e |= n,
+                |node_value, _edge_value| node_value.live_tokens |= allowed_tokens,
+                |_, _| {},
+            );
+            inserter.try_destination(Trie2Index::new(new_stored_node)).expect("Cycle detected when adding allowed llm tokens on stored trie nodes");
+        final_nodes.insert(Trie2Index::new(new_stored_node));
         }
-
-        let mut new_acc = a.clone();
-        new_acc.stored_trie_nodes = final_nodes;
-        Some(new_acc)
+        na.stored_trie_nodes = final_nodes;
+        Some(na)
     });
 }
 
