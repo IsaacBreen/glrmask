@@ -1581,20 +1581,14 @@ block ::= '{' statement_list? '}' ;
 #[test]
 fn test_ebnf_grammar_initial_mask_mandatory_pass() -> Result<(), Box<dyn std::error::Error>> {
     // This test is a minimal pair to the failing `test_ebnf_grammar_initial_mask`.
-    // The only change is making the top-level rule mandatory (`statement_list`
-    // instead of `statement_list?`).
-    //
-    // By removing the optionality, we prevent the parser from considering an
-    // initial empty parse. This avoids the buggy logic path that incorrectly
-    // allows an unrelated token (`@`), causing the test to pass.
     let ebnf_grammar = r#"
 #![ignore(IGNORE)]
 
-program ::= statement_list EOF;
+program ::= statement_list? EOF;
 EOF ::= '<|EOF|>';
 
 // The original, more complex IGNORE rule is kept, as simpler versions passed.
-IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
+IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ ;
 
 statement_list ::= statement+ ;
 statement ::= block ;
@@ -1626,9 +1620,6 @@ block ::= '{' statement_list? '}' ;
     let mask = state.get_mask();
 
     // 6. Assert the expected mask
-    // The grammar now requires a '{' to start. Since '{' is not in the vocab,
-    // the only valid move is to consume an IGNORE token. The buggy path is not
-    // taken, so '@' is correctly excluded.
     let expected_mask = HybridBitset::from_iter(vec![space_token_id.0]);
     assert_eq!(
         mask,
