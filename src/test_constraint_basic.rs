@@ -1515,6 +1515,11 @@ fn test_constraint_expression_cycle() {
 #[test]
 fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar string
+    // This is a minimal grammar to test the core issue: a grammar that can start
+    // with an optional rule (`statement?`), with an `ignore` rule active.
+    // The LLM vocab is set up to contain a token matching `ignore` (` `) but NOT
+    // a token matching the optional rule (`a`), to check if `ignore` is handled
+    // correctly in this initial state.
     let ebnf_grammar = r#"
 #![ignore(WS)]
 program ::= statement? EOF;
@@ -1529,13 +1534,11 @@ statement ::= 'a';
 
     // 3. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
-    let a_token_id = LLMTokenID(0);
-    let space_token_id = LLMTokenID(1);
-    let at_token_id = LLMTokenID(2);
-    llm_token_map.insert(b"a".to_vec(), a_token_id);
+    let space_token_id = LLMTokenID(0);
+    let at_token_id = LLMTokenID(1);
     llm_token_map.insert(b" ".to_vec(), space_token_id);
     llm_token_map.insert(b"@".to_vec(), at_token_id);
-    let max_original_llm_token_id = 2;
+    let max_original_llm_token_id = 1;
 
     // 4. Create the GrammarConstraint
     let constraint = GrammarConstraint::from_compiled_grammar(
@@ -1550,12 +1553,16 @@ statement ::= 'a';
     let mask = state.get_mask();
 
     // 6. Assert the expected mask
-    // The grammar can start with 'a' (from `statement`) or be empty (before EOF),
+    // The grammar can start with 'a' (from `statement?`) or be empty (before EOF),
     // and can always be preceded by ignored whitespace ' '.
-    // The '@' token is not valid.
-    // Therefore, the mask should contain the IDs for 'a' and ' '.
-    let expected_mask = HybridBitset::from_iter(vec![a_token_id.0, space_token_id.0]);
-    assert_eq!(mask, expected_mask, "Mask should allow 'a' and ' '");
+    // The vocabulary only contains ' ' and '@'. Only ' ' is valid.
+    // Therefore, the mask should only contain the ID for the space token.
+    let expected_mask = HybridBitset::from_iter(vec![space_token_id.0]);
+    assert_eq!(
+        mask,
+        expected_mask,
+        "Mask should only allow the ignored space token"
+    );
 
     Ok(())
 }
