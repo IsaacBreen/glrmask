@@ -451,7 +451,7 @@ impl GSSPopper {
         GSSPopper { node, below_bottom: BTreeMap::new() }
     }
     pub fn iter(&self) -> impl Iterator<Item = GSSPopperItem> {
-        self.node.inner.iter_stacks().map(|(p, a)| {
+        self.node.inner.to_stacks().into_iter().map(|(p, a)| {
             let node = Arc::new(GSSNode {
                 inner: LeveledGSS::from_stacks(&[(p, a.clone())]),
             });
@@ -543,17 +543,11 @@ impl<'a> GSSPopperItemPeek<'a> {
 pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
     let mut out: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
     for n in nodes {
-        let preds = n.inner.predecessors();
-        for (edge, preds_by_depth) in preds {
-            for gss_vec in preds_by_depth.values() {
-                for gss in gss_vec {
-                    let accs = gss.collect_accs();
-                    for acc in accs {
-                        out.entry(edge.clone())
-                            .or_default()
-                            .insert(Arc::new(acc));
-                    }
-                }
+        for (p, a) in n.inner.to_stacks() {
+            if let Some(last) = p.last() {
+                out.entry(last.clone())
+                    .or_default()
+                    .insert(Arc::new(a.clone()));
             }
         }
     }

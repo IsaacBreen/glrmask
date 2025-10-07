@@ -40,84 +40,6 @@ impl<T: Clone + Eq + Hash + Ord> PartialEq for Lower<T> {
         self.empty == other.empty && self.children == other.children
     }
 }
-
-enum WorkItem<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
-    Upper(Arc<Upper<T, A>>, Vec<T>),
-    Lower(Arc<Lower<T>>, Vec<T>, A),
-}
-
-pub struct LeveledGSSStackIter<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> {
-    work: Vec<WorkItem<T, A>>,
-}
-
-impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Iterator for LeveledGSSStackIter<T, A> {
-    type Item = (Vec<T>, A);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some(item) = self.work.pop() {
-            match item {
-                WorkItem::Upper(node, path) => match &*node {
-                    Upper::Branch(b) => {
-                        for (v, kids) in b.children.iter().rev() {
-                            for child in kids.values().rev() {
-                                let mut new_path = path.clone();
-                                new_path.push(v.clone());
-                                self.work.push(WorkItem::Upper(child.clone(), new_path));
-                            }
-                        }
-                        if let Some(acc) = &b.empty {
-                            let mut p = path.clone();
-                            p.reverse();
-                            return Some((p, acc.clone()));
-                        }
-                    }
-                    Upper::Interface(i) => {
-                        for (v, kids) in i.children.iter().rev() {
-                            for child in kids.values().rev() {
-                                let mut new_path = path.clone();
-                                new_path.push(v.clone());
-                                self.work.push(WorkItem::Lower(
-                                    child.clone(),
-                                    new_path,
-                                    i.acc.clone(),
-                                ));
-                            }
-                        }
-                        if let Some(acc) = &i.empty {
-                            let mut p = path.clone();
-                            p.reverse();
-                            return Some((p, acc.clone()));
-                        }
-                        if i.children.is_empty() && i.empty.is_none() {
-                            let mut p = path.clone();
-                            p.reverse();
-                            return Some((p, i.acc.clone()));
-                        }
-                    }
-                },
-                WorkItem::Lower(node, path, acc) => {
-                    for (v, kids) in node.children.iter().rev() {
-                        for child in kids.values().rev() {
-                            let mut new_path = path.clone();
-                            new_path.push(v.clone());
-                            self.work.push(WorkItem::Lower(child.clone(), new_path, acc.clone()));
-                        }
-                    }
-                    if node.empty {
-                        let mut p = path.clone();
-                        p.reverse();
-                        return Some((p, acc));
-                    }
-                }
-            }
-        }
-        None
-    }
-}
-
-// --------------------
-// Small, reusable helpers
-// --------------------
 impl<T: Clone + Eq + Hash + Ord> Eq for Lower<T> {}
 
 impl<T: Clone + Eq + Hash + Ord> PartialOrd for Lower<T> {
@@ -914,48 +836,6 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> LeveledGSS<
 
         dfs_upper(&self.inner, &mut vec![], &mut res);
         res
-    }
-
-    pub fn iter_stacks(&self) -> LeveledGSSStackIter<T, A> {
-        if self.is_empty() {
-            return LeveledGSSStackIter { work: vec![] };
-        }
-        LeveledGSSStackIter {
-            work: vec![WorkItem::Upper(self.inner.clone(), vec![])],
-        }
-    }
-
-    pub fn collect_accs(&self) -> HashSet<A> {
-        let mut unique: HashSet<A> = HashSet::new();
-        let mut queue: VecDeque<Arc<Upper<T, A>>> = VecDeque::new();
-        let mut visited: HashSet<usize> = HashSet::new();
-
-        queue.push_back(self.inner.clone());
-        while let Some(node) = queue.pop_front() {
-            let ptr = Arc::as_ptr(&node) as usize;
-            if !visited.insert(ptr) {
-                continue;
-            }
-            match &*node {
-                Upper::Branch(b) => {
-                    if let Some(acc) = &b.empty {
-                        unique.insert(acc.clone());
-                    }
-                    for kids in b.children.values() {
-                        for child in kids.values() {
-                            queue.push_back(child.clone());
-                        }
-                    }
-                }
-                Upper::Interface(i) => {
-                    unique.insert(i.acc.clone());
-                    if let Some(acc) = &i.empty {
-                        unique.insert(acc.clone());
-                    }
-                }
-            }
-        }
-        unique
     }
 
     pub fn push(&self, value: T) -> Self {
