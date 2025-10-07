@@ -10,6 +10,7 @@ use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::leveled_gss::{LeveledGSS, Merge as LGMerge};
+use crate::datastructures::trie::Trie2Index;
 use crate::glr::parser::{GLRParser, ParseStateEdgeContent};
 use crate::glr::table::{StateID, TerminalID};
 use crate::tokenizer::LLMTokenID;
@@ -682,6 +683,33 @@ pub fn map_allowed_terminals_tokenizer_states(
         }
         let mut na = a.clone();
         na.terminals_union = out;
+        Some(na)
+    });
+}
+
+pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
+    root_arc: &mut Arc<GSSNode>,
+    allowed_tokens: &LLMTokenBV,
+    _memo: &mut PruneAndTransformRecursiveMemo,
+    stored_trie_god: &StoredTrieGodWrapper,
+) {
+    transform_all(root_arc, |a| {
+        let mut na = a.clone();
+        let new_stored_node = stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(crate::constraint::PrecomputedNodeContents::internal()));
+        for node in &a.stored_trie_nodes {
+            // Make an edge from node to new_stored_node with allowed_tokens
+            let inserter = crate::datastructures::trie::EdgeInserter::new(
+                stored_trie_god,
+                node.as_arc().clone(),
+                (0, allowed_tokens.clone()),
+                StateIDBV::max_ones(),
+                |e, n| *e |= n,
+                |node_value, _edge_value| node_value.live_tokens |= allowed_tokens,
+                |_, _| {},
+            );
+            inserter.try_destination(Trie2Index::new(new_stored_node)).expect("Cycle detected when adding allowed llm tokens on stored trie nodes");
+        }
+        na.stored_trie_nodes = BTreeSet::from([Trie2Index::new(new_stored_node)]);
         Some(na)
     });
 }

@@ -21,7 +21,7 @@ use crate::constraint_precompute0_utils;
 use crate::constraint_precompute1_utils;
 use crate::constraint_precompute2_utils;
 use crate::datastructures::arc_wrapper::ArcPtrWrapper;
-use crate::datastructures::gss_leveled_adapter::Acc;
+use crate::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc, Acc};
 use crate::datastructures::gss_leveled_adapter::{allow_only_llm_tokens_and_prune_arc, disallow_terminals_and_prune_arc, gather_gss_stats, reset_llm_tokens, GSSNode, GSSPrintConfig};
 use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -1390,6 +1390,7 @@ impl GrammarConstraint {
                         println!("  {}: {:?}", i, p);
                     }
                     allow_only_llm_tokens_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new());
+                    allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s_copy.active_state.stack, edge_bv, &mut HashMap::new(), glr_s_copy.active_state.trie2_god.as_ref().unwrap());
                     println!("After pruning to edge tokens:");
                     for (i, p) in glr_s_copy.active_state.stack.flatten().iter().enumerate() {
                         println!("  {}: {:?}", i, p);
