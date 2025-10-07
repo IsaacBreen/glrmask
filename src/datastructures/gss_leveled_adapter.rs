@@ -429,7 +429,7 @@ impl<'a> GSSPeek<'a> {
     }
 }
 
-// --- Popper (updated to avoid to_stacks/from_stacks and own LeveledGSS) ---
+// --- Popper ---
 pub struct GSSPopper {
     inner: LeveledGSS<ParseStateEdgeContent, Acc>,
     below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Acc>>,
@@ -535,7 +535,7 @@ impl<'a> GSSPopperItemPeek<'a> {
     }
 }
 
-// --- Roots & helpers (updated to avoid to_stacks/from_stacks) ---
+// --- Roots & helpers ---
 pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
     let mut out: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
     for n in nodes {
