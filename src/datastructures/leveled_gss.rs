@@ -179,6 +179,29 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> Hash for Up
 // Small, reusable helpers
 // --------------------
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GSSPathsInfo {
+    pub num_paths: usize,
+    pub total_depth: usize,
+}
+
+impl std::ops::Add for GSSPathsInfo {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self {
+            num_paths: self.num_paths + rhs.num_paths,
+            total_depth: self.total_depth + rhs.total_depth,
+        }
+    }
+}
+
+impl std::ops::AddAssign for GSSPathsInfo {
+    fn add_assign(&mut self, rhs: Self) {
+        self.num_paths += rhs.num_paths;
+        self.total_depth += rhs.total_depth;
+    }
+}
+
 fn merge_optional_acc<A: Merge + Clone>(a: &Option<A>, b: &Option<A>) -> Option<A> {
     match (a, b) {
         (None, Some(bv)) => Some(bv.clone()),
@@ -1548,5 +1571,320 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash + Ord> LeveledGSS<
             }
         }
         result
+    }
+
+    pub fn num_paths(&self) -> usize {
+        self.paths_info().num_paths
+    }
+
+    pub fn paths_info(&self) -> GSSPathsInfo {
+        let mut memo_upper = StdHashMap::new();
+        let mut memo_lower = StdHashMap::new();
+        Self::paths_info_upper(&self.inner, &mut memo_upper, &mut memo_lower)
+    }
+
+    fn paths_info_lower(
+        node: &Arc<Lower<T>>,
+        memo: &mut StdHashMap<usize, GSSPathsInfo>,
+    ) -> GSSPathsInfo {
+        let ptr = Arc::as_ptr(node) as usize;
+        if let Some(cached) = memo.get(&ptr) {
+            return *cached;
+        }
+
+        let mut info = if node.empty {
+            GSSPathsInfo {
+                num_paths: 1,
+                total_depth: 0,
+            }
+        } else {
+            GSSPathsInfo::default()
+        };
+
+        for children in node.children.values() {
+            for child in children.values() {
+                let child_info = Self::paths_info_lower(child, memo);
+                info.num_paths += child_info.num_paths;
+                info.total_depth += child_info.total_depth + child_info.num_paths;
+            }
+        }
+
+        memo.insert(ptr, info);
+        info
+    }
+
+    fn paths_info_upper(
+        node: &Arc<Upper<T, A>>,
+        memo_upper: &mut StdHashMap<usize, GSSPathsInfo>,
+        memo_lower: &mut StdHashMap<usize, GSSPathsInfo>,
+    ) -> GSSPathsInfo {
+        let ptr = Arc::as_ptr(node) as usize;
+        if let Some(cached) = memo_upper.get(&ptr) {
+            return *cached;
+        }
+
+        let info = match &**node {
+            Upper::Branch(b) => {
+                let mut info = if b.empty.is_some() {
+                    GSSPathsInfo {
+                        num_paths: 1,
+                        total_depth: 0,
+                    }
+                } else {
+                    GSSPathsInfo::default()
+                };
+                for children in b.children.values() {
+                    for child in children.values() {
+                        let child_info = Self::paths_info_upper(child, memo_upper, memo_lower);
+                        info.num_paths += child_info.num_paths;
+                        info.total_depth += child_info.total_depth + child_info.num_paths;
+                    }
+                }
+                info
+            }
+            Upper::Interface(i) => {
+                let mut info = if i.empty.is_some() {
+                    GSSPathsInfo {
+                        num_paths: 1,
+                        total_depth: 0,
+                    }
+                } else {
+                    GSSPathsInfo::default()
+                };
+
+                if i.children.is_empty() && i.empty.is_none() {
+                    info.num_paths += 1;
+                } else {
+                    for children in i.children.values() {
+                        for child in children.values() {
+                            let child_info = Self::paths_info_lower(child, memo_lower);
+                            info.num_paths += child_info.num_paths;
+                            info.total_depth += child_info.total_depth + child_info.num_paths;
+                        }
+                    }
+                }
+                info
+            }
+        };
+
+        memo_upper.insert(ptr, info);
+        info
+    }
+
+    pub fn get_first_path(&self) -> Option<(Vec<T>, A)> {
+        let mut path = Vec::new();
+        Self::get_first_path_upper(&self.inner, &mut path)
+    }
+
+    fn get_first_path_lower(
+        node: &Arc<Lower<T>>,
+        path: &mut Vec<T>,
+        acc: &A,
+    ) -> Option<(Vec<T>, A)> {
+        if node.empty {
+            let mut p = path.clone();
+            p.reverse();
+            return Some((p, acc.clone()));
+        }
+        for (v, children) in &node.children {
+            for child in children.values() {
+                path.push(v.clone());
+                if let Some(res) = Self::get_first_path_lower(child, path, acc) {
+                    return Some(res);
+                }
+                path.pop();
+            }
+        }
+        None
+    }
+
+    fn get_first_path_upper(
+        node: &Arc<Upper<T, A>>,
+        path: &mut Vec<T>,
+    ) -> Option<(Vec<T>, A)> {
+        match &**node {
+            Upper::Branch(b) => {
+                if let Some(acc) = &b.empty {
+                    let mut p = path.clone();
+                    p.reverse();
+                    return Some((p, acc.clone()));
+                }
+                for (v, children) in &b.children {
+                    for child in children.values() {
+                        path.push(v.clone());
+                        if let Some(res) = Self::get_first_path_upper(child, path) {
+                            return Some(res);
+                        }
+                        path.pop();
+                    }
+                }
+            }
+            Upper::Interface(i) => {
+                if let Some(acc) = &i.empty {
+                    let mut p = path.clone();
+                    p.reverse();
+                    return Some((p, acc.clone()));
+                }
+                if i.children.is_empty() && i.empty.is_none() {
+                    let mut p = path.clone();
+                    p.reverse();
+                    return Some((p, i.acc.clone()));
+                }
+                for (v, children) in &i.children {
+                    for child in children.values() {
+                        path.push(v.clone());
+                        if let Some(res) = Self::get_first_path_lower(child, path, &i.acc) {
+                            return Some(res);
+                        }
+                        path.pop();
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn get_longest_path(&self) -> Option<(Vec<T>, A)> {
+        let mut longest: Option<(Vec<T>, A)> = None;
+        let mut path = Vec::new();
+        Self::get_longest_path_upper(&self.inner, &mut path, &mut longest);
+        longest
+    }
+
+    fn get_longest_path_lower(
+        node: &Arc<Lower<T>>,
+        path: &mut Vec<T>,
+        acc: &A,
+        longest: &mut Option<(Vec<T>, A)>,
+    ) {
+        if node.empty {
+            if longest.as_ref().map_or(true, |(p, _)| path.len() > p.len()) {
+                let mut p = path.clone();
+                p.reverse();
+                *longest = Some((p, acc.clone()));
+            }
+        }
+        for (v, children) in &node.children {
+            for child in children.values() {
+                path.push(v.clone());
+                Self::get_longest_path_lower(child, path, acc, longest);
+                path.pop();
+            }
+        }
+    }
+
+    fn get_longest_path_upper(
+        node: &Arc<Upper<T, A>>,
+        path: &mut Vec<T>,
+        longest: &mut Option<(Vec<T>, A)>,
+    ) {
+        match &**node {
+            Upper::Branch(b) => {
+                if let Some(acc) = &b.empty {
+                    if longest.as_ref().map_or(true, |(p, _)| path.len() > p.len()) {
+                        let mut p = path.clone();
+                        p.reverse();
+                        *longest = Some((p, acc.clone()));
+                    }
+                }
+                for (v, children) in &b.children {
+                    for child in children.values() {
+                        path.push(v.clone());
+                        Self::get_longest_path_upper(child, path, longest);
+                        path.pop();
+                    }
+                }
+            }
+            Upper::Interface(i) => {
+                if let Some(acc) = &i.empty {
+                    if longest.as_ref().map_or(true, |(p, _)| path.len() > p.len()) {
+                        let mut p = path.clone();
+                        p.reverse();
+                        *longest = Some((p, acc.clone()));
+                    }
+                }
+                if i.children.is_empty() && i.empty.is_none() {
+                    if longest.as_ref().map_or(true, |(p, _)| path.len() > p.len()) {
+                        let mut p = path.clone();
+                        p.reverse();
+                        *longest = Some((p, i.acc.clone()));
+                    }
+                } else {
+                    for (v, children) in &i.children {
+                        for child in children.values() {
+                            path.push(v.clone());
+                            Self::get_longest_path_lower(child, path, &i.acc, longest);
+                            path.pop();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn as_single_path(&self) -> Option<(Vec<T>, A)> {
+        let mut path = Vec::new();
+        if let Some(acc) = Self::as_single_path_upper(&self.inner, &mut path) {
+            path.reverse();
+            Some((path, acc))
+        } else {
+            None
+        }
+    }
+
+    fn as_single_path_lower(node: &Arc<Lower<T>>, path: &mut Vec<T>) -> bool {
+        if node.children.is_empty() {
+            return node.empty;
+        }
+        if node.empty || node.children.len() > 1 || node.children.values().next().unwrap().len() > 1 {
+            return false;
+        }
+        let (v, children) = node.children.iter().next().unwrap();
+        let child = children.values().next().unwrap();
+        path.push(v.clone());
+        Self::as_single_path_lower(child, path)
+    }
+
+    fn as_single_path_upper(node: &Arc<Upper<T, A>>, path: &mut Vec<T>) -> Option<A> {
+        match &**node {
+            Upper::Branch(b) => {
+                if b.children.is_empty() {
+                    return b.empty.clone();
+                }
+                if b.empty.is_some()
+                    || b.children.len() > 1
+                    || b.children.values().next().unwrap().len() > 1
+                {
+                    return None;
+                }
+                let (v, children) = b.children.iter().next().unwrap();
+                let child = children.values().next().unwrap();
+                path.push(v.clone());
+                Self::as_single_path_upper(child, path)
+            }
+            Upper::Interface(i) => {
+                if i.children.is_empty() {
+                    return if i.empty.is_some() {
+                        i.empty.clone()
+                    } else {
+                        Some(i.acc.clone())
+                    };
+                }
+                if i.empty.is_some()
+                    || i.children.len() > 1
+                    || i.children.values().next().unwrap().len() > 1
+                {
+                    return None;
+                }
+                let (v, children) = i.children.iter().next().unwrap();
+                let child = children.values().next().unwrap();
+                path.push(v.clone());
+                if Self::as_single_path_lower(child, path) {
+                    Some(i.acc.clone())
+                } else {
+                    None
+                }
+            }
+        }
     }
 }

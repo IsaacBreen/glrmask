@@ -99,18 +99,16 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
     let mut num_root_predecessors = 0usize;
     let mut unique_root_keys = BTreeSet::new();
     for r in roots {
-        let st = r.inner.to_stacks();
+        let info = r.inner.paths_info();
+        paths += info.num_paths;
+        total_depth += info.total_depth;
+        total_edges += info.total_depth;
+        max_depth = max_depth.max(r.inner.max_depth() as usize);
+
         if let Some(peek) = r.inner.peek().into_iter().next() {
             unique_root_keys.insert(peek);
         }
         num_root_predecessors += r.inner.peek().len();
-        for (p, _a) in st.iter() {
-            let d = p.len();
-            total_depth += d;
-            total_edges += d;
-            max_depth = max_depth.max(d);
-            paths += 1;
-        }
     }
     stats.max_depth = max_depth;
     stats.total_edges = total_edges;
@@ -181,23 +179,15 @@ pub fn print_gss_forest(
 }
 
 pub fn find_longest_path(root: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
-    let mut best: Option<Vec<ParseStateEdgeContent>> = None;
-    for (p, _a) in root.inner.to_stacks() {
-        if best.as_ref().map_or(true, |b| p.len() > b.len()) {
-            best = Some(p);
-        }
-    }
-    best.map(|p| p.into_iter().map(|e| (e, root.clone())).collect())
+    root.inner
+        .get_longest_path()
+        .map(|(p, _a)| p.into_iter().map(|e| (e, root.clone())).collect())
 }
 
 pub fn sample_path<'a>(roots: &[&'a GSSNode], _seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
-    roots.get(0).map(|r| {
-        r.inner
-            .to_stacks()
-            .get(0)
-            .map(|(p, _)| p.clone())
-            .unwrap_or_default()
-    })
+    roots
+        .get(0)
+        .map(|r| r.inner.get_first_path().map(|(p, _)| p).unwrap_or_default())
 }
 
 // --- GSS wrapper ---
@@ -208,7 +198,7 @@ pub struct GSSNode {
 
 impl Debug for GSSNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "GSSNode(len_paths={})", self.inner.to_stacks().len())
+        write!(f, "GSSNode(len_paths={})", self.inner.num_paths())
     }
 }
 
@@ -302,12 +292,7 @@ impl GSSNode {
             .unwrap_or_else(|| HybridL2Bitset::all().complement())
     }
     pub fn max_depth(&self) -> usize {
-        self.inner
-            .to_stacks()
-            .into_iter()
-            .map(|(p, _)| p.len())
-            .max()
-            .unwrap_or(0)
+        self.inner.max_depth() as usize
     }
     pub fn flatten(&self) -> Vec<(Vec<ParseStateEdgeContent>, Acc)> {
         self.inner.to_stacks()
@@ -932,10 +917,7 @@ pub(crate) fn is_simple_gss(
     node: &Arc<GSSNode>,
     hallucinated_state_id: StateID,
 ) -> Option<(StateID, Arc<Acc>)> {
-    let stacks = node.inner.to_stacks();
-    // Must be exactly one path.
-    if stacks.len() == 1 {
-        let (path, acc) = &stacks[0];
+    if let Some((path, acc)) = node.inner.as_single_path() {
         // Path must have length 2. The path is from leaf to root.
         if path.len() == 2 {
             let edge_to_leaf = &path[0];
@@ -946,7 +928,7 @@ pub(crate) fn is_simple_gss(
                 let state_id_x = edge_to_middle.state_id;
                 // The leaf must have stored_trie_nodes.
                 if !acc.stored_trie_nodes().is_empty() {
-                    return Some((state_id_x, Arc::new(acc.clone())));
+                    return Some((state_id_x, Arc::new(acc)));
                 }
             }
         }
@@ -958,10 +940,14 @@ pub(crate) fn is_simple_gss(
 pub fn popn_collect_isolated_parents(node_arc: &Arc<GSSNode>, n: usize) -> Vec<(StateID, Arc<GSSNode>)> {
     let popped = node_arc.inner.popn(n as isize);
     let mut out = Vec::new();
-    for (path, _a) in popped.to_stacks() {
-        if let Some(last) = path.last() {
-            let iso = popped.isolate(Some(last.clone()));
-            out.push((last.state_id, Arc::new(GSSNode { inner: iso })));
+    for edge in popped.peek() {
+        let iso_inner = popped.isolate(Some(edge.clone()));
+        let num_paths = iso_inner.num_paths();
+        if num_paths > 0 {
+            let gss_node = Arc::new(GSSNode { inner: iso_inner });
+            for _ in 0..num_paths {
+                out.push((edge.state_id, gss_node.clone()));
+            }
         }
     }
     out
