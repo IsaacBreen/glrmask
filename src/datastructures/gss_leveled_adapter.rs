@@ -451,14 +451,12 @@ impl GSSPopper {
         GSSPopper { node, below_bottom: BTreeMap::new() }
     }
     pub fn iter(&self) -> impl Iterator<Item = GSSPopperItem> {
-        let mut items = Vec::new();
-        self.node.inner.for_each_stack(|p, a| {
+        self.node.inner.to_stacks().into_iter().map(|(p, a)| {
             let node = Arc::new(GSSNode {
                 inner: LeveledGSS::from_stacks(&[(p, a.clone())]),
             });
-            items.push(GSSPopperItem { node, acc: a });
-        });
-        items.into_iter()
+            GSSPopperItem { node, acc: a }
+        })
     }
     pub fn below_bottom(&self) -> &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Arc<Acc>>> {
         &self.below_bottom
@@ -545,10 +543,11 @@ impl<'a> GSSPopperItemPeek<'a> {
 pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
     let mut out: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
     for n in nodes {
-        for (edge, accs) in n.inner.get_accs_by_root_edge() {
-            let entry = out.entry(edge).or_default();
-            for acc in accs {
-                entry.insert(Arc::new(acc));
+        for (p, a) in n.inner.to_stacks() {
+            if let Some(last) = p.last() {
+                out.entry(last.clone())
+                    .or_default()
+                    .insert(Arc::new(a.clone()));
             }
         }
     }
