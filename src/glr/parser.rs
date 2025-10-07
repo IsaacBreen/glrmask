@@ -1468,7 +1468,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for (predecessor_state_id, parents_map) in todo_map {
             crate::debug!(9, "Processing predecessor state {} with {} isolated parents", predecessor_state_id.0, parents_map.len());
             for (_pred_ptr, isolated_parent) in parents_map {
-                timeit!("GLRParserState::reduce_and_goto::HandleGotos", {
+                timeit!("GLRParserState::reduce_and_goto::HandleGotos", { // ~500 calls
                 let mut seen_nts: HashSet<NonTerminalID> = HashSet::new();
                 let mut seen_gotos = HashSet::new();
                 let mut nt_queue = VecDeque::new();
@@ -1604,7 +1604,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // --- NEW CACHING LOGIC ---
         let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
         if let Some(god) = self.active_state.trie2_god.as_ref() {
-            timeit!("GLRParserState::reduce_and_goto::Caching", { // ~600 calls
+            timeit!("GLRParserState::reduce_and_goto::Caching", { // ~500 calls
             for gss_arc in out {
                 timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", { // SLOW POINT, ~20k calls
                 if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
