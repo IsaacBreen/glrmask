@@ -353,11 +353,7 @@ class BruteForceModel(GraphProvider):
                 popped = state_gss.popn(action.len)
                 for from_id in popped.peek():
                     goto_id = self.parser_table.table[from_id].gotos.get(action.nonterminal_id)
-                    if goto_id is None:
-                        # raise RuntimeError(f"No goto for nonterminal {action.nonterminal_id} from state {from_id}")
-                        print(f"Warning: No goto for nonterminal {action.nonterminal_id} from state {from_id}")
-                    else:
-                        heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
+                    heads_by_state[goto_id].append(popped.isolate(from_id).push(goto_id))
             elif isinstance(action, Split):
                 if action.shift is not None:
                     shifted.append(state_gss.push(action.shift))
