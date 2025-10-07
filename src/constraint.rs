@@ -1406,6 +1406,10 @@ impl GrammarConstraint {
                 );
                 let keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
+                    println!("At end.");
+                    println!("GSS: {:?}", glr_s.active_state.stack);
+                    println!("Flat: {:?}", glr_s.active_state.stack.flatten());
+                    println!("Roots: {:?}", get_roots([glr_s.active_state.stack.as_ref()]));
                     for (_last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
                         for gss_root_acc in gss_root_accs {
                             let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
