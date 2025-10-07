@@ -1512,6 +1512,89 @@ fn test_constraint_expression_cycle() {
     assert_eq!(mask, HybridBitset::from_iter(vec![]));
 }
 
+#[test]
+fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Define the EBNF grammar string
+    let ebnf_grammar = r#"
+// Instruct the parser to ignore Whitespace and single-line Comments.
+#![ignore(IGNORE)]
+
+program ::= statement_list? EOF;
+EOF ::= '<|EOF|>';
+
+// --- Lexical Grammar (Minimal) ---
+IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
+
+// --- Statements (Core Imperative Set) ---
+statement_list ::= statement+ ;
+
+statement ::=
+    block
+  | declaration_statement
+  | if_statement
+  | while_statement
+  | expression_statement
+  ;
+
+block ::= '{' statement_list? '}' ;
+declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';' ;
+if_statement ::= 'if' '(' expression ')' statement ; // No 'else'
+while_statement ::= 'while' '(' expression ')' statement ;
+expression_statement ::= expression ';' ;
+
+// --- Expressions (Completely Flattened) ---
+expression ::= term ( ( '+' | '*' | '==' ) term )* ; // All operators have same precedence
+
+term ::= ( '-' | '!' )? primary ; // Unary operators
+
+primary ::=
+    IDENTIFIER
+  | literal
+  | '(' expression ')'
+  ;
+
+// --- Literals and Terminals (Minimal) ---
+literal ::= 'true' | 'false' | NUMERIC_LITERAL | STRING_LITERAL ;
+
+NUMERIC_LITERAL ::= [0-9]+ ; // Integers only
+STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
+IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+"#;
+
+    // 2. Parse and compile the grammar
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+
+    // 3. Define the LLM vocabulary
+    let mut llm_token_map = LLMTokenMap::new();
+    let space_token_id = LLMTokenID(0);
+    let at_token_id = LLMTokenID(1);
+    llm_token_map.insert(b" ".to_vec(), space_token_id);
+    llm_token_map.insert(b"@".to_vec(), at_token_id);
+    let max_original_llm_token_id = 1;
+
+    // 4. Create the GrammarConstraint
+    let constraint = GrammarConstraint::from_compiled_grammar(
+        compiled_grammar,
+        llm_token_map,
+        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+        max_original_llm_token_id,
+    );
+
+    // 5. Initialize state and get the initial mask
+    let mut state = constraint.init();
+    let mask = state.get_mask();
+
+    // 6. Assert the expected mask
+    // The grammar can start with any valid statement token OR an ignored token (like space).
+    // The '@' token is not valid.
+    // Therefore, the mask should only contain the ID for the space token.
+    let expected_mask = HybridBitset::from_iter(vec![space_token_id.0]);
+    assert_eq!(mask, expected_mask);
+
+    Ok(())
+}
+
 
 #[test]
 fn test_precompute_self_loop_from_shared_states() {
