@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use sep1::tokenizer::LLMTokenID;
 use sep1::finite_automata::{Expr as RegexExpr, ExprGroups as RegexGroups, greedy_group, non_greedy_group, groups as regex_groups, _choice as regex_choice, eat_u8, eat_u8_negation, eat_u8_set, eps, opt, prec, rep, rep1, _seq as regex_seq, ExprGroups, eat_u8_seq, eat_u8_set_negation};
 use sep1::finite_automata::Regex;
@@ -22,7 +24,7 @@ use sep1::interface::IncrementalParser;
 use sep1::json_serialization::{JSONConvertible, JSONNode};
 use sep1::datastructures::hybrid_bitset::HybridBitset as RustHybridBitset;
 use sep1::datastructures::hybrid_l2_bitset::HybridL2Bitset as RustHybridL2Bitset;
-use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, GSSNode, gather_gss_stats, print_gss_forest};
+use sep1::datastructures::gss::{GSSNode as RustGSSNode, allow_only_llm_tokens_and_prune as rust_allow_only, popn_collect_isolated_parents as rust_popn_collect, gather_gss_stats, print_gss_forest};
 
 #[pyclass(name = "GrammarExpr")]
 #[derive(Clone)]
