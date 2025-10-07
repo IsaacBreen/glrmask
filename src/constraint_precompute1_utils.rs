@@ -27,6 +27,10 @@ pub struct Trie1Config {
     pub minimize_by_signature: bool,
     pub merge_equivalent_llm_tokens: bool,
     pub reorder_llm_tokens: bool,
+    pub prune_on_no_terminal_follow: bool,
+    pub prune_nodes_not_reaching_end: bool,
+    pub prune_dead_paths: bool,
+    pub gc: bool,
 }
 
 impl Default for Trie1Config {
@@ -37,6 +41,10 @@ impl Default for Trie1Config {
             minimize_by_signature: true,
             merge_equivalent_llm_tokens: true,
             reorder_llm_tokens: true,
+            prune_on_no_terminal_follow: true,
+            prune_nodes_not_reaching_end: true,
+            prune_dead_paths: true,
+            gc: true,
         }
     }
 }
@@ -49,6 +57,10 @@ impl Trie1Config {
             minimize_by_signature: false,
             merge_equivalent_llm_tokens: false,
             reorder_llm_tokens: false,
+            prune_on_no_terminal_follow: false,
+            prune_nodes_not_reaching_end: false,
+            prune_dead_paths: false,
+            gc: false,
         }
     }
 }
@@ -444,9 +456,15 @@ pub fn optimize_trie1_size(
         shortcut_none_chains_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
     }
     constrain_bitvecs_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>(), internal_max_llm_token);
-    prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
-    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-    prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+    if config.prune_on_no_terminal_follow {
+        prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
+    }
+    if config.prune_nodes_not_reaching_end {
+        prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+    }
+    if config.prune_dead_paths {
+        prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+    }
 
     // === Pass 2: Minimization and further cleanup ===
     if config.minimize_by_signature {
@@ -455,8 +473,12 @@ pub fn optimize_trie1_size(
     if !config.early_flatten_epsilon {
         flatten_all_none_edges_trie1(precomputed1, trie1_god);
     }
-    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-    prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+    if config.prune_nodes_not_reaching_end {
+        prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+    }
+    if config.prune_dead_paths {
+        prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+    }
 
     // === Pass 3: Token-level optimizations ===
     if config.merge_equivalent_llm_tokens {
@@ -470,9 +492,15 @@ pub fn optimize_trie1_size(
     if config.minimize_by_signature {
         merge_nodes_trie1(precomputed1, trie1_god);
     }
-    prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
-    prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
-    Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+    if config.prune_nodes_not_reaching_end {
+        prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
+    }
+    if config.prune_dead_paths {
+        prune_dead_paths_trie1(precomputed1, trie1_god, internal_max_llm_token);
+    }
+    if config.gc {
+        Trie::gc(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+    }
     Trie::recompute_all_max_depths(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
 
     crate::debug!(2, "Final Trie1 stats:");

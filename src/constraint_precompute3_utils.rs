@@ -25,7 +25,11 @@ pub struct Trie3Config {
     pub gc: bool,
     pub prune_dead_paths: bool,
     pub compress_edges: bool,
-    pub merge_nodes: bool,
+    pub merge_nodes_exact: bool,
+    pub merge_nodes_ultrafast: bool,
+    pub prune_nodes_not_reaching_end: bool,
+    pub simplify_llm_token_bvs: bool,
+    pub factor_common_destinations: bool,
 }
 
 impl Default for Trie3Config {
@@ -38,7 +42,11 @@ impl Default for Trie3Config {
             gc: true,
             prune_dead_paths: true,
             compress_edges: true,
-            merge_nodes: true,
+            merge_nodes_exact: true,
+            merge_nodes_ultrafast: false,
+            prune_nodes_not_reaching_end: false,
+            simplify_llm_token_bvs: false,
+            factor_common_destinations: false,
         }
     }
 }
@@ -53,7 +61,11 @@ impl Trie3Config {
             gc: false,
             prune_dead_paths: false,
             compress_edges: false,
-            merge_nodes: false,
+            merge_nodes_exact: false,
+            merge_nodes_ultrafast: false,
+            prune_nodes_not_reaching_end: false,
+            simplify_llm_token_bvs: false,
+            factor_common_destinations: false,
         }
     }
 }
@@ -115,7 +127,7 @@ pub fn optimize_trie3_size(
 	// --- Phase 1: Initial Pruning & Vocab Reduction ---
 	// These passes are expensive but have a huge impact on the initial massive graph.
 	// They are essential to run first to make subsequent passes feasible.
-	if config.merge_nodes {
+	if config.merge_nodes_ultrafast {
 		run_pass!("Merging nodes (fast pre-pass)", {
 			merge_nodes_trie3_ultrafast(roots, trie3_god);
 		});
@@ -128,11 +140,11 @@ pub fn optimize_trie3_size(
 		});
 	}
 
-	// if config.optimize_trie2_prune_dead_paths { // Reusing config flag
-	// 	run_pass!("Pruning nodes that do not reach end", {
-	// 		prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-	// 	});
-	// }
+	if config.prune_nodes_not_reaching_end {
+		run_pass!("Pruning nodes that do not reach end", {
+			prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
+		});
+	}
 
 	if config.merge_equivalent_llm_tokens {
 		run_pass!("Merging equivalent LLM tokens", {
@@ -159,9 +171,17 @@ pub fn optimize_trie3_size(
 	// Now that the graph is smaller and token sets are simpler, we can apply
 	// heavy structural optimizations.
 
-	// run_pass!("Simplifying LLM token bitsets", {
-	// 	simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
-	// });
+	if config.simplify_llm_token_bvs {
+		run_pass!("Simplifying LLM token bitsets", {
+			simplify_llm_token_bvs_trie3(roots, &trie3_god, max_llm_token_id);
+		});
+	}
+
+	if config.factor_common_destinations {
+		run_pass!("Factoring common destinations", {
+			factor_common_destinations_trie3(roots, trie3_god, max_llm_token_id, max_state_id);
+		});
+	}
 
 	if config.compress_edges {
 		run_pass!("Compressing edges", {
@@ -181,7 +201,7 @@ pub fn optimize_trie3_size(
 		});
 	}
 
-	if config.merge_nodes {
+	if config.merge_nodes_exact {
 		run_pass!("Merging nodes", {
 			merge_nodes_trie3(roots, &trie3_god);
 		});
@@ -190,11 +210,11 @@ pub fn optimize_trie3_size(
 	// --- Phase 3: Iterative Refinement ---
 	// A few rounds of compression and merging on the now much smaller graph.
 
-	// if config.optimize_trie2_prune_dead_paths { // Reusing config flag
-	// 	run_pass!("Pruning nodes that do not reach end (post-merge)", {
-	// 		prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
-	// 	});
-	// }
+	if config.prune_nodes_not_reaching_end {
+		run_pass!("Pruning nodes that do not reach end (post-merge)", {
+			prune_nodes_not_reaching_end_trie3(roots, &trie3_god);
+		});
+	}
 
 	if config.compress_edges {
 		run_pass!("Compressing edges (post-merge)", {
@@ -202,7 +222,7 @@ pub fn optimize_trie3_size(
 		});
 	}
 
-	if config.merge_nodes {
+	if config.merge_nodes_exact {
 		run_pass!("Merging nodes (post-compress)", {
 			merge_nodes_trie3(roots, &trie3_god);
 		});
@@ -644,7 +664,6 @@ fn simplify_llm_token_bvs_trie3(
     trie3_god: &Trie3GodWrapper,
     max_llm_token_id: usize,
 ) {
-    return;
     crate::debug!(2, "Simplifying LLM token bitsets in Trie3 to reduce range counts...");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
@@ -692,7 +711,6 @@ fn prune_nodes_not_reaching_end_trie3(
     roots: &BTreeMap<TokenizerStateID, PrecomputeNode3Index>,
     trie3_god: &Trie3GodWrapper,
 ) {
-    return;
     crate::debug!(2, "Pruning Trie3 nodes that cannot reach any end node (reverse reachability)...");
     let roots_vec: Vec<_> = roots.values().cloned().collect();
     if roots_vec.is_empty() {
@@ -784,7 +802,6 @@ fn factor_common_destinations_trie3(
     max_llm_token_id: usize,
     max_state_id: usize,
 ) {
-    return;
     crate::debug!(2, "Factoring out common destinations in Trie3.");
     const MIN_INCOMING_EDGES_FOR_FACTORING: usize = 3;
 
