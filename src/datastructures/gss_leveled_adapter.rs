@@ -693,112 +693,28 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
     _memo: &mut PruneAndTransformRecursiveMemo,
     stored_trie_god: &StoredTrieGodWrapper,
 ) {
-    // Map from each source node to all destinations we created/used for it.
-    // We keep it outside the transform so we can reuse destinations across different Accs.
-    let mut src_to_dsts: BTreeMap<StoredPrecomputeNodeIndex, Vec<StoredPrecomputeNodeIndex>> = BTreeMap::new();
-    // A single shared destination we try to reuse to minimize the number of new nodes.
-    let mut shared_dst: Option<StoredPrecomputeNodeIndex> = None;
-
     transform_all(root_arc, |a| {
-        // Partition nodes: which need edges vs which can remain as-is.
-        let mut final_nodes: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
-        let mut needs_edges: Vec<StoredPrecomputeNodeIndex> = Vec::new();
-
-        for node in a.stored_trie_nodes() {
-            let live = node
-                .as_arc()
-                .read(stored_trie_god)
-                .expect("poison")
-                .value
-                .live_tokens
-                .clone();
-            if live.is_subset(allowed_tokens) {
-                // No edge needed; keep the node as-is.
+        let mut na = a.clone();
+        let new_stored_node = stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(crate::constraint::PrecomputedNodeContents::internal()));
+        let mut final_nodes = BTreeSet::new();
+        for node in &a.stored_trie_nodes {
+            if node.as_arc().read(stored_trie_god).expect("poison").value.live_tokens.is_subset(allowed_tokens) {
                 final_nodes.insert(node.clone());
-            } else {
-                // This node has tokens not in the allowed set -> needs an edge out.
-                needs_edges.push(node.clone());
+                continue;
             }
-        }
-
-        // If nothing needs edges, avoid any work.
-        if needs_edges.is_empty() {
-            return Some(a.clone());
-        }
-
-        // For every node that needs an edge, choose a destination (prefer reusing a shared one),
-        // add the edge, and record the new frontier nodes.
-        for src in needs_edges {
-            // Pick a candidate destination. Prefer the shared one if available and not equal to the source.
-            let mut dst_opt = shared_dst.clone().filter(|d| d != &src);
-
-            // If we don't have a shared one yet (or it would be equal to src), create a fresh destination.
-            if dst_opt.is_none() {
-                let raw = stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                    crate::constraint::PrecomputedNodeContents::internal(),
-                ));
-                let new_dst = StoredPrecomputeNodeIndex::new(raw);
-                // Seed the destination with allowed tokens so it is immediately correct even if no incoming edges are processed later.
-                new_dst
-                    .write(stored_trie_god)
-                    .expect("poison")
-                    .value
-                    .live_tokens
-                    |= allowed_tokens;
-                shared_dst = Some(new_dst.clone());
-                dst_opt = Some(new_dst);
-            }
-
-            let dst = dst_opt.unwrap();
-
-            // Try to add the edge from src -> dst with the allowed token filter.
+            // Make an edge from node to new_stored_node with allowed_tokens
             let inserter = crate::datastructures::trie::EdgeInserter::new(
                 stored_trie_god,
-                src.as_arc().clone(),
+                node.as_arc().clone(),
                 (0, allowed_tokens.clone()),
                 StateIDBV::max_ones(),
                 |e, n| *e |= n,
                 |node_value, _edge_value| node_value.live_tokens |= allowed_tokens,
-                |_, _| {}, // unconditional insertion
+                |_, _| {},
             );
-
-            match inserter.try_destination(dst.clone()).into_option() {
-                Some(_) => {
-                    src_to_dsts.entry(src.clone()).or_default().push(dst.clone());
-                    final_nodes.insert(dst);
-                }
-                None => {
-                    // Fallback: create a fresh destination for this source only (avoid cycles).
-                    let raw = stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                        crate::constraint::PrecomputedNodeContents::internal(),
-                    ));
-                    let fresh_dst = StoredPrecomputeNodeIndex::new(raw);
-                    fresh_dst
-                        .write(stored_trie_god)
-                        .expect("poison")
-                        .value
-                        .live_tokens
-                        |= allowed_tokens;
-
-                    let inserter = crate::datastructures::trie::EdgeInserter::new(
-                        stored_trie_god,
-                        src.as_arc().clone(),
-                        (0, allowed_tokens.clone()),
-                        StateIDBV::max_ones(),
-                        |e, n| *e |= n,
-                        |node_value, _edge_value| node_value.live_tokens |= allowed_tokens,
-                        |_, _| {},
-                    );
-                    inserter
-                        .try_destination(fresh_dst.clone())
-                        .expect("Cycle detected when adding allowed llm tokens on stored trie nodes (fallback)");
-                    src_to_dsts.entry(src.clone()).or_default().push(fresh_dst.clone());
-                    final_nodes.insert(fresh_dst);
-                }
-            }
+            inserter.try_destination(Trie2Index::new(new_stored_node)).expect("Cycle detected when adding allowed llm tokens on stored trie nodes");
+        final_nodes.insert(Trie2Index::new(new_stored_node));
         }
-
-        let mut na = a.clone();
         na.stored_trie_nodes = final_nodes;
         Some(na)
     });
