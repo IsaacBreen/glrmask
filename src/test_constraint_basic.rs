@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use bimap::BiBTreeMap;
 use reqwest::blocking;
 use serde_json;
-use crate::constraint::{GrammarConstraint, GrammarConstraintState};
+use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, GrammarConstraintState};
 use crate::datastructures::trie::Trie;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 // Already a main dependency, but good to be explicit if used directly
@@ -1533,12 +1533,16 @@ IGNORE ::= ' ' | '$@';
     let max_original_llm_token_id = 1;
 
     // 4. Create the GrammarConstraint
-    let constraint = GrammarConstraint::from_compiled_grammar(
+    let constraint = GrammarConstraint::from_compiled_grammar_with_config(
         compiled_grammar,
         llm_token_map,
         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
         max_original_llm_token_id,
+        &GrammarConstraintConfig::off(),
     );
+    constraint.dump_precomputed0();
+    // constraint.dump_precomputed1();
+    constraint.dump_precomputed3();
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
@@ -1576,12 +1580,16 @@ IGNORE ::= ' ';
     let max_original_llm_token_id = 1;
 
     // 4. Create the GrammarConstraint
-    let constraint = GrammarConstraint::from_compiled_grammar(
+    let constraint = GrammarConstraint::from_compiled_grammar_with_config(
         compiled_grammar,
         llm_token_map,
         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
         max_original_llm_token_id,
+        &GrammarConstraintConfig::off(),
     );
+    constraint.dump_precomputed0();
+    // constraint.dump_precomputed1();
+    constraint.dump_precomputed3();
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
