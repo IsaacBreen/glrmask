@@ -1525,16 +1525,10 @@ fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // allowing the `IGNORE` token.
     let ebnf_grammar = r#"
 #![ignore(IGNORE)]
-
-program ::= statement_list EOF;
+program ::= A EOF;
 EOF ::= '<|EOF|>';
-
-// The original, more complex IGNORE rule is kept, as simpler versions passed.
 IGNORE ::= ' ' | '//' [^\n\r]*;
-
-statement_list ::= statement+ ;
-statement ::= block ;
-block ::= '{' statement_list? '}' ;
+A ::= 'a';
 "#;
 
     // 2. Parse and compile the grammar
@@ -1583,16 +1577,10 @@ fn test_ebnf_grammar_initial_mask_mandatory_pass() -> Result<(), Box<dyn std::er
     // This test is a minimal pair to the failing `test_ebnf_grammar_initial_mask`.
     let ebnf_grammar = r#"
 #![ignore(IGNORE)]
-
-program ::= statement_list EOF;
+program ::= A EOF;
 EOF ::= '<|EOF|>';
-
-// The original, more complex IGNORE rule is kept, as simpler versions passed.
 IGNORE ::= ' ' ;
-
-statement_list ::= statement+ ;
-statement ::= block ;
-block ::= '{' statement_list? '}' ;
+A ::= 'a';
 "#;
 
     // 2. Parse and compile the grammar
