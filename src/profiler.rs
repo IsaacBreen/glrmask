@@ -160,8 +160,17 @@ fn print_node_recursive(
     }
 }
 
+pub fn print_summary() {
+    let options = PrintOptions {
+        show_own_per_hit: true,
+        show_percentage_own: true,
+        show_percentage_of_parent: true,
+    };
+    _print_summary(&options);
+}
+
 /// Prints a summary of the collected profiling data to stdout.
-pub fn print_summary(options: &PrintOptions) {
+pub fn _print_summary(options: &PrintOptions) {
     if !PROFILING_ENABLED {
         return;
     }
@@ -237,8 +246,17 @@ fn flatten_tree_recursive(
     }
 }
 
+pub fn print_summary_flat() {
+    let options = PrintOptions {
+        show_own_per_hit: true,
+        show_percentage_own: true,
+        show_percentage_of_parent: false,
+    };
+    _print_summary_flat(&options);
+}
+
 /// Prints a summary of the collected profiling data as a flat list, merging all calls to the same function.
-pub fn print_summary_flat(options: &PrintOptions) {
+pub fn _print_summary_flat(options: &PrintOptions) {
     if !PROFILING_ENABLED {
         return;
     }
