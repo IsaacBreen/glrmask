@@ -32,6 +32,14 @@ pub struct ProfileNode {
     pub children: HashMap<String, ProfileNode>,
 }
 
+/// Options for printing profiler summaries.
+#[derive(Default)]
+pub struct PrintOptions {
+    pub show_own_per_hit: bool,
+    pub show_percentage_own: bool,
+    pub show_percentage_of_parent: bool,
+}
+
 /// Holds all profiling data.
 #[derive(Default)]
 pub struct ProfilerData {
@@ -88,6 +96,7 @@ fn print_node_recursive(
     name: &str,
     indent_level: usize,
     parent_total_time: Duration,
+    options: &PrintOptions,
 ) {
     let indent = "  ".repeat(indent_level);
     let name_with_indent = format!("{}{}", indent, name);
@@ -101,47 +110,58 @@ fn print_node_recursive(
         (Duration::from_secs(0), Duration::from_secs(0))
     };
 
-    let percentage_of_parent = if !parent_total_time.is_zero() {
-        (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
-    } else {
-        0.0
-    };
-
-    let percentage_own = if !node.total_time.is_zero() {
-        (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
-    } else {
-        0.0
-    };
-
     let total_str = format_duration(node.total_time);
     let own_str = format_duration(node.own_time);
     let total_per_hit_str = format_duration(total_per_hit);
-    let own_per_hit_str = format_duration(own_per_hit);
-    let percentage_of_parent_str = format!("{:.1}%", percentage_of_parent);
-    let percentage_own_str = format!("{:.1}%", percentage_own);
 
-    println!(
-        "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10} {:>15}  {}",
-        node.hits,
-        total_str,
-        total_per_hit_str,
-        own_str,
-        own_per_hit_str,
-        percentage_own_str,
-        percentage_of_parent_str,
-        name_with_indent
+    print!(
+        "{:>10} {:>15} {:>15} {:>15}",
+        node.hits, total_str, total_per_hit_str, own_str,
     );
+
+    if options.show_own_per_hit {
+        let own_per_hit_str = format_duration(own_per_hit);
+        print!(" {:>15}", own_per_hit_str);
+    }
+
+    if options.show_percentage_own {
+        let percentage_own = if !node.total_time.is_zero() {
+            (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
+        } else {
+            0.0
+        };
+        let percentage_own_str = format!("{:.1}%", percentage_own);
+        print!(" {:>10}", percentage_own_str);
+    }
+
+    if options.show_percentage_of_parent {
+        let percentage_of_parent = if !parent_total_time.is_zero() {
+            (node.total_time.as_secs_f64() / parent_total_time.as_secs_f64()) * 100.0
+        } else {
+            0.0
+        };
+        let percentage_of_parent_str = format!("{:.1}%", percentage_of_parent);
+        print!(" {:>15}", percentage_of_parent_str);
+    }
+
+    println!("  {}", name_with_indent);
 
     let mut sorted_children: Vec<_> = node.children.iter().collect();
     sorted_children.sort_by_key(|(name, _)| *name);
 
     for (child_name, child_node) in sorted_children {
-        print_node_recursive(child_node, child_name, indent_level + 1, node.total_time);
+        print_node_recursive(
+            child_node,
+            child_name,
+            indent_level + 1,
+            node.total_time,
+            options,
+        );
     }
 }
 
 /// Prints a summary of the collected profiling data to stdout.
-pub fn print_summary() {
+pub fn print_summary(options: &PrintOptions) {
     if !PROFILING_ENABLED {
         return;
     }
@@ -159,17 +179,20 @@ pub fn print_summary() {
 
     if !no_timing_data {
         println!("\n[Hierarchical Timings]");
-        println!(
-            "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10} {:>15}  {}",
-            "Hits",
-            "Total Time",
-            "Total/Hit",
-            "Own Time",
-            "Own/Hit",
-            "% Own",
-            "% of Parent",
-            "Name"
+        print!(
+            "{:>10} {:>15} {:>15} {:>15}",
+            "Hits", "Total Time", "Total/Hit", "Own Time"
         );
+        if options.show_own_per_hit {
+            print!(" {:>15}", "Own/Hit");
+        }
+        if options.show_percentage_own {
+            print!(" {:>10}", "% Own");
+        }
+        if options.show_percentage_of_parent {
+            print!(" {:>15}", "% of Parent");
+        }
+        println!("  {}", "Name");
 
         let root_total_time: Duration = data
             .call_tree
@@ -182,7 +205,7 @@ pub fn print_summary() {
         sorted_children.sort_by_key(|(name, _)| *name);
 
         for (name, node) in sorted_children {
-            print_node_recursive(node, name, 0, root_total_time);
+            print_node_recursive(node, name, 0, root_total_time, options);
         }
     }
 
@@ -215,7 +238,7 @@ fn flatten_tree_recursive(
 }
 
 /// Prints a summary of the collected profiling data as a flat list, merging all calls to the same function.
-pub fn print_summary_flat() {
+pub fn print_summary_flat(options: &PrintOptions) {
     if !PROFILING_ENABLED {
         return;
     }
@@ -236,16 +259,17 @@ pub fn print_summary_flat() {
         flatten_tree_recursive(&data.call_tree.children, &mut flat_map);
 
         println!("\n[Flat Timings]");
-        println!(
-            "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10}  {}",
-            "Hits",
-            "Total Time",
-            "Total/Hit",
-            "Own Time",
-            "Own/Hit",
-            "% Own",
-            "Name"
+        print!(
+            "{:>10} {:>15} {:>15} {:>15}",
+            "Hits", "Total Time", "Total/Hit", "Own Time"
         );
+        if options.show_own_per_hit {
+            print!(" {:>15}", "Own/Hit");
+        }
+        if options.show_percentage_own {
+            print!(" {:>10}", "% Own");
+        }
+        println!("  {}", "Name");
 
         let mut sorted_list: Vec<_> = flat_map.iter().collect();
         sorted_list.sort_by(|a, b| b.1.total_time.cmp(&a.1.total_time));
@@ -260,23 +284,30 @@ pub fn print_summary_flat() {
                 (Duration::from_secs(0), Duration::from_secs(0))
             };
 
-            let percentage_own = if !node.total_time.is_zero() {
-                (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
-            } else {
-                0.0
-            };
-
             let total_str = format_duration(node.total_time);
             let own_str = format_duration(node.own_time);
             let total_per_hit_str = format_duration(total_per_hit);
-            let own_per_hit_str = format_duration(own_per_hit);
-            let percentage_own_str = format!("{:.1}%", percentage_own);
 
-            println!(
-                "{:>10} {:>15} {:>15} {:>15} {:>15} {:>10}  {}",
-                node.hits, total_str, total_per_hit_str, own_str, own_per_hit_str,
-                percentage_own_str, name
+            print!(
+                "{:>10} {:>15} {:>15} {:>15}",
+                node.hits, total_str, total_per_hit_str, own_str
             );
+
+            if options.show_own_per_hit {
+                let own_per_hit_str = format_duration(own_per_hit);
+                print!(" {:>15}", own_per_hit_str);
+            }
+
+            if options.show_percentage_own {
+                let percentage_own = if !node.total_time.is_zero() {
+                    (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
+                } else {
+                    0.0
+                };
+                let percentage_own_str = format!("{:.1}%", percentage_own);
+                print!(" {:>10}", percentage_own_str);
+            }
+            println!("  {}", name);
         }
     }
 
