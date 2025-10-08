@@ -1523,7 +1523,18 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 
         // --- Statements (Core Imperative Set) ---
         expression_statement ::= expression ';' ;
-        expression ::= IDENTIFIER | STRING_LITERAL ;
+        // --- Expressions (Completely Flattened) ---
+        expression ::= term ;
+
+        term ::= primary ; // Unary operators
+
+        primary ::=
+            IDENTIFIER
+          | literal
+          ;
+
+        // --- Literals and Terminals (Minimal) ---
+        literal ::= STRING_LITERAL ;
 
         STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
         IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;

@@ -4026,7 +4026,18 @@ local_system:
 
               // --- Statements (Core Imperative Set) ---
               expression_statement ::= expression ';' ;
-              expression ::= IDENTIFIER | STRING_LITERAL ;
+              // --- Expressions (Completely Flattened) ---
+              expression ::= term ;
+
+              term ::= primary ; // Unary operators
+
+              primary ::=
+                  IDENTIFIER
+                | literal
+                ;
+
+              // --- Literals and Terminals (Minimal) ---
+              literal ::= STRING_LITERAL ;
 
               STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
               IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
@@ -13113,5 +13124,90 @@ messages:
     metadata:
   - user: 'Changes committed with message: "test: Collapse expression rules and remove
       IGNORE/unary operator logic in simplified grammar"'
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_basic.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - assistant: |-
+      You are right, the last change was too much. Thank you for the feedback. It seems we removed a crucial part of the grammar that was triggering the bug.
+
+      Let's backtrack carefully. The previous change did two things: it removed the optional `!` operator, and it collapsed the non-terminal chain (`expression -> term -> primary`). Since the test now passes, one of those two elements is necessary to reproduce the error.
+
+      We will now restore the non-terminal chain but keep the `!` operator removed. This will tell us if the bug is related to the layers of grammar rules or the optional operator.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the test file**: `src/test_constraint_basic.rs`.
+      2.  **Locate the test**: Find the function `test_js_simplified_ebnf_string`.
+      3.  **Modify the EBNF grammar string**: We will re-introduce the `term`, `primary`, and `literal` non-terminals, but without the optional `!` operator.
+
+          Find this line in the grammar:
+          ```ebnf
+          expression ::= IDENTIFIER | STRING_LITERAL ;
+          ```
+          Replace it with the following block of rules, which restores the chain of indirection:
+          ```ebnf
+              // --- Expressions (Completely Flattened) ---
+              expression ::= term ;
+
+              term ::= primary ; // Unary operators
+
+              primary ::=
+                  IDENTIFIER
+                | literal
+                ;
+
+              // --- Literals and Terminals (Minimal) ---
+              literal ::= STRING_LITERAL ;
+          ```
+          The rest of the test function (the LLM vocabulary and assertions) should remain as it is from the last step, as it's already compatible with this grammar.
+
+      ### Git Diff
+
+      Here is the git patch that applies the change described above.
+
+      ```diff
+      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
+      index 666f666..777g777 100644
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -1529,8 +1529,19 @@
+       
+               // --- Statements (Core Imperative Set) ---
+               expression_statement ::= expression ';' ;
+      -        expression ::= IDENTIFIER | STRING_LITERAL ;
+      +        // --- Expressions (Completely Flattened) ---
+      +        expression ::= term ;
+      +
+      +        term ::= primary ; // Unary operators
+      +
+      +        primary ::=
+      +            IDENTIFIER
+      +          | literal
+      +          ;
+      +
+      +        // --- Literals and Terminals (Minimal) ---
+      +        literal ::= STRING_LITERAL ;
+       
+               STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
+               IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+           "#};
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_basic.rs
+      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_basic.rs.
+    metadata:
+  - user: 'Changes committed with message: "test: Restore expression non-terminal
+      chain without unary operator to isolate bug source"'
     metadata:
 ...
