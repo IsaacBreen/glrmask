@@ -50,7 +50,7 @@ def greedy_tokenizer(text_bytes, id_to_token):
             node = node.setdefault(byte_val, {})
         node['<ID>'] = token_id
 
-    token_ids = []
+    tokens_with_pos = []
     pos = 0
     while pos < len(text_bytes):
         # Find the longest possible token match starting at the current position.
@@ -72,11 +72,11 @@ def greedy_tokenizer(text_bytes, id_to_token):
                 break
         
         if longest_match_len > 0:
-            token_ids.append(longest_match_id)
+            tokens_with_pos.append((longest_match_id, pos, pos + longest_match_len))
             pos += longest_match_len
         else:
             raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
-    return token_ids
+    return tokens_with_pos
 
 def load_model_class(model_path: Path):
     """Dynamically loads the 'Model' class from a Python file."""
@@ -233,7 +233,9 @@ def run_benchmark(args, run_index: int = 0):
     # 4. Tokenize input code
     print(f"Loading and tokenizing code from: {args.code}")
     code_bytes = args.code.read_bytes()
-    token_ids = greedy_tokenizer(code_bytes, id_to_token)
+    tokens_with_pos = greedy_tokenizer(code_bytes, id_to_token)
+    token_ids = [t[0] for t in tokens_with_pos]
+    token_positions = [(t[1], t[2]) for t in tokens_with_pos]
     print(f"Tokenized into {len(token_ids)} tokens.")
 
     get_mask_timings: list[float] = []
@@ -316,6 +318,7 @@ def run_benchmark(args, run_index: int = 0):
             "get_mask_timings_seconds": get_mask_timings,
             "commit_timings_seconds": commit_timings,
             "masks_ranges": masks_ranges,
+            "token_positions": token_positions,
             "summary_stats": summary_stats,
         }
     }

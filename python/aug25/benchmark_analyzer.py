@@ -167,6 +167,50 @@ def _format_numeric_ranges(ranges: Tuple[Tuple[int, int], ...]) -> str:
             parts.append(f"{start}..{end}")
     return ", ".join(parts)
 
+def _print_mismatch_context(code_bytes: bytes, start_byte: int, end_byte: int):
+    """Prints the source line and context for a token mismatch."""
+    # Find the line containing the start of the token
+    line_start_pos = code_bytes.rfind(b'\n', 0, start_byte) + 1
+    line_end_pos = code_bytes.find(b'\n', start_byte)
+    if line_end_pos == -1:
+        line_end_pos = len(code_bytes)
+
+    # Find context lines
+    prev_line_start_pos = code_bytes.rfind(b'\n', 0, line_start_pos - 1) + 1
+    next_line_end_pos = code_bytes.find(b'\n', line_end_pos + 1)
+    if next_line_end_pos == -1:
+        next_line_end_pos = len(code_bytes)
+
+    # Get line numbers
+    line_num = code_bytes.count(b'\n', 0, line_start_pos) + 1
+
+    # Extract and decode lines, handling potential errors
+    def decode_line(b: bytes) -> str:
+        try:
+            return b.decode('utf-8')
+        except UnicodeDecodeError:
+            return repr(b)
+
+    prev_line = decode_line(code_bytes[prev_line_start_pos:line_start_pos-1]) if line_start_pos > 0 else ""
+    current_line = decode_line(code_bytes[line_start_pos:line_end_pos])
+    next_line = decode_line(code_bytes[line_end_pos+1:next_line_end_pos]) if line_end_pos < len(code_bytes) else ""
+
+    # Calculate column and length for the pointer
+    start_col = start_byte - line_start_pos
+    # The token might span multiple lines. For visualization, we'll cap it at the end of the current line.
+    token_len_on_line = min(end_byte, line_end_pos) - start_byte
+
+    # Print with context
+    print(f"  Mismatch context (line {line_num}):")
+    if line_num > 1 and prev_line:
+        print(f"    {line_num-1: >4} | {prev_line}")
+    print(f"    {line_num: >4} | {current_line}")
+    # Pointer line
+    pointer = ' ' * start_col + '^' * max(1, token_len_on_line) # ensure at least one ^
+    print(f"         | {pointer}")
+    if next_line:
+        print(f"    {line_num+1: >4} | {next_line}")
+
 def _generate_and_print_summary(df: pd.DataFrame, title: str, equivalence_info: Optional[Dict[str, bool]] = None, mismatch_counts: Optional[Dict[str, List[int]]] = None):
     """Calculates, formats, and prints a summary statistics table for a given DataFrame."""
     print(f"\n--- {title} ---")
@@ -222,6 +266,8 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
     masks_by_model: Dict[str, List[List[Tuple[Tuple[int, int], ...]]]] = {}
     get_mask_timings_by_model: Dict[str, List[List[float]]] = {}
     id_to_token_by_model: Dict[str, Dict[int, bytes]] = {}
+    token_positions_by_model: Dict[str, List[List[Tuple[int, int]]]] = {}
+    code_content_by_model: Dict[str, bytes] = {}
 
     model_order: List[str] = []
 
@@ -232,6 +278,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
 
         model_script = data.get("model_script") or data.get("competitor_script")  # legacy fallback
         grammar_file = data.get("inputs", {}).get("grammar_file")
+        code_file = data.get("inputs", {}).get("code_file")
 
         model_stem = Path(model_script).stem if model_script else Path(file_path).stem
         
@@ -263,12 +310,19 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
                 id_to_token_by_model[model_name] = id_to_token
             except Exception as e:
                 print(f"Warning: could not load vocab from {grammar_file} for {model_name}: {e}")
+        
+        if model_name not in code_content_by_model and code_file:
+            try:
+                code_content_by_model[model_name] = Path(code_file).read_bytes()
+            except Exception as e:
+                print(f"Warning: could not load code file {code_file} for {model_name}: {e}")
 
         # Initialize if first time seeing model
         if model_name not in get_mask_timings_by_model:
             get_mask_timings_by_model[model_name] = []
             commit_timings_by_model[model_name] = []
             masks_by_model[model_name] = []
+            token_positions_by_model[model_name] = []
 
         timings = data["results"].get("get_mask_timings_seconds", [])
         get_mask_timings_by_model[model_name].append(timings)
@@ -282,6 +336,9 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
             masks_by_model[model_name].append([])
         else:
             masks_by_model[model_name].append([_normalize_intervals(r) for r in masks_raw])
+        
+        token_positions = data["results"].get("token_positions", [])
+        token_positions_by_model[model_name].append(token_positions)
 
     if not get_mask_timings_by_model:
         print("No data to analyze.")
@@ -291,6 +348,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
     final_get_mask_timings: Dict[str, List[float]] = {}
     final_commit_timings: Dict[str, List[float]] = {}
     final_masks_by_model: Dict[str, List[Tuple[Tuple[int, int], ...]]] = {}
+    final_token_positions_by_model: Dict[str, List[Tuple[int, int]]] = {}
     final_model_order: List[str] = []
 
     if agg_method:
@@ -325,6 +383,14 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
                     print(f"Info: For model '{model_name}', using masks from the first of {len(mask_runs)} runs for equivalence checks.")
             else:
                 final_masks_by_model[model_name] = []
+            
+            # For token positions, use the first run
+            pos_runs = token_positions_by_model.get(model_name, [])
+            if pos_runs:
+                final_token_positions_by_model[model_name] = pos_runs[0]
+            else:
+                final_token_positions_by_model[model_name] = []
+
             final_model_order.append(model_name)
     else:  # No aggregation, unpack runs
         for model_name in model_order:
@@ -335,6 +401,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
                     final_get_mask_timings[run_name] = get_mask_timings_by_model[model_name][i]
                     final_commit_timings[run_name] = commit_timings_by_model[model_name][i]
                     final_masks_by_model[run_name] = masks_by_model[model_name][i]
+                    final_token_positions_by_model[run_name] = token_positions_by_model[model_name][i]
                     if model_name in id_to_token_by_model:
                         id_to_token_by_model[run_name] = id_to_token_by_model[model_name]
                     final_model_order.append(run_name)
@@ -342,12 +409,14 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
                 final_get_mask_timings[model_name] = get_mask_timings_by_model[model_name][0]
                 final_commit_timings[model_name] = commit_timings_by_model[model_name][0]
                 final_masks_by_model[model_name] = masks_by_model[model_name][0]
+                final_token_positions_by_model[model_name] = token_positions_by_model[model_name][0]
                 final_model_order.append(model_name)
 
     # Replace original data structures with the processed ones
     get_mask_timings_by_model = final_get_mask_timings
     commit_timings_by_model = final_commit_timings
     masks_by_model = final_masks_by_model
+    token_positions_by_model = final_token_positions_by_model
     model_order = final_model_order
 
     # Determine baseline
@@ -416,6 +485,12 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
                 print(f"  Current (numeric):  {_format_numeric_ranges(masks[i])}")
                 print(f"  Baseline (tokens):  {_format_ranges_as_tokens(baseline_masks[i], baseline_vocab)}")
                 print(f"  Current (tokens):   {_format_ranges_as_tokens(masks[i], current_vocab)}")
+
+                code_bytes = code_content_by_model.get(model_name)
+                token_positions = token_positions_by_model.get(model_name, [])
+                if code_bytes and i < len(token_positions):
+                    start_byte, end_byte = token_positions[i]
+                    _print_mismatch_context(code_bytes, start_byte, end_byte)
                 mismatches.append(i)
         # If lengths differ, count extra indices as mismatches (conservative)
         if len(baseline_masks) != len(masks):

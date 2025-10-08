@@ -37,7 +37,7 @@ local_system:
       # from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
       # from python.gss_tester.implementations.leveled_per_acc_standalone_impl import LeveledPerAccGSS as GSS
       from python.gss_tester.implementations.leveled_rs_impl import LeveledRSGSS as GSS
-      from ..common_interface import GraphProvider, TimedOutputGetMask, TimedOutputCommit
+      from ..common_interface import GraphProvider
       from ..stats import Stats
       from ..range_set import FFIRangeSet as RangeSet
       from ..range_set import SetRangeSet as RangeSetOut
@@ -784,7 +784,7 @@ local_system:
                               for sid in range(start, end + 1):
                                   yield (edge.pop, sid, dest.dest_idx)
 
-          def commit(self, token_id: int) -> Optional[TimedOutputCommit]:
+          def commit(self, token_id: int) -> Optional[Dict]:
               stats = Stats.get()
               stats.start('commit')
               token_bytes = self.id_to_token[token_id]
@@ -923,7 +923,7 @@ local_system:
               stats.stop(f'{p}.total')
               return result
 
-          def get_mask(self) -> Union[RangeSetOut, TimedOutputGetMask]:
+          def get_mask(self) -> Union[RangeSetOut, Dict]:
               stats = Stats.get()
               stats.start('get_mask')
               stats.counts['get_mask.traversal.max_depth'] = 0
@@ -1290,12 +1290,16 @@ local_system:
                   if next_group != current_group:
                       # The group has changed, so the previous sub-range has ended at i-1
                       sub_range_end_idx = i - 1
-                      start_tok_str = _format_token_bytes(id_to_token.get(sub_range_start_idx, b'<??>'))
-                      if sub_range_start_idx == sub_range_end_idx:
-                          all_parts.append(start_tok_str)
-                      else:
+                      # If the group is a recognized sequential one, we can form a range.
+                      if current_group is not None and sub_range_start_idx < sub_range_end_idx:
+                          start_tok_str = _format_token_bytes(id_to_token.get(sub_range_start_idx, b'<??>'))
                           end_tok_str = _format_token_bytes(id_to_token.get(sub_range_end_idx, b'<??>'))
                           all_parts.append(f"{start_tok_str}..{end_tok_str}")
+                      # Otherwise, print each token in the sub-range individually.
+                      else:
+                          for j in range(sub_range_start_idx, sub_range_end_idx + 1):
+                              tok_str = _format_token_bytes(id_to_token.get(j, b'<??>'))
+                              all_parts.append(tok_str)
 
                       # Start a new sub-range
                       sub_range_start_idx = i
@@ -1946,7 +1950,6 @@ local_system:
       from tqdm import tqdm
 
       from python.aug25.stats import Stats
-      from python.aug25.common_interface import TimedOutputGetMask, TimedOutputCommit
 
       # --- Helper Functions (from former example_js.py) ---
 
@@ -2300,21 +2303,9 @@ local_system:
     python/aug25/common_interface.py: |
       import os
       import sys
-      from typing import Protocol, Iterable, Optional, Tuple, TypedDict, Literal
+      from typing import Protocol, Iterable, Optional, Tuple
 
-      from .range_set import RangeSet, SetRangeSet
-
-
-      class TimedOutputGetMask(TypedDict):
-          """Custom return type for get_mask to provide specific timing data."""
-          type: Literal["timed_output"]
-          output: SetRangeSet  # The actual mask
-          time_sec: float      # The custom timing in seconds
-
-      class TimedOutputCommit(TypedDict):
-          """Custom return type for commit to provide specific timing data."""
-          type: Literal["timed_output"]
-          time_sec: float      # The custom timing in seconds
+      from .range_set import RangeSet
 
       class GraphProvider(Protocol):
           """
@@ -2341,7 +2332,7 @@ local_system:
               ...
 
 
-      __all__ = ["GraphProvider", "RangeSet", "TimedOutputGetMask", "TimedOutputCommit"]
+      __all__ = ["GraphProvider", "RangeSet"]
     python/aug25/create_additional_benchmark_plots.py: |-
       #!/usr/bin/env python
       """
@@ -5119,7 +5110,7 @@ local_system:
       # from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
       # from python.gss_tester.implementations.leveled_per_acc_standalone_impl import LeveledPerAccGSS as GSS
       from python.gss_tester.implementations.leveled_rs_impl import LeveledRSGSS as GSS
-      from ..common_interface import GraphProvider, TimedOutputGetMask, TimedOutputCommit
+      from ..common_interface import GraphProvider
       from ..stats import Stats
       from ..range_set import FFIRangeSet as RangeSet
       from ..range_set import SetRangeSet as RangeSetOut
@@ -5866,7 +5857,7 @@ local_system:
                               for sid in range(start, end + 1):
                                   yield (edge.pop, sid, dest.dest_idx)
 
-          def commit(self, token_id: int) -> Optional[TimedOutputCommit]:
+          def commit(self, token_id: int) -> Optional[Dict]:
               stats = Stats.get()
               stats.start('commit')
               token_bytes = self.id_to_token[token_id]
@@ -6005,7 +5996,7 @@ local_system:
               stats.stop(f'{p}.total')
               return result
 
-          def get_mask(self) -> Union[RangeSetOut, TimedOutputGetMask]:
+          def get_mask(self) -> Union[RangeSetOut, Dict]:
               stats = Stats.get()
               stats.start('get_mask')
               stats.counts['get_mask.traversal.max_depth'] = 0
@@ -6399,6 +6390,50 @@ local_system:
                   parts.append(f"{start}..{end}")
           return ", ".join(parts)
 
+      def _print_mismatch_context(code_bytes: bytes, start_byte: int, end_byte: int):
+          """Prints the source line and context for a token mismatch."""
+          # Find the line containing the start of the token
+          line_start_pos = code_bytes.rfind(b'\n', 0, start_byte) + 1
+          line_end_pos = code_bytes.find(b'\n', start_byte)
+          if line_end_pos == -1:
+              line_end_pos = len(code_bytes)
+
+          # Find context lines
+          prev_line_start_pos = code_bytes.rfind(b'\n', 0, line_start_pos - 1) + 1
+          next_line_end_pos = code_bytes.find(b'\n', line_end_pos + 1)
+          if next_line_end_pos == -1:
+              next_line_end_pos = len(code_bytes)
+
+          # Get line numbers
+          line_num = code_bytes.count(b'\n', 0, line_start_pos) + 1
+
+          # Extract and decode lines, handling potential errors
+          def decode_line(b: bytes) -> str:
+              try:
+                  return b.decode('utf-8')
+              except UnicodeDecodeError:
+                  return repr(b)
+
+          prev_line = decode_line(code_bytes[prev_line_start_pos:line_start_pos-1]) if line_start_pos > 0 else ""
+          current_line = decode_line(code_bytes[line_start_pos:line_end_pos])
+          next_line = decode_line(code_bytes[line_end_pos+1:next_line_end_pos]) if line_end_pos < len(code_bytes) else ""
+
+          # Calculate column and length for the pointer
+          start_col = start_byte - line_start_pos
+          # The token might span multiple lines. For visualization, we'll cap it at the end of the current line.
+          token_len_on_line = min(end_byte, line_end_pos) - start_byte
+
+          # Print with context
+          print(f"  Mismatch context (line {line_num}):")
+          if line_num > 1 and prev_line:
+              print(f"    {line_num-1: >4} | {prev_line}")
+          print(f"    {line_num: >4} | {current_line}")
+          # Pointer line
+          pointer = ' ' * start_col + '^' * max(1, token_len_on_line) # ensure at least one ^
+          print(f"         | {pointer}")
+          if next_line:
+              print(f"    {line_num+1: >4} | {next_line}")
+
       def _generate_and_print_summary(df: pd.DataFrame, title: str, equivalence_info: Optional[Dict[str, bool]] = None, mismatch_counts: Optional[Dict[str, List[int]]] = None):
           """Calculates, formats, and prints a summary statistics table for a given DataFrame."""
           print(f"\n--- {title} ---")
@@ -6454,6 +6489,8 @@ local_system:
           masks_by_model: Dict[str, List[List[Tuple[Tuple[int, int], ...]]]] = {}
           get_mask_timings_by_model: Dict[str, List[List[float]]] = {}
           id_to_token_by_model: Dict[str, Dict[int, bytes]] = {}
+          token_positions_by_model: Dict[str, List[List[Tuple[int, int]]]] = {}
+          code_content_by_model: Dict[str, bytes] = {}
 
           model_order: List[str] = []
 
@@ -6464,6 +6501,7 @@ local_system:
 
               model_script = data.get("model_script") or data.get("competitor_script")  # legacy fallback
               grammar_file = data.get("inputs", {}).get("grammar_file")
+              code_file = data.get("inputs", {}).get("code_file")
 
               model_stem = Path(model_script).stem if model_script else Path(file_path).stem
               
@@ -6495,12 +6533,19 @@ local_system:
                       id_to_token_by_model[model_name] = id_to_token
                   except Exception as e:
                       print(f"Warning: could not load vocab from {grammar_file} for {model_name}: {e}")
+              
+              if model_name not in code_content_by_model and code_file:
+                  try:
+                      code_content_by_model[model_name] = Path(code_file).read_bytes()
+                  except Exception as e:
+                      print(f"Warning: could not load code file {code_file} for {model_name}: {e}")
 
               # Initialize if first time seeing model
               if model_name not in get_mask_timings_by_model:
                   get_mask_timings_by_model[model_name] = []
                   commit_timings_by_model[model_name] = []
                   masks_by_model[model_name] = []
+                  token_positions_by_model[model_name] = []
 
               timings = data["results"].get("get_mask_timings_seconds", [])
               get_mask_timings_by_model[model_name].append(timings)
@@ -6514,6 +6559,9 @@ local_system:
                   masks_by_model[model_name].append([])
               else:
                   masks_by_model[model_name].append([_normalize_intervals(r) for r in masks_raw])
+              
+              token_positions = data["results"].get("token_positions", [])
+              token_positions_by_model[model_name].append(token_positions)
 
           if not get_mask_timings_by_model:
               print("No data to analyze.")
@@ -6523,6 +6571,7 @@ local_system:
           final_get_mask_timings: Dict[str, List[float]] = {}
           final_commit_timings: Dict[str, List[float]] = {}
           final_masks_by_model: Dict[str, List[Tuple[Tuple[int, int], ...]]] = {}
+          final_token_positions_by_model: Dict[str, List[Tuple[int, int]]] = {}
           final_model_order: List[str] = []
 
           if agg_method:
@@ -6557,6 +6606,14 @@ local_system:
                           print(f"Info: For model '{model_name}', using masks from the first of {len(mask_runs)} runs for equivalence checks.")
                   else:
                       final_masks_by_model[model_name] = []
+                  
+                  # For token positions, use the first run
+                  pos_runs = token_positions_by_model.get(model_name, [])
+                  if pos_runs:
+                      final_token_positions_by_model[model_name] = pos_runs[0]
+                  else:
+                      final_token_positions_by_model[model_name] = []
+
                   final_model_order.append(model_name)
           else:  # No aggregation, unpack runs
               for model_name in model_order:
@@ -6567,6 +6624,7 @@ local_system:
                           final_get_mask_timings[run_name] = get_mask_timings_by_model[model_name][i]
                           final_commit_timings[run_name] = commit_timings_by_model[model_name][i]
                           final_masks_by_model[run_name] = masks_by_model[model_name][i]
+                          final_token_positions_by_model[run_name] = token_positions_by_model[model_name][i]
                           if model_name in id_to_token_by_model:
                               id_to_token_by_model[run_name] = id_to_token_by_model[model_name]
                           final_model_order.append(run_name)
@@ -6574,12 +6632,14 @@ local_system:
                       final_get_mask_timings[model_name] = get_mask_timings_by_model[model_name][0]
                       final_commit_timings[model_name] = commit_timings_by_model[model_name][0]
                       final_masks_by_model[model_name] = masks_by_model[model_name][0]
+                      final_token_positions_by_model[model_name] = token_positions_by_model[model_name][0]
                       final_model_order.append(model_name)
 
           # Replace original data structures with the processed ones
           get_mask_timings_by_model = final_get_mask_timings
           commit_timings_by_model = final_commit_timings
           masks_by_model = final_masks_by_model
+          token_positions_by_model = final_token_positions_by_model
           model_order = final_model_order
 
           # Determine baseline
@@ -6648,6 +6708,12 @@ local_system:
                       print(f"  Current (numeric):  {_format_numeric_ranges(masks[i])}")
                       print(f"  Baseline (tokens):  {_format_ranges_as_tokens(baseline_masks[i], baseline_vocab)}")
                       print(f"  Current (tokens):   {_format_ranges_as_tokens(masks[i], current_vocab)}")
+
+                      code_bytes = code_content_by_model.get(model_name)
+                      token_positions = token_positions_by_model.get(model_name, [])
+                      if code_bytes and i < len(token_positions):
+                          start_byte, end_byte = token_positions[i]
+                          _print_mismatch_context(code_bytes, start_byte, end_byte)
                       mismatches.append(i)
               # If lengths differ, count extra indices as mismatches (conservative)
               if len(baseline_masks) != len(masks):
@@ -7032,7 +7098,6 @@ local_system:
       from tqdm import tqdm
 
       from python.aug25.stats import Stats
-      from python.aug25.common_interface import TimedOutputGetMask, TimedOutputCommit
 
       # --- Helper Functions (from former example_js.py) ---
 
@@ -7065,7 +7130,7 @@ local_system:
                   node = node.setdefault(byte_val, {})
               node['<ID>'] = token_id
 
-          token_ids = []
+          tokens_with_pos = []
           pos = 0
           while pos < len(text_bytes):
               # Find the longest possible token match starting at the current position.
@@ -7087,11 +7152,11 @@ local_system:
                       break
               
               if longest_match_len > 0:
-                  token_ids.append(longest_match_id)
+                  tokens_with_pos.append((longest_match_id, pos, pos + longest_match_len))
                   pos += longest_match_len
               else:
                   raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
-          return token_ids
+          return tokens_with_pos
 
       def load_model_class(model_path: Path):
           """Dynamically loads the 'Model' class from a Python file."""
@@ -7248,7 +7313,9 @@ local_system:
           # 4. Tokenize input code
           print(f"Loading and tokenizing code from: {args.code}")
           code_bytes = args.code.read_bytes()
-          token_ids = greedy_tokenizer(code_bytes, id_to_token)
+          tokens_with_pos = greedy_tokenizer(code_bytes, id_to_token)
+          token_ids = [t[0] for t in tokens_with_pos]
+          token_positions = [(t[1], t[2]) for t in tokens_with_pos]
           print(f"Tokenized into {len(token_ids)} tokens.")
 
           get_mask_timings: list[float] = []
@@ -7331,6 +7398,7 @@ local_system:
                   "get_mask_timings_seconds": get_mask_timings,
                   "commit_timings_seconds": commit_timings,
                   "masks_ranges": masks_ranges,
+                  "token_positions": token_positions,
                   "summary_stats": summary_stats,
               }
           }
@@ -7386,21 +7454,9 @@ local_system:
     python/aug25/common_interface.py: |
       import os
       import sys
-      from typing import Protocol, Iterable, Optional, Tuple, TypedDict, Literal
+      from typing import Protocol, Iterable, Optional, Tuple
 
-      from .range_set import RangeSet, SetRangeSet
-
-
-      class TimedOutputGetMask(TypedDict):
-          """Custom return type for get_mask to provide specific timing data."""
-          type: Literal["timed_output"]
-          output: SetRangeSet  # The actual mask
-          time_sec: float      # The custom timing in seconds
-
-      class TimedOutputCommit(TypedDict):
-          """Custom return type for commit to provide specific timing data."""
-          type: Literal["timed_output"]
-          time_sec: float      # The custom timing in seconds
+      from .range_set import RangeSet
 
       class GraphProvider(Protocol):
           """
@@ -7427,7 +7483,7 @@ local_system:
               ...
 
 
-      __all__ = ["GraphProvider", "RangeSet", "TimedOutputGetMask", "TimedOutputCommit"]
+      __all__ = ["GraphProvider", "RangeSet"]
     python/aug25/create_additional_benchmark_plots.py: |-
       #!/usr/bin/env python
       """
@@ -10246,7 +10302,7 @@ messages:
       # from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
       # from python.gss_tester.implementations.leveled_per_acc_standalone_impl import LeveledPerAccGSS as GSS
       from python.gss_tester.implementations.leveled_rs_impl import LeveledRSGSS as GSS
-      from ..common_interface import GraphProvider, TimedOutputGetMask, TimedOutputCommit
+      from ..common_interface import GraphProvider
       from ..stats import Stats
       from ..range_set import FFIRangeSet as RangeSet
       from ..range_set import SetRangeSet as RangeSetOut
@@ -10993,7 +11049,7 @@ messages:
                               for sid in range(start, end + 1):
                                   yield (edge.pop, sid, dest.dest_idx)
 
-          def commit(self, token_id: int) -> Optional[TimedOutputCommit]:
+          def commit(self, token_id: int) -> Optional[Dict]:
               stats = Stats.get()
               stats.start('commit')
               token_bytes = self.id_to_token[token_id]
@@ -11132,7 +11188,7 @@ messages:
               stats.stop(f'{p}.total')
               return result
 
-          def get_mask(self) -> Union[RangeSetOut, TimedOutputGetMask]:
+          def get_mask(self) -> Union[RangeSetOut, Dict]:
               stats = Stats.get()
               stats.start('get_mask')
               stats.counts['get_mask.traversal.max_depth'] = 0
@@ -11509,12 +11565,16 @@ messages:
                   if next_group != current_group:
                       # The group has changed, so the previous sub-range has ended at i-1
                       sub_range_end_idx = i - 1
-                      start_tok_str = _format_token_bytes(id_to_token.get(sub_range_start_idx, b'<??>'))
-                      if sub_range_start_idx == sub_range_end_idx:
-                          all_parts.append(start_tok_str)
-                      else:
+                      # If the group is a recognized sequential one, we can form a range.
+                      if current_group is not None and sub_range_start_idx < sub_range_end_idx:
+                          start_tok_str = _format_token_bytes(id_to_token.get(sub_range_start_idx, b'<??>'))
                           end_tok_str = _format_token_bytes(id_to_token.get(sub_range_end_idx, b'<??>'))
                           all_parts.append(f"{start_tok_str}..{end_tok_str}")
+                      # Otherwise, print each token in the sub-range individually.
+                      else:
+                          for j in range(sub_range_start_idx, sub_range_end_idx + 1):
+                              tok_str = _format_token_bytes(id_to_token.get(j, b'<??>'))
+                              all_parts.append(tok_str)
 
                       # Start a new sub-range
                       sub_range_start_idx = i
@@ -12170,7 +12230,6 @@ messages:
       from tqdm import tqdm
 
       from python.aug25.stats import Stats
-      from python.aug25.common_interface import TimedOutputGetMask, TimedOutputCommit
 
       # --- Helper Functions (from former example_js.py) ---
 
@@ -12529,21 +12588,9 @@ messages:
       ```python 'python/aug25/common_interface.py'
       import os
       import sys
-      from typing import Protocol, Iterable, Optional, Tuple, TypedDict, Literal
+      from typing import Protocol, Iterable, Optional, Tuple
 
-      from .range_set import RangeSet, SetRangeSet
-
-
-      class TimedOutputGetMask(TypedDict):
-          """Custom return type for get_mask to provide specific timing data."""
-          type: Literal["timed_output"]
-          output: SetRangeSet  # The actual mask
-          time_sec: float      # The custom timing in seconds
-
-      class TimedOutputCommit(TypedDict):
-          """Custom return type for commit to provide specific timing data."""
-          type: Literal["timed_output"]
-          time_sec: float      # The custom timing in seconds
+      from .range_set import RangeSet
 
       class GraphProvider(Protocol):
           """
@@ -12570,7 +12617,7 @@ messages:
               ...
 
 
-      __all__ = ["GraphProvider", "RangeSet", "TimedOutputGetMask", "TimedOutputCommit"]
+      __all__ = ["GraphProvider", "RangeSet"]
 
       ```
     metadata:
@@ -15365,16 +15412,13 @@ messages:
       filename: python/run_benchmarks.sh
   - user: |-
       ```
-      Mask mismatch at token index 1 for model precompute3_model_pure_python_opt3__js_grammar_constraint
+      Mask mismatch at token index 1 for model rust_model__js_grammar_constraint
         Baseline (numeric): 9..10, 14..24, 26, 28, 32..57, 62, 64..89, 95..96
-        Current (numeric):  14, 26, 95..96
-        Baseline (tokens):  '*'..'+', '/', '0'..'9', ';', '=', 'A'..'Z', '_', 'a'..'z', '\n'..' '
-        Current (tokens):   '/', ';', '\n'..' '
+        Current (numeric):  9..10, 14, 26, 28, 95..96
+        Baseline (tokens):  '*', '+', '/', '0'..'9', ';', '=', 'A'..'Z', '_', 'a'..'z', '\n', ' '
+        Current (tokens):   '*', '+', '/', ';', '=', '\n', ' '
       ```
-      I like this overall... but some of the ranges aren't understandable. eg what is `'*'..'+'`? or `'\n'..' '`?
-      I understand alphabetic and numeric ranges, but no other ranges.
-      Make it so only alphabetic and numeric chars can displayed in ranges (in the represented string ranges, I'm not talking about numeric ranges here - don't touch those).
-      BUT we shouldn't have `'a'..'Z'` or `'0'..'Z'`... ie there are three kinds of ranges allowed that should be displayed whenever possible: ranges containing just numbers, ranges containing just uppercase letters, and ranges containing just lowercase letters.
+      It'd be nice if we could see exactly *where* the mismatch happened. In Rust, when the compiler wants to point something out, it shows the line, a bit of context, and underlines the segment of the line it's referring to. That'd be nice.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -15393,87 +15437,271 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Dealing with arbitrary character ranges can be confusing. Here are the step-by-step instructions to adjust the token range formatting, followed by the corresponding git diff.
+      Of course. Displaying the source code context for a mismatch is a great idea for improving debuggability. Here are the step-by-step instructions and the corresponding git diffs to implement this feature.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `python/aug25/benchmark_analyzer.py`**.
+      #### 1. Update the Tokenizer to Track Positions
 
-      2.  **Navigate to the `_format_ranges_as_tokens` function**. You can find it around line 135.
+      First, we need to modify the `greedy_tokenizer` in `benchmark_runner.py` to not only return the token IDs but also their start and end byte positions in the source file. We'll then update the benchmark runner to save this positional information in the results JSON.
 
-      3.  **Locate the logic that formats the output string**. Inside the function, there's a loop that processes ranges. Within that loop, find the `if next_group != current_group:` block. The code to be changed is inside this block, around line 162.
+      **File: `python/aug25/benchmark_runner.py`**
 
-      4.  **Modify the formatting logic**. You will replace the current implementation, which creates a range for any consecutive sequence of tokens, with new logic that restricts range formatting to only digits, uppercase letters, or lowercase letters. For all other sequences, each token will be printed individually.
+      1.  **In the `greedy_tokenizer` function:**
+          *   Change the initialized list from `token_ids = []` to `tokens_with_pos = []`.
+          *   Instead of just appending the token ID, append a tuple containing the ID and its start/end byte offsets: `tokens_with_pos.append((longest_match_id, pos, pos + longest_match_len))`.
+          *   Update the function to `return tokens_with_pos`.
 
-          Replace the following lines:
-          ```python
-                      start_tok_str = _format_token_bytes(id_to_token.get(sub_range_start_idx, b'<??>'))
-                      if sub_range_start_idx == sub_range_end_idx:
-                          all_parts.append(start_tok_str)
-                      else:
-                          end_tok_str = _format_token_bytes(id_to_token.get(sub_range_end_idx, b'<??>'))
-                          all_parts.append(f"{start_tok_str}..{end_tok_str}")
-          ```
+      2.  **In the `run_benchmark` function:**
+          *   Adjust the call to `greedy_tokenizer` to handle the new return format.
+          *   Create two new lists: `token_ids` for the benchmark loop and `token_positions` to store the byte offsets.
+          *   Add the `token_positions` list to the `output_data` dictionary that gets saved to the JSON results file.
 
-          with this new block of code:
-          ```python
-                      # If the group is a recognized sequential one, we can form a range.
-                      if current_group is not None and sub_range_start_idx < sub_range_end_idx:
-                          start_tok_str = _format_token_bytes(id_to_token.get(sub_range_start_idx, b'<??>'))
-                          end_tok_str = _format_token_bytes(id_to_token.get(sub_range_end_idx, b'<??>'))
-                          all_parts.append(f"{start_tok_str}..{end_tok_str}")
-                      # Otherwise, print each token in the sub-range individually.
-                      else:
-                          for j in range(sub_range_start_idx, sub_range_end_idx + 1):
-                              tok_str = _format_token_bytes(id_to_token.get(j, b'<??>'))
-                              all_parts.append(tok_str)
-          ```
+      #### 2. Enhance the Analyzer to Display Context
 
-      5.  **Save the file**. The analyzer will now produce more readable token range outputs.
+      Next, we'll update `benchmark_analyzer.py` to use this new positional data. We'll add a new function to format and print the source code snippet where the mismatch occurred.
 
-      ### Git Diff
+      **File: `python/aug25/benchmark_analyzer.py`**
 
-      Here is the git patch for the change. You can apply it directly to your project.
+      1.  **Add a new helper function `_print_mismatch_context`:**
+          *   Before the `_generate_and_print_summary` function, add a new function named `_print_mismatch_context`.
+          *   This function will take the source code (as bytes) and the token's start/end positions. It will find the line number, print the line itself, and then print a second line with a `^` pointer to highlight the exact location of the token.
+
+      2.  **Update the `analyze_results` function:**
+          *   **Load Data:** Modify the data loading loop to read the new `token_positions` from each result file. Also, read the `code_file` path and load its contents.
+          *   **Aggregate Data:** Ensure the aggregation logic for repeated runs correctly handles the new `token_positions_by_model` data structure (we'll just use the data from the first run, similar to how masks are handled).
+          *   **Report Mismatches:** In the loop where mask differences are detected and printed, add a call to your new `_print_mismatch_context` function. This will display the source code context immediately after the numeric and token-based diffs.
+
+      ### Git Diffs
+
+      Here are the git diffs to apply these changes.
 
       ```diff
       diff --git a/python/aug25/benchmark_analyzer.py b/python/aug25/benchmark_analyzer.py
       --- a/python/aug25/benchmark_analyzer.py
       +++ b/python/aug25/benchmark_analyzer.py
-      @@ -160,13 +160,16 @@
-                   if next_group != current_group:
-                       # The group has changed, so the previous sub-range has ended at i-1
-                       sub_range_end_idx = i - 1
-      -                start_tok_str = _format_token_bytes(id_to_token.get(sub_range_start_idx, b'<??>'))
-      -                if sub_range_start_idx == sub_range_end_idx:
-      -                    all_parts.append(start_tok_str)
-      +                # If the group is a recognized sequential one, we can form a range.
-      +                if current_group is not None and sub_range_start_idx < sub_range_end_idx:
-      +                    start_tok_str = _format_token_bytes(id_to_token.get(sub_range_start_idx, b'<??>'))
-      +                    end_tok_str = _format_token_bytes(id_to_token.get(sub_range_end_idx, b'<??>'))
-      +                    all_parts.append(f"{start_tok_str}..{end_tok_str}")
-      +                # Otherwise, print each token in the sub-range individually.
-                       else:
-      -                    end_tok_str = _format_token_bytes(id_to_token.get(sub_range_end_idx, b'<??>'))
-      -                    all_parts.append(f"{start_tok_str}..{end_tok_str}")
-      +                    for j in range(sub_range_start_idx, sub_range_end_idx + 1):
-      +                        tok_str = _format_token_bytes(id_to_token.get(j, b'<??>'))
-      +                        all_parts.append(tok_str)
+      @@ -178,6 +178,47 @@
+                   parts.append(f"{start}..{end}")
+           return ", ".join(parts)
        
-                       # Start a new sub-range
-                       sub_range_start_idx = i
+      +def _print_mismatch_context(code_bytes: bytes, start_byte: int, end_byte: int):
+      +    """Prints the source line and context for a token mismatch."""
+      +    # Find the line containing the start of the token
+      +    line_start_pos = code_bytes.rfind(b'\n', 0, start_byte) + 1
+      +    line_end_pos = code_bytes.find(b'\n', start_byte)
+      +    if line_end_pos == -1:
+      +        line_end_pos = len(code_bytes)
+      +
+      +    # Find context lines
+      +    prev_line_start_pos = code_bytes.rfind(b'\n', 0, line_start_pos - 1) + 1
+      +    next_line_end_pos = code_bytes.find(b'\n', line_end_pos + 1)
+      +    if next_line_end_pos == -1:
+      +        next_line_end_pos = len(code_bytes)
+      +
+      +    # Get line numbers
+      +    line_num = code_bytes.count(b'\n', 0, line_start_pos) + 1
+      +
+      +    # Extract and decode lines, handling potential errors
+      +    def decode_line(b: bytes) -> str:
+      +        try:
+      +            return b.decode('utf-8')
+      +        except UnicodeDecodeError:
+      +            return repr(b)
+      +
+      +    prev_line = decode_line(code_bytes[prev_line_start_pos:line_start_pos-1]) if line_start_pos > 0 else ""
+      +    current_line = decode_line(code_bytes[line_start_pos:line_end_pos])
+      +    next_line = decode_line(code_bytes[line_end_pos+1:next_line_end_pos]) if line_end_pos < len(code_bytes) else ""
+      +
+      +    # Calculate column and length for the pointer
+      +    start_col = start_byte - line_start_pos
+      +    # The token might span multiple lines. For visualization, we'll cap it at the end of the current line.
+      +    token_len_on_line = min(end_byte, line_end_pos) - start_byte
+      +
+      +    # Print with context
+      +    print(f"  Mismatch context (line {line_num}):")
+      +    if line_num > 1 and prev_line:
+      +        print(f"    {line_num-1: >4} | {prev_line}")
+      +    print(f"    {line_num: >4} | {current_line}")
+      +    # Pointer line
+      +    pointer = ' ' * start_col + '^' * max(1, token_len_on_line) # ensure at least one ^
+      +    print(f"         | {pointer}")
+      +    if next_line:
+      +        print(f"    {line_num+1: >4} | {next_line}")
+      +
+       def _generate_and_print_summary(df: pd.DataFrame, title: str, equivalence_info: Optional[Dict[str, bool]] = None, mismatch_counts: Optional[Dict[str, List[int]]] = None):
+           """Calculates, formats, and prints a summary statistics table for a given DataFrame."""
+           print(f"\n--- {title} ---")
+      @@ -233,6 +274,8 @@
+           masks_by_model: Dict[str, List[List[Tuple[Tuple[int, int], ...]]]] = {}
+           get_mask_timings_by_model: Dict[str, List[List[float]]] = {}
+           id_to_token_by_model: Dict[str, Dict[int, bytes]] = {}
+      +    token_positions_by_model: Dict[str, List[List[Tuple[int, int]]]] = {}
+      +    code_content_by_model: Dict[str, bytes] = {}
+       
+           model_order: List[str] = []
+       
+      @@ -243,6 +286,7 @@
+       
+               model_script = data.get("model_script") or data.get("competitor_script")  # legacy fallback
+               grammar_file = data.get("inputs", {}).get("grammar_file")
+      +        code_file = data.get("inputs", {}).get("code_file")
+       
+               model_stem = Path(model_script).stem if model_script else Path(file_path).stem
+               
+      @@ -274,12 +318,19 @@
+                       id_to_token_by_model[model_name] = id_to_token
+                   except Exception as e:
+                       print(f"Warning: could not load vocab from {grammar_file} for {model_name}: {e}")
+      +        
+      +        if model_name not in code_content_by_model and code_file:
+      +            try:
+      +                code_content_by_model[model_name] = Path(code_file).read_bytes()
+      +            except Exception as e:
+      +                print(f"Warning: could not load code file {code_file} for {model_name}: {e}")
+       
+               # Initialize if first time seeing model
+               if model_name not in get_mask_timings_by_model:
+                   get_mask_timings_by_model[model_name] = []
+                   commit_timings_by_model[model_name] = []
+                   masks_by_model[model_name] = []
+      +            token_positions_by_model[model_name] = []
+       
+               timings = data["results"].get("get_mask_timings_seconds", [])
+               get_mask_timings_by_model[model_name].append(timings)
+      @@ -293,6 +344,9 @@
+                   masks_by_model[model_name].append([])
+               else:
+                   masks_by_model[model_name].append([_normalize_intervals(r) for r in masks_raw])
+      +        
+      +        token_positions = data["results"].get("token_positions", [])
+      +        token_positions_by_model[model_name].append(token_positions)
+       
+           if not get_mask_timings_by_model:
+               print("No data to analyze.")
+      @@ -302,6 +356,7 @@
+           final_get_mask_timings: Dict[str, List[float]] = {}
+           final_commit_timings: Dict[str, List[float]] = {}
+           final_masks_by_model: Dict[str, List[Tuple[Tuple[int, int], ...]]] = {}
+      +    final_token_positions_by_model: Dict[str, List[Tuple[int, int]]] = {}
+           final_model_order: List[str] = []
+       
+           if agg_method:
+      @@ -334,6 +389,14 @@
+                           print(f"Info: For model '{model_name}', using masks from the first of {len(mask_runs)} runs for equivalence checks.")
+                   else:
+                       final_masks_by_model[model_name] = []
+      +            
+      +            # For token positions, use the first run
+      +            pos_runs = token_positions_by_model.get(model_name, [])
+      +            if pos_runs:
+      +                final_token_positions_by_model[model_name] = pos_runs[0]
+      +            else:
+      +                final_token_positions_by_model[model_name] = []
+      +
+                   final_model_order.append(model_name)
+           else:  # No aggregation, unpack runs
+               for model_name in model_order:
+      @@ -344,6 +407,7 @@
+                           final_get_mask_timings[run_name] = get_mask_timings_by_model[model_name][i]
+                           final_commit_timings[run_name] = commit_timings_by_model[model_name][i]
+                           final_masks_by_model[run_name] = masks_by_model[model_name][i]
+      +                    final_token_positions_by_model[run_name] = token_positions_by_model[model_name][i]
+                           if model_name in id_to_token_by_model:
+                               id_to_token_by_model[run_name] = id_to_token_by_model[model_name]
+                           final_model_order.append(run_name)
+      @@ -351,12 +415,14 @@
+                       final_get_mask_timings[model_name] = get_mask_timings_by_model[model_name][0]
+                       final_commit_timings[model_name] = commit_timings_by_model[model_name][0]
+                       final_masks_by_model[model_name] = masks_by_model[model_name][0]
+      +                final_token_positions_by_model[model_name] = token_positions_by_model[model_name][0]
+                       final_model_order.append(model_name)
+       
+           # Replace original data structures with the processed ones
+           get_mask_timings_by_model = final_get_mask_timings
+           commit_timings_by_model = final_commit_timings
+           masks_by_model = final_masks_by_model
+      +    token_positions_by_model = final_token_positions_by_model
+           model_order = final_model_order
+       
+           # Determine baseline
+      @@ -422,6 +488,12 @@
+                       print(f"  Current (numeric):  {_format_numeric_ranges(masks[i])}")
+                       print(f"  Baseline (tokens):  {_format_ranges_as_tokens(baseline_masks[i], baseline_vocab)}")
+                       print(f"  Current (tokens):   {_format_ranges_as_tokens(masks[i], current_vocab)}")
+      +
+      +                code_bytes = code_content_by_model.get(model_name)
+      +                token_positions = token_positions_by_model.get(model_name, [])
+      +                if code_bytes and i < len(token_positions):
+      +                    start_byte, end_byte = token_positions[i]
+      +                    _print_mismatch_context(code_bytes, start_byte, end_byte)
+                       mismatches.append(i)
+               # If lengths differ, count extra indices as mismatches (conservative)
+               if len(baseline_masks) != len(masks):
+
+      ``````diff
+      diff --git a/python/aug25/benchmark_runner.py b/python/aug25/benchmark_runner.py
+      --- a/python/aug25/benchmark_runner.py
+      +++ b/python/aug25/benchmark_runner.py
+      @@ -82,7 +82,7 @@
+                   node = node.setdefault(byte_val, {})
+               node['<ID>'] = token_id
+       
+      -    token_ids = []
+      +    tokens_with_pos = []
+           pos = 0
+           while pos < len(text_bytes):
+               # Find the longest possible token match starting at the current position.
+      @@ -102,11 +102,11 @@
+                       break
+               
+               if longest_match_len > 0:
+      -            token_ids.append(longest_match_id)
+      +            tokens_with_pos.append((longest_match_id, pos, pos + longest_match_len))
+                   pos += longest_match_len
+               else:
+                   raise ValueError(f"Failed to tokenize. No token found for prefix: {text_bytes[pos:pos+20]!r}")
+      -    return token_ids
+      +    return tokens_with_pos
+       
+       def load_model_class(model_path: Path):
+           """Dynamically loads the 'Model' class from a Python file."""
+      @@ -262,7 +262,9 @@
+           # 4. Tokenize input code
+           print(f"Loading and tokenizing code from: {args.code}")
+           code_bytes = args.code.read_bytes()
+      -    token_ids = greedy_tokenizer(code_bytes, id_to_token)
+      +    tokens_with_pos = greedy_tokenizer(code_bytes, id_to_token)
+      +    token_ids = [t[0] for t in tokens_with_pos]
+      +    token_positions = [(t[1], t[2]) for t in tokens_with_pos]
+           print(f"Tokenized into {len(token_ids)} tokens.")
+       
+           get_mask_timings: list[float] = []
+      @@ -340,6 +342,7 @@
+                   "get_mask_timings_seconds": get_mask_timings,
+                   "commit_timings_seconds": commit_timings,
+                   "masks_ranges": masks_ranges,
+      +            "token_positions": token_positions,
+                   "summary_stats": summary_stats,
+               }
+           }
 
       ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
+      Found 2 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
       Identified target file: python/aug25/benchmark_analyzer.py
       Applying patch to 'python/aug25/benchmark_analyzer.py' using custom patcher...
       Successfully applied patch and wrote to python/aug25/benchmark_analyzer.py.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: python/aug25/benchmark_runner.py
+      Applying patch to 'python/aug25/benchmark_runner.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/benchmark_runner.py.
     metadata:
-  - user: 'Changes committed with message: "Improve token range readability in benchmark_analyzer
-      by restricting range formatting to contiguous numeric/alpha sequences"'
+  - user: 'Changes committed with message: "Enhance mask mismatch reporting by including
+      source code context for token positions."'
     metadata:
 ...
