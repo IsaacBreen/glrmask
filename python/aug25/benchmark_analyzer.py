@@ -29,7 +29,6 @@ def _normalize_intervals(ranges: Optional[List[List[int]]]) -> Tuple[Tuple[int, 
     merged.append((cs, ce))
     return tuple(merged)
 
-
 def _print_vocab_summary(id_to_token: Dict[int, bytes]):
     """Prints a summarized, readable version of the vocabulary."""
     print("\n--- Vocabulary Reference (Baseline) ---")
@@ -44,51 +43,91 @@ def _print_vocab_summary(id_to_token: Dict[int, bytes]):
         return
 
     sorted_ids = sorted(id_to_token.keys())
-    digits = {ord(c) for c in "0123456789"}
-    lower = {ord(c) for c in "abcdefghijklmnopqrstuvwxyz"}
-    upper = {ord(c) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+    
+    digits_map = {ord(c) for c in "0123456789"}
+    lower_map = {ord(c) for c in "abcdefghijklmnopqrstuvwxyz"}
+    upper_map = {ord(c) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+    
+    def get_token_group(token_id, id_to_token):
+        tok = id_to_token.get(token_id)
+        if tok is None or len(tok) != 1:
+            return None
+        byte_val = tok[0]
+        if byte_val in digits_map: return "digits"
+        if byte_val in lower_map: return "lowercase"
+        if byte_val in upper_map: return "uppercase"
+        return None
 
     i = 0
     while i < len(sorted_ids):
-        start_id = sorted_ids[i]
-        end_id = start_id
-        j = i + 1
-        while j < len(sorted_ids) and sorted_ids[j] == end_id + 1:
-            end_id = sorted_ids[j]
-            j += 1
+        current_id = sorted_ids[i]
+        current_tok = id_to_token[current_id]
+        group = get_token_group(current_id, id_to_token)
 
-        start_tok, end_tok = id_to_token[start_id], id_to_token[end_id]
-        range_str = f"[{start_id}]" if start_id == end_id else f"[{start_id}..{end_id}]"
-
-        token_range = range(start_id, end_id + 1)
-        is_single_byte = all(len(id_to_token.get(k, b'')) == 1 for k in token_range)
-        
-        group_name = ""
-        if is_single_byte and len(token_range) > 2:
-            bytes_in_range = {id_to_token[k][0] for k in token_range}
-            if bytes_in_range.issubset(digits): group_name = " (digits)"
-            elif bytes_in_range.issubset(lower): group_name = " (lowercase)"
-            elif bytes_in_range.issubset(upper): group_name = " (uppercase)"
-
-        if start_id == end_id:
-            print(f"  - {range_str:<12}: {repr(start_tok)}")
+        if group:
+            start_id = current_id
+            end_id = current_id
+            j = i + 1
+            while j < len(sorted_ids):
+                next_id = sorted_ids[j]
+                if next_id == end_id + 1 and get_token_group(next_id, id_to_token) == group:
+                    end_id = next_id
+                    j += 1
+                else:
+                    break
+            
+            start_tok = id_to_token[start_id]
+            end_tok = id_to_token[end_id]
+            range_str = f"[{start_id}..{end_id}]"
+            print(f"  - {range_str:<12}: {repr(start_tok)}..{repr(end_tok)} ({group})")
+            i = j
         else:
-            print(f"  - {range_str:<12}: {repr(start_tok)}..{repr(end_tok)}{group_name}")
-        i = j
+            range_str = f"[{current_id}]"
+            print(f"  - {range_str:<12}: {repr(current_tok)}")
+            i += 1
     print("-------------------------------------\n")
 
 def _format_ranges_as_tokens(ranges: Tuple[Tuple[int, int], ...], id_to_token: Dict[int, bytes]) -> str:
     """Converts token ID ranges to a summary string of token representations."""
     if not id_to_token:
         return "[(vocab not loaded)]"
+
+    digits_bytes = {ord(c) for c in "0123456789"}
+    lower_bytes = {ord(c) for c in "abcdefghijklmnopqrstuvwxyz"}
+    upper_bytes = {ord(c) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+
+    def get_range_type(start, end, id_to_token):
+        if start > end: return None
+        byte_set = set()
+        for i in range(start, end + 1):
+            tok = id_to_token.get(i)
+            if tok is None or len(tok) != 1:
+                return None
+            byte_set.add(tok[0])
+        
+        if byte_set.issubset(digits_bytes): return "digits"
+        if byte_set.issubset(lower_bytes): return "lowercase"
+        if byte_set.issubset(upper_bytes): return "uppercase"
+        return None
+
     parts = []
     for start, end in ranges:
         start_tok_repr = repr(id_to_token.get(start, f"<?ID:{start}?>"))
         if start == end:
             parts.append(start_tok_repr)
-        else:
-            end_tok_repr = repr(id_to_token.get(end, f"<?ID:{end}?>"))
+            continue
+
+        end_tok_repr = repr(id_to_token.get(end, f"<?ID:{end}?>"))
+        range_type = get_range_type(start, end, id_to_token)
+
+        if range_type:
             parts.append(f"{start_tok_repr}..{end_tok_repr}")
+        elif end - start < 3:  # Expand small, non-grouped ranges
+            expanded = [repr(id_to_token.get(i, f"<?ID:{i}?>")) for i in range(start, end + 1)]
+            parts.extend(expanded)
+        else:  # Summarize large, non-grouped ranges
+            parts.append(f"{start_tok_repr}..{end_tok_repr} (mixed)")
+            
     return f"[{', '.join(parts)}]"
 
 
