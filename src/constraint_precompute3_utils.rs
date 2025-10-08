@@ -69,7 +69,7 @@ impl Default for Trie3Config {
             gc: true,
             prune_dead_paths: false,
             compress_edges: false,
-            merge_nodes_exact: Trie3MergeConfig::off(),
+            merge_nodes_exact: Trie3MergeConfig::default(),
             merge_nodes_structural: false,
             merge_nodes_ultrafast: false,
             prune_nodes_not_reaching_end: false,
