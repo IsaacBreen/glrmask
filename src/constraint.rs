@@ -1423,7 +1423,7 @@ impl GrammarConstraint {
                 // for (i, p) in glr_s1.active_state.stack.flatten().iter().enumerate() {
                     // println!("    {}: {:?}", i, p);
                 // }
-                // print_summary();
+                print_summary();
                 reset();
             },
             |precomputed_node_data, glr_s| {
@@ -1486,7 +1486,9 @@ impl GrammarConstraint {
                 // simplify_roots_in_place(&mut stack);
                 glr_s.active_state.stack = stack.into_iter().next().unwrap();
 
-                // print_summary();
+                // glr_s.active_state.stack.fuse_predecessors(1);
+
+                print_summary();
                 reset();
 
                 keep_going
