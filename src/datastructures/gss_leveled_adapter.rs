@@ -887,7 +887,7 @@ pub(crate) fn deep_add_precompute_trie_edges(
             inserter.try_destination(destination.clone()).expect("Cycle detected when adding precompute trie edges");
         }
 
-        destination.write(god).expect("poison").value.live_tokens |= tokens_for_update;
+        // destination.write(god).expect("poison").value.live_tokens |= tokens_for_update;
 
         let mut new_acc = acc.clone();
         *new_acc.stored_trie_nodes_mut() = BTreeSet::from([destination]);
