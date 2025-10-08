@@ -1248,7 +1248,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let r = v.iter()
                                     .map(|(a, bv)| (Action::Normal(a), Some(bv.clone())))
                                     .collect::<Vec<_>>();
-                                println!("{:?}", r);
+                                println!("hallucinated_row.shifts_and_reduces for token '{}' in state {}: {:?}", token_display, state_id.0, r);
                                 r
                             })
                             .unwrap_or_default()
