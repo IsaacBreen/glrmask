@@ -1,20 +1,8 @@
 import os
 import sys
-from typing import Protocol, Iterable, Optional, Tuple, TypedDict, Literal
+from typing import Protocol, Iterable, Optional, Tuple
 
-from .range_set import RangeSet, SetRangeSet
-
-
-class TimedOutputGetMask(TypedDict):
-    """Custom return type for get_mask to provide specific timing data."""
-    type: Literal["timed_output"]
-    output: SetRangeSet  # The actual mask
-    time_sec: float      # The custom timing in seconds
-
-class TimedOutputCommit(TypedDict):
-    """Custom return type for commit to provide specific timing data."""
-    type: Literal["timed_output"]
-    time_sec: float      # The custom timing in seconds
+from .range_set import RangeSet
 
 class GraphProvider(Protocol):
     """
@@ -41,4 +29,4 @@ class GraphProvider(Protocol):
         ...
 
 
-__all__ = ["GraphProvider", "RangeSet", "TimedOutputGetMask", "TimedOutputCommit"]
+__all__ = ["GraphProvider", "RangeSet"]

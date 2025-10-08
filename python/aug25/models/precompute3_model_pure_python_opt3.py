@@ -19,7 +19,7 @@ from tqdm import tqdm
 # from python.gss_tester.implementations.leveled_per_acc_impl import LeveledPerAccGSS as GSS
 # from python.gss_tester.implementations.leveled_per_acc_standalone_impl import LeveledPerAccGSS as GSS
 from python.gss_tester.implementations.leveled_rs_impl import LeveledRSGSS as GSS
-from ..common_interface import GraphProvider, TimedOutputGetMask, TimedOutputCommit
+from ..common_interface import GraphProvider
 from ..stats import Stats
 from ..range_set import FFIRangeSet as RangeSet
 from ..range_set import SetRangeSet as RangeSetOut
@@ -766,7 +766,7 @@ class Model(GraphProvider):
                         for sid in range(start, end + 1):
                             yield (edge.pop, sid, dest.dest_idx)
 
-    def commit(self, token_id: int) -> Optional[TimedOutputCommit]:
+    def commit(self, token_id: int) -> Optional[Dict]:
         stats = Stats.get()
         stats.start('commit')
         token_bytes = self.id_to_token[token_id]
@@ -905,7 +905,7 @@ class Model(GraphProvider):
         stats.stop(f'{p}.total')
         return result
 
-    def get_mask(self) -> Union[RangeSetOut, TimedOutputGetMask]:
+    def get_mask(self) -> Union[RangeSetOut, Dict]:
         stats = Stats.get()
         stats.start('get_mask')
         stats.counts['get_mask.traversal.max_depth'] = 0
