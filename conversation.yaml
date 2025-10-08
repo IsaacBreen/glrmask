@@ -6013,6 +6013,23 @@ local_system:
           merged.append((cs, ce))
           return tuple(merged)
 
+      def _format_token_bytes(b: bytes) -> str:
+          """Formats a token's bytes into a clean, readable string without the b'' prefix."""
+          if b == b'\n': return "'\\n'"
+          if b == b'\t': return "'\\t'"
+          if b == b'\r': return "'\\r'"
+          if b == b' ': return "' '"
+
+          try:
+              s = b.decode('utf-8')
+              # Use single quotes if it's a simple, printable ASCII string.
+              if all(32 <= ord(c) < 127 and c != "'" and c != "\\" for c in s):
+                  return f"'{s}'"
+          except UnicodeDecodeError:
+              pass
+          # Fallback to a hex representation for everything else.
+          return "0x" + b.hex()
+
       def _print_vocab_summary(id_to_token: Dict[int, bytes]):
           """Prints a summarized, readable version of the vocabulary."""
           print("\n--- Vocabulary Reference (Baseline) ---")
@@ -6062,12 +6079,12 @@ local_system:
                   
                   start_tok = id_to_token[start_id]
                   end_tok = id_to_token[end_id]
-                  range_str = f"[{start_id}..{end_id}]"
-                  print(f"  - {range_str:<12}: {repr(start_tok)}..{repr(end_tok)} ({group})")
+                  range_str = f"{start_id}..{end_id}"
+                  print(f"  - {range_str:<12}: {_format_token_bytes(start_tok)}..{_format_token_bytes(end_tok)} ({group})")
                   i = j
               else:
-                  range_str = f"[{current_id}]"
-                  print(f"  - {range_str:<12}: {repr(current_tok)}")
+                  range_str = f"{current_id}"
+                  print(f"  - {range_str:<12}: {_format_token_bytes(current_tok)}")
                   i += 1
           print("-------------------------------------\n")
 
@@ -6096,24 +6113,33 @@ local_system:
 
           parts = []
           for start, end in ranges:
-              start_tok_repr = repr(id_to_token.get(start, f"<?ID:{start}?>"))
+              start_tok_str = _format_token_bytes(id_to_token.get(start, b''))
               if start == end:
-                  parts.append(start_tok_repr)
+                  parts.append(start_tok_str)
                   continue
 
-              end_tok_repr = repr(id_to_token.get(end, f"<?ID:{end}?>"))
+              end_tok_str = _format_token_bytes(id_to_token.get(end, b''))
               range_type = get_range_type(start, end, id_to_token)
 
               if range_type:
-                  parts.append(f"{start_tok_repr}..{end_tok_repr}")
+                  parts.append(f"{start_tok_str}..{end_tok_str}")
               elif end - start < 3:  # Expand small, non-grouped ranges
-                  expanded = [repr(id_to_token.get(i, f"<?ID:{i}?>")) for i in range(start, end + 1)]
+                  expanded = [_format_token_bytes(id_to_token.get(i, b'')) for i in range(start, end + 1)]
                   parts.extend(expanded)
               else:  # Summarize large, non-grouped ranges
-                  parts.append(f"{start_tok_repr}..{end_tok_repr} (mixed)")
+                  parts.append(f"{start_tok_str}..{end_tok_str}")
                   
-          return f"[{', '.join(parts)}]"
+          return ", ".join(parts)
 
+      def _format_numeric_ranges(ranges: Tuple[Tuple[int, int], ...]) -> str:
+          """Converts numeric ranges to a clean string like '1..10, 12, 15..20'."""
+          parts = []
+          for start, end in ranges:
+              if start == end:
+                  parts.append(str(start))
+              else:
+                  parts.append(f"{start}..{end}")
+          return ", ".join(parts)
 
       def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None, skip_plots: bool = False):
           """
@@ -6316,8 +6342,8 @@ local_system:
                           vocab_printed_for_baseline = True
 
                       print(f"Mask mismatch at token index {i} for model {model_name}")
-                      print(f"  Baseline (numeric): {baseline_masks[i]}")
-                      print(f"  Current (numeric):  {masks[i]}")
+                      print(f"  Baseline (numeric): {_format_numeric_ranges(baseline_masks[i])}")
+                      print(f"  Current (numeric):  {_format_numeric_ranges(masks[i])}")
                       print(f"  Baseline (tokens):  {_format_ranges_as_tokens(baseline_masks[i], baseline_vocab)}")
                       print(f"  Current (tokens):   {_format_ranges_as_tokens(masks[i], current_vocab)}")
                       mismatches.append(i)
@@ -15489,5 +15515,276 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Enhance mask mismatch reporting with token
       representations and vocabulary summary"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt3.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/benchmark_analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/benchmark_runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/common_interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/create_additional_benchmark_plots.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/equality.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/optimization_coordinator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/optimizer_general.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/reduce_constraint.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/stats.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/run_benchmarks.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      ```
+      --- Vocabulary Reference (Baseline) ---
+        - [0]         : b'!'
+        - [1]         : b'"'
+        - [2]         : b'#'
+        - [3]         : b'$'
+      ...
+        - [15..24]    : b'0'..b'9' (digits)
+        - [25]        : b':'
+      ...
+      -------------------------------------
+
+      Mask mismatch at token index 1 for model precompute3_model_pure_python_opt3__js_grammar_constraint
+        Baseline (numeric): ((9, 10), (14, 24), (26, 26), (28, 28), (32, 57), (62, 62), (64, 89), (95, 96))
+        Current (numeric):  ((14, 14), (26, 26), (95, 96))
+        Baseline (tokens):  [b'*', b'+', b'/'..b'9' (mixed), b';', b'=', b'A'..b'Z', b'_', b'a'..b'z', b'\n', b' ']
+        Current (tokens):   [b'/', b';', b'\n', b' ']
+      --- Benchmark Summary ---
+      ```
+
+      OK getting better...
+      But get rid of the `b` outside the front of every string. And in the vocab reference there's no need for the square brackets.
+      In fact, no need for brackets in the mask mismatches either, either round `()` or square `[]`. We could prob use a hyphen or smth. And get rid of the `b`s there too.
+      What does 'mixed' mean? I don't get that.
+    metadata:
+  - assistant: |-
+      Of course. The goal is to make the output as clear and intuitive as possible. Removing the byte-string `b''` prefixes, simplifying the range notation, and making the vocabulary reference more explicit for non-standard sequences will achieve that.
+
+      Here are the step-by-step instructions and the corresponding git diff.
+
+      ### Step-by-step Instructions
+
+      All changes will be in the file `python/aug25/benchmark_analyzer.py`.
+
+      1.  **Add a Token Formatting Helper**
+
+          Right after the `_normalize_intervals` function, add a new helper function named `_format_token_bytes`. This function will take a `bytes` object and convert it into a clean string representation (e.g., `'*'`, `'\\n'`, `0x...`) without the `b''` prefix.
+
+      2.  **Add a Numeric Range Formatting Helper**
+
+          After the `_format_ranges_as_tokens` function, add another new helper named `_format_numeric_ranges`. This will format the numeric tuples into the desired `1..10, 12, 15..20` style.
+
+      3.  **Update the Vocabulary Summary Function (`_print_vocab_summary`)**
+
+          -   Modify the function to use the new `_format_token_bytes` helper instead of `repr()`.
+          -   Change the formatting of the token ID ranges to remove the square brackets (e.g., `[15..24]` becomes `15..24`).
+
+      4.  **Update the Token Range Formatting Function (`_format_ranges_as_tokens`)**
+
+          -   This function formats the allowed tokens from a mask.
+          -   Modify it to use `_format_token_bytes` for a clean token representation.
+          -   Remove the outer square brackets from the final returned string.
+          -   Remove the `(mixed)` suffix for ranges that are not known groups. The function will now just show the start and end tokens of such ranges.
+
+      5.  **Update the Mismatch Printing Logic in `analyze_results`**
+
+          -   In the `if baseline_masks[i] != masks[i]:` block, find the four `print` statements.
+          -   Update the two lines that print numeric ranges to use the new `_format_numeric_ranges` helper.
+          -   The other two lines that print token representations will now produce the correct format automatically because you've already updated `_format_ranges_as_tokens`.
+
+      ### Git Diff
+
+      Here is the git diff to apply these changes.
+
+      ```diff
+      diff --git a/python/aug25/benchmark_analyzer.py b/python/aug25/benchmark_analyzer.py
+      --- a/python/aug25/benchmark_analyzer.py
+      +++ b/python/aug25/benchmark_analyzer.py
+      @@ -23,6 +23,22 @@
+           merged.append((cs, ce))
+           return tuple(merged)
+       
+      +def _format_token_bytes(b: bytes) -> str:
+      +    """Formats a token's bytes into a clean, readable string without the b'' prefix."""
+      +    if b == b'\n': return "'\\n'"
+      +    if b == b'\t': return "'\\t'"
+      +    if b == b'\r': return "'\\r'"
+      +    if b == b' ': return "' '"
+      +
+      +    try:
+      +        s = b.decode('utf-8')
+      +        # Use single quotes if it's a simple, printable ASCII string.
+      +        if all(32 <= ord(c) < 127 and c != "'" and c != "\\" for c in s):
+      +            return f"'{s}'"
+      +    except UnicodeDecodeError:
+      +        pass
+      +    # Fallback to a hex representation for everything else.
+      +    return "0x" + b.hex()
+       
+       def _print_vocab_summary(id_to_token: Dict[int, bytes]):
+           """Prints a summarized, readable version of the vocabulary."""
+      @@ -59,30 +75,14 @@
+                   
+                   start_tok = id_to_token[start_id]
+                   end_tok = id_to_token[end_id]
+      -            range_str = f"[{start_id}..{end_id}]"
+      -            print(f"  - {range_str:<12}: {repr(start_tok)}..{repr(end_tok)} ({group})")
+      +            range_str = f"{start_id}..{end_id}"
+      +            print(f"  - {range_str:<12}: {_format_token_bytes(start_tok)}..{_format_token_bytes(end_tok)} ({group})")
+                   i = j
+               else:
+      -            range_str = f"[{current_id}]"
+      -            print(f"  - {range_str:<12}: {repr(current_tok)}")
+      +            range_str = f"{current_id}"
+      +            print(f"  - {range_str:<12}: {_format_token_bytes(current_tok)}")
+                   i += 1
+           print("-------------------------------------\n")
+       
+       def _format_ranges_as_tokens(ranges: Tuple[Tuple[int, int], ...], id_to_token: Dict[int, bytes]) -> str:
+           """Converts token ID ranges to a summary string of token representations."""
+           if not id_to_token:
+               return "[(vocab not loaded)]"
+       
+           digits_bytes = {ord(c) for c in "0123456789"}
+           lower_bytes = {ord(c) for c in "abcdefghijklmnopqrstuvwxyz"}
+           upper_bytes = {ord(c) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+       
+           def get_range_type(start, end, id_to_token):
+               if start > end: return None
+               byte_set = set()
+               for i in range(start, end + 1):
+                   tok = id_to_token.get(i)
+                   if tok is None or len(tok) != 1:
+                       return None
+                   byte_set.add(tok[0])
+               
+               if byte_set.issubset(digits_bytes): return "digits"
+               if byte_set.issubset(lower_bytes): return "lowercase"
+               if byte_set.issubset(upper_bytes): return "uppercase"
+               return None
+       
+           parts = []
+           for start, end in ranges:
+      -        start_tok_repr = repr(id_to_token.get(start, f"<?ID:{start}?>"))
+      +        start_tok_str = _format_token_bytes(id_to_token.get(start, b''))
+               if start == end:
+      -            parts.append(start_tok_repr)
+      +            parts.append(start_tok_str)
+                   continue
+       
+      -        end_tok_repr = repr(id_to_token.get(end, f"<?ID:{end}?>"))
+      +        end_tok_str = _format_token_bytes(id_to_token.get(end, b''))
+               range_type = get_range_type(start, end, id_to_token)
+       
+               if range_type:
+      -            parts.append(f"{start_tok_repr}..{end_tok_repr}")
+      +            parts.append(f"{start_tok_str}..{end_tok_str}")
+               elif end - start < 3:  # Expand small, non-grouped ranges
+      -            expanded = [repr(id_to_token.get(i, f"<?ID:{i}?>")) for i in range(start, end + 1)]
+      +            expanded = [_format_token_bytes(id_to_token.get(i, b'')) for i in range(start, end + 1)]
+                   parts.extend(expanded)
+               else:  # Summarize large, non-grouped ranges
+      -            parts.append(f"{start_tok_repr}..{end_tok_repr} (mixed)")
+      +            parts.append(f"{start_tok_str}..{end_tok_str}")
+                   
+      -    return f"[{', '.join(parts)}]"
+      +    return ", ".join(parts)
+       
+      +def _format_numeric_ranges(ranges: Tuple[Tuple[int, int], ...]) -> str:
+      +    """Converts numeric ranges to a clean string like '1..10, 12, 15..20'."""
+      +    parts = []
+      +    for start, end in ranges:
+      +        if start == end:
+      +            parts.append(str(start))
+      +        else:
+      +            parts.append(f"{start}..{end}")
+      +    return ", ".join(parts)
+       
+       def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None, skip_plots: bool = False):
+           """
+      @@ -211,10 +227,10 @@
+                           vocab_printed_for_baseline = True
+       
+                       print(f"Mask mismatch at token index {i} for model {model_name}")
+      -                print(f"  Baseline (numeric): {baseline_masks[i]}")
+      -                print(f"  Current (numeric):  {masks[i]}")
+      +                print(f"  Baseline (numeric): {_format_numeric_ranges(baseline_masks[i])}")
+      +                print(f"  Current (numeric):  {_format_numeric_ranges(masks[i])}")
+                       print(f"  Baseline (tokens):  {_format_ranges_as_tokens(baseline_masks[i], baseline_vocab)}")
+                       print(f"  Current (tokens):   {_format_ranges_as_tokens(masks[i], current_vocab)}")
+                       mismatches.append(i)
+               # If lengths differ, count extra indices as mismatches (conservative)
+               if len(baseline_masks) != len(masks):
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/benchmark_analyzer.py
+      Applying patch to 'python/aug25/benchmark_analyzer.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/benchmark_analyzer.py.
+    metadata:
+  - user: 'Changes committed with message: "Enhance mask mismatch reporting to show
+      token representations and print a summarized vocabulary reference"'
     metadata:
 ...

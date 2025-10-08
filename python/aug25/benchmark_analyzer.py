@@ -29,6 +29,23 @@ def _normalize_intervals(ranges: Optional[List[List[int]]]) -> Tuple[Tuple[int, 
     merged.append((cs, ce))
     return tuple(merged)
 
+def _format_token_bytes(b: bytes) -> str:
+    """Formats a token's bytes into a clean, readable string without the b'' prefix."""
+    if b == b'\n': return "'\\n'"
+    if b == b'\t': return "'\\t'"
+    if b == b'\r': return "'\\r'"
+    if b == b' ': return "' '"
+
+    try:
+        s = b.decode('utf-8')
+        # Use single quotes if it's a simple, printable ASCII string.
+        if all(32 <= ord(c) < 127 and c != "'" and c != "\\" for c in s):
+            return f"'{s}'"
+    except UnicodeDecodeError:
+        pass
+    # Fallback to a hex representation for everything else.
+    return "0x" + b.hex()
+
 def _print_vocab_summary(id_to_token: Dict[int, bytes]):
     """Prints a summarized, readable version of the vocabulary."""
     print("\n--- Vocabulary Reference (Baseline) ---")
@@ -78,12 +95,12 @@ def _print_vocab_summary(id_to_token: Dict[int, bytes]):
             
             start_tok = id_to_token[start_id]
             end_tok = id_to_token[end_id]
-            range_str = f"[{start_id}..{end_id}]"
-            print(f"  - {range_str:<12}: {repr(start_tok)}..{repr(end_tok)} ({group})")
+            range_str = f"{start_id}..{end_id}"
+            print(f"  - {range_str:<12}: {_format_token_bytes(start_tok)}..{_format_token_bytes(end_tok)} ({group})")
             i = j
         else:
-            range_str = f"[{current_id}]"
-            print(f"  - {range_str:<12}: {repr(current_tok)}")
+            range_str = f"{current_id}"
+            print(f"  - {range_str:<12}: {_format_token_bytes(current_tok)}")
             i += 1
     print("-------------------------------------\n")
 
@@ -112,24 +129,33 @@ def _format_ranges_as_tokens(ranges: Tuple[Tuple[int, int], ...], id_to_token: D
 
     parts = []
     for start, end in ranges:
-        start_tok_repr = repr(id_to_token.get(start, f"<?ID:{start}?>"))
+        start_tok_str = _format_token_bytes(id_to_token.get(start, b''))
         if start == end:
-            parts.append(start_tok_repr)
+            parts.append(start_tok_str)
             continue
 
-        end_tok_repr = repr(id_to_token.get(end, f"<?ID:{end}?>"))
+        end_tok_str = _format_token_bytes(id_to_token.get(end, b''))
         range_type = get_range_type(start, end, id_to_token)
 
         if range_type:
-            parts.append(f"{start_tok_repr}..{end_tok_repr}")
+            parts.append(f"{start_tok_str}..{end_tok_str}")
         elif end - start < 3:  # Expand small, non-grouped ranges
-            expanded = [repr(id_to_token.get(i, f"<?ID:{i}?>")) for i in range(start, end + 1)]
+            expanded = [_format_token_bytes(id_to_token.get(i, b'')) for i in range(start, end + 1)]
             parts.extend(expanded)
         else:  # Summarize large, non-grouped ranges
-            parts.append(f"{start_tok_repr}..{end_tok_repr} (mixed)")
+            parts.append(f"{start_tok_str}..{end_tok_str}")
             
-    return f"[{', '.join(parts)}]"
+    return ", ".join(parts)
 
+def _format_numeric_ranges(ranges: Tuple[Tuple[int, int], ...]) -> str:
+    """Converts numeric ranges to a clean string like '1..10, 12, 15..20'."""
+    parts = []
+    for start, end in ranges:
+        if start == end:
+            parts.append(str(start))
+        else:
+            parts.append(f"{start}..{end}")
+    return ", ".join(parts)
 
 def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None, skip_plots: bool = False):
     """
@@ -332,8 +358,8 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
                     vocab_printed_for_baseline = True
 
                 print(f"Mask mismatch at token index {i} for model {model_name}")
-                print(f"  Baseline (numeric): {baseline_masks[i]}")
-                print(f"  Current (numeric):  {masks[i]}")
+                print(f"  Baseline (numeric): {_format_numeric_ranges(baseline_masks[i])}")
+                print(f"  Current (numeric):  {_format_numeric_ranges(masks[i])}")
                 print(f"  Baseline (tokens):  {_format_ranges_as_tokens(baseline_masks[i], baseline_vocab)}")
                 print(f"  Current (tokens):   {_format_ranges_as_tokens(masks[i], current_vocab)}")
                 mismatches.append(i)
