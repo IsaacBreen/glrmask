@@ -616,7 +616,10 @@ pub(crate) fn disallow_terminals_and_prune_arc(
 ) {
     transform_all(root_arc, |a| {
         let mut na = a.clone();
+        println!("Disallowing terminals: {:?}", disallowed_terminals);
+        println!("Before: {:?}", na.terminals_union);
         na.terminals_union -= disallowed_terminals;
+        println!("After: {:?}", na.terminals_union);
         Some(na)
     });
 }
