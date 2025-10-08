@@ -4025,8 +4025,8 @@ local_system:
               EOF ::= '<|EOF|>';
               expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
 
-              STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
-              IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+              STRING_LITERAL ::= 'b' ;
+              IDENTIFIER ::= 'a' ;
           "#};
           let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
@@ -4034,12 +4034,12 @@ local_system:
           // 2. Define the LLM vocabulary
           let mut llm_token_map = LLMTokenMap::new();
           let llm_a = LLMTokenID(0);
-          let llm_not_quote = LLMTokenID(1);
-          let llm_quote = LLMTokenID(2);
+          let llm_not_b = LLMTokenID(1);
+          let llm_b = LLMTokenID(2);
           let llm_semi = LLMTokenID(3);
           llm_token_map.insert(b"a".to_vec(), llm_a);
-          llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
-          llm_token_map.insert(b"\"".to_vec(), llm_quote);
+          llm_token_map.insert(b"!b".to_vec(), llm_not_b);
+          llm_token_map.insert(b"b".to_vec(), llm_b);
           llm_token_map.insert(b";".to_vec(), llm_semi);
           let max_original_llm_token_id = 3;
 
@@ -4060,14 +4060,11 @@ local_system:
           let mut state = constraint.init();
           let mask1 = state.get_mask();
 
-          // The grammar can start with an IDENTIFIER ("a"), a unary '!' ("!\""), or a STRING_LITERAL ("\"").
-          // It can also start with other things like 'let', 'if', 'while', '{', '(', 'true', 'false', a number, or a unary '-'.
-          // The LLM tokens provided match the start of IDENTIFIER, unary '!', and STRING_LITERAL.
-          let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
+          let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_b.0, llm_b.0]);
           assert_eq!(
               mask1,
               expected_mask1,
-              "Initial mask should allow 'a', '!\"', and '\"'"
+              "Initial mask should allow 'a', '!b', and 'b'"
           );
 
           // 5. Commit "a" and get the next mask
@@ -4075,14 +4072,13 @@ local_system:
           state.print_gss();
           let mask2 = state.get_mask();
 
-          // After committing "a", two paths are possible:
-          // 1. "a" is an incomplete IDENTIFIER. The next token can be "a" to continue it.
-          // 2. "a" is a complete IDENTIFIER, which forms a complete expression. The next token must be ";".
-          let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0, llm_semi.0]);
+          // After committing "a" (a complete IDENTIFIER and expression), the only valid next token is ";".
+          // The bug is that the parser also allows tokens that can start a *new* expression.
+          let expected_mask2 = HybridBitset::from_iter(vec![llm_semi.0]);
           assert_eq!(
               mask2,
               expected_mask2,
-              "After 'a', mask should allow continuing the identifier ('a') or finishing the statement (';')"
+              "After 'a', the only valid next token should be ';'"
           );
 
           Ok(())
@@ -13572,5 +13568,205 @@ messages:
     metadata:
   - user: 'Changes committed with message: "test: Simplify grammar in test_js_simplified_ebnf_string
       to isolate optionality bug"'
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_basic.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - assistant: |-
+      That's an excellent question. The definitions of the terminals are indeed another layer of complexity we can simplify. The current definitions for `IDENTIFIER` and `STRING_LITERAL` involve regex patterns that make the tokenizer stateful (e.g., after seeing `"a"`, it could be the start of a longer identifier).
+
+      By changing these complex terminals to simple, single-character literals, we can remove the tokenizer's statefulness from the equation. This will make the test's behavior depend purely on the parser's logic, which is exactly what we want to isolate.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the test file**: `src/test_constraint_basic.rs`.
+      2.  **Locate the test**: Find the function `test_js_simplified_ebnf_string`.
+      3.  **Simplify the terminal definitions in the grammar**:
+          a.  Find the `IDENTIFIER` rule and change it from a regex to the literal `'a'`.
+          b.  Find the `STRING_LITERAL` rule and change it from a regex to the literal `'b'`.
+
+          Replace this block:
+          ```ebnf
+          STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
+          IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+          ```
+          With this:
+          ```ebnf
+          STRING_LITERAL ::= 'b' ;
+          IDENTIFIER ::= 'a' ;
+          ```
+      4.  **Update the LLM vocabulary** to match the new, simpler terminals. We'll replace `!"` with `!b` and `"` with `b`.
+
+          Replace this block:
+          ```rust
+          let mut llm_token_map = LLMTokenMap::new();
+          let llm_a = LLMTokenID(0);
+          let llm_not_quote = LLMTokenID(1);
+          let llm_quote = LLMTokenID(2);
+          let llm_semi = LLMTokenID(3);
+          llm_token_map.insert(b"a".to_vec(), llm_a);
+          llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
+          llm_token_map.insert(b"\"".to_vec(), llm_quote);
+          llm_token_map.insert(b";".to_vec(), llm_semi);
+          let max_original_llm_token_id = 3;
+          ```
+          With this:
+          ```rust
+          let mut llm_token_map = LLMTokenMap::new();
+          let llm_a = LLMTokenID(0);
+          let llm_not_b = LLMTokenID(1);
+          let llm_b = LLMTokenID(2);
+          let llm_semi = LLMTokenID(3);
+          llm_token_map.insert(b"a".to_vec(), llm_a);
+          llm_token_map.insert(b"!b".to_vec(), llm_not_b);
+          llm_token_map.insert(b"b".to_vec(), llm_b);
+          llm_token_map.insert(b";".to_vec(), llm_semi);
+          let max_original_llm_token_id = 3;
+          ```
+      5.  **Update the assertions** to match the new vocabulary and the non-stateful nature of the tokens.
+          a.  The initial mask should now allow `'a'`, `'!b'`, and `'b'`.
+          b.  Crucially, after committing `'a'`, the *only* valid next token is `';'`, because `'a'` is now a complete, unambiguous token. This makes the test's expectation much clearer.
+
+          Replace this block:
+          ```rust
+          let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
+          assert_eq!(
+              mask1,
+              expected_mask1,
+              "Initial mask should allow 'a', '!\"', and '\"'"
+          );
+
+          // 5. Commit "a" and get the next mask
+          state.commit(llm_a);
+          state.print_gss();
+          let mask2 = state.get_mask();
+
+          // After committing "a", two paths are possible:
+          // 1. "a" is an incomplete IDENTIFIER. The next token can be "a" to continue it.
+          // 2. "a" is a complete IDENTIFIER, which forms a complete expression. The next token must be ";".
+          let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0, llm_semi.0]);
+          assert_eq!(
+              mask2,
+              expected_mask2,
+              "After 'a', mask should allow continuing the identifier ('a') or finishing the statement (';')"
+          );
+          ```
+          With this:
+          ```rust
+          let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_b.0, llm_b.0]);
+          assert_eq!(
+              mask1,
+              expected_mask1,
+              "Initial mask should allow 'a', '!b', and 'b'"
+          );
+
+          // 5. Commit "a" and get the next mask
+          state.commit(llm_a);
+          state.print_gss();
+          let mask2 = state.get_mask();
+
+          // After committing "a" (a complete IDENTIFIER and expression), the only valid next token is ";".
+          // The bug is that the parser also allows tokens that can start a *new* expression.
+          let expected_mask2 = HybridBitset::from_iter(vec![llm_semi.0]);
+          assert_eq!(
+              mask2,
+              expected_mask2,
+              "After 'a', the only valid next token should be ';'"
+          );
+          ```
+
+      These changes create our most minimal test case yet. The test will still fail, but it will do so for the clearest possible reason.
+
+      ### Git Diff
+
+      Here is the git patch that applies the changes described above.
+
+      ```diff
+      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
+      index aaab111..bbbc222 100644
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -1527,21 +1527,21 @@
+               program ::= (expression ';')* EOF;
+               EOF ::= '<|EOF|>';
+               expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
+       
+      -        STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
+      -        IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+      +        STRING_LITERAL ::= 'b' ;
+      +        IDENTIFIER ::= 'a' ;
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
+           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+       
+           // 2. Define the LLM vocabulary
+           let mut llm_token_map = LLMTokenMap::new();
+           let llm_a = LLMTokenID(0);
+      -    let llm_not_quote = LLMTokenID(1);
+      -    let llm_quote = LLMTokenID(2);
+      +    let llm_not_b = LLMTokenID(1);
+      +    let llm_b = LLMTokenID(2);
+           let llm_semi = LLMTokenID(3);
+           llm_token_map.insert(b"a".to_vec(), llm_a);
+      -    llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
+      -    llm_token_map.insert(b"\"".to_vec(), llm_quote);
+      +    llm_token_map.insert(b"!b".to_vec(), llm_not_b);
+      +    llm_token_map.insert(b"b".to_vec(), llm_b);
+           llm_token_map.insert(b";".to_vec(), llm_semi);
+           let max_original_llm_token_id = 3;
+       
+      @@ -1559,28 +1559,24 @@
+           let mut state = constraint.init();
+           let mask1 = state.get_mask();
+       
+      -    // The grammar can start with an IDENTIFIER ("a"), a unary '!' ("!\""), or a STRING_LITERAL ("\"").
+      -    // It can also start with other things like 'let', 'if', 'while', '{', '(', 'true', 'false', a number, or a unary '-'.
+      -    // The LLM tokens provided match the start of IDENTIFIER, unary '!', and STRING_LITERAL.
+      -    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
+      +    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_b.0, llm_b.0]);
+           assert_eq!(
+               mask1,
+               expected_mask1,
+      -        "Initial mask should allow 'a', '!\"', and '\"'"
+      +        "Initial mask should allow 'a', '!b', and 'b'"
+           );
+       
+           // 5. Commit "a" and get the next mask
+           state.commit(llm_a);
+           state.print_gss();
+           let mask2 = state.get_mask();
+       
+      -    // After committing "a", two paths are possible:
+      -    // 1. "a" is an incomplete IDENTIFIER. The next token can be "a" to continue it.
+      -    // 2. "a" is a complete IDENTIFIER, which forms a complete expression. The next token must be ";".
+      -    let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0, llm_semi.0]);
+      +    // After committing "a" (a complete IDENTIFIER and expression), the only valid next token is ";".
+      +    // The bug is that the parser also allows tokens that can start a *new* expression.
+      +    let expected_mask2 = HybridBitset::from_iter(vec![llm_semi.0]);
+           assert_eq!(
+               mask2,
+               expected_mask2,
+      -        "After 'a', mask should allow continuing the identifier ('a') or finishing the statement (';')"
+      +        "After 'a', the only valid next token should be ';'"
+           );
+       
+           Ok(())
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_basic.rs
+      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_basic.rs.
+    metadata:
+  - user: 'Changes committed with message: "test: Final minimal grammar setup for
+      optionality bug isolation in test_js_simplified_ebnf_string"'
     metadata:
 ...
