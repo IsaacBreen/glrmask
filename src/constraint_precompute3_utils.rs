@@ -63,18 +63,18 @@ impl Default for Trie3Config {
         Self {
             enabled: true,
             num_passes: 1,
-            merge_equivalent_llm_tokens: false,
-            reorder_llm_tokens: false,
-            constrain_bitvecs: false,
+            merge_equivalent_llm_tokens: true,
+            reorder_llm_tokens: true,
+            constrain_bitvecs: true,
             gc: true,
-            prune_dead_paths: false,
+            prune_dead_paths: true,
             compress_edges: false,
             merge_nodes_exact: Trie3MergeConfig::default(),
-            merge_nodes_structural: false,
-            merge_nodes_ultrafast: false,
-            prune_nodes_not_reaching_end: false,
+            merge_nodes_structural: true,
+            merge_nodes_ultrafast: true,
+            prune_nodes_not_reaching_end: true,
             simplify_llm_token_bvs: false,
-            factor_common_destinations: false,
+            factor_common_destinations: true,
         }
     }
 }
