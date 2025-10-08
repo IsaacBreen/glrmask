@@ -1457,20 +1457,9 @@ impl GrammarConstraint {
                     //  Reason: llm tokens is redundant... we do LLM token filtering now at the trie node level
                     for (_last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
                         for gss_root_acc in gss_root_accs {
-                            let active_llm_tokens_for_root = gss_root_acc.union_llm_tokens();
                             for src_wr in gss_root_acc.stored_trie_nodes().iter() {
                                 let src_arc = src_wr.as_arc().clone();
-                                // let src_live = { src_arc.read(&trie3_god).expect("poison").value.live_tokens.clone() };
-                                // let tokens_to_push = &active_llm_tokens_for_root & &src_live;
-                                let tokens_to_push = active_llm_tokens_for_root.clone();
-                                if tokens_to_push.is_empty() { continue; }
-
-                                {
-                                    let mut src_w = src_arc.write(&trie3_god).expect("poison");
-                                    src_w.value.live_tokens |= &tokens_to_push;
-                                }
-
-                                let edge_key = (0, tokens_to_push.clone());
+                                let edge_key = (0, LLMTokenBV::ones(internal_max_llm_token + 1)); // edge key is unused in trie3
                                 let edge_value = StateIDBV::max_ones();
 
                                 let inserter = EdgeInserter::new(
@@ -1479,7 +1468,7 @@ impl GrammarConstraint {
                                     edge_key,
                                     edge_value,
                                     |e, n| *e |= n,
-                                    |node_value, _edge_value| node_value.live_tokens |= &tokens_to_push,
+                                    |node_value, _edge_value| {},
                                     |_, _| {},
                                 );
                                 inserter.try_destination(trie3_end.clone()).expect("Failed to insert end edge");
