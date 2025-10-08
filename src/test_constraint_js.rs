@@ -8,7 +8,7 @@
 // - A `minimizer` module containing a tool to find minimal reproducing examples for bugs in the grammar or parser.
 // - Tests that use the minimizer, which are ignored by default as they are for debugging specific issues.
 
-use crate::constraint::GrammarConstraint;
+use crate::constraint::{GrammarConstraint, GrammarConstraintConfig};
 use crate::glr::grammar::{literal, nt, prod, t, regex_name, NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParserState;
 use crate::glr::stats::get_stats;
@@ -591,11 +591,13 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Construct the GrammarConstraint.
     let dummy_eof_placeholder = 0;
     println!("\nConstructing GrammarConstraint...");
-    let grammar_constraint = GrammarConstraint::from_compiled_grammar(
+    let grammar_constraint = GrammarConstraint::from_compiled_grammar_with_config(
         compiled_grammar.clone(),
         llm_token_map.clone(),
         LLMTokenID(dummy_eof_placeholder),
-        max_original_llm_token_id_val
+        max_original_llm_token_id_val,
+        // &GrammarConstraintConfig::default(),
+        &GrammarConstraintConfig::off(),
     );
     // grammar_constraint.dump_precomputed1();
     // grammar_constraint.dump_precomputed2();
