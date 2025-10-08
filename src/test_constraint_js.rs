@@ -531,7 +531,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n--- Applying manual vocabulary modifications ---");
 
         // Filter 1: Keep only tokens with length <= x
-        let x = 1;
+        let x = 3;
         gpt2_raw_vocab.retain(|s| {
             let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
             processed.as_bytes().len() <= x
@@ -543,8 +543,8 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // gpt2_raw_vocab.push("if(1){if(1){if(1){".to_string());
         // gpt2_raw_vocab.push("if(1){".to_string());
         // gpt2_raw_vocab.push("if(2){".to_string());
-        gpt2_raw_vocab.push("!!".to_string());
-        gpt2_raw_vocab.push("!\"".to_string());
+        // gpt2_raw_vocab.push("!!".to_string());
+        // gpt2_raw_vocab.push("!\"".to_string());
 
         //
         // // Filter 2: Keep only tokens where all alphabetic chars are 'a'
@@ -568,19 +568,19 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
 
         // Option 3: Set to a few specific tokens
         //   Current (tokens):   '"', '*', '+', '/', '0'..'9', ';', '=', 'A'..'Z', '_', 'a'..'z', '\n', ' '
-        gpt2_raw_vocab = vec![
-            // "\"", "*", "+", "/", "0", ";", "=", "A", "_", "a", "\n", " ",
-            // "\"", "*", "+", "/",
-            // "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-            // ";", "=",
-            // "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
-            // "_",
-            // "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
-            // "\n", " ",
-            // "!\"", "!!",
-
-            "a", "!\"", "\""
-        ].iter().map(|s| s.to_string()).collect();
+        // gpt2_raw_vocab = vec![
+        //     // "\"", "*", "+", "/", "0", ";", "=", "A", "_", "a", "\n", " ",
+        //     // "\"", "*", "+", "/",
+        //     // "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+        //     // ";", "=",
+        //     // "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+        //     // "_",
+        //     // "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+        //     // "\n", " ",
+        //     // "!\"", "!!",
+        //
+        //     "a", "!\"", "\""
+        // ].iter().map(|s| s.to_string()).collect();
 
 
         println!("  - Set to a specific small set of tokens: {} tokens.", gpt2_raw_vocab.len());
@@ -607,8 +607,8 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         llm_token_map.clone(),
         LLMTokenID(dummy_eof_placeholder),
         max_original_llm_token_id_val,
-        // &GrammarConstraintConfig::default(),
-        &GrammarConstraintConfig::off(),
+        &GrammarConstraintConfig::default(),
+        // &GrammarConstraintConfig::off(),
     );
     // grammar_constraint.dump_precomputed1();
     // grammar_constraint.dump_precomputed2();
