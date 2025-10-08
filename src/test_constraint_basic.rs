@@ -1533,12 +1533,10 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     let llm_a = LLMTokenID(0);
     let llm_not_quote = LLMTokenID(1);
     let llm_quote = LLMTokenID(2);
-    let llm_semi = LLMTokenID(3);
     llm_token_map.insert(b"a".to_vec(), llm_a);
     llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
     llm_token_map.insert(b"\"".to_vec(), llm_quote);
-    llm_token_map.insert(b";".to_vec(), llm_semi);
-    let max_original_llm_token_id = 3;
+    let max_original_llm_token_id = 2;
 
     // 3. Create the GrammarConstraint
     let constraint = GrammarConstraint::from_compiled_grammar(
