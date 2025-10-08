@@ -852,6 +852,7 @@ impl GSSNode {
 }
 
 // --- Trie-utils stubs (no-ops) ---
+#[time_it]
 pub(crate) fn deep_add_precompute_trie_edges(
     root_arc: &mut Arc<GSSNode>,
     god: &StoredTrieGodWrapper,
