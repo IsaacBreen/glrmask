@@ -140,12 +140,16 @@ def _format_ranges_as_tokens(ranges: Tuple[Tuple[int, int], ...], id_to_token: D
             if next_group != current_group:
                 # The group has changed, so the previous sub-range has ended at i-1
                 sub_range_end_idx = i - 1
-                start_tok_str = _format_token_bytes(id_to_token.get(sub_range_start_idx, b'<??>'))
-                if sub_range_start_idx == sub_range_end_idx:
-                    all_parts.append(start_tok_str)
-                else:
+                # If the group is a recognized sequential one, we can form a range.
+                if current_group is not None and sub_range_start_idx < sub_range_end_idx:
+                    start_tok_str = _format_token_bytes(id_to_token.get(sub_range_start_idx, b'<??>'))
                     end_tok_str = _format_token_bytes(id_to_token.get(sub_range_end_idx, b'<??>'))
                     all_parts.append(f"{start_tok_str}..{end_tok_str}")
+                # Otherwise, print each token in the sub-range individually.
+                else:
+                    for j in range(sub_range_start_idx, sub_range_end_idx + 1):
+                        tok_str = _format_token_bytes(id_to_token.get(j, b'<??>'))
+                        all_parts.append(tok_str)
 
                 # Start a new sub-range
                 sub_range_start_idx = i
