@@ -4024,7 +4024,7 @@ local_system:
               // Instruct the parser to ignore Whitespace and single-line Comments.
               #![ignore(IGNORE)]
 
-              program ::= expression_statement* EOF;
+              program ::= expression_statement EOF;
               EOF ::= '<|EOF|>';
 
               // --- Lexical Grammar (Minimal) ---
@@ -12768,5 +12768,64 @@ messages:
     metadata:
   - user: 'Changes committed with message: "test: Collapse program structure and expression
       rules in test_js_simplified_ebnf_string grammar"'
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_basic.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - assistant: |-
+      Of course. We'll continue simplifying the grammar with another small, targeted change. The previous steps have narrowed down the structure. Now, let's focus on the repetition in the `program` rule. The grammar currently allows for zero or more `expression_statement`s. This might be related to the bug, as the logic for what's allowed next could be incorrectly considering the start of a *new* statement when it should be focused on completing the current one.
+
+      By making one `expression_statement` mandatory, we can test this theory.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the test file**: `src/test_constraint_basic.rs`.
+      2.  **Locate the test**: Find the function `test_js_simplified_ebnf_string`.
+      3.  **Modify the `program` rule**: In the `ebnf_grammar` string, find the line that defines the `program` rule.
+
+          Current line:
+          ```ebnf
+          program ::= expression_statement* EOF;
+          ```
+          Change the Kleene star (`*`) to require exactly one `expression_statement`.
+          ```ebnf
+          program ::= expression_statement EOF;
+          ```
+      This change simplifies the top-level rule of the grammar. If the error persists, it points more strongly to an issue within the expression-handling logic itself, rather than the interaction between multiple statements.
+
+      ### Git Diff
+
+      Here is the git patch that applies the change described above.
+
+      ```diff
+      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
+      index 333c333..444d444 100644
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -1523,7 +1523,7 @@
+               // Instruct the parser to ignore Whitespace and single-line Comments.
+               #![ignore(IGNORE)]
+       
+      -        program ::= expression_statement* EOF;
+      +        program ::= expression_statement EOF;
+               EOF ::= '<|EOF|>';
+       
+               // --- Lexical Grammar (Minimal) ---
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_basic.rs
+      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_basic.rs.
+    metadata:
+  - user: 'Changes committed with message: "test: No changes to grammar in test_js_simplified_ebnf_string"'
     metadata:
 ...

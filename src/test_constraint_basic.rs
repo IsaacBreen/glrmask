@@ -1521,7 +1521,7 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
         // Instruct the parser to ignore Whitespace and single-line Comments.
         #![ignore(IGNORE)]
 
-        program ::= expression_statement* EOF;
+        program ::= expression_statement EOF;
         EOF ::= '<|EOF|>';
 
         // --- Lexical Grammar (Minimal) ---
