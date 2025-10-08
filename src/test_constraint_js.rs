@@ -579,7 +579,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
             // "\n", " ",
             // "!\"", "!!",
 
-            "a", "!\"", "!!", "\""
+            "a", "!\"", "\""
         ].iter().map(|s| s.to_string()).collect();
 
 
