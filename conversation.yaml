@@ -2168,12 +2168,6 @@ local_system:
                   run_pass!("Merging nodes (structural)", {
                       merge_nodes_trie3_structural(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
                   });
-              }
-
-              if config.merge_nodes_structural {
-                  run_pass!("Merging nodes (structural)", {
-                      merge_nodes_trie3_structural(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
-                  });
                   // Structural merge can create parallel edges (same dest/pop/sids, diff tokens).
                   // Compress them immediately.
                   if config.compress_edges {
@@ -3163,6 +3157,7 @@ local_system:
               for (ek, dest_map) in guard.children() {
                   for (v_idx, bv) in dest_map {
                       if let Some(&v_dense) = dense_of.get(v_idx) {
+                          // Note: we capture the LLMTokenBV here but won't use it in the signature.
                           raw_edges[u_dense].push((ek.0, ek.1.clone(), v_dense, bv.clone()));
                       }
                   }
@@ -3190,7 +3185,7 @@ local_system:
                       // _bv_key (LLM tokens) is IGNORED for structural equivalence.
                       let dest_class = prev_class[*v_dense];
                       let key = (*p, dest_class);
-                      aggr.entry(key).or_default() |= sids;
+                      *aggr.entry(key).or_default() |= sids;
                   }
 
                   let sig: SignatureStructural3 = (ends[u], aggr);
@@ -3212,6 +3207,7 @@ local_system:
               if changes == 0 { break; }
           }
 
+          // Reconstruction
           let final_partition = prev_class;
           let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
 
@@ -3229,24 +3225,31 @@ local_system:
 
           for class_id in 0..num_classes {
               if let Some(rep_idx) = representatives[class_id] {
+                  // Gather all nodes belonging to this class
                   let nodes_in_class: Vec<Trie2Index> = final_partition.iter().enumerate()
                       .filter(|(_, &c)| c == class_id)
                       .map(|(i, _)| old_of[i])
                       .collect();
 
-                  let mut new_children = BTreeMap::new();
+                  let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
                   let mut new_live_tokens = LLMTokenBV::zeros();
 
+                  // Merge all edges from all nodes in the class into the representative.
                   for node_idx in &nodes_in_class {
                       let guard = node_idx.read(trie3_god).unwrap();
                       new_live_tokens |= &guard.value.live_tokens;
+
                       for ((pop, llm_bv), dest_map) in guard.children() {
                           for (dest_idx, sids) in dest_map {
+                              // Remap destination to its representative
                               let dest_rep_idx = *node_to_rep.get(dest_idx).unwrap();
                               
+                              // Insert into new_children.
+                              // Note: This may create parallel edges (same pop/dest_rep/sids, different llm_bv)
+                              // if the original nodes had them. Subsequent edge compression will fix this.
                               let new_dest_map = new_children.entry((*pop, llm_bv.clone())).or_insert_with(OrderedHashMap::new);
                               new_dest_map.entry(dest_rep_idx)
-                                  .and_modify(|e| *e |= sids)
+                                  .and_modify(|e| *e |= sids) // Union SIDs if exact edge exists
                                   .or_insert_with(|| sids.clone());
                           }
                       }
@@ -3703,254 +3706,79 @@ local_system:
               changed_any
           };
 
-          // Pass 2: shortcut zero-pop chains.
-          // Contracts sequences V --(pop 0, L2, S2)--> ... --(pop 0, Lk, Sk)--> Z
-          // into U --(p1, L1∩L2∩...∩Lk, S1∩S2∩...∩Sk)--> Z where U --(p1, L1, S1)--> V.
-          // Only applies when each intermediate has exactly one outgoing (pop 0) edge with exactly one destination (no fanout), avoiding edge explosion.
-          let shortcut_zero_pop_chains = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+          // Pass 2: Bypass single-exit nodes.
+          // This is a general path-contraction optimization. If a node B is not an end state and
+          // has exactly one outgoing edge to a single destination C, any incoming edge to B from A
+          // can be rerouted to C, composing the pops and intersecting the constraints.
+          // A --(p1, L1, S1)--> B --(p2, L2, S2)--> C  =>  A --(p1+p2, L1&L2, S1&S2)--> C
+          // This is a powerful transform that subsumes shortcut_zero_pop_chains and shortcut_universal_pop_step.
+          let bypass_single_exit_nodes = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
               let nodes = Trie::all_nodes(trie3_god, roots_vec);
-              if nodes.is_empty() { return false; }
-
-              // Snapshot summaries for quick lookups
-              type DestList = Vec<(Trie2Index, StateIDBV)>;
-              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
-              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
-              for n in &nodes {
-                  let g = n.read(trie3_god).expect("read");
-                  let edges: EdgeList = g.children()
-                      .iter()
-                      .map(|(ek, dm)| {
-                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
-                          (ek.0, ek.1.clone(), dests)
-                      })
-                      .collect();
-                  summary.insert(*n, (g.value.end, edges));
-              }
-
-              // Memoization for zero-pop chain results
-              #[derive(Clone)]
-              struct ChainRes {
-                  last: Trie2Index,
-                  llm: LLMTokenBV,
-                  sids: StateIDBV,
-              }
-              let mut memo: HashMap<Trie2Index, Option<ChainRes>> = HashMap::new();
-
-              fn follow_zero_chain(
-                  v: Trie2Index,
-                  summary: &HashMap<Trie2Index, (bool, EdgeList)>,
-                  memo: &mut HashMap<Trie2Index, Option<ChainRes>>,
-              ) -> Option<ChainRes> {
-                  if let Some(cached) = memo.get(&v) {
-                      return cached.clone();
-                  }
-                  let (_is_end, edges) = match summary.get(&v) {
-                      Some(x) => x,
-                      None => {
-                          memo.insert(v, None);
-                          return None;
-                      }
-                  };
-                  // Must be exactly one outgoing edge, pop == 0, with exactly one destination.
-                  let mut pop0_edges = edges.iter().filter(|(p, _, _)| *p == 0);
-                  let next = match pop0_edges.next() {
-                      Some(x) => x,
-                      None => {
-                          memo.insert(v, None);
-                          return None;
-                      }
-                  };
-                  // Ensure it is the only outgoing edge and has a single destination.
-                  if edges.len() != 1 || next.2.len() != 1 {
-                      memo.insert(v, None);
-                      return None;
-                  }
-                  let (_p0, llm2, dests) = next;
-                  let (w, sids2) = &dests[0];
-
-                  // Recurse forward
-                  let res = if let Some(tail) = follow_zero_chain(*w, summary, memo) {
-                      Some(ChainRes {
-                          last: tail.last,
-                          llm: llm2 & &tail.llm,
-                          sids: sids2 & &tail.sids,
-                      })
-                  } else {
-                      Some(ChainRes {
-                          last: *w,
-                          llm: llm2.clone(),
-                          sids: sids2.clone(),
-                      })
-                  };
-                  memo.insert(v, res.clone());
-                  res
-              }
-
               let mut changed_any = false;
 
+              // 1. Identify all single-exit nodes.
+              let mut single_exit_info: HashMap<Trie2Index, (usize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
+              for n in &nodes {
+                  let g = n.read(trie3_god).expect("read");
+                  if g.value.end { continue; }
+                  if g.children().len() == 1 {
+                      let ((p2, l2), dm) = g.children().iter().next().unwrap();
+                      if dm.len() == 1 {
+                          let (c, s2) = dm.iter().next().unwrap();
+                          single_exit_info.insert(*n, (*p2, l2.clone(), *c, s2.clone()));
+                      }
+                  }
+              }
+              if single_exit_info.is_empty() { return false; }
+
               #[cfg(not(rustrover))]
-              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Pop-0 Chains)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Bypass)", total = nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false);
               #[cfg(rustrover)]
               let it = nodes.iter();
               for u in it {
-                  // Snapshot children (stable during this node's rewrite)
-                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
-                      let g = u.read(trie3_god).expect("read");
-                      g.children()
-                          .iter()
-                          .map(|(ek, dm)| {
-                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
-                              (ek.clone(), dests)
-                          })
-                          .collect()
-                  };
-                  if children_snapshot.is_empty() { continue; }
+                  let old_children = u.read(trie3_god).expect("read").children().clone();
+                  if old_children.is_empty() { continue; }
 
+                  let mut new_children = old_children.clone();
                   let mut local_changed = false;
-                  let mut w = u.write(trie3_god).expect("write");
 
-                  for ((p1, llm1), dests) in &children_snapshot {
-                      // We will remove/replace individual destinations for this key.
-                      for (v, sids1) in dests {
-                          if let Some(chain) = follow_zero_chain(*v, &summary, &mut memo) {
-                              // Compose new filters
-                              let new_llm = llm1 & &chain.llm;
-                              let new_sids = sids1 & &chain.sids;
+                  for ((p1, l1), dm) in &old_children {
+                      for (v, s1) in dm {
+                          if let Some((p2, l2, c, s2)) = single_exit_info.get(v) {
+                              local_changed = true;
 
-                              // Remove old edge U --(p1, llm1)--> V
-                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
-                                  if dm.remove(v).is_some() {
-                                      local_changed = true;
-                                  }
-                                  if dm.is_empty() {
-                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
-                                  }
+                              // Remove old edge u -> v from our temporary new_children map
+                              let current_dm = new_children.get_mut(&(*p1, l1.clone())).unwrap();
+                              current_dm.remove(v);
+                              if current_dm.is_empty() {
+                                  new_children.remove(&(*p1, l1.clone()));
                               }
 
-                              // If empty, nothing to add; drop the path.
-                              if new_llm.is_empty() || new_sids.is_empty() {
-                                  continue;
-                              }
+                              // Add new composed edge u -> c
+                              let p_new = p1 + p2;
+                              let l_new = l1 & l2;
+                              let s_new = s1 & s2;
 
-                              // Insert U --(p1, new_llm)--> chain.last with new_sids
-                              let dest_map = w.children_mut().entry((*p1, new_llm)).or_default();
-                              dest_map.entry(chain.last)
-                                  .and_modify(|s| *s |= &new_sids)
-                                  .or_insert(new_sids);
+                              if !l_new.is_empty() && !s_new.is_empty() {
+                                  new_children.entry((p_new, l_new)).or_default()
+                                      .entry(*c)
+                                      .and_modify(|s| *s |= &s_new)
+                                      .or_insert(s_new.clone());
+                              }
                           }
                       }
                   }
 
                   if local_changed {
-                      // Keep node metadata consistent after rewrites
-                      let mut union_bv = LLMTokenBV::zeros();
-                      for ((_, llm_bv), _) in w.children().iter() {
-                          union_bv |= llm_bv;
-                      }
-                      w.value.live_tokens = union_bv;
                       changed_any = true;
-                  }
-              }
-
-              changed_any
-          };
-
-          // Pass 3: shortcut when the first edge is "universal" and the middle has a single outgoing edge.
-          // A --(p1, ALL_LLM, ALL_SID)--> B and B --(p2, L2, SID2)--> C (only outgoing)
-          // becomes A --(p1+p2, L2, SID2)--> C. (Do not apply when p2 == 0; zero-pop handled by pass 2.)
-          let shortcut_universal_pop_step = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
-              let nodes = Trie::all_nodes(trie3_god, roots_vec);
-              if nodes.is_empty() { return false; }
-
-              // Summaries
-              type DestList = Vec<(Trie2Index, StateIDBV)>;
-              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
-              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
-              for n in &nodes {
-                  let g = n.read(trie3_god).expect("read");
-                  let edges: EdgeList = g.children()
-                      .iter()
-                      .map(|(ek, dm)| {
-                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
-                          (ek.0, ek.1.clone(), dests)
-                      })
-                      .collect();
-                  summary.insert(*n, (g.value.end, edges));
-              }
-
-              // Identify "compressible" middle nodes: exactly one outgoing edge, with exactly one destination, pop > 0
-              let mut middle_info: HashMap<Trie2Index, (usize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
-              for n in &nodes {
-                  let (is_end, edges) = summary.get(n).unwrap();
-                  if *is_end { continue; }
-                  if edges.len() != 1 { continue; }
-                  let (p2, llm2, dests) = &edges[0];
-                  if *p2 == 0 { continue; } // leave to zero-pop pass
-                  if dests.len() != 1 { continue; }
-                  let (c, sids2) = &dests[0];
-                  middle_info.insert(*n, (*p2, llm2.clone(), *c, sids2.clone()));
-              }
-
-              let mut changed_any = false;
-
-              #[cfg(not(rustrover))]
-              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Universal Pop)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
-              #[cfg(rustrover)]
-              let it = nodes.iter();
-              for u in it {
-                  // Snapshot children
-                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
-                      let g = u.read(trie3_god).expect("read");
-                      g.children()
-                          .iter()
-                          .map(|(ek, dm)| {
-                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
-                              (ek.clone(), dests)
-                          })
-                          .collect()
-                  };
-                  if children_snapshot.is_empty() { continue; }
-
-                  let mut local_changed = false;
-                  let mut w = u.write(trie3_god).expect("write");
-
-                  for ((p1, llm1), dests) in &children_snapshot {
-                      // Only when the first edge is universal in both LLM and SIDs.
-                      if !is_all_llm(&llm1) {
-                          continue;
+                      let mut u_guard = u.write(trie3_god).expect("write");
+                      *u_guard.children_mut() = new_children;
+                      // Recompute live tokens as they may have changed
+                      let mut new_live = LLMTokenBV::zeros();
+                      for ((_, llm_bv), _) in u_guard.children() {
+                          new_live |= llm_bv;
                       }
-                      for (v, sids1) in dests {
-                          if !is_all_sids(&sids1) {
-                              continue;
-                          }
-                          if let Some((p2, llm2, c, sids2)) = middle_info.get(v).cloned() {
-                              // Remove old edge U --(p1, llm1)--> V
-                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
-                                  if dm.remove(v).is_some() {
-                                      local_changed = true;
-                                  }
-                                  if dm.is_empty() {
-                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
-                                  }
-                              }
-                              // Insert U --(p1+p2, llm2)--> C with sids2
-                              let key_new = (p1 + p2, llm2);
-                              let dest_map = w.children_mut().entry(key_new).or_default();
-                              dest_map.entry(c)
-                                  .and_modify(|s| *s |= &sids2)
-                                  .or_insert(sids2);
-                          }
-                      }
-                  }
-
-                  if local_changed {
-                      // Keep node metadata consistent after rewrites
-                      let mut union_bv = LLMTokenBV::zeros();
-                      for ((_, llm_bv), _) in w.children().iter() {
-                          union_bv |= llm_bv;
-                      }
-                      w.value.live_tokens = union_bv;
-                      changed_any = true;
+                      u_guard.value.live_tokens = new_live;
                   }
               }
 
@@ -3971,12 +3799,8 @@ local_system:
               if coalesce_edges_within_nodes(trie3_god, &roots_vec) {
                   pass_changed = true;
               }
-              // 2) Shortcut pop=0 chains (safe, non-expanding)
-              if shortcut_zero_pop_chains(trie3_god, &roots_vec) {
-                  pass_changed = true;
-              }
-              // 3) Shortcut universal-first edges by adding pops (safe, non-expanding)
-              if shortcut_universal_pop_step(trie3_god, &roots_vec) {
+              // 2) Bypass single-exit nodes to contract paths.
+              if bypass_single_exit_nodes(trie3_god, &roots_vec) {
                   pass_changed = true;
               }
               if pass_changed {
@@ -8714,5 +8538,1822 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Implement aggressive structural
       node merging pass for Trie3"'
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_utils.rs since previous turn:
+      ```diff
+      --- original version of src/constraint_precompute3_utils.rs
+      +++ current version of src/constraint_precompute3_utils.rs
+      @@ -1263,7 +1263,7 @@
+                       // _bv_key (LLM tokens) is IGNORED for structural equivalence.
+                       let dest_class = prev_class[*v_dense];
+                       let key = (*p, dest_class);
+      -                aggr.entry(key).or_default() |= sids;
+      +                *aggr.entry(key).or_default() |= sids;
+                   }
+       
+                   let sig: SignatureStructural3 = (ends[u], aggr);
+
+      ```
+    metadata:
+  - user: |-
+      Excellent, the graph has become much more compact, but you're right—there's still a significant optimization opportunity we can exploit. The key is to generalize some of the existing edge compression logic.
+
+      Currently, there are specialized functions for contracting `pop=0` chains and "universal" edges. We can replace these with a single, more powerful optimization pass that bypasses *any* node that is not an end-state and has only a single exit path. This will aggressively contract linear chains within the graph, regardless of pop counts or whether constraints are "universal".
+
+      This change simplifies the codebase while making it more effective, which is a great candidate for a "final edit".
+
+      ### Step-by-step Instructions
+
+      1.  **Open `src/constraint_precompute3_utils.rs`**.
+
+      2.  **Delete Obsolete Functions**: Remove the now-redundant `shortcut_zero_pop_chains` and `shortcut_universal_pop_step` functions. These are the large blocks of code starting around line 1579 and line 1711, respectively.
+
+      3.  **Implement `bypass_single_exit_nodes`**: In their place, insert the new, more general `bypass_single_exit_nodes` function. This function identifies any node with a single exit and reroutes all incoming edges to that node's destination, composing the pop counts and constraints.
+
+      4.  **Update `compress_trie3_edges`**: Modify the main loop in `compress_trie3_edges` to call the new `bypass_single_exit_nodes` function instead of the two functions you just deleted.
+
+      ### Git Diff
+
+      Here is the git patch that applies these changes. It will cleanly replace the specialized functions with the more powerful, general one.
+
+      ```diff
+      diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
+      index 3333333..4444444 100644
+      --- a/src/constraint_precompute3_utils.rs
+      +++ b/src/constraint_precompute3_utils.rs
+      @@ -1568,200 +1568,93 @@
+               changed_any
+           };
+       
+      -    // Pass 2: shortcut zero-pop chains.
+      -    // Contracts sequences V --(pop 0, L2, S2)--> ... --(pop 0, Lk, Sk)--> Z
+      -    // into U --(p1, L1∩L2∩...∩Lk, S1∩S2∩...∩Sk)--> Z where U --(p1, L1, S1)--> V.
+      -    // Only applies when each intermediate has exactly one outgoing (pop 0) edge with exactly one destination (no fanout), avoiding edge explosion.
+      -    let shortcut_zero_pop_chains = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+      +    // Pass 2: Bypass single-exit nodes.
+      +    // This is a general path-contraction optimization. If a node B is not an end state and
+      +    // has exactly one outgoing edge to a single destination C, any incoming edge to B from A
+      +    // can be rerouted to C, composing the pops and intersecting the constraints.
+      +    // A --(p1, L1, S1)--> B --(p2, L2, S2)--> C  =>  A --(p1+p2, L1&L2, S1&S2)--> C
+      +    // This is a powerful transform that subsumes shortcut_zero_pop_chains and shortcut_universal_pop_step.
+      +    let bypass_single_exit_nodes = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+               let nodes = Trie::all_nodes(trie3_god, roots_vec);
+      -        if nodes.is_empty() { return false; }
+      -
+      -        // Snapshot summaries for quick lookups
+      -        type DestList = Vec<(Trie2Index, StateIDBV)>;
+      -        type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
+      -        let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
+      +        let mut changed_any = false;
+      +
+      +        // 1. Identify all single-exit nodes.
+      +        let mut single_exit_info: HashMap<Trie2Index, (usize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
+               for n in &nodes {
+                   let g = n.read(trie3_god).expect("read");
+      -            let edges: EdgeList = g.children()
+      -                .iter()
+      -                .map(|(ek, dm)| {
+      -                    let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
+      -                    (ek.0, ek.1.clone(), dests)
+      -                })
+      -                .collect();
+      -            summary.insert(*n, (g.value.end, edges));
+      -        }
+      -
+      -        // Memoization for zero-pop chain results
+      -        #[derive(Clone)]
+      -        struct ChainRes {
+      -            last: Trie2Index,
+      -            llm: LLMTokenBV,
+      -            sids: StateIDBV,
+      -        }
+      -        let mut memo: HashMap<Trie2Index, Option<ChainRes>> = HashMap::new();
+      -
+      -        fn follow_zero_chain(
+      -            v: Trie2Index,
+      -            summary: &HashMap<Trie2Index, (bool, EdgeList)>,
+      -            memo: &mut HashMap<Trie2Index, Option<ChainRes>>,
+      -        ) -> Option<ChainRes> {
+      -            if let Some(cached) = memo.get(&v) {
+      -                return cached.clone();
+      -            }
+      -            let (_is_end, edges) = match summary.get(&v) {
+      -                Some(x) => x,
+      -                None => {
+      -                    memo.insert(v, None);
+      -                    return None;
+      -                }
+      -            };
+      -            // Must be exactly one outgoing edge, pop == 0, with exactly one destination.
+      -            let mut pop0_edges = edges.iter().filter(|(p, _, _)| *p == 0);
+      -            let next = match pop0_edges.next() {
+      -                Some(x) => x,
+      -                None => {
+      -                    memo.insert(v, None);
+      -                    return None;
+      -                }
+      -            };
+      -            // Ensure it is the only outgoing edge and has a single destination.
+      -            if edges.len() != 1 || next.2.len() != 1 {
+      -                memo.insert(v, None);
+      -                return None;
+      -            }
+      -            let (_p0, llm2, dests) = next;
+      -            let (w, sids2) = &dests[0];
+      -
+      -            // Recurse forward
+      -            let res = if let Some(tail) = follow_zero_chain(*w, summary, memo) {
+      -                Some(ChainRes {
+      -                    last: tail.last,
+      -                    llm: llm2 & &tail.llm,
+      -                    sids: sids2 & &tail.sids,
+      -                })
+      -            } else {
+      -                Some(ChainRes {
+      -                    last: *w,
+      -                    llm: llm2.clone(),
+      -                    sids: sids2.clone(),
+      -                })
+      -            };
+      -            memo.insert(v, res.clone());
+      -            res
+      -        }
+      -
+      -        let mut changed_any = false;
+      +            if g.value.end { continue; }
+      +            if g.children().len() == 1 {
+      +                let ((p2, l2), dm) = g.children().iter().next().unwrap();
+      +                if dm.len() == 1 {
+      +                    let (c, s2) = dm.iter().next().unwrap();
+      +                    single_exit_info.insert(*n, (*p2, l2.clone(), *c, s2.clone()));
+      +                }
+      +            }
+      +        }
+      +        if single_exit_info.is_empty() { return false; }
+       
+               #[cfg(not(rustrover))]
+      -        let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Pop-0 Chains)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+      +        let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Bypass)", total = nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false);
+               #[cfg(rustrover)]
+               let it = nodes.iter();
+               for u in it {
+      -            // Snapshot children (stable during this node's rewrite)
+      -            let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
+      -                let g = u.read(trie3_god).expect("read");
+      -                g.children()
+      -                    .iter()
+      -                    .map(|(ek, dm)| {
+      -                        let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
+      -                        (ek.clone(), dests)
+      -                    })
+      -                    .collect()
+      -            };
+      -            if children_snapshot.is_empty() { continue; }
+      -
+      -            let mut local_changed = false;
+      -            let mut w = u.write(trie3_god).expect("write");
+      -
+      -            for ((p1, llm1), dests) in &children_snapshot {
+      -                // We will remove/replace individual destinations for this key.
+      -                for (v, sids1) in dests {
+      -                    if let Some(chain) = follow_zero_chain(*v, &summary, &mut memo) {
+      -                        // Compose new filters
+      -                        let new_llm = llm1 & &chain.llm;
+      -                        let new_sids = s1 & &chain.sids;
+      -
+      -                        // Remove old edge U --(p1, llm1)--> V
+      -                        if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
+      -                            if dm.remove(v).is_some() {
+      -                                local_changed = true;
+      -                            }
+      -                            if dm.is_empty() {
+      -                                w.children_mut().remove(&(p1.clone(), llm1.clone()));
+      -                            }
+      -                        }
+      -
+      -                        // If empty, nothing to add; drop the path.
+      -                        if new_llm.is_empty() || new_sids.is_empty() {
+      -                            continue;
+      -                        }
+      -
+      -                        // Insert U --(p1, new_llm)--> chain.last with new_sids
+      -                        let dest_map = w.children_mut().entry((*p1, new_llm)).or_default();
+      -                        dest_map.entry(chain.last)
+      -                            .and_modify(|s| *s |= &new_sids)
+      -                            .or_insert(new_sids);
+      -                    }
+      -                }
+      -            }
+      -
+      -            if local_changed {
+      -                // Keep node metadata consistent after rewrites
+      -                let mut union_bv = LLMTokenBV::zeros();
+      -                for ((_, llm_bv), _) in w.children().iter() {
+      -                    union_bv |= llm_bv;
+      -                }
+      -                w.value.live_tokens = union_bv;
+      -                changed_any = true;
+      -            }
+      -        }
+      -
+      -        changed_any
+      -    };
+      -
+      -    // Pass 3: shortcut when the first edge is "universal" and the middle has a single outgoing edge.
+      -    // A --(p1, ALL_LLM, ALL_SID)--> B and B --(p2, L2, SID2)--> C (only outgoing)
+      -    // becomes A --(p1+p2, L2, SID2)--> C. (Do not apply when p2 == 0; zero-pop handled by pass 2.)
+      -    let shortcut_universal_pop_step = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+      -        let nodes = Trie::all_nodes(trie3_god, roots_vec);
+      -        if nodes.is_empty() { return false; }
+      -
+      -        // Summaries
+      -        type DestList = Vec<(Trie2Index, StateIDBV)>;
+      -        type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
+      -        let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
+      -        for n in &nodes {
+      -            let g = n.read(trie3_god).expect("read");
+      -            let edges: EdgeList = g.children()
+      -                .iter()
+      -                .map(|(ek, dm)| {
+      -                    let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
+      -                    (ek.0, ek.1.clone(), dests)
+      -                })
+      -                .collect();
+      -            summary.insert(*n, (g.value.end, edges));
+      -        }
+      -
+      -        // Identify "compressible" middle nodes: exactly one outgoing edge, with exactly one destination, pop > 0
+      -        let mut middle_info: HashMap<Trie2Index, (usize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
+      -        for n in &nodes {
+      -            let (is_end, edges) = summary.get(n).unwrap();
+      -            if *is_end { continue; }
+      -            if edges.len() != 1 { continue; }
+      -            let (p2, llm2, dests) = &edges[0];
+      -            if *p2 == 0 { continue; } // leave to zero-pop pass
+      -            if dests.len() != 1 { continue; }
+      -            let (c, sids2) = &dests[0];
+      -            middle_info.insert(*n, (*p2, llm2.clone(), *c, sids2.clone()));
+      -        }
+      -
+      -        let mut changed_any = false;
+      -
+      -        #[cfg(not(rustrover))]
+      -        let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Universal Pop)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+      -        #[cfg(rustrover)]
+      -        let it = nodes.iter();
+      -        for u in it {
+      -            // Snapshot children
+      -            let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
+      -                let g = u.read(trie3_god).expect("read");
+      -                g.children()
+      -                    .iter()
+      -                    .map(|(ek, dm)| {
+      -                        let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
+      -                        (ek.clone(), dests)
+      -                    })
+      -                    .collect()
+      -            };
+      -            if children_snapshot.is_empty() { continue; }
+      +            let old_children = u.read(trie3_god).expect("read").children().clone();
+      +            if old_children.is_empty() { continue; }
+       
+      +            let mut new_children = old_children.clone();
+                   let mut local_changed = false;
+      -            let mut w = u.write(trie3_god).expect("write");
+      -
+      -            for ((p1, llm1), dests) in &children_snapshot {
+      -                // Only when the first edge is universal in both LLM and SIDs.
+      -                if !is_all_llm(&llm1) {
+      -                    continue;
+      -                }
+      -                for (v, sids1) in dests {
+      -                    if !is_all_sids(&sids1) {
+      -                        continue;
+      -                    }
+      -                    if let Some((p2, llm2, c, sids2)) = middle_info.get(v).cloned() {
+      -                        // Remove old edge U --(p1, llm1)--> V
+      -                        if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
+      -                            if dm.remove(v).is_some() {
+      -                                local_changed = true;
+      -                            }
+      -                            if dm.is_empty() {
+      -                                w.children_mut().remove(&(p1.clone(), llm1.clone()));
+      -                            }
+      -                        }
+      -                        // Insert U --(p1+p2, llm2)--> C with sids2
+      -                        let key_new = (p1 + p2, llm2);
+      -                        let dest_map = w.children_mut().entry(key_new).or_default();
+      -                        dest_map.entry(c)
+      -                            .and_modify(|s| *s |= &sids2)
+      -                            .or_insert(sids2);
+      +
+      +            for ((p1, l1), dm) in &old_children {
+      +                for (v, s1) in dm {
+      +                    if let Some((p2, l2, c, s2)) = single_exit_info.get(v) {
+      +                        local_changed = true;
+      +
+      +                        // Remove old edge u -> v from our temporary new_children map
+      +                        let current_dm = new_children.get_mut(&(*p1, l1.clone())).unwrap();
+      +                        current_dm.remove(v);
+      +                        if current_dm.is_empty() {
+      +                            new_children.remove(&(*p1, l1.clone()));
+      +                        }
+      +
+      +                        // Add new composed edge u -> c
+      +                        let p_new = p1 + p2;
+      +                        let l_new = l1 & l2;
+      +                        let s_new = s1 & s2;
+      +
+      +                        if !l_new.is_empty() && !s_new.is_empty() {
+      +                            new_children.entry((p_new, l_new)).or_default()
+      +                                .entry(*c)
+      +                                .and_modify(|s| *s |= &s_new)
+      +                                .or_insert(s_new.clone());
+      +                        }
+                           }
+                       }
+                   }
+       
+                   if local_changed {
+      -                // Keep node metadata consistent after rewrites
+      -                let mut union_bv = LLMTokenBV::zeros();
+      -                for ((_, llm_bv), _) in w.children().iter() {
+      -                    union_bv |= llm_bv;
+      +                changed_any = true;
+      +                let mut u_guard = u.write(trie3_god).expect("write");
+      +                *u_guard.children_mut() = new_children;
+      +                // Recompute live tokens as they may have changed
+      +                let mut new_live = LLMTokenBV::zeros();
+      +                for ((_, llm_bv), _) in u_guard.children() {
+      +                    new_live |= llm_bv;
+                       }
+      -                w.value.live_tokens = union_bv;
+      -                changed_any = true;
+      +                u_guard.value.live_tokens = new_live;
+                   }
+               }
+       
+      @@ -1789,14 +1682,8 @@
+               let mut pass_changed = false;
+               // 1) Coalesce within nodes (cheap win)
+               if coalesce_edges_within_nodes(trie3_god, &roots_vec) {
+      -            pass_changed = true;
+      -        }
+      -        // 2) Shortcut pop=0 chains (safe, non-expanding)
+      -        if shortcut_zero_pop_chains(trie3_god, &roots_vec) {
+      -            pass_changed = true;
+      -        }
+      -        // 3) Shortcut universal-first edges by adding pops (safe, non-expanding)
+      -        if shortcut_universal_pop_step(trie3_god, &roots_vec) {
+      +            pass_changed = true; }
+      +        // 2) Bypass single-exit nodes to contract paths.
+      +        if bypass_single_exit_nodes(trie3_god, &roots_vec) {
+                   pass_changed = true;
+               }
+               if pass_changed {
+
+      ```
+    metadata:
+  - assistant: |-
+      Excellent, the graph has become much more compact, but you're right—there's still a significant optimization opportunity we can exploit. The key is to generalize some of the existing edge compression logic.
+
+      Currently, there are specialized functions for contracting `pop=0` chains and "universal" edges. We can replace these with a single, more powerful optimization pass that bypasses *any* node that is not an end-state and has only a single exit path. This will aggressively contract linear chains within the graph, regardless of pop counts or whether constraints are "universal".
+
+      This change simplifies the codebase while making it more effective, which is a great candidate for a "final edit".
+
+      ### Step-by-step Instructions
+
+      1.  **Open `src/constraint_precompute3_utils.rs`**.
+
+      2.  **Delete Obsolete Functions**: Remove the now-redundant `shortcut_zero_pop_chains` and `shortcut_universal_pop_step` functions. These are the large blocks of code starting around line 1579 and line 1711, respectively.
+
+      3.  **Implement `bypass_single_exit_nodes`**: In their place, insert the new, more general `bypass_single_exit_nodes` function. This function identifies any node with a single exit and reroutes all incoming edges to that node's destination, composing the pop counts and constraints.
+
+      4.  **Update `compress_trie3_edges`**: Modify the main loop in `compress_trie3_edges` to call the new `bypass_single_exit_nodes` function instead of the two functions you just deleted.
+
+      ### Git Diff
+
+      Here is the git patch that applies these changes. It will cleanly replace the specialized functions with the more powerful, general one.
+
+      ```diff
+      diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
+      index 3333333..4444444 100644
+      --- a/src/constraint_precompute3_utils.rs
+      +++ b/src/constraint_precompute3_utils.rs
+      @@ -1568,200 +1568,93 @@
+               changed_any
+           };
+       
+      -    // Pass 2: shortcut zero-pop chains.
+      -    // Contracts sequences V --(pop 0, L2, S2)--> ... --(pop 0, Lk, Sk)--> Z
+      -    // into U --(p1, L1∩L2∩...∩Lk, S1∩S2∩...∩Sk)--> Z where U --(p1, L1, S1)--> V.
+      -    // Only applies when each intermediate has exactly one outgoing (pop 0) edge with exactly one destination (no fanout), avoiding edge explosion.
+      -    let shortcut_zero_pop_chains = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+      +    // Pass 2: Bypass single-exit nodes.
+      +    // This is a general path-contraction optimization. If a node B is not an end state and
+      +    // has exactly one outgoing edge to a single destination C, any incoming edge to B from A
+      +    // can be rerouted to C, composing the pops and intersecting the constraints.
+      +    // A --(p1, L1, S1)--> B --(p2, L2, S2)--> C  =>  A --(p1+p2, L1&L2, S1&S2)--> C
+      +    // This is a powerful transform that subsumes shortcut_zero_pop_chains and shortcut_universal_pop_step.
+      +    let bypass_single_exit_nodes = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+               let nodes = Trie::all_nodes(trie3_god, roots_vec);
+      -        if nodes.is_empty() { return false; }
+      -
+      -        // Snapshot summaries for quick lookups
+      -        type DestList = Vec<(Trie2Index, StateIDBV)>;
+      -        type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
+      -        let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
+      +        let mut changed_any = false;
+      +
+      +        // 1. Identify all single-exit nodes.
+      +        let mut single_exit_info: HashMap<Trie2Index, (usize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
+               for n in &nodes {
+                   let g = n.read(trie3_god).expect("read");
+      -            let edges: EdgeList = g.children()
+      -                .iter()
+      -                .map(|(ek, dm)| {
+      -                    let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
+      -                    (ek.0, ek.1.clone(), dests)
+      -                })
+      -                .collect();
+      -            summary.insert(*n, (g.value.end, edges));
+      -        }
+      -
+      -        // Memoization for zero-pop chain results
+      -        #[derive(Clone)]
+      -        struct ChainRes {
+      -            last: Trie2Index,
+      -            llm: LLMTokenBV,
+      -            sids: StateIDBV,
+      -        }
+      -        let mut memo: HashMap<Trie2Index, Option<ChainRes>> = HashMap::new();
+      -
+      -        fn follow_zero_chain(
+      -            v: Trie2Index,
+      -            summary: &HashMap<Trie2Index, (bool, EdgeList)>,
+      -            memo: &mut HashMap<Trie2Index, Option<ChainRes>>,
+      -        ) -> Option<ChainRes> {
+      -            if let Some(cached) = memo.get(&v) {
+      -                return cached.clone();
+      -            }
+      -            let (_is_end, edges) = match summary.get(&v) {
+      -                Some(x) => x,
+      -                None => {
+      -                    memo.insert(v, None);
+      -                    return None;
+      -                }
+      -            };
+      -            // Must be exactly one outgoing edge, pop == 0, with exactly one destination.
+      -            let mut pop0_edges = edges.iter().filter(|(p, _, _)| *p == 0);
+      -            let next = match pop0_edges.next() {
+      -                Some(x) => x,
+      -                None => {
+      -                    memo.insert(v, None);
+      -                    return None;
+      -                }
+      -            };
+      -            // Ensure it is the only outgoing edge and has a single destination.
+      -            if edges.len() != 1 || next.2.len() != 1 {
+      -                memo.insert(v, None);
+      -                return None;
+      -            }
+      -            let (_p0, llm2, dests) = next;
+      -            let (w, sids2) = &dests[0];
+      -
+      -            // Recurse forward
+      -            let res = if let Some(tail) = follow_zero_chain(*w, summary, memo) {
+      -                Some(ChainRes {
+      -                    last: tail.last,
+      -                    llm: llm2 & &tail.llm,
+      -                    sids: sids2 & &tail.sids,
+      -                })
+      -            } else {
+      -                Some(ChainRes {
+      -                    last: *w,
+      -                    llm: llm2.clone(),
+      -                    sids: sids2.clone(),
+      -                })
+      -            };
+      -            memo.insert(v, res.clone());
+      -            res
+      -        }
+      -
+      -        let mut changed_any = false;
+      +            if g.value.end { continue; }
+      +            if g.children().len() == 1 {
+      +                let ((p2, l2), dm) = g.children().iter().next().unwrap();
+      +                if dm.len() == 1 {
+      +                    let (c, s2) = dm.iter().next().unwrap();
+      +                    single_exit_info.insert(*n, (*p2, l2.clone(), *c, s2.clone()));
+      +                }
+      +            }
+      +        }
+      +        if single_exit_info.is_empty() { return false; }
+       
+               #[cfg(not(rustrover))]
+      -        let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Pop-0 Chains)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+      +        let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Bypass)", total = nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave = false);
+               #[cfg(rustrover)]
+               let it = nodes.iter();
+               for u in it {
+      -            // Snapshot children (stable during this node's rewrite)
+      -            let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
+      -                let g = u.read(trie3_god).expect("read");
+      -                g.children()
+      -                    .iter()
+      -                    .map(|(ek, dm)| {
+      -                        let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
+      -                        (ek.clone(), dests)
+      -                    })
+      -                    .collect()
+      -            };
+      -            if children_snapshot.is_empty() { continue; }
+      -
+      -            let mut local_changed = false;
+      -            let mut w = u.write(trie3_god).expect("write");
+      -
+      -            for ((p1, llm1), dests) in &children_snapshot {
+      -                // We will remove/replace individual destinations for this key.
+      -                for (v, sids1) in dests {
+      -                    if let Some(chain) = follow_zero_chain(*v, &summary, &mut memo) {
+      -                        // Compose new filters
+      -                        let new_llm = llm1 & &chain.llm;
+      -                        let new_sids = s1 & &chain.sids;
+      -
+      -                        // Remove old edge U --(p1, llm1)--> V
+      -                        if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
+      -                            if dm.remove(v).is_some() {
+      -                                local_changed = true;
+      -                            }
+      -                            if dm.is_empty() {
+      -                                w.children_mut().remove(&(p1.clone(), llm1.clone()));
+      -                            }
+      -                        }
+      -
+      -                        // If empty, nothing to add; drop the path.
+      -                        if new_llm.is_empty() || new_sids.is_empty() {
+      -                            continue;
+      -                        }
+      -
+      -                        // Insert U --(p1, new_llm)--> chain.last with new_sids
+      -                        let dest_map = w.children_mut().entry((*p1, new_llm)).or_default();
+      -                        dest_map.entry(chain.last)
+      -                            .and_modify(|s| *s |= &new_sids)
+      -                            .or_insert(new_sids);
+      -                    }
+      -                }
+      -            }
+      -
+      -            if local_changed {
+      -                // Keep node metadata consistent after rewrites
+      -                let mut union_bv = LLMTokenBV::zeros();
+      -                for ((_, llm_bv), _) in w.children().iter() {
+      -                    union_bv |= llm_bv;
+      -                }
+      -                w.value.live_tokens = union_bv;
+      -                changed_any = true;
+      -            }
+      -        }
+      -
+      -        changed_any
+      -    };
+      -
+      -    // Pass 3: shortcut when the first edge is "universal" and the middle has a single outgoing edge.
+      -    // A --(p1, ALL_LLM, ALL_SID)--> B and B --(p2, L2, SID2)--> C (only outgoing)
+      -    // becomes A --(p1+p2, L2, SID2)--> C. (Do not apply when p2 == 0; zero-pop handled by pass 2.)
+      -    let shortcut_universal_pop_step = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+      -        let nodes = Trie::all_nodes(trie3_god, roots_vec);
+      -        if nodes.is_empty() { return false; }
+      -
+      -        // Summaries
+      -        type DestList = Vec<(Trie2Index, StateIDBV)>;
+      -        type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
+      -        let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
+      -        for n in &nodes {
+      -            let g = n.read(trie3_god).expect("read");
+      -            let edges: EdgeList = g.children()
+      -                .iter()
+      -                .map(|(ek, dm)| {
+      -                    let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
+      -                    (ek.0, ek.1.clone(), dests)
+      -                })
+      -                .collect();
+      -            summary.insert(*n, (g.value.end, edges));
+      -        }
+      -
+      -        // Identify "compressible" middle nodes: exactly one outgoing edge, with exactly one destination, pop > 0
+      -        let mut middle_info: HashMap<Trie2Index, (usize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
+      -        for n in &nodes {
+      -            let (is_end, edges) = summary.get(n).unwrap();
+      -            if *is_end { continue; }
+      -            if edges.len() != 1 { continue; }
+      -            let (p2, llm2, dests) = &edges[0];
+      -            if *p2 == 0 { continue; } // leave to zero-pop pass
+      -            if dests.len() != 1 { continue; }
+      -            let (c, sids2) = &dests[0];
+      -            middle_info.insert(*n, (*p2, llm2.clone(), *c, sids2.clone()));
+      -        }
+      -
+      -        let mut changed_any = false;
+      -
+      -        #[cfg(not(rustrover))]
+      -        let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Universal Pop)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+      -        #[cfg(rustrover)]
+      -        let it = nodes.iter();
+      -        for u in it {
+      -            // Snapshot children
+      -            let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
+      -                let g = u.read(trie3_god).expect("read");
+      -                g.children()
+      -                    .iter()
+      -                    .map(|(ek, dm)| {
+      -                        let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
+      -                        (ek.clone(), dests)
+      -                    })
+      -                    .collect()
+      -            };
+      -            if children_snapshot.is_empty() { continue; }
+      +            let old_children = u.read(trie3_god).expect("read").children().clone();
+      +            if old_children.is_empty() { continue; }
+       
+      +            let mut new_children = old_children.clone();
+                   let mut local_changed = false;
+      -            let mut w = u.write(trie3_god).expect("write");
+      -
+      -            for ((p1, llm1), dests) in &children_snapshot {
+      -                // Only when the first edge is universal in both LLM and SIDs.
+      -                if !is_all_llm(&llm1) {
+      -                    continue;
+      -                }
+      -                for (v, sids1) in dests {
+      -                    if !is_all_sids(&sids1) {
+      -                        continue;
+      -                    }
+      -                    if let Some((p2, llm2, c, sids2)) = middle_info.get(v).cloned() {
+      -                        // Remove old edge U --(p1, llm1)--> V
+      -                        if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
+      -                            if dm.remove(v).is_some() {
+      -                                local_changed = true;
+      -                            }
+      -                            if dm.is_empty() {
+      -                                w.children_mut().remove(&(p1.clone(), llm1.clone()));
+      -                            }
+      -                        }
+      -                        // Insert U --(p1+p2, llm2)--> C with sids2
+      -                        let key_new = (p1 + p2, llm2);
+      -                        let dest_map = w.children_mut().entry(key_new).or_default();
+      -                        dest_map.entry(c)
+      -                            .and_modify(|s| *s |= &sids2)
+      -                            .or_insert(sids2);
+      +
+      +            for ((p1, l1), dm) in &old_children {
+      +                for (v, s1) in dm {
+      +                    if let Some((p2, l2, c, s2)) = single_exit_info.get(v) {
+      +                        local_changed = true;
+      +
+      +                        // Remove old edge u -> v from our temporary new_children map
+      +                        let current_dm = new_children.get_mut(&(*p1, l1.clone())).unwrap();
+      +                        current_dm.remove(v);
+      +                        if current_dm.is_empty() {
+      +                            new_children.remove(&(*p1, l1.clone()));
+      +                        }
+      +
+      +                        // Add new composed edge u -> c
+      +                        let p_new = p1 + p2;
+      +                        let l_new = l1 & l2;
+      +                        let s_new = s1 & s2;
+      +
+      +                        if !l_new.is_empty() && !s_new.is_empty() {
+      +                            new_children.entry((p_new, l_new)).or_default()
+      +                                .entry(*c)
+      +                                .and_modify(|s| *s |= &s_new)
+      +                                .or_insert(s_new.clone());
+      +                        }
+                           }
+                       }
+                   }
+       
+                   if local_changed {
+      -                // Keep node metadata consistent after rewrites
+      -                let mut union_bv = LLMTokenBV::zeros();
+      -                for ((_, llm_bv), _) in w.children().iter() {
+      -                    union_bv |= llm_bv;
+      +                changed_any = true;
+      +                let mut u_guard = u.write(trie3_god).expect("write");
+      +                *u_guard.children_mut() = new_children;
+      +                // Recompute live tokens as they may have changed
+      +                let mut new_live = LLMTokenBV::zeros();
+      +                for ((_, llm_bv), _) in u_guard.children() {
+      +                    new_live |= llm_bv;
+                       }
+      -                w.value.live_tokens = union_bv;
+      -                changed_any = true;
+      +                u_guard.value.live_tokens = new_live;
+                   }
+               }
+       
+      @@ -1789,14 +1682,8 @@
+               let mut pass_changed = false;
+               // 1) Coalesce within nodes (cheap win)
+               if coalesce_edges_within_nodes(trie3_god, &roots_vec) {
+      -            pass_changed = true;
+      -        }
+      -        // 2) Shortcut pop=0 chains (safe, non-expanding)
+      -        if shortcut_zero_pop_chains(trie3_god, &roots_vec) {
+      -            pass_changed = true;
+      -        }
+      -        // 3) Shortcut universal-first edges by adding pops (safe, non-expanding)
+      -        if shortcut_universal_pop_step(trie3_god, &roots_vec) {
+      +            pass_changed = true; }
+      +        // 2) Bypass single-exit nodes to contract paths.
+      +        if bypass_single_exit_nodes(trie3_god, &roots_vec) {
+                   pass_changed = true;
+               }
+               if pass_changed {
+
+      ```
+    metadata:
+  - user: |-
+      Git apply attempt failed (git-llm mode) after iterative fixes:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint_precompute3_utils.rs
+      Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
+      Error applying patch to src/constraint_precompute3_utils.rs: Hunk #1 (header: `@@ -1568,200 +1568,93 @@`) failed: context not found.
+
+      --- Expected Context (from patch): ---
+              changed_any
+          };
+
+          // Pass 2: shortcut zero-pop chains.
+          // Contracts sequences V --(pop 0, L2, S2)--> ... --(pop 0, Lk, Sk)--> Z
+          // into U --(p1, L1∩L2∩...∩Lk, S1∩S2∩...∩Sk)--> Z where U --(p1, L1, S1)--> V.
+          // Only applies when each intermediate has exactly one outgoing (pop 0) edge with exactly one destination (no fanout), avoiding edge explosion.
+          let shortcut_zero_pop_chains = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+              let nodes = Trie::all_nodes(trie3_god, roots_vec);
+              if nodes.is_empty() { return false; }
+
+              // Snapshot summaries for quick lookups
+              type DestList = Vec<(Trie2Index, StateIDBV)>;
+              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
+              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
+              for n in &nodes {
+                  let g = n.read(trie3_god).expect("read");
+                  let edges: EdgeList = g.children()
+                      .iter()
+                      .map(|(ek, dm)| {
+                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
+                          (ek.0, ek.1.clone(), dests)
+                      })
+                      .collect();
+                  summary.insert(*n, (g.value.end, edges));
+              }
+
+              // Memoization for zero-pop chain results
+              #[derive(Clone)]
+              struct ChainRes {
+                  last: Trie2Index,
+                  llm: LLMTokenBV,
+                  sids: StateIDBV,
+              }
+              let mut memo: HashMap<Trie2Index, Option<ChainRes>> = HashMap::new();
+
+              fn follow_zero_chain(
+                  v: Trie2Index,
+                  summary: &HashMap<Trie2Index, (bool, EdgeList)>,
+                  memo: &mut HashMap<Trie2Index, Option<ChainRes>>,
+              ) -> Option<ChainRes> {
+                  if let Some(cached) = memo.get(&v) {
+                      return cached.clone();
+                  }
+                  let (_is_end, edges) = match summary.get(&v) {
+                      Some(x) => x,
+                      None => {
+                          memo.insert(v, None);
+                          return None;
+                      }
+                  };
+                  // Must be exactly one outgoing edge, pop == 0, with exactly one destination.
+                  let mut pop0_edges = edges.iter().filter(|(p, _, _)| *p == 0);
+                  let next = match pop0_edges.next() {
+                      Some(x) => x,
+                      None => {
+                          memo.insert(v, None);
+                          return None;
+                      }
+                  };
+                  // Ensure it is the only outgoing edge and has a single destination.
+                  if edges.len() != 1 || next.2.len() != 1 {
+                      memo.insert(v, None);
+                      return None;
+                  }
+                  let (_p0, llm2, dests) = next;
+                  let (w, sids2) = &dests[0];
+
+                  // Recurse forward
+                  let res = if let Some(tail) = follow_zero_chain(*w, summary, memo) {
+                      Some(ChainRes {
+                          last: tail.last,
+                          llm: llm2 & &tail.llm,
+                          sids: sids2 & &tail.sids,
+                      })
+                  } else {
+                      Some(ChainRes {
+                          last: *w,
+                          llm: llm2.clone(),
+                          sids: sids2.clone(),
+                      })
+                  };
+                  memo.insert(v, res.clone());
+                  res
+              }
+
+              let mut changed_any = false;
+
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Pop-0 Chains)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for u in it {
+                  // Snapshot children (stable during this node's rewrite)
+                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
+                      let g = u.read(trie3_god).expect("read");
+                      g.children()
+                          .iter()
+                          .map(|(ek, dm)| {
+                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
+                              (ek.clone(), dests)
+                          })
+                          .collect()
+                  };
+                  if children_snapshot.is_empty() { continue; }
+
+                  let mut local_changed = false;
+                  let mut w = u.write(trie3_god).expect("write");
+
+                  for ((p1, llm1), dests) in &children_snapshot {
+                      // We will remove/replace individual destinations for this key.
+                      for (v, sids1) in dests {
+                          if let Some(chain) = follow_zero_chain(*v, &summary, &mut memo) {
+                              // Compose new filters
+                              let new_llm = llm1 & &chain.llm;
+                              let new_sids = s1 & &chain.sids;
+
+                              // Remove old edge U --(p1, llm1)--> V
+                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
+                                  if dm.remove(v).is_some() {
+                                      local_changed = true;
+                                  }
+                                  if dm.is_empty() {
+                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
+                                  }
+                              }
+
+                              // If empty, nothing to add; drop the path.
+                              if new_llm.is_empty() || new_sids.is_empty() {
+                                  continue;
+                              }
+
+                              // Insert U --(p1, new_llm)--> chain.last with new_sids
+                              let dest_map = w.children_mut().entry((*p1, new_llm)).or_default();
+                              dest_map.entry(chain.last)
+                                  .and_modify(|s| *s |= &new_sids)
+                                  .or_insert(new_sids);
+                          }
+                      }
+                  }
+
+                  if local_changed {
+                      // Keep node metadata consistent after rewrites
+                      let mut union_bv = LLMTokenBV::zeros();
+                      for ((_, llm_bv), _) in w.children().iter() {
+                          union_bv |= llm_bv;
+                      }
+                      w.value.live_tokens = union_bv;
+                      changed_any = true;
+                  }
+              }
+
+              changed_any
+          };
+
+          // Pass 3: shortcut when the first edge is "universal" and the middle has a single outgoing edge.
+          // A --(p1, ALL_LLM, ALL_SID)--> B and B --(p2, L2, SID2)--> C (only outgoing)
+          // becomes A --(p1+p2, L2, SID2)--> C. (Do not apply when p2 == 0; zero-pop handled by pass 2.)
+          let shortcut_universal_pop_step = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+              let nodes = Trie::all_nodes(trie3_god, roots_vec);
+              if nodes.is_empty() { return false; }
+
+              // Summaries
+              type DestList = Vec<(Trie2Index, StateIDBV)>;
+              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
+              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
+              for n in &nodes {
+                  let g = n.read(trie3_god).expect("read");
+                  let edges: EdgeList = g.children()
+                      .iter()
+                      .map(|(ek, dm)| {
+                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
+                          (ek.0, ek.1.clone(), dests)
+                      })
+                      .collect();
+                  summary.insert(*n, (g.value.end, edges));
+              }
+
+              // Identify "compressible" middle nodes: exactly one outgoing edge, with exactly one destination, pop > 0
+              let mut middle_info: HashMap<Trie2Index, (usize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
+              for n in &nodes {
+                  let (is_end, edges) = summary.get(n).unwrap();
+                  if *is_end { continue; }
+                  if edges.len() != 1 { continue; }
+                  let (p2, llm2, dests) = &edges[0];
+                  if *p2 == 0 { continue; } // leave to zero-pop pass
+                  if dests.len() != 1 { continue; }
+                  let (c, sids2) = &dests[0];
+                  middle_info.insert(*n, (*p2, llm2.clone(), *c, sids2.clone()));
+              }
+
+              let mut changed_any = false;
+
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Universal Pop)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for u in it {
+                  // Snapshot children
+                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
+                      let g = u.read(trie3_god).expect("read");
+                      g.children()
+                          .iter()
+                          .map(|(ek, dm)| {
+                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
+                              (ek.clone(), dests)
+                          })
+                          .collect()
+                  };
+                  if children_snapshot.is_empty() { continue; }
+
+                  let mut local_changed = false;
+                  let mut w = u.write(trie3_god).expect("write");
+
+                  for ((p1, llm1), dests) in &children_snapshot {
+                      // Only when the first edge is "universal" in both LLM and SIDs.
+                      if !is_all_llm(&llm1) {
+                          continue;
+                      }
+                      for (v, sids1) in dests {
+                          if !is_all_sids(&sids1) {
+                              continue;
+                          }
+                          if let Some((p2, llm2, c, sids2)) = middle_info.get(v).cloned() {
+                              // Remove old edge U --(p1, llm1)--> V
+                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
+                                  if dm.remove(v).is_some() {
+                                      local_changed = true;
+                                  }
+                                  if dm.is_empty() {
+                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
+                                  }
+                              }
+                              // Insert U --(p1+p2, llm2)--> C with sids2
+                              let key_new = (p1 + p2, llm2);
+                              let dest_map = w.children_mut().entry(key_new).or_default();
+                              dest_map.entry(c)
+                                  .and_modify(|s| *s |= &sids2)
+                                  .or_insert(sids2);
+                          }
+                      }
+                  }
+
+                  if local_changed {
+                      // Keep node metadata consistent after rewrites
+                      let mut union_bv = LLMTokenBV::zeros();
+                      for ((_, llm_bv), _) in w.children().iter() {
+                          union_bv |= llm_bv;
+                      }
+                      w.value.live_tokens = union_bv;
+                      changed_any = true;
+                  }
+              }
+
+              changed_any
+          };
+      --- End Expected Context ---
+
+      --- Nearest Match (found at line 1776 with 99.22% similarity): ---
+              changed_any
+          };
+
+          // Pass 2: shortcut zero-pop chains.
+          // Contracts sequences V --(pop 0, L2, S2)--> ... --(pop 0, Lk, Sk)--> Z
+          // into U --(p1, L1∩L2∩...∩Lk, S1∩S2∩...∩Sk)--> Z where U --(p1, L1, S1)--> V.
+          // Only applies when each intermediate has exactly one outgoing (pop 0) edge with exactly one destination (no fanout), avoiding edge explosion.
+          let shortcut_zero_pop_chains = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+              let nodes = Trie::all_nodes(trie3_god, roots_vec);
+              if nodes.is_empty() { return false; }
+
+              // Snapshot summaries for quick lookups
+              type DestList = Vec<(Trie2Index, StateIDBV)>;
+              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
+              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
+              for n in &nodes {
+                  let g = n.read(trie3_god).expect("read");
+                  let edges: EdgeList = g.children()
+                      .iter()
+                      .map(|(ek, dm)| {
+                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
+                          (ek.0, ek.1.clone(), dests)
+                      })
+                      .collect();
+                  summary.insert(*n, (g.value.end, edges));
+              }
+
+              // Memoization for zero-pop chain results
+              #[derive(Clone)]
+              struct ChainRes {
+                  last: Trie2Index,
+                  llm: LLMTokenBV,
+                  sids: StateIDBV,
+              }
+              let mut memo: HashMap<Trie2Index, Option<ChainRes>> = HashMap::new();
+
+              fn follow_zero_chain(
+                  v: Trie2Index,
+                  summary: &HashMap<Trie2Index, (bool, EdgeList)>,
+                  memo: &mut HashMap<Trie2Index, Option<ChainRes>>,
+              ) -> Option<ChainRes> {
+                  if let Some(cached) = memo.get(&v) {
+                      return cached.clone();
+                  }
+                  let (_is_end, edges) = match summary.get(&v) {
+                      Some(x) => x,
+                      None => {
+                          memo.insert(v, None);
+                          return None;
+                      }
+                  };
+                  // Must be exactly one outgoing edge, pop == 0, with exactly one destination.
+                  let mut pop0_edges = edges.iter().filter(|(p, _, _)| *p == 0);
+                  let next = match pop0_edges.next() {
+                      Some(x) => x,
+                      None => {
+                          memo.insert(v, None);
+                          return None;
+                      }
+                  };
+                  // Ensure it is the only outgoing edge and has a single destination.
+                  if edges.len() != 1 || next.2.len() != 1 {
+                      memo.insert(v, None);
+                      return None;
+                  }
+                  let (_p0, llm2, dests) = next;
+                  let (w, sids2) = &dests[0];
+
+                  // Recurse forward
+                  let res = if let Some(tail) = follow_zero_chain(*w, summary, memo) {
+                      Some(ChainRes {
+                          last: tail.last,
+                          llm: llm2 & &tail.llm,
+                          sids: sids2 & &tail.sids,
+                      })
+                  } else {
+                      Some(ChainRes {
+                          last: *w,
+                          llm: llm2.clone(),
+                          sids: sids2.clone(),
+                      })
+                  };
+                  memo.insert(v, res.clone());
+                  res
+              }
+
+              let mut changed_any = false;
+
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Pop-0 Chains)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for u in it {
+                  // Snapshot children (stable during this node's rewrite)
+                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
+                      let g = u.read(trie3_god).expect("read");
+                      g.children()
+                          .iter()
+                          .map(|(ek, dm)| {
+                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
+                              (ek.clone(), dests)
+                          })
+                          .collect()
+                  };
+                  if children_snapshot.is_empty() { continue; }
+
+                  let mut local_changed = false;
+                  let mut w = u.write(trie3_god).expect("write");
+
+                  for ((p1, llm1), dests) in &children_snapshot {
+                      // We will remove/replace individual destinations for this key.
+                      for (v, sids1) in dests {
+                          if let Some(chain) = follow_zero_chain(*v, &summary, &mut memo) {
+                              // Compose new filters
+                              let new_llm = llm1 & &chain.llm;
+                              let new_sids = sids1 & &chain.sids;
+
+                              // Remove old edge U --(p1, llm1)--> V
+                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
+                                  if dm.remove(v).is_some() {
+                                      local_changed = true;
+                                  }
+                                  if dm.is_empty() {
+                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
+                                  }
+                              }
+
+                              // If empty, nothing to add; drop the path.
+                              if new_llm.is_empty() || new_sids.is_empty() {
+                                  continue;
+                              }
+
+                              // Insert U --(p1, new_llm)--> chain.last with new_sids
+                              let dest_map = w.children_mut().entry((*p1, new_llm)).or_default();
+                              dest_map.entry(chain.last)
+                                  .and_modify(|s| *s |= &new_sids)
+                                  .or_insert(new_sids);
+                          }
+                      }
+                  }
+
+                  if local_changed {
+                      // Keep node metadata consistent after rewrites
+                      let mut union_bv = LLMTokenBV::zeros();
+                      for ((_, llm_bv), _) in w.children().iter() {
+                          union_bv |= llm_bv;
+                      }
+                      w.value.live_tokens = union_bv;
+                      changed_any = true;
+                  }
+              }
+
+              changed_any
+          };
+
+          // Pass 3: shortcut when the first edge is "universal" and the middle has a single outgoing edge.
+          // A --(p1, ALL_LLM, ALL_SID)--> B and B --(p2, L2, SID2)--> C (only outgoing)
+          // becomes A --(p1+p2, L2, SID2)--> C. (Do not apply when p2 == 0; zero-pop handled by pass 2.)
+          let shortcut_universal_pop_step = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+              let nodes = Trie::all_nodes(trie3_god, roots_vec);
+              if nodes.is_empty() { return false; }
+
+              // Summaries
+              type DestList = Vec<(Trie2Index, StateIDBV)>;
+              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
+              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
+              for n in &nodes {
+                  let g = n.read(trie3_god).expect("read");
+                  let edges: EdgeList = g.children()
+                      .iter()
+                      .map(|(ek, dm)| {
+                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
+                          (ek.0, ek.1.clone(), dests)
+                      })
+                      .collect();
+                  summary.insert(*n, (g.value.end, edges));
+              }
+
+              // Identify "compressible" middle nodes: exactly one outgoing edge, with exactly one destination, pop > 0
+              let mut middle_info: HashMap<Trie2Index, (usize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
+              for n in &nodes {
+                  let (is_end, edges) = summary.get(n).unwrap();
+                  if *is_end { continue; }
+                  if edges.len() != 1 { continue; }
+                  let (p2, llm2, dests) = &edges[0];
+                  if *p2 == 0 { continue; } // leave to zero-pop pass
+                  if dests.len() != 1 { continue; }
+                  let (c, sids2) = &dests[0];
+                  middle_info.insert(*n, (*p2, llm2.clone(), *c, sids2.clone()));
+              }
+
+              let mut changed_any = false;
+
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Universal Pop)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for u in it {
+                  // Snapshot children
+                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
+                      let g = u.read(trie3_god).expect("read");
+                      g.children()
+                          .iter()
+                          .map(|(ek, dm)| {
+                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
+                              (ek.clone(), dests)
+                          })
+                          .collect()
+                  };
+                  if children_snapshot.is_empty() { continue; }
+
+                  let mut local_changed = false;
+                  let mut w = u.write(trie3_god).expect("write");
+
+                  for ((p1, llm1), dests) in &children_snapshot {
+                      // Only when the first edge is universal in both LLM and SIDs.
+                      if !is_all_llm(&llm1) {
+                          continue;
+                      }
+                      for (v, sids1) in dests {
+                          if !is_all_sids(&sids1) {
+                              continue;
+                          }
+                          if let Some((p2, llm2, c, sids2)) = middle_info.get(v).cloned() {
+                              // Remove old edge U --(p1, llm1)--> V
+                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
+                                  if dm.remove(v).is_some() {
+                                      local_changed = true;
+                                  }
+                                  if dm.is_empty() {
+                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
+                                  }
+                              }
+                              // Insert U --(p1+p2, llm2)--> C with sids2
+                              let key_new = (p1 + p2, llm2);
+                              let dest_map = w.children_mut().entry(key_new).or_default();
+                              dest_map.entry(c)
+                                  .and_modify(|s| *s |= &sids2)
+                                  .or_insert(sids2);
+                          }
+                      }
+                  }
+
+                  if local_changed {
+                      // Keep node metadata consistent after rewrites
+                      let mut union_bv = LLMTokenBV::zeros();
+                      for ((_, llm_bv), _) in w.children().iter() {
+                          union_bv |= llm_bv;
+                      }
+                      w.value.live_tokens = union_bv;
+                      changed_any = true;
+                  }
+              }
+
+              changed_any
+          };
+      --- End Nearest Match ---
+
+
+      ---
+
+      Note: Some chunks may have been successfully applied. A file only needs to be written in full if there is a chunk for it whose application failed.
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Git apply failed after iterative fixes. Fallback to LLM apply:
+      Git apply output:
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint_precompute3_utils.rs
+      Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
+      Error applying patch to src/constraint_precompute3_utils.rs: Hunk #1 (header: `@@ -1568,200 +1568,93 @@`) failed: context not found.
+
+      --- Expected Context (from patch): ---
+              changed_any
+          };
+
+          // Pass 2: shortcut zero-pop chains.
+          // Contracts sequences V --(pop 0, L2, S2)--> ... --(pop 0, Lk, Sk)--> Z
+          // into U --(p1, L1∩L2∩...∩Lk, S1∩S2∩...∩Sk)--> Z where U --(p1, L1, S1)--> V.
+          // Only applies when each intermediate has exactly one outgoing (pop 0) edge with exactly one destination (no fanout), avoiding edge explosion.
+          let shortcut_zero_pop_chains = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+              let nodes = Trie::all_nodes(trie3_god, roots_vec);
+              if nodes.is_empty() { return false; }
+
+              // Snapshot summaries for quick lookups
+              type DestList = Vec<(Trie2Index, StateIDBV)>;
+              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
+              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
+              for n in &nodes {
+                  let g = n.read(trie3_god).expect("read");
+                  let edges: EdgeList = g.children()
+                      .iter()
+                      .map(|(ek, dm)| {
+                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
+                          (ek.0, ek.1.clone(), dests)
+                      })
+                      .collect();
+                  summary.insert(*n, (g.value.end, edges));
+              }
+
+              // Memoization for zero-pop chain results
+              #[derive(Clone)]
+              struct ChainRes {
+                  last: Trie2Index,
+                  llm: LLMTokenBV,
+                  sids: StateIDBV,
+              }
+              let mut memo: HashMap<Trie2Index, Option<ChainRes>> = HashMap::new();
+
+              fn follow_zero_chain(
+                  v: Trie2Index,
+                  summary: &HashMap<Trie2Index, (bool, EdgeList)>,
+                  memo: &mut HashMap<Trie2Index, Option<ChainRes>>,
+              ) -> Option<ChainRes> {
+                  if let Some(cached) = memo.get(&v) {
+                      return cached.clone();
+                  }
+                  let (_is_end, edges) = match summary.get(&v) {
+                      Some(x) => x,
+                      None => {
+                          memo.insert(v, None);
+                          return None;
+                      }
+                  };
+                  // Must be exactly one outgoing edge, pop == 0, with exactly one destination.
+                  let mut pop0_edges = edges.iter().filter(|(p, _, _)| *p == 0);
+                  let next = match pop0_edges.next() {
+                      Some(x) => x,
+                      None => {
+                          memo.insert(v, None);
+                          return None;
+                      }
+                  };
+                  // Ensure it is the only outgoing edge and has a single destination.
+                  if edges.len() != 1 || next.2.len() != 1 {
+                      memo.insert(v, None);
+                      return None;
+                  }
+                  let (_p0, llm2, dests) = next;
+                  let (w, sids2) = &dests[0];
+
+                  // Recurse forward
+                  let res = if let Some(tail) = follow_zero_chain(*w, summary, memo) {
+                      Some(ChainRes {
+                          last: tail.last,
+                          llm: llm2 & &tail.llm,
+                          sids: sids2 & &tail.sids,
+                      })
+                  } else {
+                      Some(ChainRes {
+                          last: *w,
+                          llm: llm2.clone(),
+                          sids: sids2.clone(),
+                      })
+                  };
+                  memo.insert(v, res.clone());
+                  res
+              }
+
+              let mut changed_any = false;
+
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Pop-0 Chains)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for u in it {
+                  // Snapshot children (stable during this node's rewrite)
+                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
+                      let g = u.read(trie3_god).expect("read");
+                      g.children()
+                          .iter()
+                          .map(|(ek, dm)| {
+                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
+                              (ek.clone(), dests)
+                          })
+                          .collect()
+                  };
+                  if children_snapshot.is_empty() { continue; }
+
+                  let mut local_changed = false;
+                  let mut w = u.write(trie3_god).expect("write");
+
+                  for ((p1, llm1), dests) in &children_snapshot {
+                      // We will remove/replace individual destinations for this key.
+                      for (v, sids1) in dests {
+                          if let Some(chain) = follow_zero_chain(*v, &summary, &mut memo) {
+                              // Compose new filters
+                              let new_llm = llm1 & &chain.llm;
+                              let new_sids = s1 & &chain.sids;
+
+                              // Remove old edge U --(p1, llm1)--> V
+                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
+                                  if dm.remove(v).is_some() {
+                                      local_changed = true;
+                                  }
+                                  if dm.is_empty() {
+                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
+                                  }
+                              }
+
+                              // If empty, nothing to add; drop the path.
+                              if new_llm.is_empty() || new_sids.is_empty() {
+                                  continue;
+                              }
+
+                              // Insert U --(p1, new_llm)--> chain.last with new_sids
+                              let dest_map = w.children_mut().entry((*p1, new_llm)).or_default();
+                              dest_map.entry(chain.last)
+                                  .and_modify(|s| *s |= &new_sids)
+                                  .or_insert(new_sids);
+                          }
+                      }
+                  }
+
+                  if local_changed {
+                      // Keep node metadata consistent after rewrites
+                      let mut union_bv = LLMTokenBV::zeros();
+                      for ((_, llm_bv), _) in w.children().iter() {
+                          union_bv |= llm_bv;
+                      }
+                      w.value.live_tokens = union_bv;
+                      changed_any = true;
+                  }
+              }
+
+              changed_any
+          };
+
+          // Pass 3: shortcut when the first edge is "universal" and the middle has a single outgoing edge.
+          // A --(p1, ALL_LLM, ALL_SID)--> B and B --(p2, L2, SID2)--> C (only outgoing)
+          // becomes A --(p1+p2, L2, SID2)--> C. (Do not apply when p2 == 0; zero-pop handled by pass 2.)
+          let shortcut_universal_pop_step = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+              let nodes = Trie::all_nodes(trie3_god, roots_vec);
+              if nodes.is_empty() { return false; }
+
+              // Summaries
+              type DestList = Vec<(Trie2Index, StateIDBV)>;
+              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
+              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
+              for n in &nodes {
+                  let g = n.read(trie3_god).expect("read");
+                  let edges: EdgeList = g.children()
+                      .iter()
+                      .map(|(ek, dm)| {
+                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
+                          (ek.0, ek.1.clone(), dests)
+                      })
+                      .collect();
+                  summary.insert(*n, (g.value.end, edges));
+              }
+
+              // Identify "compressible" middle nodes: exactly one outgoing edge, with exactly one destination, pop > 0
+              let mut middle_info: HashMap<Trie2Index, (usize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
+              for n in &nodes {
+                  let (is_end, edges) = summary.get(n).unwrap();
+                  if *is_end { continue; }
+                  if edges.len() != 1 { continue; }
+                  let (p2, llm2, dests) = &edges[0];
+                  if *p2 == 0 { continue; } // leave to zero-pop pass
+                  if dests.len() != 1 { continue; }
+                  let (c, sids2) = &dests[0];
+                  middle_info.insert(*n, (*p2, llm2.clone(), *c, sids2.clone()));
+              }
+
+              let mut changed_any = false;
+
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Universal Pop)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for u in it {
+                  // Snapshot children
+                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
+                      let g = u.read(trie3_god).expect("read");
+                      g.children()
+                          .iter()
+                          .map(|(ek, dm)| {
+                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
+                              (ek.clone(), dests)
+                          })
+                          .collect()
+                  };
+                  if children_snapshot.is_empty() { continue; }
+
+                  let mut local_changed = false;
+                  let mut w = u.write(trie3_god).expect("write");
+
+                  for ((p1, llm1), dests) in &children_snapshot {
+                      // Only when the first edge is "universal" in both LLM and SIDs.
+                      if !is_all_llm(&llm1) {
+                          continue;
+                      }
+                      for (v, sids1) in dests {
+                          if !is_all_sids(&sids1) {
+                              continue;
+                          }
+                          if let Some((p2, llm2, c, sids2)) = middle_info.get(v).cloned() {
+                              // Remove old edge U --(p1, llm1)--> V
+                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
+                                  if dm.remove(v).is_some() {
+                                      local_changed = true;
+                                  }
+                                  if dm.is_empty() {
+                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
+                                  }
+                              }
+                              // Insert U --(p1+p2, llm2)--> C with sids2
+                              let key_new = (p1 + p2, llm2);
+                              let dest_map = w.children_mut().entry(key_new).or_default();
+                              dest_map.entry(c)
+                                  .and_modify(|s| *s |= &sids2)
+                                  .or_insert(sids2);
+                          }
+                      }
+                  }
+
+                  if local_changed {
+                      // Keep node metadata consistent after rewrites
+                      let mut union_bv = LLMTokenBV::zeros();
+                      for ((_, llm_bv), _) in w.children().iter() {
+                          union_bv |= llm_bv;
+                      }
+                      w.value.live_tokens = union_bv;
+                      changed_any = true;
+                  }
+              }
+
+              changed_any
+          };
+      --- End Expected Context ---
+
+      --- Nearest Match (found at line 1776 with 99.22% similarity): ---
+              changed_any
+          };
+
+          // Pass 2: shortcut zero-pop chains.
+          // Contracts sequences V --(pop 0, L2, S2)--> ... --(pop 0, Lk, Sk)--> Z
+          // into U --(p1, L1∩L2∩...∩Lk, S1∩S2∩...∩Sk)--> Z where U --(p1, L1, S1)--> V.
+          // Only applies when each intermediate has exactly one outgoing (pop 0) edge with exactly one destination (no fanout), avoiding edge explosion.
+          let shortcut_zero_pop_chains = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+              let nodes = Trie::all_nodes(trie3_god, roots_vec);
+              if nodes.is_empty() { return false; }
+
+              // Snapshot summaries for quick lookups
+              type DestList = Vec<(Trie2Index, StateIDBV)>;
+              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
+              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
+              for n in &nodes {
+                  let g = n.read(trie3_god).expect("read");
+                  let edges: EdgeList = g.children()
+                      .iter()
+                      .map(|(ek, dm)| {
+                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
+                          (ek.0, ek.1.clone(), dests)
+                      })
+                      .collect();
+                  summary.insert(*n, (g.value.end, edges));
+              }
+
+              // Memoization for zero-pop chain results
+              #[derive(Clone)]
+              struct ChainRes {
+                  last: Trie2Index,
+                  llm: LLMTokenBV,
+                  sids: StateIDBV,
+              }
+              let mut memo: HashMap<Trie2Index, Option<ChainRes>> = HashMap::new();
+
+              fn follow_zero_chain(
+                  v: Trie2Index,
+                  summary: &HashMap<Trie2Index, (bool, EdgeList)>,
+                  memo: &mut HashMap<Trie2Index, Option<ChainRes>>,
+              ) -> Option<ChainRes> {
+                  if let Some(cached) = memo.get(&v) {
+                      return cached.clone();
+                  }
+                  let (_is_end, edges) = match summary.get(&v) {
+                      Some(x) => x,
+                      None => {
+                          memo.insert(v, None);
+                          return None;
+                      }
+                  };
+                  // Must be exactly one outgoing edge, pop == 0, with exactly one destination.
+                  let mut pop0_edges = edges.iter().filter(|(p, _, _)| *p == 0);
+                  let next = match pop0_edges.next() {
+                      Some(x) => x,
+                      None => {
+                          memo.insert(v, None);
+                          return None;
+                      }
+                  };
+                  // Ensure it is the only outgoing edge and has a single destination.
+                  if edges.len() != 1 || next.2.len() != 1 {
+                      memo.insert(v, None);
+                      return None;
+                  }
+                  let (_p0, llm2, dests) = next;
+                  let (w, sids2) = &dests[0];
+
+                  // Recurse forward
+                  let res = if let Some(tail) = follow_zero_chain(*w, summary, memo) {
+                      Some(ChainRes {
+                          last: tail.last,
+                          llm: llm2 & &tail.llm,
+                          sids: sids2 & &tail.sids,
+                      })
+                  } else {
+                      Some(ChainRes {
+                          last: *w,
+                          llm: llm2.clone(),
+                          sids: sids2.clone(),
+                      })
+                  };
+                  memo.insert(v, res.clone());
+                  res
+              }
+
+              let mut changed_any = false;
+
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Pop-0 Chains)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for u in it {
+                  // Snapshot children (stable during this node's rewrite)
+                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
+                      let g = u.read(trie3_god).expect("read");
+                      g.children()
+                          .iter()
+                          .map(|(ek, dm)| {
+                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
+                              (ek.clone(), dests)
+                          })
+                          .collect()
+                  };
+                  if children_snapshot.is_empty() { continue; }
+
+                  let mut local_changed = false;
+                  let mut w = u.write(trie3_god).expect("write");
+
+                  for ((p1, llm1), dests) in &children_snapshot {
+                      // We will remove/replace individual destinations for this key.
+                      for (v, sids1) in dests {
+                          if let Some(chain) = follow_zero_chain(*v, &summary, &mut memo) {
+                              // Compose new filters
+                              let new_llm = llm1 & &chain.llm;
+                              let new_sids = sids1 & &chain.sids;
+
+                              // Remove old edge U --(p1, llm1)--> V
+                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
+                                  if dm.remove(v).is_some() {
+                                      local_changed = true;
+                                  }
+                                  if dm.is_empty() {
+                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
+                                  }
+                              }
+
+                              // If empty, nothing to add; drop the path.
+                              if new_llm.is_empty() || new_sids.is_empty() {
+                                  continue;
+                              }
+
+                              // Insert U --(p1, new_llm)--> chain.last with new_sids
+                              let dest_map = w.children_mut().entry((*p1, new_llm)).or_default();
+                              dest_map.entry(chain.last)
+                                  .and_modify(|s| *s |= &new_sids)
+                                  .or_insert(new_sids);
+                          }
+                      }
+                  }
+
+                  if local_changed {
+                      // Keep node metadata consistent after rewrites
+                      let mut union_bv = LLMTokenBV::zeros();
+                      for ((_, llm_bv), _) in w.children().iter() {
+                          union_bv |= llm_bv;
+                      }
+                      w.value.live_tokens = union_bv;
+                      changed_any = true;
+                  }
+              }
+
+              changed_any
+          };
+
+          // Pass 3: shortcut when the first edge is "universal" and the middle has a single outgoing edge.
+          // A --(p1, ALL_LLM, ALL_SID)--> B and B --(p2, L2, SID2)--> C (only outgoing)
+          // becomes A --(p1+p2, L2, SID2)--> C. (Do not apply when p2 == 0; zero-pop handled by pass 2.)
+          let shortcut_universal_pop_step = |trie3_god: &Trie3GodWrapper, roots_vec: &[PrecomputeNode3Index]| -> bool {
+              let nodes = Trie::all_nodes(trie3_god, roots_vec);
+              if nodes.is_empty() { return false; }
+
+              // Summaries
+              type DestList = Vec<(Trie2Index, StateIDBV)>;
+              type EdgeList = Vec<(usize, LLMTokenBV, DestList)>;
+              let mut summary: HashMap<Trie2Index, (bool, EdgeList)> = HashMap::new();
+              for n in &nodes {
+                  let g = n.read(trie3_god).expect("read");
+                  let edges: EdgeList = g.children()
+                      .iter()
+                      .map(|(ek, dm)| {
+                          let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<DestList>();
+                          (ek.0, ek.1.clone(), dests)
+                      })
+                      .collect();
+                  summary.insert(*n, (g.value.end, edges));
+              }
+
+              // Identify "compressible" middle nodes: exactly one outgoing edge, with exactly one destination, pop > 0
+              let mut middle_info: HashMap<Trie2Index, (usize, LLMTokenBV, Trie2Index, StateIDBV)> = HashMap::new();
+              for n in &nodes {
+                  let (is_end, edges) = summary.get(n).unwrap();
+                  if *is_end { continue; }
+                  if edges.len() != 1 { continue; }
+                  let (p2, llm2, dests) = &edges[0];
+                  if *p2 == 0 { continue; } // leave to zero-pop pass
+                  if dests.len() != 1 { continue; }
+                  let (c, sids2) = &dests[0];
+                  middle_info.insert(*n, (*p2, llm2.clone(), *c, sids2.clone()));
+              }
+
+              let mut changed_any = false;
+
+              #[cfg(not(rustrover))]
+              let it = tqdm!(nodes.iter(), desc = "Trie3 Compress (Universal Pop)", total=nodes.len(), disable = !PROGRESS_BAR_ENABLED, leave=false);
+              #[cfg(rustrover)]
+              let it = nodes.iter();
+              for u in it {
+                  // Snapshot children
+                  let children_snapshot: Vec<((usize, LLMTokenBV), Vec<(Trie2Index, StateIDBV)>)> = {
+                      let g = u.read(trie3_god).expect("read");
+                      g.children()
+                          .iter()
+                          .map(|(ek, dm)| {
+                              let dests = dm.iter().map(|(d, sids)| (*d, sids.clone())).collect::<Vec<_>>();
+                              (ek.clone(), dests)
+                          })
+                          .collect()
+                  };
+                  if children_snapshot.is_empty() { continue; }
+
+                  let mut local_changed = false;
+                  let mut w = u.write(trie3_god).expect("write");
+
+                  for ((p1, llm1), dests) in &children_snapshot {
+                      // Only when the first edge is universal in both LLM and SIDs.
+                      if !is_all_llm(&llm1) {
+                          continue;
+                      }
+                      for (v, sids1) in dests {
+                          if !is_all_sids(&sids1) {
+                              continue;
+                          }
+                          if let Some((p2, llm2, c, sids2)) = middle_info.get(v).cloned() {
+                              // Remove old edge U --(p1, llm1)--> V
+                              if let Some(dm) = w.children_mut().get_mut(&(p1.clone(), llm1.clone())) {
+                                  if dm.remove(v).is_some() {
+                                      local_changed = true;
+                                  }
+                                  if dm.is_empty() {
+                                      w.children_mut().remove(&(p1.clone(), llm1.clone()));
+                                  }
+                              }
+                              // Insert U --(p1+p2, llm2)--> C with sids2
+                              let key_new = (p1 + p2, llm2);
+                              let dest_map = w.children_mut().entry(key_new).or_default();
+                              dest_map.entry(c)
+                                  .and_modify(|s| *s |= &sids2)
+                                  .or_insert(sids2);
+                          }
+                      }
+                  }
+
+                  if local_changed {
+                      // Keep node metadata consistent after rewrites
+                      let mut union_bv = LLMTokenBV::zeros();
+                      for ((_, llm_bv), _) in w.children().iter() {
+                          union_bv |= llm_bv;
+                      }
+                      w.value.live_tokens = union_bv;
+                      changed_any = true;
+                  }
+              }
+
+              changed_any
+          };
+      --- End Nearest Match ---
+
+
+      LLM apply output:
+      Using model 'cp' for code completion.
+
+      --- LLM Code Generation Attempt 1/5 ---
+      Parsed actions JSON: [
+        {
+          "action": "replace",
+          "filepath": "src/constraint_precompute3_utils.rs"
+        }
+      ]
+      Found 1 code blocks with filepaths in attempt 1.
+      Received code for required file: src/constraint_precompute3_utils.rs
+      All required file contents received or no content needed.
+
+      --- Applying Changes ---
+      Successfully replaced file: src/constraint_precompute3_utils.rs
+    metadata:
+  - user: 'Changes committed with message: "refactor: Replace specific path-shortcutting
+      passes with general single-exit node bypass"'
     metadata:
 ...
