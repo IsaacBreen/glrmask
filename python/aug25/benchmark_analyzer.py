@@ -114,36 +114,44 @@ def _format_ranges_as_tokens(ranges: Tuple[Tuple[int, int], ...], id_to_token: D
     lower_bytes = {ord(c) for c in "abcdefghijklmnopqrstuvwxyz"}
     upper_bytes = {ord(c) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
 
-    def get_range_group(start, end, id_to_token):
-        """Check if a numeric range corresponds to a known, clean group of tokens."""
-        if start > end: return None
-        byte_set = set()
-        for i in range(start, end + 1):
-            tok = id_to_token.get(i)
-            if tok is None or len(tok) != 1:
-                return None  # Not a continuous group of single bytes
-            byte_set.add(tok[0])
-        
-        if byte_set.issubset(digits_bytes): return "group"
-        if byte_set.issubset(lower_bytes): return "group"
-        if byte_set.issubset(upper_bytes): return "group"
+    def get_token_group(token_id: int, id_to_token: Dict[int, bytes]) -> Optional[str]:
+        """Determines if a token belongs to a known sequential group."""
+        tok = id_to_token.get(token_id)
+        if tok is None or len(tok) != 1:
+            return None
+        byte_val = tok[0]
+        if byte_val in digits_bytes: return "digits"
+        if byte_val in lower_bytes: return "lowercase"
+        if byte_val in upper_bytes: return "uppercase"
         return None
 
-    parts = []
+    all_parts = []
     for start, end in ranges:
-        start_tok_str = _format_token_bytes(id_to_token.get(start, b'<??>'))
-        if start == end:
-            parts.append(start_tok_str)
-        elif get_range_group(start, end, id_to_token):
-            # This is a clean, known group; represent it as a range.
-            end_tok_str = _format_token_bytes(id_to_token.get(end, b'<??>'))
-            parts.append(f"{start_tok_str}..{end_tok_str}")
-        else:
-            # Not a clean group (e.g., '/' through '9'); expand it.
-            for i in range(start, end + 1):
-                parts.append(_format_token_bytes(id_to_token.get(i, b'<??>')))
+        if start > end:
+            continue
+
+        sub_range_start_idx = start
+        current_group = get_token_group(start, id_to_token)
+
+        for i in range(start + 1, end + 2): # Iterate one past the end to flush the last sub-range
+            # Determine the group of the current token, or a unique group if we're past the end
+            next_group = get_token_group(i, id_to_token) if i <= end else object()
+
+            if next_group != current_group:
+                # The group has changed, so the previous sub-range has ended at i-1
+                sub_range_end_idx = i - 1
+                start_tok_str = _format_token_bytes(id_to_token.get(sub_range_start_idx, b'<??>'))
+                if sub_range_start_idx == sub_range_end_idx:
+                    all_parts.append(start_tok_str)
+                else:
+                    end_tok_str = _format_token_bytes(id_to_token.get(sub_range_end_idx, b'<??>'))
+                    all_parts.append(f"{start_tok_str}..{end_tok_str}")
+
+                # Start a new sub-range
+                sub_range_start_idx = i
+                current_group = next_group
             
-    return ", ".join(parts)
+    return ", ".join(all_parts)
 
 def _format_numeric_ranges(ranges: Tuple[Tuple[int, int], ...]) -> str:
     """Converts numeric ranges to a clean string like '1..10, 12, 15..20'."""
