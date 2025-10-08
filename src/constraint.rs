@@ -428,9 +428,9 @@ impl Default for GrammarConstraintConfig {
     fn default() -> Self {
         Self {
             skip_precomputation: false,
-            trie0: Trie0Config::default(),
-            trie1: Trie1Config::default(),
-            trie2: Trie2Config::default(),
+            trie0: Trie0Config::off(),
+            trie1: Trie1Config::off(),
+            trie2: Trie2Config::off(),
             trie3: Trie3Config::default(),
         }
     }

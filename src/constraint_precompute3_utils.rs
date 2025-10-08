@@ -68,13 +68,13 @@ impl Default for Trie3Config {
             constrain_bitvecs: true,
             gc: true,
             prune_dead_paths: true,
-            compress_edges: true,
+            compress_edges: false,
             merge_nodes_exact: Trie3MergeConfig::default(),
             merge_nodes_structural: true,
             merge_nodes_ultrafast: true,
             prune_nodes_not_reaching_end: true,
             simplify_llm_token_bvs: false,
-            factor_common_destinations: true,
+            factor_common_destinations: false,
         }
     }
 }
