@@ -1518,11 +1518,8 @@ fn test_constraint_expression_cycle() {
 fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load and compile the grammar from the EBNF file
     let ebnf_grammar = indoc! {r#"
-        program ::= expression_statement* EOF;
+        program ::= (expression ';')* EOF;
         EOF ::= '<|EOF|>';
-
-        // --- Statements (Core Imperative Set) ---
-        expression_statement ::= expression ';' ;
         expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
 
         STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters

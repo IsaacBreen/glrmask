@@ -4021,11 +4021,8 @@ local_system:
       fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
           // 1. Load and compile the grammar from the EBNF file
           let ebnf_grammar = indoc! {r#"
-              program ::= expression_statement* EOF;
+              program ::= (expression ';')* EOF;
               EOF ::= '<|EOF|>';
-
-              // --- Statements (Core Imperative Set) ---
-              expression_statement ::= expression ';' ;
               expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
 
               STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
@@ -13365,5 +13362,72 @@ messages:
     metadata:
   - user: 'Changes committed with message: "test: Re-introduce optional unary operator
       to expression rule in simplified grammar"'
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_basic.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - assistant: |-
+      You're right, that was a good simplification. We've now established that the issue is not related to the choice `(A | B)` inside the expression. The core issue seems to be the interaction between the repeatable `expression_statement*` and the optional `'!'?`.
+
+      Let's try one final simplification to create a minimal reproducible example. We will remove the `expression_statement` layer of indirection. The `program` rule will now directly repeat the `expression` rule, which is where the optionality lives. This makes the grammar as flat as possible while preserving the key `*` and `?` interaction.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the test file**: `src/test_constraint_basic.rs`.
+      2.  **Locate the test**: Find the function `test_js_simplified_ebnf_string`.
+      3.  **Modify the EBNF grammar string**:
+          a.  Find the `program` and `expression_statement` rules:
+              ```ebnf
+              program ::= expression_statement* EOF;
+              ...
+              expression_statement ::= expression ';' ;
+              ```
+          b.  Replace them with a single `program` rule that directly repeats the expression followed by a semicolon. This removes the `expression_statement` non-terminal.
+              ```ebnf
+              program ::= (expression ';')* EOF;
+              ```
+          c.  The rest of the grammar and the test setup can remain the same.
+
+      This change removes one non-terminal and one production rule, making the grammar even simpler for debugging, while keeping the essential structure that causes the failure.
+
+      ### Git Diff
+
+      Here is the git patch that applies the change described above.
+
+      ```diff
+      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
+      index 888h888..999i999 100644
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -1523,11 +1523,8 @@
+       fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
+           // 1. Load and compile the grammar from the EBNF file
+           let ebnf_grammar = indoc! {r#"
+      -        program ::= expression_statement* EOF;
+      +        program ::= (expression ';')* EOF;
+               EOF ::= '<|EOF|>';
+      -
+      -        // --- Statements (Core Imperative Set) ---
+      -        expression_statement ::= expression ';' ;
+               expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
+       
+               STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_basic.rs
+      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_basic.rs.
+    metadata:
+  - user: 'Changes committed with message: "test: Collapse program and expression
+      rules to minimal failing grammar structure"'
     metadata:
 ...
