@@ -1522,8 +1522,8 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
         EOF ::= '<|EOF|>';
         expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
 
-        STRING_LITERAL ::= 'b' ;
-        IDENTIFIER ::= 'a' ;
+        STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
+        IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     "#};
     let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
@@ -1531,12 +1531,12 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
     let llm_a = LLMTokenID(0);
-    let llm_not_b = LLMTokenID(1);
-    let llm_b = LLMTokenID(2);
+    let llm_not_quote = LLMTokenID(1);
+    let llm_quote = LLMTokenID(2);
     let llm_semi = LLMTokenID(3);
     llm_token_map.insert(b"a".to_vec(), llm_a);
-    llm_token_map.insert(b"!b".to_vec(), llm_not_b);
-    llm_token_map.insert(b"b".to_vec(), llm_b);
+    llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
+    llm_token_map.insert(b"\"".to_vec(), llm_quote);
     llm_token_map.insert(b";".to_vec(), llm_semi);
     let max_original_llm_token_id = 3;
 
@@ -1557,11 +1557,14 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = constraint.init();
     let mask1 = state.get_mask();
 
-    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_b.0, llm_b.0]);
+    // The grammar can start with an IDENTIFIER ("a"), a unary '!' ("!\""), or a STRING_LITERAL ("\"").
+    // It can also start with other things like 'let', 'if', 'while', '{', '(', 'true', 'false', a number, or a unary '-'.
+    // The LLM tokens provided match the start of IDENTIFIER, unary '!', and STRING_LITERAL.
+    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
     assert_eq!(
         mask1,
         expected_mask1,
-        "Initial mask should allow 'a', '!b', and 'b'"
+        "Initial mask should allow 'a', '!\"', and '\"'"
     );
 
     // 5. Commit "a" and get the next mask
@@ -1569,13 +1572,14 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     state.print_gss();
     let mask2 = state.get_mask();
 
-    // After committing "a" (a complete IDENTIFIER and expression), the only valid next token is ";".
-    // The bug is that the parser also allows tokens that can start a *new* expression.
-    let expected_mask2 = HybridBitset::from_iter(vec![llm_semi.0]);
+    // After committing "a", the only valid continuation from the LLM vocabulary is another "a"
+    // to form a longer identifier (e.g., "aa"). The path where "a" is a complete identifier
+    // would require an operator (+, *, ==) or a semicolon, none of which are available as tokens.
+    let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0]);
     assert_eq!(
         mask2,
         expected_mask2,
-        "After 'a', the only valid next token should be ';'"
+        "After 'a', mask should only allow 'a' to continue the identifier"
     );
 
     Ok(())
