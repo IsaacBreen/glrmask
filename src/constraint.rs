@@ -3420,7 +3420,8 @@ impl<'a> GrammarConstraintState<'a> {
                                 // Disallow this token from being matched again immediately.
                                 disallowed_terminals_for_end_state.insert(match_info.id);
                                 disallowed_terminals.insert_l2_bitset(end_state_id, disallowed_terminals_for_end_state);
-                                    disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
+                                println!("Disallowing immediate repeat of terminal {:?} at tokenizer state {:?}", TerminalID(match_info.id), TokenizerStateID(end_state_id));
+                                disallow_terminals_and_prune_arc(&mut cloned_glr_s.active_state.stack, &disallowed_terminals, &mut HashMap::new());
                             }
                         }
                         // cloned_glr_s.log_gss(format!("Before disallowing terminals {:?} after committing bytes {:?}", &disallowed_terminals, &llm_token_bytes[offset..new_offset]).as_str(), TerminalID(match_info.id), false, false);
