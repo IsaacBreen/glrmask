@@ -1627,13 +1627,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         match entry {
                             std::collections::hash_map::Entry::Occupied(mut occupied) => {
                                 let (dest, cached_tokens) = occupied.get_mut();
-                                let current_tokens = &acc.llm_tokens_union;
-                                if current_tokens.is_subset(cached_tokens) {
-                                    (dest.clone(), false)
-                                } else {
-                                    *cached_tokens |= current_tokens;
-                                    (dest.clone(), true)
-                                }
+                                (dest.clone(), false)
                             }
                             std::collections::hash_map::Entry::Vacant(vacant) => {
                                 let new_dest = PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
