@@ -1517,14 +1517,47 @@ fn test_constraint_expression_cycle() {
 fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load and compile the grammar from the EBNF file
     let ebnf_grammar = indoc! {r#"
-        program ::= expression_statement? EOF;
+        // Instruct the parser to ignore Whitespace and single-line Comments.
+        #![ignore(IGNORE)]
+
+        program ::= statement_list? EOF;
         EOF ::= '<|EOF|>';
 
-        expression_statement ::= expression ';' ;
-        expression ::= term;
-        term ::= '!'? primary ;
-        primary ::= IDENTIFIER | STRING_LITERAL ;
+        // --- Lexical Grammar (Minimal) ---
+        IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
 
+        // --- Statements (Core Imperative Set) ---
+        statement_list ::= statement+ ;
+
+        statement ::=
+            block
+          | declaration_statement
+          | if_statement
+          | while_statement
+          | expression_statement
+          ;
+
+        block ::= '{' statement_list? '}' ;
+        declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';' ;
+        if_statement ::= 'if' '(' expression ')' statement ; // No 'else'
+        while_statement ::= 'while' '(' expression ')' statement ;
+        expression_statement ::= expression ';' ;
+
+        // --- Expressions (Completely Flattened) ---
+        expression ::= term ( ( '+' | '*' | '==' ) term )* ; // All operators have same precedence
+
+        term ::= ( '-' | '!' )? primary ; // Unary operators
+
+        primary ::=
+            IDENTIFIER
+          | literal
+          | '(' expression ')'
+          ;
+
+        // --- Literals and Terminals (Minimal) ---
+        literal ::= 'true' | 'false' | NUMERIC_LITERAL | STRING_LITERAL ;
+
+        NUMERIC_LITERAL ::= [0-9]+ ; // Integers only
         STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
         IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     "#};
@@ -1572,17 +1605,15 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     state.commit(llm_a);
     state.print_gss();
     let mask2 = state.get_mask();
- 
-    // TODO: This assertion reflects buggy behavior. After committing "a", the mask
-    // should only allow another "a" (to continue the IDENTIFIER). However, it also
-    // incorrectly allows '"' (which starts a STRING_LITERAL). This suggests the
-    // constraint logic does not correctly use the partial-token tokenizer state
-    // when determining what *new* tokens can be started.
-    let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0, llm_quote.0]);
+
+    // After committing "a", the only valid continuation from the LLM vocabulary is another "a"
+    // to form a longer identifier (e.g., "aa"). The path where "a" is a complete identifier
+    // would require an operator (+, *, ==) or a semicolon, none of which are available as tokens.
+    let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0]);
     assert_eq!(
         mask2,
         expected_mask2,
-        "After 'a', mask should allow 'a' (correct) and '\"' (bug)"
+        "After 'a', mask should only allow 'a' to continue the identifier"
     );
 
     Ok(())
