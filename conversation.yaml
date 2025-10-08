@@ -4024,19 +4024,17 @@ local_system:
               // Instruct the parser to ignore Whitespace and single-line Comments.
               #![ignore(IGNORE)]
 
-              program ::= statement_list? EOF;
+              program ::= expression_statement* EOF;
               EOF ::= '<|EOF|>';
 
               // --- Lexical Grammar (Minimal) ---
               IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
 
               // --- Statements (Core Imperative Set) ---
-              statement_list ::= statement+ ;
-              statement ::= expression_statement;
               expression_statement ::= expression ';' ;
 
               // --- Expressions (Completely Flattened) ---
-              expression ::= term ( ( '+' | '*' | '==' ) term )* ; // All operators have same precedence
+              expression ::= term ;
 
               term ::= '!'? primary ; // Unary operators
 
@@ -12681,6 +12679,94 @@ messages:
       Successfully applied patch and wrote to src/test_constraint_basic.rs.
     metadata:
   - user: 'Changes committed with message: "test: Simplify statement and expression
+      rules in test_js_simplified_ebnf_string grammar"'
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_basic.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - assistant: |-
+      Alright, let's continue to simplify. The last change removed unused statement types. Now, we can simplify the expression and program structure itself, as the complexity there is likely not contributing to the error.
+
+      We will make two changes:
+      1.  The `expression` rule currently allows for a sequence of terms separated by operators. Since the test vocabulary doesn't include any of those operators, we can simplify the expression to be just a single `term`.
+      2.  The grammar uses `statement_list` and `statement` to structure the program. We can collapse this into a simpler `program` rule that directly allows zero or more `expression_statement`s.
+
+      These changes will reduce the number of non-terminals and parser states, helping us focus on the core issue.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the test file**: `src/test_constraint_basic.rs`.
+      2.  **Locate the test**: Find the function `test_js_simplified_ebnf_string`.
+      3.  **Modify the EBNF grammar string**:
+
+          a.  **Simplify the program structure**: Find the rules for `program`, `statement_list`, and `statement`.
+              ```ebnf
+              program ::= statement_list? EOF;
+              ...
+              statement_list ::= statement+ ;
+              statement ::= expression_statement;
+              ```
+              Replace these three lines with a single, simpler `program` rule. This also involves removing the `statement_list` and `statement` rules entirely.
+              ```ebnf
+              program ::= expression_statement* EOF;
+              ```
+
+          b.  **Simplify the expression rule**: Find the rule for `expression`.
+              ```ebnf
+              expression ::= term ( ( '+' | '*' | '==' ) term )* ; // All operators have same precedence
+              ```
+              Replace it with the following line, which removes the operator-based repetition:
+              ```ebnf
+              expression ::= term ;
+              ```
+
+      ### Git Diff
+
+      Here is the git patch that applies the changes described above.
+
+      ```diff
+      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
+      index 222b222..333c333 100644
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -1523,20 +1523,14 @@
+               // Instruct the parser to ignore Whitespace and single-line Comments.
+               #![ignore(IGNORE)]
+       
+      -        program ::= statement_list? EOF;
+      +        program ::= expression_statement* EOF;
+               EOF ::= '<|EOF|>';
+       
+               // --- Lexical Grammar (Minimal) ---
+               IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
+       
+               // --- Statements (Core Imperative Set) ---
+      -        statement_list ::= statement+ ;
+      -        statement ::= expression_statement;
+               expression_statement ::= expression ';' ;
+       
+               // --- Expressions (Completely Flattened) ---
+      -        expression ::= term ( ( '+' | '*' | '==' ) term )* ; // All operators have same precedence
+      +        expression ::= term ;
+       
+               term ::= '!'? primary ; // Unary operators
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_basic.rs
+      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_basic.rs.
+    metadata:
+  - user: 'Changes committed with message: "test: Collapse program structure and expression
       rules in test_js_simplified_ebnf_string grammar"'
     metadata:
 ...

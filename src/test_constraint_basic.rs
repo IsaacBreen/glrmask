@@ -1521,19 +1521,17 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
         // Instruct the parser to ignore Whitespace and single-line Comments.
         #![ignore(IGNORE)]
 
-        program ::= statement_list? EOF;
+        program ::= expression_statement* EOF;
         EOF ::= '<|EOF|>';
 
         // --- Lexical Grammar (Minimal) ---
         IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
 
         // --- Statements (Core Imperative Set) ---
-        statement_list ::= statement+ ;
-        statement ::= expression_statement;
         expression_statement ::= expression ';' ;
 
         // --- Expressions (Completely Flattened) ---
-        expression ::= term ( ( '+' | '*' | '==' ) term )* ; // All operators have same precedence
+        expression ::= term ;
 
         term ::= '!'? primary ; // Unary operators
 
