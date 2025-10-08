@@ -1537,6 +1537,11 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
         LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
         max_original_llm_token_id,
     );
+    println!("Tokenizer: {}", constraint.tokenizer);
+    println!("Parser: {}", constraint.parser);
+    constraint.dump_precomputed0();
+    constraint.dump_precomputed1();
+    constraint.dump_precomputed3();
 
     // 4. Initialize state and get the initial mask
     let mut state = constraint.init();
