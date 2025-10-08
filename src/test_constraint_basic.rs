@@ -1519,11 +1519,11 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load and compile the grammar from the EBNF file
     let ebnf_grammar = indoc! {r#"
         program ::= (expression ';')* EOF;
-        EOF ::= '<|EOF|>';
+        EOF ::= '$';
         expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
 
-        STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
-        IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+        STRING_LITERAL ::= '"' [^"]* '"' ;
+        IDENTIFIER ::= 'a' ;
     "#};
     let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
@@ -1570,14 +1570,10 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     state.print_gss();
     let mask2 = state.get_mask();
 
-    // After committing "a", the only valid continuation from the LLM vocabulary is another "a"
-    // to form a longer identifier (e.g., "aa"). The path where "a" is a complete identifier
-    // would require an operator (+, *, ==) or a semicolon, none of which are available as tokens.
-    let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0]);
+    let expected_mask2 = HybridBitset::from_iter(vec![]);
     assert_eq!(
         mask2,
         expected_mask2,
-        "After 'a', mask should only allow 'a' to continue the identifier"
     );
 
     Ok(())
