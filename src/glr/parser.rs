@@ -1245,11 +1245,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             .shifts_and_reduces
                             .get(&token_id)
                             .map(|v| {
-                                let r = v.iter()
+                                panic!();
+                                v.iter()
                                     .map(|(a, bv)| (Action::Normal(a), Some(bv.clone())))
-                                    .collect::<Vec<_>>();
-                                println!("hallucinated_row.shifts_and_reduces for token '{}' in state {}: {:?}", token_display, state_id.0, r);
-                                r
+                                    .collect::<Vec<_>>()
                             })
                             .unwrap_or_default()
                     } else {
