@@ -878,7 +878,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         }
 
         // Main loop ---------------------------------------------------------
-        while let Some((_depth, node_indices)) = todo.pop_first() {
+        while let Some((_depth, node_indices)) = todo.pop_last() {
             for node_idx in &node_indices {
                 let ptr = node_idx.as_usize();
                 if stopped_nodes.contains(&ptr) { continue; }
