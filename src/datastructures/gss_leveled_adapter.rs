@@ -382,6 +382,7 @@ impl GSSNode {
         }
     }
 
+    #[time_it]
     pub fn fuse_predecessors(&mut self, levels: usize) {
         if levels == 0 {
             return;
