@@ -1245,9 +1245,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             .shifts_and_reduces
                             .get(&token_id)
                             .map(|v| {
-                                v.iter()
+                                let r = v.iter()
                                     .map(|(a, bv)| (Action::Normal(a), Some(bv.clone())))
-                                    .collect::<Vec<_>>()
+                                    .collect::<Vec<_>>();
+                                println!("{:?}", r);
+                                r
                             })
                             .unwrap_or_default()
                     } else {
