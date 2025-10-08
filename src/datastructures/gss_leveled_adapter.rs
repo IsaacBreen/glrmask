@@ -304,6 +304,11 @@ impl GSSNode {
             .map(|acc| acc.terminals_union.complement())
             .unwrap_or_else(|| HybridL2Bitset::all().complement())
     }
+    pub fn stored_trie_nodes(&self) -> BTreeSet<StoredPrecomputeNodeIndex> {
+        self.inner
+            .reduce_acc()
+            .map_or_else(BTreeSet::new, |acc| acc.stored_trie_nodes.clone())
+    }
     pub fn max_depth(&self) -> usize {
         self.inner.max_depth() as usize
     }

@@ -1443,44 +1443,22 @@ impl GrammarConstraint {
                 );
                 keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
-                    // println!("At end.");
-                    // println!("GSS: {}", glr_s);
-                    // println!("Flat:");
-                    // for (i, p) in glr_s.active_state.stack.flatten().iter().enumerate() {
-                        // println!("  {}: {:?}", i, p);
-                    // }
-                    // println!("Roots:");
-                    // for (_last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
-                    //     for gss_root_acc in gss_root_accs {
-                            // println!("  Acc: {:?}", gss_root_acc);
-                            // println!("  Stored trie nodes:");
-                            // for sn in gss_root_acc.stored_trie_nodes().iter() {
-                                // println!("    {:?}", sn);
-                            // }
-                            // println!("  Union LLM tokens: {:?}", gss_root_acc.union_llm_tokens());
-                        // }
-                    // }
-                    // TODO: We don't even need to gather roots here. Can just get acc and its stored trie nodes.
-                    //  Reason: llm tokens is redundant... we do LLM token filtering now at the trie node level
-                    for (_last_edge, gss_root_accs) in get_roots([glr_s.active_state.stack.as_ref()]) {
-                        for gss_root_acc in gss_root_accs {
-                            for src_wr in gss_root_acc.stored_trie_nodes().iter() {
-                                let src_arc = src_wr.as_arc().clone();
-                                let edge_key = (0, LLMTokenBV::ones(internal_max_llm_token + 1)); // edge key is unused in trie3
-                                let edge_value = StateIDBV::max_ones();
+                    let stored_trie_nodes = glr_s.active_state.stack.stored_trie_nodes();
+                    for src_wr in stored_trie_nodes {
+                        let src_arc = src_wr.as_arc().clone();
+                        let edge_key = (0, LLMTokenBV::ones(internal_max_llm_token + 1)); // edge key is unused in trie3
+                        let edge_value = StateIDBV::max_ones();
 
-                                let inserter = EdgeInserter::new(
-                                    glr_s.active_state.trie2_god.as_ref().unwrap(),
-                                    src_arc.clone(),
-                                    edge_key,
-                                    edge_value,
-                                    |e, n| *e |= n,
-                                    |node_value, _edge_value| {},
-                                    |_, _| {},
-                                );
-                                inserter.try_destination(trie3_end.clone()).expect("Failed to insert end edge");
-                            }
-                        }
+                        let inserter = EdgeInserter::new(
+                            glr_s.active_state.trie2_god.as_ref().unwrap(),
+                            src_arc.clone(),
+                            edge_key,
+                            edge_value,
+                            |e, n| *e |= n,
+                            |node_value, _edge_value| {},
+                            |_, _| {},
+                        );
+                        inserter.try_destination(trie3_end.clone()).expect("Failed to insert end edge");
                     }
                 }
 
