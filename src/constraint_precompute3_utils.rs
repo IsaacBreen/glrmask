@@ -71,7 +71,7 @@ impl Default for Trie3Config {
             compress_edges: false,
             merge_nodes_exact: Trie3MergeConfig::default(),
             merge_nodes_structural: true,
-            merge_nodes_ultrafast: true,
+            merge_nodes_ultrafast: false,
             prune_nodes_not_reaching_end: true,
             simplify_llm_token_bvs: false,
             factor_common_destinations: true,
