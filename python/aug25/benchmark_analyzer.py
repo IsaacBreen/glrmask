@@ -29,6 +29,23 @@ def _normalize_intervals(ranges: Optional[List[List[int]]]) -> Tuple[Tuple[int, 
     merged.append((cs, ce))
     return tuple(merged)
 
+def _ranges_to_token_str(ranges: Tuple[Tuple[int, int], ...], id_to_token: Dict[int, bytes]) -> str:
+    """Converts token ID ranges to a descriptive string including token representations."""
+    if not id_to_token:
+        return str(ranges)  # Fallback if vocab is missing
+
+    tokens = []
+    for start, end in ranges:
+        for i in range(start, end + 1):
+            tokens.append(repr(id_to_token.get(i, f"<?ID:{i}?>")))
+
+    MAX_TOKENS_TO_SHOW = 20
+    token_str = ", ".join(tokens[:MAX_TOKENS_TO_SHOW])
+    if len(tokens) > MAX_TOKENS_TO_SHOW:
+        token_str += f", ... ({len(tokens) - MAX_TOKENS_TO_SHOW} more)"
+
+    return f"{ranges} -> [{token_str}]"
+
 
 def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None, skip_plots: bool = False):
     """
@@ -40,6 +57,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
     commit_timings_by_model: Dict[str, List[List[float]]] = {}
     masks_by_model: Dict[str, List[List[Tuple[Tuple[int, int], ...]]]] = {}
     get_mask_timings_by_model: Dict[str, List[List[float]]] = {}
+    id_to_token_by_model: Dict[str, Dict[int, bytes]] = {}
 
     model_order: List[str] = []
 
@@ -61,6 +79,26 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
 
         if model_name not in model_order:
             model_order.append(model_name)
+
+        # Load vocab if not already loaded for this model_name
+        if model_name not in id_to_token_by_model and grammar_file:
+            try:
+                p = Path(grammar_file)
+                if str(p).endswith('.gz'):
+                    import gzip
+                    with gzip.open(p, 'rt', encoding='utf-8') as f_gz:
+                        constraint_json = json.load(f_gz)
+                else:
+                    with open(p, 'r', encoding='utf-8') as f_plain:
+                        constraint_json = json.load(f_plain)
+
+                id_to_token: dict[int, bytes] = {}
+                llm_token_map = constraint_json.get('llm_token_map', [])
+                for token_bytes_list, token_id in llm_token_map:
+                    id_to_token[token_id] = bytes(token_bytes_list)
+                id_to_token_by_model[model_name] = id_to_token
+            except Exception as e:
+                print(f"Warning: could not load vocab from {grammar_file} for {model_name}: {e}")
 
         # Initialize if first time seeing model
         if model_name not in get_mask_timings_by_model:
@@ -133,6 +171,8 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
                     final_get_mask_timings[run_name] = get_mask_timings_by_model[model_name][i]
                     final_commit_timings[run_name] = commit_timings_by_model[model_name][i]
                     final_masks_by_model[run_name] = masks_by_model[model_name][i]
+                    if model_name in id_to_token_by_model:
+                        id_to_token_by_model[run_name] = id_to_token_by_model[model_name]
                     final_model_order.append(run_name)
             elif num_runs == 1:
                 final_get_mask_timings[model_name] = get_mask_timings_by_model[model_name][0]
@@ -193,13 +233,18 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
             mismatch_indices_by_model[model_name] = []
             equivalent_by_model[model_name] = True if model_name == baseline_name else False
             continue
+
+        # Get vocabs for baseline and current model
+        baseline_vocab = id_to_token_by_model.get(baseline_name, {})
+        current_vocab = id_to_token_by_model.get(model_name, {})
+
         length = min(len(baseline_masks), len(masks))
         mismatches: List[int] = []
         for i in range(length):
             if baseline_masks[i] != masks[i]:
                 print(f"Mask mismatch at token index {i} for model {model_name}")
-                print(f"Baseline: {baseline_masks[i]}")
-                print(f"Current:  {masks[i]}")
+                print(f"Baseline: {_ranges_to_token_str(baseline_masks[i], baseline_vocab)}")
+                print(f"Current:  {_ranges_to_token_str(masks[i], current_vocab)}")
                 mismatches.append(i)
         # If lengths differ, count extra indices as mismatches (conservative)
         if len(baseline_masks) != len(masks):
