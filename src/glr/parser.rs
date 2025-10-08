@@ -854,6 +854,12 @@ impl Display for GLRParserState<'_> {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 struct WorkMapKey(usize, StateID);
 
+impl WorkMapKey {
+    fn new(depth: usize, state_id: StateID) -> Self {
+        WorkMapKey(0, state_id)
+    }
+}
+
 impl PartialOrd for WorkMapKey {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -900,7 +906,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let depth = isolated_state.stack.max_depth();
             let state_id = peek.edge_value().state_id;
             work_map
-                .entry(WorkMapKey(depth, state_id))
+                .entry(WorkMapKey::new(depth, state_id))
                 .and_modify(|(s, existing_fuel)| {
                     s.merge(isolated_state.clone());
                     *existing_fuel = std::cmp::max(*existing_fuel, fuel);
