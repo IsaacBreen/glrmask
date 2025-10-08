@@ -3172,24 +3172,25 @@ local_system:
           let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
 
           for it in 0..max_iters {
-              // Signature is (end_flag, map<(pop, dest_class) -> set<StateIDBV>>)
-              type SignatureStructural3 = (bool, BTreeMap<(usize, usize), BTreeSet<StateIDBV>>);
+              // Signature is (end_flag, map<(pop, dest_class) -> union of StateIDBVs>)
+              // This is more aggressive than using a BTreeSet of SIDs, as it allows merging
+              // nodes that have different SID distributions as long as the total set of states
+              // required to reach a destination class is the same.
+              type SignatureStructural3 = (bool, BTreeMap<(usize, usize), StateIDBV>);
 
               let mut sig_to_id: HashMap<SignatureStructural3, usize> = HashMap::new();
               let mut new_class = vec![0; n];
               let mut next_id = 0;
               let mut changes = 0;
 
-              #[cfg(not(rustrover))]
               let its = tqdm!(0..n, desc = format!("Trie3 Merge Structural Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
-              #[cfg(rustrover)]
-              let its = 0..n;
               for u in its {
-                  let mut aggr: BTreeMap<(usize, usize), BTreeSet<StateIDBV>> = BTreeMap::new();
+                  let mut aggr: BTreeMap<(usize, usize), StateIDBV> = BTreeMap::new();
                   for (p, _bv_key, v_dense, sids) in &raw_edges[u] {
+                      // _bv_key (LLM tokens) is IGNORED for structural equivalence.
                       let dest_class = prev_class[*v_dense];
                       let key = (*p, dest_class);
-                      aggr.entry(key).or_default().insert(sids.clone());
+                      aggr.entry(key).or_default() |= sids;
                   }
 
                   let sig: SignatureStructural3 = (ends[u], aggr);
@@ -3246,145 +3247,6 @@ local_system:
                               let new_dest_map = new_children.entry((*pop, llm_bv.clone())).or_insert_with(OrderedHashMap::new);
                               new_dest_map.entry(dest_rep_idx)
                                   .and_modify(|e| *e |= sids)
-                                  .or_insert_with(|| sids.clone());
-                          }
-                      }
-                  }
-
-                  let mut guard = rep_idx.write(trie3_god).unwrap();
-                  *guard.children_mut() = new_children;
-                  guard.value.live_tokens = new_live_tokens;
-              }
-          }
-
-          for root_idx in roots.values_mut() {
-              *root_idx = *node_to_rep.get(root_idx).unwrap();
-          }
-
-          let final_roots_vec: Vec<_> = roots.values().cloned().collect();
-          Trie::recompute_all_max_depths(trie3_god, &final_roots_vec);
-      }
-
-      fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {
-          crate::debug!(2, "Merging structurally equivalent subtrees in precomputed trie 3 (max_iters={}).", max_iters);
-
-          let roots_vec: Vec<_> = roots.values().cloned().collect();
-          let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
-          if all_nodes.is_empty() { return; }
-
-          let mut dense_of: HashMap<Trie2Index, usize> = HashMap::new();
-          let mut old_of: Vec<Trie2Index> = Vec::with_capacity(all_nodes.len());
-          for (i, node_idx) in all_nodes.iter().enumerate() {
-              dense_of.insert(*node_idx, i);
-              old_of.push(*node_idx);
-          }
-          let n = all_nodes.len();
-
-          let mut ends: Vec<bool> = vec![false; n];
-          type RawEdge3 = (usize, LLMTokenBV, usize, StateIDBV);
-          let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
-
-          for (u_dense, u_idx) in old_of.iter().enumerate() {
-              let guard = u_idx.read(trie3_god).unwrap();
-              ends[u_dense] = guard.value.end;
-              for (ek, dest_map) in guard.children() {
-                  for (v_idx, bv) in dest_map {
-                      if let Some(&v_dense) = dense_of.get(v_idx) {
-                          // Note: we capture the LLMTokenBV here but won't use it in the signature.
-                          raw_edges[u_dense].push((ek.0, ek.1.clone(), v_dense, bv.clone()));
-                      }
-                  }
-              }
-          }
-
-          let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
-
-          for it in 0..max_iters {
-              // Signature is (end_flag, map<(pop, dest_class) -> set<StateIDBV>>)
-              // We use a BTreeSet<StateIDBV> to represent all unique SID constraints required
-              // to go to a specific destination class with a specific pop.
-              type SignatureStructural3 = (bool, BTreeMap<(usize, usize), BTreeSet<StateIDBV>>);
-
-              let mut sig_to_id: HashMap<SignatureStructural3, usize> = HashMap::new();
-              let mut new_class = vec![0; n];
-              let mut next_id = 0;
-              let mut changes = 0;
-
-              #[cfg(not(rustrover))]
-              let its = tqdm!(0..n, desc = format!("Trie3 Merge Structural Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
-              #[cfg(rustrover)]
-              let its = 0..n;
-              for u in its {
-                  let mut aggr: BTreeMap<(usize, usize), BTreeSet<StateIDBV>> = BTreeMap::new();
-                  for (p, _bv_key, v_dense, sids) in &raw_edges[u] {
-                      // _bv_key (LLM tokens) is IGNORED for structural equivalence.
-                      let dest_class = prev_class[*v_dense];
-                      let key = (*p, dest_class);
-                      aggr.entry(key).or_default().insert(sids.clone());
-                  }
-
-                  let sig: SignatureStructural3 = (ends[u], aggr);
-
-                  let cid = *sig_to_id.entry(sig).or_insert_with(|| {
-                      let id = next_id;
-                      next_id += 1;
-                      id
-                  });
-
-                  new_class[u] = cid;
-                  if new_class[u] != prev_class[u] {
-                      changes += 1;
-                  }
-              }
-
-              crate::debug!(3, "Trie3 structural merge iter {}: classes={}, changes={}", it + 1, next_id, changes);
-              prev_class = new_class;
-              if changes == 0 { break; }
-          }
-
-          // Reconstruction
-          let final_partition = prev_class;
-          let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
-
-          let mut representatives: Vec<Option<Trie2Index>> = vec![None; num_classes];
-          for (u_dense, &class_id) in final_partition.iter().enumerate() {
-              if representatives[class_id].is_none() {
-                  representatives[class_id] = Some(old_of[u_dense]);
-              }
-          }
-
-          let mut node_to_rep: HashMap<Trie2Index, Trie2Index> = HashMap::new();
-          for (u_dense, &class_id) in final_partition.iter().enumerate() {
-              node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
-          }
-
-          for class_id in 0..num_classes {
-              if let Some(rep_idx) = representatives[class_id] {
-                  // Gather all nodes belonging to this class
-                  let nodes_in_class: Vec<Trie2Index> = final_partition.iter().enumerate()
-                      .filter(|(_, &c)| c == class_id)
-                      .map(|(i, _)| old_of[i])
-                      .collect();
-
-                  let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
-                  let mut new_live_tokens = LLMTokenBV::zeros();
-
-                  // Merge all edges from all nodes in the class into the representative.
-                  for node_idx in &nodes_in_class {
-                      let guard = node_idx.read(trie3_god).unwrap();
-                      new_live_tokens |= &guard.value.live_tokens;
-
-                      for ((pop, llm_bv), dest_map) in guard.children() {
-                          for (dest_idx, sids) in dest_map {
-                              // Remap destination to its representative
-                              let dest_rep_idx = *node_to_rep.get(dest_idx).unwrap();
-
-                              // Insert into new_children.
-                              // Note: This may create parallel edges (same pop/dest_rep/sids, different llm_bv)
-                              // if the original nodes had them. Subsequent edge compression will fix this.
-                              let new_dest_map = new_children.entry((*pop, llm_bv.clone())).or_insert_with(OrderedHashMap::new);
-                              new_dest_map.entry(dest_rep_idx)
-                                  .and_modify(|e| *e |= sids) // Union SIDs if exact edge exists
                                   .or_insert_with(|| sids.clone());
                           }
                       }
@@ -8128,5 +7990,729 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat: Implement structural node merging
       pass for Trie3"'
+    metadata:
+  - user: |-
+      Diff of src/constraint_precompute3_utils.rs since previous turn:
+      ```diff
+      --- original version of src/constraint_precompute3_utils.rs
+      +++ current version of src/constraint_precompute3_utils.rs
+      @@ -1338,145 +1338,6 @@
+           Trie::recompute_all_max_depths(trie3_god, &final_roots_vec);
+       }
+       
+      -fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {
+      -    crate::debug!(2, "Merging structurally equivalent subtrees in precomputed trie 3 (max_iters={}).", max_iters);
+      -
+      -    let roots_vec: Vec<_> = roots.values().cloned().collect();
+      -    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+      -    if all_nodes.is_empty() { return; }
+      -
+      -    let mut dense_of: HashMap<Trie2Index, usize> = HashMap::new();
+      -    let mut old_of: Vec<Trie2Index> = Vec::with_capacity(all_nodes.len());
+      -    for (i, node_idx) in all_nodes.iter().enumerate() {
+      -        dense_of.insert(*node_idx, i);
+      -        old_of.push(*node_idx);
+      -    }
+      -    let n = all_nodes.len();
+      -
+      -    let mut ends: Vec<bool> = vec![false; n];
+      -    type RawEdge3 = (usize, LLMTokenBV, usize, StateIDBV);
+      -    let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
+      -
+      -    for (u_dense, u_idx) in old_of.iter().enumerate() {
+      -        let guard = u_idx.read(trie3_god).unwrap();
+      -        ends[u_dense] = guard.value.end;
+      -        for (ek, dest_map) in guard.children() {
+      -            for (v_idx, bv) in dest_map {
+      -                if let Some(&v_dense) = dense_of.get(v_idx) {
+      -                    // Note: we capture the LLMTokenBV here but won't use it in the signature.
+      -                    raw_edges[u_dense].push((ek.0, ek.1.clone(), v_dense, bv.clone()));
+      -                }
+      -            }
+      -        }
+      -    }
+      -
+      -    let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
+      -
+      -    for it in 0..max_iters {
+      -        // Signature is (end_flag, map<(pop, dest_class) -> set<StateIDBV>>)
+      -        // We use a BTreeSet<StateIDBV> to represent all unique SID constraints required
+      -        // to go to a specific destination class with a specific pop.
+      -        type SignatureStructural3 = (bool, BTreeMap<(usize, usize), BTreeSet<StateIDBV>>);
+      -
+      -        let mut sig_to_id: HashMap<SignatureStructural3, usize> = HashMap::new();
+      -        let mut new_class = vec![0; n];
+      -        let mut next_id = 0;
+      -        let mut changes = 0;
+      -
+      -        #[cfg(not(rustrover))]
+      -        let its = tqdm!(0..n, desc = format!("Trie3 Merge Structural Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
+      -        #[cfg(rustrover)]
+      -        let its = 0..n;
+      -        for u in its {
+      -            let mut aggr: BTreeMap<(usize, usize), BTreeSet<StateIDBV>> = BTreeMap::new();
+      -            for (p, _bv_key, v_dense, sids) in &raw_edges[u] {
+      -                // _bv_key (LLM tokens) is IGNORED for structural equivalence.
+      -                let dest_class = prev_class[*v_dense];
+      -                let key = (*p, dest_class);
+      -                aggr.entry(key).or_default().insert(sids.clone());
+      -            }
+      -
+      -            let sig: SignatureStructural3 = (ends[u], aggr);
+      -
+      -            let cid = *sig_to_id.entry(sig).or_insert_with(|| {
+      -                let id = next_id;
+      -                next_id += 1;
+      -                id
+      -            });
+      -
+      -            new_class[u] = cid;
+      -            if new_class[u] != prev_class[u] {
+      -                changes += 1;
+      -            }
+      -        }
+      -
+      -        crate::debug!(3, "Trie3 structural merge iter {}: classes={}, changes={}", it + 1, next_id, changes);
+      -        prev_class = new_class;
+      -        if changes == 0 { break; }
+      -    }
+      -
+      -    // Reconstruction
+      -    let final_partition = prev_class;
+      -    let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
+      -
+      -    let mut representatives: Vec<Option<Trie2Index>> = vec![None; num_classes];
+      -    for (u_dense, &class_id) in final_partition.iter().enumerate() {
+      -        if representatives[class_id].is_none() {
+      -            representatives[class_id] = Some(old_of[u_dense]);
+      -        }
+      -    }
+      -
+      -    let mut node_to_rep: HashMap<Trie2Index, Trie2Index> = HashMap::new();
+      -    for (u_dense, &class_id) in final_partition.iter().enumerate() {
+      -        node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
+      -    }
+      -
+      -    for class_id in 0..num_classes {
+      -        if let Some(rep_idx) = representatives[class_id] {
+      -            // Gather all nodes belonging to this class
+      -            let nodes_in_class: Vec<Trie2Index> = final_partition.iter().enumerate()
+      -                .filter(|(_, &c)| c == class_id)
+      -                .map(|(i, _)| old_of[i])
+      -                .collect();
+      -
+      -            let mut new_children: BTreeMap<(usize, LLMTokenBV), OrderedHashMap<Trie2Index, StateIDBV>> = BTreeMap::new();
+      -            let mut new_live_tokens = LLMTokenBV::zeros();
+      -
+      -            // Merge all edges from all nodes in the class into the representative.
+      -            for node_idx in &nodes_in_class {
+      -                let guard = node_idx.read(trie3_god).unwrap();
+      -                new_live_tokens |= &guard.value.live_tokens;
+      -
+      -                for ((pop, llm_bv), dest_map) in guard.children() {
+      -                    for (dest_idx, sids) in dest_map {
+      -                        // Remap destination to its representative
+      -                        let dest_rep_idx = *node_to_rep.get(dest_idx).unwrap();
+      -
+      -                        // Insert into new_children.
+      -                        // Note: This may create parallel edges (same pop/dest_rep/sids, different llm_bv)
+      -                        // if the original nodes had them. Subsequent edge compression will fix this.
+      -                        let new_dest_map = new_children.entry((*pop, llm_bv.clone())).or_insert_with(OrderedHashMap::new);
+      -                        new_dest_map.entry(dest_rep_idx)
+      -                            .and_modify(|e| *e |= sids) // Union SIDs if exact edge exists
+      -                            .or_insert_with(|| sids.clone());
+      -                    }
+      -                }
+      -            }
+      -
+      -            let mut guard = rep_idx.write(trie3_god).unwrap();
+      -            *guard.children_mut() = new_children;
+      -            guard.value.live_tokens = new_live_tokens;
+      -        }
+      -    }
+      -
+      -    for root_idx in roots.values_mut() {
+      -        *root_idx = *node_to_rep.get(root_idx).unwrap();
+      -    }
+      -
+      -    let final_roots_vec: Vec<_> = roots.values().cloned().collect();
+      -    Trie::recompute_all_max_depths(trie3_god, &final_roots_vec);
+      -}
+      -
+       /// Extremely fast, cycle-safe node merging using WL-style refinement with a cheap signature
+       /// (ignoring StateIDBV during coarse iterations) followed by a single exact refinement within
+       /// candidate equivalence classes that compares aggregated SIDs exactly. Finally, only representatives
+
+      ```
+    metadata:
+  - user: |-
+      --- Tokenizer State ID: 0 ---
+      Root Node Trie2Index(0) (MaxDepth: 0)
+      └── Edge (pop: 0, tokens: [0..=20] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(46) (MaxDepth: 1)
+         ├── Edge (pop: 0, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(60) (MaxDepth: 2)
+         │  ├── Edge (pop: 0, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0, 5, 10, 14, 16, ...] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [51] -> Node Trie2Index(76) (MaxDepth: 8)
+         │  │  └── Edge (pop: 2, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [48] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [18..=20] -> Node Trie2Index(180) (MaxDepth: 5)
+         │  │  └── Edge (pop: 1, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [12..=13] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [50, 55..=57] -> Node Trie2Index(195) (MaxDepth: 3)
+         │  │  └── Edge (pop: 1, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0, 10, 14, 16, 24, ...] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [43..=47] -> Node Trie2Index(111) (MaxDepth: 3)
+         │  │  └── Edge (pop: 1, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(80) (MaxDepth: 4)
+         │  │     ├── Edge (pop: 0, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0, 41, 48] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │     ├── Edge (pop: 0, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [49] -> Ref to Node Trie2Index(195) (MaxDepth: 3)
+         │  │     └── Edge (pop: 0, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [26, 61] -> Node Trie2Index(142) (MaxDepth: 3)
+         │  │        └── Edge (pop: 4, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(80) (MaxDepth: 4)
+         │  ├── Edge (pop: 0, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [1, 22] -> Node Trie2Index(166) (MaxDepth: 3)
+         │  │  └── Edge (pop: 2, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(80) (MaxDepth: 4)
+         │  ├── Edge (pop: 0, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [3, 7] -> Node Trie2Index(126) (MaxDepth: 3)
+         │  │  └── Edge (pop: 3, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(80) (MaxDepth: 4)
+         │  ├── Edge (pop: 0, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [9] -> Ref to Node Trie2Index(142) (MaxDepth: 3)
+         │  └── Edge (pop: 0, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [27, 62] -> Node Trie2Index(158) (MaxDepth: 3)
+         │     └── Edge (pop: 5, tokens: [0..=7] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(80) (MaxDepth: 4)
+         ├── Edge (pop: 0, tokens: [0..=7, 10..=11, 14..=15, 18..=19] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(47) (MaxDepth: 2)
+         │  ├── Edge (pop: 0, tokens: [0, 2..=3, 6] (e.g., ["E", "F", "O", "e", "h"], ...)): states [0..=62] -> Node Trie2Index(11178) (MaxDepth: 4)
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0, 5, 10, 14, 16, ...] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [50, 55..=57] -> Node Trie2Index(12410) (MaxDepth: 8)
+         │  │  │  └── Edge (pop: 1, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [48] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [51] -> Ref to Node Trie2Index(76) (MaxDepth: 8)
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [43..=47] -> Node Trie2Index(5933) (MaxDepth: 5)
+         │  │  │  └── Edge (pop: 1, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(5934) (MaxDepth: 6)
+         │  │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0, 41, 48] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [49] -> Ref to Node Trie2Index(12410) (MaxDepth: 8)
+         │  │  │     └── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [26, 61] -> Node Trie2Index(244) (MaxDepth: 5)
+         │  │  │        └── Edge (pop: 4, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(5934) (MaxDepth: 6)
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [1, 22] -> Node Trie2Index(273) (MaxDepth: 5)
+         │  │  │  └── Edge (pop: 2, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(5934) (MaxDepth: 6)
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [3, 7] -> Node Trie2Index(289) (MaxDepth: 5)
+         │  │  │  └── Edge (pop: 3, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(5934) (MaxDepth: 6)
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [9] -> Ref to Node Trie2Index(244) (MaxDepth: 5)
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [27, 62] -> Node Trie2Index(313) (MaxDepth: 5)
+         │  │  │  └── Edge (pop: 5, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(5934) (MaxDepth: 6)
+         │  │  └── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [18..=20] -> Ref to Node Trie2Index(180) (MaxDepth: 5)
+         │  ├── Edge (pop: 0, tokens: [1, 4, 7] (e.g., ["l", "i", "w"])): states [0..=62] -> Node Trie2Index(2325) (MaxDepth: 3)
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(11178) (MaxDepth: 4)
+         │  │  └── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(370) (MaxDepth: 4)
+         │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0, 26, 41, 48..=49, 61] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [50] -> Ref to Node Trie2Index(12410) (MaxDepth: 8)
+         │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [51] -> Ref to Node Trie2Index(76) (MaxDepth: 8)
+         │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [43..=47] -> Ref to Node Trie2Index(5933) (MaxDepth: 5)
+         │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [1, 22] -> Ref to Node Trie2Index(273) (MaxDepth: 5)
+         │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [3, 7] -> Ref to Node Trie2Index(289) (MaxDepth: 5)
+         │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [9] -> Ref to Node Trie2Index(244) (MaxDepth: 5)
+         │  │     └── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [27, 62] -> Ref to Node Trie2Index(313) (MaxDepth: 5)
+         │  ├── Edge (pop: 0, tokens: [5] (e.g., ["f", "t"])): states [0..=62] -> Node Trie2Index(4146) (MaxDepth: 3)
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(216) (MaxDepth: 4)
+         │  │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0, 10, 14, 16, 24, ...] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [50, 55..=57] -> Ref to Node Trie2Index(12410) (MaxDepth: 8)
+         │  │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [51] -> Ref to Node Trie2Index(76) (MaxDepth: 8)
+         │  │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [43..=47] -> Ref to Node Trie2Index(5933) (MaxDepth: 5)
+         │  │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [1, 22] -> Ref to Node Trie2Index(273) (MaxDepth: 5)
+         │  │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [3, 7] -> Ref to Node Trie2Index(289) (MaxDepth: 5)
+         │  │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [9] -> Ref to Node Trie2Index(244) (MaxDepth: 5)
+         │  │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [27, 62] -> Ref to Node Trie2Index(313) (MaxDepth: 5)
+         │  │  │  └── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [18..=20] -> Ref to Node Trie2Index(180) (MaxDepth: 5)
+         │  │  └── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(11178) (MaxDepth: 4)
+         │  ├── Edge (pop: 0, tokens: [10] (e.g., ["="])): states [0..=62] -> Node Trie2Index(6321) (MaxDepth: 3)
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [12..=13] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [17] -> Ref to Node Trie2Index(76) (MaxDepth: 8)
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [15] -> Node Trie2Index(6056) (MaxDepth: 4)
+         │  │  │  └── Edge (pop: 3, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [12] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [52] -> Node Trie2Index(6359) (MaxDepth: 6)
+         │  │  │  └── Edge (pop: 1, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(6340) (MaxDepth: 7)
+         │  │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0, 10, 24, 26, 33, ...] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [16] -> Ref to Node Trie2Index(12410) (MaxDepth: 8)
+         │  │  │     └── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [14] -> Ref to Node Trie2Index(76) (MaxDepth: 8)
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [54] -> Node Trie2Index(6347) (MaxDepth: 4)
+         │  │  │  └── Edge (pop: 2, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(6340) (MaxDepth: 7)
+         │  │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [28..=32, 36] -> Node Trie2Index(6360) (MaxDepth: 4)
+         │  │  │  └── Edge (pop: 1, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(6368) (MaxDepth: 5)
+         │  │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0, 10, 24, 26, 33, ...] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [16] -> Ref to Node Trie2Index(12410) (MaxDepth: 8)
+         │  │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [14] -> Ref to Node Trie2Index(76) (MaxDepth: 8)
+         │  │  │     └── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [53] -> Ref to Node Trie2Index(6359) (MaxDepth: 6)
+         │  │  └── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [35] -> Node Trie2Index(6367) (MaxDepth: 4)
+         │  │     └── Edge (pop: 3, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(6368) (MaxDepth: 5)
+         │  ├── Edge (pop: 0, tokens: [11, 15] (e.g., ["0", "1", "2", "3", "4"], ...)): states [0..=62] -> Ref to Node Trie2Index(216) (MaxDepth: 4)
+         │  ├── Edge (pop: 0, tokens: [14, 18] (e.g., ["\n", " ", "/"])): states [0..=62] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  └── Edge (pop: 0, tokens: [19] (e.g., ["<"])): states [0..=62] -> Node Trie2Index(8749) (MaxDepth: 3)
+         │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [38, 41] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [40] -> Ref to Node Trie2Index(12410) (MaxDepth: 8)
+         │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [43..=47] -> Node Trie2Index(1877) (MaxDepth: 4)
+         │     │  └── Edge (pop: 1, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(1869) (MaxDepth: 5)
+         │     │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [41] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │     │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [26, 61] -> Node Trie2Index(1865) (MaxDepth: 4)
+         │     │     │  └── Edge (pop: 4, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(1869) (MaxDepth: 5)
+         │     │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [48] -> Node Trie2Index(1836) (MaxDepth: 5)
+         │     │     │  └── Edge (pop: 1, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [41] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │     │     └── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [49] -> Node Trie2Index(1866) (MaxDepth: 4)
+         │     │        └── Edge (pop: 1, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [48] -> Ref to Node Trie2Index(1836) (MaxDepth: 5)
+         │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [1, 22] -> Node Trie2Index(1904) (MaxDepth: 4)
+         │     │  └── Edge (pop: 2, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(1869) (MaxDepth: 5)
+         │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [3, 7] -> Node Trie2Index(1914) (MaxDepth: 4)
+         │     │  └── Edge (pop: 3, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(1869) (MaxDepth: 5)
+         │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [9] -> Ref to Node Trie2Index(1865) (MaxDepth: 4)
+         │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [27, 62] -> Node Trie2Index(1954) (MaxDepth: 4)
+         │     │  └── Edge (pop: 5, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(1869) (MaxDepth: 5)
+         │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [48] -> Ref to Node Trie2Index(1836) (MaxDepth: 5)
+         │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [49] -> Node Trie2Index(1845) (MaxDepth: 4)
+         │     │  └── Edge (pop: 2, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [41] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [50] -> Ref to Node Trie2Index(1866) (MaxDepth: 4)
+         │     └── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [51] -> Node Trie2Index(1853) (MaxDepth: 4)
+         │        └── Edge (pop: 2, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [48] -> Ref to Node Trie2Index(1836) (MaxDepth: 5)
+         ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [0..=62] -> Node Trie2Index(686) (MaxDepth: 2)
+         │  ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [6, 8, 21] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [11] -> Node Trie2Index(699) (MaxDepth: 3)
+         │  │  └── Edge (pop: 2, tokens: [8] (e.g., [";"])): states [6] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [12] -> Node Trie2Index(725) (MaxDepth: 8)
+         │  │  └── Edge (pop: 1, tokens: [8] (e.g., [";"])): states [0..=62] -> Node Trie2Index(716) (MaxDepth: 9)
+         │  │     ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [0, 26, 41, 48..=49, 61] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │     └── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [10] -> Node Trie2Index(710) (MaxDepth: 10)
+         │  │        └── Edge (pop: 1, tokens: [8] (e.g., [";"])): states [6] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [13] -> Node Trie2Index(715) (MaxDepth: 3)
+         │  │  └── Edge (pop: 2, tokens: [8] (e.g., [";"])): states [0..=62] -> Ref to Node Trie2Index(716) (MaxDepth: 9)
+         │  ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [17] -> Node Trie2Index(739) (MaxDepth: 7)
+         │  │  └── Edge (pop: 2, tokens: [8] (e.g., [";"])): states [12] -> Ref to Node Trie2Index(725) (MaxDepth: 8)
+         │  ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [15] -> Node Trie2Index(726) (MaxDepth: 3)
+         │  │  └── Edge (pop: 3, tokens: [8] (e.g., [";"])): states [12] -> Ref to Node Trie2Index(725) (MaxDepth: 8)
+         │  ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [52] -> Node Trie2Index(763) (MaxDepth: 5)
+         │  │  └── Edge (pop: 1, tokens: [8] (e.g., [";"])): states [0..=62] -> Node Trie2Index(730) (MaxDepth: 6)
+         │  │     ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [0, 26, 41, 48..=49, 61] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │     ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [14] -> Ref to Node Trie2Index(739) (MaxDepth: 7)
+         │  │     ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [10] -> Ref to Node Trie2Index(710) (MaxDepth: 10)
+         │  │     └── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [16] -> Node Trie2Index(740) (MaxDepth: 7)
+         │  │        └── Edge (pop: 1, tokens: [8] (e.g., [";"])): states [12] -> Ref to Node Trie2Index(725) (MaxDepth: 8)
+         │  ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [54] -> Node Trie2Index(741) (MaxDepth: 3)
+         │  │  └── Edge (pop: 2, tokens: [8] (e.g., [";"])): states [0..=62] -> Ref to Node Trie2Index(730) (MaxDepth: 6)
+         │  ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [28..=32, 36] -> Node Trie2Index(764) (MaxDepth: 3)
+         │  │  └── Edge (pop: 1, tokens: [8] (e.g., [";"])): states [0..=62] -> Node Trie2Index(777) (MaxDepth: 4)
+         │  │     ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [0, 26, 41, 48..=49, 61] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │     ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [14] -> Ref to Node Trie2Index(739) (MaxDepth: 7)
+         │  │     ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [53] -> Ref to Node Trie2Index(763) (MaxDepth: 5)
+         │  │     ├── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [10] -> Ref to Node Trie2Index(710) (MaxDepth: 10)
+         │  │     └── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [16] -> Ref to Node Trie2Index(740) (MaxDepth: 7)
+         │  └── Edge (pop: 0, tokens: [8] (e.g., [";"])): states [35] -> Node Trie2Index(776) (MaxDepth: 3)
+         │     └── Edge (pop: 3, tokens: [8] (e.g., [";"])): states [0..=62] -> Ref to Node Trie2Index(777) (MaxDepth: 4)
+         ├── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [0..=62] -> Node Trie2Index(1018) (MaxDepth: 2)
+         │  ├── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [25, 34, 60] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [12] -> Node Trie2Index(1031) (MaxDepth: 8)
+         │  │  └── Edge (pop: 1, tokens: [9] (e.g., [")"])): states [24, 33, 59] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [13] -> Node Trie2Index(1043) (MaxDepth: 3)
+         │  │  └── Edge (pop: 2, tokens: [9] (e.g., [")"])): states [24, 33, 59] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [17] -> Node Trie2Index(1050) (MaxDepth: 7)
+         │  │  └── Edge (pop: 2, tokens: [9] (e.g., [")"])): states [12] -> Ref to Node Trie2Index(1031) (MaxDepth: 8)
+         │  ├── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [15] -> Node Trie2Index(1054) (MaxDepth: 3)
+         │  │  └── Edge (pop: 3, tokens: [9] (e.g., [")"])): states [12] -> Ref to Node Trie2Index(1031) (MaxDepth: 8)
+         │  ├── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [52] -> Node Trie2Index(1057) (MaxDepth: 5)
+         │  │  └── Edge (pop: 1, tokens: [9] (e.g., [")"])): states [0..=62] -> Node Trie2Index(1058) (MaxDepth: 6)
+         │  │     ├── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [24, 33, 59] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │     ├── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [14] -> Ref to Node Trie2Index(1050) (MaxDepth: 7)
+         │  │     └── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [16] -> Node Trie2Index(1068) (MaxDepth: 7)
+         │  │        └── Edge (pop: 1, tokens: [9] (e.g., [")"])): states [12] -> Ref to Node Trie2Index(1031) (MaxDepth: 8)
+         │  ├── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [54] -> Node Trie2Index(1069) (MaxDepth: 3)
+         │  │  └── Edge (pop: 2, tokens: [9] (e.g., [")"])): states [0..=62] -> Ref to Node Trie2Index(1058) (MaxDepth: 6)
+         │  ├── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [28..=32, 36] -> Node Trie2Index(1079) (MaxDepth: 3)
+         │  │  └── Edge (pop: 1, tokens: [9] (e.g., [")"])): states [0..=62] -> Node Trie2Index(1080) (MaxDepth: 4)
+         │  │     ├── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [24, 33, 59] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │     ├── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [14] -> Ref to Node Trie2Index(1050) (MaxDepth: 7)
+         │  │     ├── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [53] -> Ref to Node Trie2Index(1057) (MaxDepth: 5)
+         │  │     └── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [16] -> Ref to Node Trie2Index(1068) (MaxDepth: 7)
+         │  └── Edge (pop: 0, tokens: [9] (e.g., [")"])): states [35] -> Node Trie2Index(1104) (MaxDepth: 3)
+         │     └── Edge (pop: 3, tokens: [9] (e.g., [")"])): states [0..=62] -> Ref to Node Trie2Index(1080) (MaxDepth: 4)
+         ├── Edge (pop: 0, tokens: [10] (e.g., ["="])): states [6] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         ├── Edge (pop: 0, tokens: [11] (e.g., ["0", "1", "2", "3", "4"], ...)): states [0..=62] -> Ref to Node Trie2Index(216) (MaxDepth: 4)
+         ├── Edge (pop: 0, tokens: [12] (e.g., ["*", "+"])): states [0..=62] -> Node Trie2Index(6041) (MaxDepth: 2)
+         │  ├── Edge (pop: 0, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [12..=13] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [17] -> Node Trie2Index(6065) (MaxDepth: 7)
+         │  │  └── Edge (pop: 2, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [12] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [15] -> Ref to Node Trie2Index(6056) (MaxDepth: 4)
+         │  ├── Edge (pop: 0, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [52] -> Node Trie2Index(6079) (MaxDepth: 5)
+         │  │  └── Edge (pop: 1, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [0..=62] -> Node Trie2Index(6130) (MaxDepth: 6)
+         │  │     ├── Edge (pop: 0, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [0, 10, 24, 26, 33, ...] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │     ├── Edge (pop: 0, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [14] -> Ref to Node Trie2Index(6065) (MaxDepth: 7)
+         │  │     └── Edge (pop: 0, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [16] -> Node Trie2Index(6066) (MaxDepth: 7)
+         │  │        └── Edge (pop: 1, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [12] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [54] -> Node Trie2Index(6067) (MaxDepth: 3)
+         │  │  └── Edge (pop: 2, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [0..=62] -> Ref to Node Trie2Index(6130) (MaxDepth: 6)
+         │  ├── Edge (pop: 0, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [28..=32, 36] -> Node Trie2Index(6072) (MaxDepth: 3)
+         │  │  └── Edge (pop: 1, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [0..=62] -> Node Trie2Index(6081) (MaxDepth: 4)
+         │  │     ├── Edge (pop: 0, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [0, 10, 24, 26, 33, ...] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │     ├── Edge (pop: 0, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [14] -> Ref to Node Trie2Index(6065) (MaxDepth: 7)
+         │  │     ├── Edge (pop: 0, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [53] -> Ref to Node Trie2Index(6079) (MaxDepth: 5)
+         │  │     └── Edge (pop: 0, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [16] -> Ref to Node Trie2Index(6066) (MaxDepth: 7)
+         │  └── Edge (pop: 0, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [35] -> Node Trie2Index(6087) (MaxDepth: 3)
+         │     └── Edge (pop: 3, tokens: [10, 12] (e.g., ["=", "*", "+"])): states [0..=62] -> Ref to Node Trie2Index(6081) (MaxDepth: 4)
+         ├── Edge (pop: 0, tokens: [13] (e.g., ["}"])): states [0..=62] -> Node Trie2Index(500) (MaxDepth: 2)
+         │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [43..=47] -> Node Trie2Index(529) (MaxDepth: 3)
+         │  │  └── Edge (pop: 1, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(530) (MaxDepth: 4)
+         │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [49] -> Ref to Node Trie2Index(1866) (MaxDepth: 4)
+         │  │     ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [26, 61] -> Node Trie2Index(610) (MaxDepth: 3)
+         │  │     │  └── Edge (pop: 4, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(530) (MaxDepth: 4)
+         │  │     ├── Edge (pop: 0, tokens: [13] (e.g., ["}"])): states [0] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  │     └── Edge (pop: 0, tokens: [13] (e.g., ["}"])): states [48] -> Node Trie2Index(512) (MaxDepth: 4)
+         │  │        └── Edge (pop: 1, tokens: [13] (e.g., ["}"])): states [0] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [1, 22] -> Node Trie2Index(640) (MaxDepth: 3)
+         │  │  └── Edge (pop: 2, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(530) (MaxDepth: 4)
+         │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [3, 7] -> Node Trie2Index(600) (MaxDepth: 3)
+         │  │  └── Edge (pop: 3, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(530) (MaxDepth: 4)
+         │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [9] -> Ref to Node Trie2Index(610) (MaxDepth: 3)
+         │  ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [27, 62] -> Node Trie2Index(630) (MaxDepth: 3)
+         │  │  └── Edge (pop: 5, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(530) (MaxDepth: 4)
+         │  ├── Edge (pop: 0, tokens: [13] (e.g., ["}"])): states [0, 2] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [13] (e.g., ["}"])): states [4, 48] -> Ref to Node Trie2Index(512) (MaxDepth: 4)
+         │  ├── Edge (pop: 0, tokens: [13] (e.g., ["}"])): states [49] -> Node Trie2Index(518) (MaxDepth: 3)
+         │  │  └── Edge (pop: 2, tokens: [13] (e.g., ["}"])): states [0] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [13] (e.g., ["}"])): states [50] -> Node Trie2Index(539) (MaxDepth: 3)
+         │  │  └── Edge (pop: 1, tokens: [13] (e.g., ["}"])): states [48] -> Ref to Node Trie2Index(512) (MaxDepth: 4)
+         │  └── Edge (pop: 0, tokens: [13] (e.g., ["}"])): states [51] -> Node Trie2Index(526) (MaxDepth: 3)
+         │     └── Edge (pop: 2, tokens: [13] (e.g., ["}"])): states [48] -> Ref to Node Trie2Index(512) (MaxDepth: 4)
+         ├── Edge (pop: 0, tokens: [14] (e.g., ["\n", " "])): states [0..=62] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         ├── Edge (pop: 0, tokens: [16] (e.g., ["!", "-"])): states [0..=62] -> Node Trie2Index(1520) (MaxDepth: 2)
+         │  ├── Edge (pop: 0, tokens: [16] (e.g., ["!", "-"])): states [0, 10, 14, 16, 24, ...] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [16] (e.g., ["!", "-"])): states [50] -> Ref to Node Trie2Index(12410) (MaxDepth: 8)
+         │  ├── Edge (pop: 0, tokens: [16] (e.g., ["!", "-"])): states [51] -> Ref to Node Trie2Index(76) (MaxDepth: 8)
+         │  ├── Edge (pop: 0, tokens: [16] (e.g., ["!", "-"])): states [43..=47] -> Ref to Node Trie2Index(5933) (MaxDepth: 5)
+         │  ├── Edge (pop: 0, tokens: [16] (e.g., ["!", "-"])): states [1, 22] -> Ref to Node Trie2Index(273) (MaxDepth: 5)
+         │  ├── Edge (pop: 0, tokens: [16] (e.g., ["!", "-"])): states [3, 7] -> Ref to Node Trie2Index(289) (MaxDepth: 5)
+         │  ├── Edge (pop: 0, tokens: [16] (e.g., ["!", "-"])): states [9] -> Ref to Node Trie2Index(244) (MaxDepth: 5)
+         │  ├── Edge (pop: 0, tokens: [16] (e.g., ["!", "-"])): states [27, 62] -> Ref to Node Trie2Index(313) (MaxDepth: 5)
+         │  └── Edge (pop: 0, tokens: [16] (e.g., ["!", "-"])): states [18..=20] -> Ref to Node Trie2Index(180) (MaxDepth: 5)
+         ├── Edge (pop: 0, tokens: [17] (e.g., ["("])): states [0..=62] -> Node Trie2Index(862) (MaxDepth: 2)
+         │  ├── Edge (pop: 0, tokens: [17] (e.g., ["("])): states [0, 10, 14, 16, 23..=24, ...] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         │  ├── Edge (pop: 0, tokens: [17] (e.g., ["("])): states [50, 55..=57] -> Ref to Node Trie2Index(12410) (MaxDepth: 8)
+         │  ├── Edge (pop: 0, tokens: [17] (e.g., ["("])): states [51] -> Ref to Node Trie2Index(76) (MaxDepth: 8)
+         │  ├── Edge (pop: 0, tokens: [17] (e.g., ["("])): states [43..=47] -> Ref to Node Trie2Index(5933) (MaxDepth: 5)
+         │  ├── Edge (pop: 0, tokens: [17] (e.g., ["("])): states [1, 22] -> Ref to Node Trie2Index(273) (MaxDepth: 5)
+         │  ├── Edge (pop: 0, tokens: [17] (e.g., ["("])): states [3, 7] -> Ref to Node Trie2Index(289) (MaxDepth: 5)
+         │  ├── Edge (pop: 0, tokens: [17] (e.g., ["("])): states [9] -> Ref to Node Trie2Index(244) (MaxDepth: 5)
+         │  ├── Edge (pop: 0, tokens: [17] (e.g., ["("])): states [27, 62] -> Ref to Node Trie2Index(313) (MaxDepth: 5)
+         │  └── Edge (pop: 0, tokens: [17] (e.g., ["("])): states [18..=20] -> Ref to Node Trie2Index(180) (MaxDepth: 5)
+         └── Edge (pop: 0, tokens: [20] (e.g., ["{"])): states [0..=62] -> Ref to Node Trie2Index(370) (MaxDepth: 4)
+
+      --- Tokenizer State ID: 1 ---
+      Root Node Trie2Index(1) (MaxDepth: 0)
+      └── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(216) (MaxDepth: 4)
+
+      --- Tokenizer State ID: 2 ---
+      Root Node Trie2Index(2) (MaxDepth: 0)
+      └── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+
+      --- Tokenizer State ID: 3 ---
+      Root Node Trie2Index(3) (MaxDepth: 0)
+      └── Edge (pop: 0, tokens: [21] (e.g., [">"])): states [0..=62] -> Node Trie2Index(1824) (MaxDepth: 1)
+         ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [43..=47] -> Ref to Node Trie2Index(1877) (MaxDepth: 4)
+         ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [1, 22] -> Ref to Node Trie2Index(1904) (MaxDepth: 4)
+         ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [3, 7] -> Ref to Node Trie2Index(1914) (MaxDepth: 4)
+         ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [9] -> Ref to Node Trie2Index(1865) (MaxDepth: 4)
+         ├── Edge (pop: 0, tokens: [0..=23] (e.g., ["E", "F", "O", "l", "e"], ...)): states [27, 62] -> Ref to Node Trie2Index(1954) (MaxDepth: 4)
+         ├── Edge (pop: 0, tokens: [21] (e.g., [">"])): states [38, 41] -> Node Trie2Index(45) (MaxDepth: 11) [END]
+         ├── Edge (pop: 0, tokens: [21] (e.g., [">"])): states [40, 48] -> Ref to Node Trie2Index(1836) (MaxDepth: 5)
+         ├── Edge (pop: 0, tokens: [21] (e.g., [">"])): states [49] -> Ref to Node Trie2Index(1845) (MaxDepth: 4)
+         ├── Edge (pop: 0, tokens: [21] (e.g., [">"])): states [50] -> Ref to Node Trie2Index(1866) (MaxDepth: 4)
+         └── Edge (pop: 0, tokens: [21] (e.g., [">"])): states [51] -> Ref to Node Trie2Index(1853) (MaxDepth: 4)
+
+      --- Tokenizer State ID: 4 ---
+      Root Node Trie2Index(4) (MaxDepth: 0)
+      └── Edge (pop: 0, tokens: [0, 22] (e.g., ["E", "F", "O", "|"])): states [0..=62] -> Ref to Node Trie2Index(8749) (MaxDepth: 3)
+
+      --- Tokenizer State ID: 5 ---
+      Root Node Trie2Index(4) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 6 ---
+      Root Node Trie2Index(4) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 7 ---
+      Root Node Trie2Index(4) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 8 ---
+      Root Node Trie2Index(4) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 9 ---
+      Root Node Trie2Index(9) (MaxDepth: 0)
+
+      --- Tokenizer State ID: 10 ---
+      Root Node Trie2Index(27) (MaxDepth: 0)
+      └── Edge (pop: 0, tokens: [0..=7, 11] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(11178) (MaxDepth: 4)
+
+      --- Tokenizer State ID: 11 ---
+      Root Node Trie2Index(11) (MaxDepth: 0)
+      └── Edge (pop: 0, tokens: [0..=7, 11] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(2166) (MaxDepth: 1)
+         ├── Edge (pop: 0, tokens: [0..=7, 11] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(11178) (MaxDepth: 4)
+         └── Edge (pop: 0, tokens: [0..=7, 11] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(2167) (MaxDepth: 2)
+            ├── Edge (pop: 0, tokens: [0..=7, 11] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(11178) (MaxDepth: 4)
+            └── Edge (pop: 0, tokens: [1, 3] (e.g., ["l", "a", "r", "s", "u"])): states [0..=62] -> Ref to Node Trie2Index(4146) (MaxDepth: 3)
+
+      --- Tokenizer State ID: 12 ---
+      Root Node Trie2Index(12) (MaxDepth: 0)
+      └── Edge (pop: 0, tokens: [0..=7, 11] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(2325) (MaxDepth: 3)
+
+      --- Tokenizer State ID: 13 ---
+      Root Node Trie2Index(11) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 14 ---
+      Root Node Trie2Index(11) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 15 ---
+      Root Node Trie2Index(15) (MaxDepth: 0)
+      └── Edge (pop: 0, tokens: [0..=7, 11] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(2932) (MaxDepth: 1)
+         ├── Edge (pop: 0, tokens: [0..=7, 11] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(11178) (MaxDepth: 4)
+         └── Edge (pop: 0, tokens: [0..=7, 11] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Node Trie2Index(2933) (MaxDepth: 2)
+            ├── Edge (pop: 0, tokens: [0..=7, 11] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(11178) (MaxDepth: 4)
+            └── Edge (pop: 0, tokens: [1..=2, 4] (e.g., ["l", "e", "h", "i"])): states [0..=62] -> Ref to Node Trie2Index(2325) (MaxDepth: 3)
+
+      --- Tokenizer State ID: 16 ---
+      Root Node Trie2Index(11) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 17 ---
+      Root Node Trie2Index(15) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 18 ---
+      Root Node Trie2Index(15) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 19 ---
+      Root Node Trie2Index(12) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 20 ---
+      Root Node Trie2Index(12) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 21 ---
+      Root Node Trie2Index(21) (MaxDepth: 0)
+      └── Edge (pop: 0, tokens: [0..=7, 11] (e.g., ["E", "F", "O", "l", "e"], ...)): states [0..=62] -> Ref to Node Trie2Index(4146) (MaxDepth: 3)
+
+      --- Tokenizer State ID: 22 ---
+      Root Node Trie2Index(15) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 23 ---
+      Root Node Trie2Index(21) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 24 ---
+      Root Node Trie2Index(11) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 25 ---
+      Root Node Trie2Index(27) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 26 ---
+      Root Node Trie2Index(27) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 27 ---
+      Root Node Trie2Index(27) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 28 ---
+      Root Node Trie2Index(27) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 29 ---
+      Root Node Trie2Index(27) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 30 ---
+      Root Node Trie2Index(2) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 31 ---
+      Root Node Trie2Index(2) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 32 ---
+      Root Node Trie2Index(1) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 33 ---
+      Root Node Trie2Index(9) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 34 ---
+      Root Node Trie2Index(9) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 35 ---
+      Root Node Trie2Index(9) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 36 ---
+      Root Node Trie2Index(36) (MaxDepth: 0)
+      └── Edge (pop: 0, tokens: [10] (e.g., ["="])): states [0..=62] -> Ref to Node Trie2Index(6041) (MaxDepth: 2)
+
+      --- Tokenizer State ID: 37 ---
+      Root Node Trie2Index(9) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 38 ---
+      Root Node Trie2Index(9) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 39 ---
+      Root Node Trie2Index(9) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 40 ---
+      Root Node Trie2Index(9) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 41 ---
+      Root Node Trie2Index(9) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 42 ---
+      Root Node Trie2Index(9) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 43 ---
+      Root Node Trie2Index(9) (MaxDepth: 0)
+        (Root already visited)
+
+      --- Tokenizer State ID: 44 ---
+      Root Node Trie2Index(9) (MaxDepth: 0)
+        (Root already visited)
+
+      ===================================
+      Dump Complete.
+      [DEBUG] 2] src/constraint_extra.rs:658: Calculating final precompute3 statistics...
+      [DEBUG] 2] src/constraint_extra.rs:724: Finished calculating final precompute3 statistics.
+      --- Precomputation 3 Statistics ---
+
+      Node Counts Breakdown:
+        There are:
+        - 110 unique nodes, of which
+          - 12 are roots
+          - 98 are non-roots, of which
+              - 97 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 110
+        Total Edges: 268
+        Nodes with End Marker: 1
+        Average edge fanout:    2.06
+        Total ranges in all HybridBitsets: 442
+      ---------------------------------
+    metadata:
+  - assistant: |-
+      You are right, the previous optimizations were a good step, but the structural merge was too conservative. By requiring an exact match on the sets of `StateIDBV`s, it missed opportunities to merge nodes that were functionally very similar.
+
+      The "final edit" is to make the structural merge more aggressive. We will modify it to consider nodes structurally equivalent if the *union* of `StateIDBV`s for each `(pop, destination_class)` pair is the same. This allows it to merge nodes that have different distributions of state IDs across their edges, as long as the total set of states required to transition to a given destination structure is identical. This should produce a much more compact graph.
+
+      ### Step-by-step Instructions
+
+      1.  **Open `src/constraint_precompute3_utils.rs`**.
+
+      2.  **Navigate to the `merge_nodes_trie3_structural` function**, which you added in the previous step (around line 1221).
+
+      3.  **Modify the signature and aggregation logic** inside the main loop of the function. You will be changing the `SignatureStructural3` type from using a `BTreeSet<StateIDBV>` to just a single, unioned `StateIDBV`, and updating the aggregation loop to union the bitsets instead of inserting them into a set.
+
+          -   **Find this block of code** (around line 1245):
+              ```rust
+                      // Signature is (end_flag, map<(pop, dest_class) -> set<StateIDBV>>)
+                      type SignatureStructural3 = (bool, BTreeMap<(usize, usize), BTreeSet<StateIDBV>>);
+              
+                      let mut sig_to_id: HashMap<SignatureStructural3, usize> = HashMap::new();
+              ```
+          -   **Replace it with this:**
+              ```rust
+                      // Signature is (end_flag, map<(pop, dest_class) -> union of StateIDBVs>)
+                      // This is more aggressive than using a BTreeSet of SIDs, as it allows merging
+                      // nodes that have different SID distributions as long as the total set of states
+                      // required to reach a destination class is the same.
+                      type SignatureStructural3 = (bool, BTreeMap<(usize, usize), StateIDBV>);
+              
+                      let mut sig_to_id: HashMap<SignatureStructural3, usize> = HashMap::new();
+              ```
+          -   **Next, find the aggregation loop** (around line 1255):
+              ```rust
+                      for u in its {
+                          let mut aggr: BTreeMap<(usize, usize), BTreeSet<StateIDBV>> = BTreeMap::new();
+                          for (p, _bv_key, v_dense, sids) in &raw_edges[u] {
+                              let dest_class = prev_class[*v_dense];
+                              let key = (*p, dest_class);
+                              aggr.entry(key).or_default().insert(sids.clone());
+                          }
+              ```
+          -   **Modify it to union the `StateIDBV`s:**
+              ```rust
+                      for u in its {
+                          let mut aggr: BTreeMap<(usize, usize), StateIDBV> = BTreeMap::new();
+                          for (p, _bv_key, v_dense, sids) in &raw_edges[u] {
+                              // _bv_key (LLM tokens) is IGNORED for structural equivalence.
+                              let dest_class = prev_class[*v_dense];
+                              let key = (*p, dest_class);
+                              aggr.entry(key).or_default() |= sids;
+                          }
+              ```
+
+      No other changes are needed. The reconstruction logic and the subsequent edge compression pass will handle the results of this more aggressive merge correctly.
+
+      ### Git Diff
+
+      Here is the patch to apply the changes:
+
+      ```diff
+      diff --git a/src/constraint_precompute3_utils.rs b/src/constraint_precompute3_utils.rs
+      index 2222222..3333333 100644
+      --- a/src/constraint_precompute3_utils.rs
+      +++ b/src/constraint_precompute3_utils.rs
+      @@ -1241,25 +1241,25 @@
+           let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
+       
+           for it in 0..max_iters {
+      -        // Signature is (end_flag, map<(pop, dest_class) -> set<StateIDBV>>)
+      -        type SignatureStructural3 = (bool, BTreeMap<(usize, usize), BTreeSet<StateIDBV>>);
+      +        // Signature is (end_flag, map<(pop, dest_class) -> union of StateIDBVs>)
+      +        // This is more aggressive than using a BTreeSet of SIDs, as it allows merging
+      +        // nodes that have different SID distributions as long as the total set of states
+      +        // required to reach a destination class is the same.
+      +        type SignatureStructural3 = (bool, BTreeMap<(usize, usize), StateIDBV>);
+       
+               let mut sig_to_id: HashMap<SignatureStructural3, usize> = HashMap::new();
+               let mut new_class = vec![0; n];
+               let mut next_id = 0;
+               let mut changes = 0;
+       
+      -        #[cfg(not(rustrover))]
+               let its = tqdm!(0..n, desc = format!("Trie3 Merge Structural Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
+      -        #[cfg(rustrover)]
+      -        let its = 0..n;
+               for u in its {
+      -            let mut aggr: BTreeMap<(usize, usize), BTreeSet<StateIDBV>> = BTreeMap::new();
+      +            let mut aggr: BTreeMap<(usize, usize), StateIDBV> = BTreeMap::new();
+                   for (p, _bv_key, v_dense, sids) in &raw_edges[u] {
+      +                // _bv_key (LLM tokens) is IGNORED for structural equivalence.
+                       let dest_class = prev_class[*v_dense];
+                       let key = (*p, dest_class);
+      -                aggr.entry(key).or_default().insert(sids.clone());
+      +                aggr.entry(key).or_default() |= sids;
+                   }
+       
+                   let sig: SignatureStructural3 = (ends[u], aggr);
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/constraint_precompute3_utils.rs
+      Applying patch to 'src/constraint_precompute3_utils.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint_precompute3_utils.rs.
+    metadata:
+  - user: 'Changes committed with message: "feat: Implement aggressive structural
+      node merging pass for Trie3"'
     metadata:
 ...

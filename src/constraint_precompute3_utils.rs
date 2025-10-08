@@ -1245,24 +1245,25 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
     let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
 
     for it in 0..max_iters {
-        // Signature is (end_flag, map<(pop, dest_class) -> set<StateIDBV>>)
-        type SignatureStructural3 = (bool, BTreeMap<(usize, usize), BTreeSet<StateIDBV>>);
+        // Signature is (end_flag, map<(pop, dest_class) -> union of StateIDBVs>)
+        // This is more aggressive than using a BTreeSet of SIDs, as it allows merging
+        // nodes that have different SID distributions as long as the total set of states
+        // required to reach a destination class is the same.
+        type SignatureStructural3 = (bool, BTreeMap<(usize, usize), StateIDBV>);
 
         let mut sig_to_id: HashMap<SignatureStructural3, usize> = HashMap::new();
         let mut new_class = vec![0; n];
         let mut next_id = 0;
         let mut changes = 0;
 
-        #[cfg(not(rustrover))]
         let its = tqdm!(0..n, desc = format!("Trie3 Merge Structural Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
-        #[cfg(rustrover)]
-        let its = 0..n;
         for u in its {
-            let mut aggr: BTreeMap<(usize, usize), BTreeSet<StateIDBV>> = BTreeMap::new();
+            let mut aggr: BTreeMap<(usize, usize), StateIDBV> = BTreeMap::new();
             for (p, _bv_key, v_dense, sids) in &raw_edges[u] {
+                // _bv_key (LLM tokens) is IGNORED for structural equivalence.
                 let dest_class = prev_class[*v_dense];
                 let key = (*p, dest_class);
-                aggr.entry(key).or_default().insert(sids.clone());
+                *aggr.entry(key).or_default() |= sids;
             }
 
             let sig: SignatureStructural3 = (ends[u], aggr);
