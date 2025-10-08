@@ -1374,6 +1374,8 @@ impl GrammarConstraint {
             initial_values_for_map,
             |current_glr_state, edge_grammar_token_opt, destinations_map| {
                 reset();
+                let mut out;
+                timeit!("process edge", {
                 let mut glr_s = current_glr_state.clone();
                 let mut edge_bv = LLMTokenBV::zeros();
                 for bv in destinations_map.values() {
@@ -1386,7 +1388,7 @@ impl GrammarConstraint {
                     glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                 }
 
-                let mut out = Vec::new();
+                out = Vec::new();
                 // println!("At node with GLR state: {}", glr_s);
                 for (dst_node_wrapper, edge_bv) in destinations_map.iter() {
                     let mut glr_s_copy = glr_s.clone();
@@ -1403,12 +1405,14 @@ impl GrammarConstraint {
                     // }
                     out.push((dst_node_wrapper.clone(), glr_s_copy));
                 }
+                });
                 print_summary();
                 reset();
                 out
             },
             |glr_s1, glr_s2| {
                 reset();
+                timeit!("merge glr states", {
                 // println!("Merging GLR states:");
                 // println!("  Flat 1:");
                 // for (i, p) in glr_s1.active_state.stack.flatten().iter().enumerate() {
@@ -1423,11 +1427,13 @@ impl GrammarConstraint {
                 // for (i, p) in glr_s1.active_state.stack.flatten().iter().enumerate() {
                     // println!("    {}: {:?}", i, p);
                 // }
+                });
                 print_summary();
                 reset();
             },
             |precomputed_node_data, glr_s| {
                 reset();
+                let keep_going;
                 timeit!("precompute3 process node", {
 
                 crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
@@ -1435,7 +1441,7 @@ impl GrammarConstraint {
                     &mut HashMap::new(),
                     glr_s.active_state.trie2_god.as_ref().unwrap(),
                 );
-                let keep_going = glr_s.is_ok();
+                keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
                     // println!("At end.");
                     // println!("GSS: {}", glr_s);
@@ -1489,11 +1495,11 @@ impl GrammarConstraint {
 
                 // glr_s.active_state.stack.fuse_predecessors(1);
 
+                });
                 print_summary();
                 reset();
 
                 keep_going
-                })
             },
         );
 
