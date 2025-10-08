@@ -12,6 +12,7 @@ use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
 use crate::datastructures::leveled_gss::{LeveledGSS, Merge as LGMerge};
 use crate::datastructures::trie::Trie2Index;
+use crate::glr::grammar::Terminal;
 use crate::glr::parser::{GLRParser, ParseStateEdgeContent};
 use crate::glr::table::{StateID, TerminalID};
 use crate::tokenizer::LLMTokenID;
@@ -147,8 +148,8 @@ impl<'a> Default for GSSPrintConfig<'a> {
 
 pub fn print_gss_forest(
     roots: &[Arc<GSSNode>],
-    _terminal_map: &BiBTreeMap<crate::glr::grammar::Terminal, TerminalID>,
-    _config: &GSSPrintConfig,
+    terminal_map: &BiBTreeMap<crate::glr::grammar::Terminal, TerminalID>,
+    config: &GSSPrintConfig,
 ) -> (String, Vec<StateID>) {
     let mut out = String::new();
     let mut state_ids_in_order = Vec::new();
@@ -158,7 +159,7 @@ pub fn print_gss_forest(
     writeln!(&mut out, "GSS Forest (leveled adapter):").unwrap();
     for (i, r) in roots.iter().enumerate() {
         // Use label if available
-        if let Some(labels) = _config.labels {
+        if let Some(labels) = config.labels {
             assert!(labels.len() == roots.len());
             writeln!(&mut out, "{}", labels[i]).unwrap();
         } else {
@@ -166,21 +167,25 @@ pub fn print_gss_forest(
         }
         let stacks = r.inner.to_stacks();
         for (path, acc) in stacks {
-            let mut sids: Vec<_> = path.iter().map(|e| e.state_id).collect();
+            let sids: Vec<_> = path.iter().map(|e| e.state_id).collect();
             for sid in &sids {
                 if !state_ids_in_order.contains(sid) {
                     state_ids_in_order.push(*sid);
                 }
             }
             let s: Vec<_> = sids.iter().map(|s| s.0.to_string()).collect();
-            writeln!(
-                &mut out,
-                "  - [{}], tokens={}, trie_nodes={}",
-                s.join(" "),
-                acc.llm_tokens_union.len(),
-                acc.stored_trie_nodes.len()
-            )
-            .unwrap();
+            let acc_str = format_acc(
+                &acc,
+                terminal_map,
+                config.original_internal_bimap,
+                config.llm_token_map,
+                config,
+            );
+            if acc_str.is_empty() {
+                writeln!(&mut out, "  - [{}]", s.join(" ")).unwrap();
+            } else {
+                writeln!(&mut out, "  - [{}] {}", s.join(" "), acc_str).unwrap();
+            }
         }
     }
     (out, state_ids_in_order)
@@ -961,11 +966,118 @@ pub fn popn_collect_isolated_parents(node_arc: &Arc<GSSNode>, n: usize) -> Vec<(
 
 // Compatibility for formatting acc (used by printer)
 pub(crate) fn format_acc(
-    _node: &GSSNode,
-    _terminal_map: &BiBTreeMap<crate::glr::grammar::Terminal, TerminalID>,
-    _original_internal_bimap: Option<&BTreeMap<usize, usize>>,
-    _llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-    _config: &GSSPrintConfig,
+    acc: &Acc,
+    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+    original_internal_bimap: Option<&BTreeMap<usize, usize>>,
+    llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+    config: &GSSPrintConfig,
 ) -> String {
-    String::new()
+    let _ = (original_internal_bimap, llm_token_map);
+
+    if config.verbose {
+        // In verbose mode, print the full debug representation of the Acc.
+        return format!("[acc: {:?}]", acc);
+    }
+
+    let summarize_llm = |bv: &HybridBitset, label: &str| -> Option<String> {
+        if *bv == HybridBitset::max_ones() {
+            return None;
+        }
+        if bv.is_empty() {
+            return Some(format!("{}=∅", label));
+        }
+        let total = bv.len();
+        const MAX_SHOW: usize = 8;
+        let sample: Vec<String> = bv.iter().take(MAX_SHOW).map(|id| id.to_string()).collect();
+        if total > MAX_SHOW {
+            Some(format!("{}({}): [{} …]", label, total, sample.join(", ")))
+        } else {
+            Some(format!("{}({}): [{}]", label, total, sample.join(", ")))
+        }
+    };
+
+    let summarize_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> Option<String> {
+        let mut any_disallowed = false;
+        let mut parts = Vec::new();
+        const MAX_RANGES_TO_SHOW: usize = 3;
+        for (range, allowed_bv) in allowed_terminals.range_values() {
+            let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
+            if disallowed_bv.is_empty() {
+                continue;
+            }
+            any_disallowed = true;
+            if parts.len() >= MAX_RANGES_TO_SHOW {
+                break;
+            }
+            let range_str = if range.start() == range.end() {
+                format!("{}", range.start())
+            } else {
+                format!("{}..={}", range.start(), range.end())
+            };
+
+            if disallowed_bv == HybridBitset::max_ones() {
+                parts.push(format!("state(s) {}: all", range_str));
+                continue;
+            }
+
+            const MAX_NAMES_TO_SHOW: usize = 5;
+            let num_disallowed = disallowed_bv.len();
+            let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES_TO_SHOW)
+                .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
+                    .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.to_string()))
+                .collect();
+            let names_str = names.join(", ");
+
+            if num_disallowed > MAX_NAMES_TO_SHOW {
+                parts.push(format!("state(s) {} ({}): [{}, …]", range_str, num_disallowed, names_str));
+            } else {
+                parts.push(format!("state(s) {}: [{}]", range_str, names_str));
+            }
+        }
+        if !any_disallowed {
+            None
+        } else if parts.is_empty() {
+            Some(format!("Disallowed {}(…)", label))
+        } else {
+            Some(format!("Disallowed {}({})", label, parts.join("; ")))
+        }
+    };
+
+    let union_llm_opt = summarize_llm(&acc.llm_tokens_union, "LLM(U)");
+    let union_terminals_opt = summarize_disallowed_terminals(&acc.terminals_union, "Term(U)");
+
+    let stored_trie_nodes_str = {
+        const MAX_PTRS_TO_SHOW: usize = 5;
+        let n = acc.stored_trie_nodes().len();
+        if n == 0 {
+            None
+        } else if n <= MAX_PTRS_TO_SHOW {
+            let ptrs: Vec<String> = acc
+                .stored_trie_nodes()
+                .iter()
+                .map(|wrapper| format!("{}", wrapper.as_arc()))
+                .collect();
+            Some(format!("Trie(n={}, [{}])", n, ptrs.join(", ")))
+        } else {
+            let ptrs_sample: Vec<String> = acc
+                .stored_trie_nodes()
+                .iter()
+                .take(MAX_PTRS_TO_SHOW)
+                .map(|wrapper| format!("{}", wrapper.as_arc()))
+                .collect();
+            let remaining = n - MAX_PTRS_TO_SHOW;
+            Some(format!("Trie(n={}, first {}: {}, …; +{} more)", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining))
+        }
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(s) = union_llm_opt { parts.push(s); }
+    if let Some(s) = union_terminals_opt { parts.push(s); }
+    if let Some(s) = stored_trie_nodes_str { parts.push(s); }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("[{}]", parts.join(", "))
+    }
 }
