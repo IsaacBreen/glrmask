@@ -4036,10 +4036,12 @@ local_system:
           let llm_a = LLMTokenID(0);
           let llm_not_quote = LLMTokenID(1);
           let llm_quote = LLMTokenID(2);
+          let llm_semi = LLMTokenID(3);
           llm_token_map.insert(b"a".to_vec(), llm_a);
           llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
           llm_token_map.insert(b"\"".to_vec(), llm_quote);
-          let max_original_llm_token_id = 2;
+          llm_token_map.insert(b";".to_vec(), llm_semi);
+          let max_original_llm_token_id = 3;
 
           // 3. Create the GrammarConstraint
           let constraint = GrammarConstraint::from_compiled_grammar(
@@ -4073,14 +4075,14 @@ local_system:
           state.print_gss();
           let mask2 = state.get_mask();
 
-          // After committing "a", the only valid continuation from the LLM vocabulary is another "a"
-          // to form a longer identifier (e.g., "aa"). The path where "a" is a complete identifier
-          // would require an operator (+, *, ==) or a semicolon, none of which are available as tokens.
-          let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0]);
+          // After committing "a", two paths are possible:
+          // 1. "a" is an incomplete IDENTIFIER. The next token can be "a" to continue it.
+          // 2. "a" is a complete IDENTIFIER, which forms a complete expression. The next token must be ";".
+          let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0, llm_semi.0]);
           assert_eq!(
               mask2,
               expected_mask2,
-              "After 'a', mask should only allow 'a' to continue the identifier"
+              "After 'a', mask should allow continuing the identifier ('a') or finishing the statement (';')"
           );
 
           Ok(())
@@ -13429,5 +13431,146 @@ messages:
     metadata:
   - user: 'Changes committed with message: "test: Collapse program and expression
       rules to minimal failing grammar structure"'
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_basic.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - assistant: |-
+      You've done an excellent job narrowing this down. We now have a minimal grammar that reliably reproduces the issue. The simplifications have revealed that the test's own vocabulary and assertions are now out of sync with the grammar we are testing.
+
+      The current test fails because:
+      1.  The grammar requires a semicolon `;` after an expression, but the test's LLM vocabulary doesn't include a token for `;`.
+      2.  The test's assertion incorrectly expects that only another `a` (to continue the identifier) is valid after committing `a`.
+
+      The actual buggy behavior is that after seeing `a` (a complete expression), the parser allows tokens that can start a *new* expression (like `"`) instead of requiring the semicolon that must follow the *current* expression.
+
+      To fix this and create a clear, correct test case that demonstrates the bug, we need to update the test's vocabulary and its final assertion.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the test file**: `src/test_constraint_basic.rs`.
+      2.  **Locate the test**: Find the function `test_js_simplified_ebnf_string`.
+      3.  **Update the LLM vocabulary**: Add a token for the semicolon.
+
+          Replace this block:
+          ```rust
+          let mut llm_token_map = LLMTokenMap::new();
+          let llm_a = LLMTokenID(0);
+          let llm_not_quote = LLMTokenID(1);
+          let llm_quote = LLMTokenID(2);
+          llm_token_map.insert(b"a".to_vec(), llm_a);
+          llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
+          llm_token_map.insert(b"\"".to_vec(), llm_quote);
+          let max_original_llm_token_id = 2;
+          ```
+          With this updated version that includes `;`:
+          ```rust
+          let mut llm_token_map = LLMTokenMap::new();
+          let llm_a = LLMTokenID(0);
+          let llm_not_quote = LLMTokenID(1);
+          let llm_quote = LLMTokenID(2);
+          let llm_semi = LLMTokenID(3);
+          llm_token_map.insert(b"a".to_vec(), llm_a);
+          llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
+          llm_token_map.insert(b"\"".to_vec(), llm_quote);
+          llm_token_map.insert(b";".to_vec(), llm_semi);
+          let max_original_llm_token_id = 3;
+          ```
+      4.  **Update the final assertion**: The assertion should now check for the correct set of expected tokens. After committing `a`, the system should allow either continuing the identifier with another `a` OR completing the expression with `;`.
+
+          Replace this block:
+          ```rust
+          // After committing "a", the only valid continuation from the LLM vocabulary is another "a"
+          // to form a longer identifier (e.g., "aa"). The path where "a" is a complete identifier
+          // would require an operator (+, *, ==) or a semicolon, none of which are available as tokens.
+          let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0]);
+          assert_eq!(
+              mask2,
+              expected_mask2,
+              "After 'a', mask should only allow 'a' to continue the identifier"
+          );
+          ```
+          With this corrected assertion and comment:
+          ```rust
+          // After committing "a", two paths are possible:
+          // 1. "a" is an incomplete IDENTIFIER. The next token can be "a" to continue it.
+          // 2. "a" is a complete IDENTIFIER, which forms a complete expression. The next token must be ";".
+          let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0, llm_semi.0]);
+          assert_eq!(
+              mask2,
+              expected_mask2,
+              "After 'a', mask should allow continuing the identifier ('a') or finishing the statement (';')"
+          );
+          ```
+
+      After these changes, the test will still fail, but it will now fail with a much clearer error message, showing that the parser allows `"` (a new expression) where it should require `;`. This provides a perfect, minimal test case for debugging the core issue.
+
+      ### Git Diff
+
+      Here is the git patch that applies the changes described above.
+
+      ```diff
+      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
+      index 999i999..aaab111 100644
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -1534,12 +1534,16 @@
+           let llm_a = LLMTokenID(0);
+           let llm_not_quote = LLMTokenID(1);
+           let llm_quote = LLMTokenID(2);
+      +    let llm_semi = LLMTokenID(3);
+           llm_token_map.insert(b"a".to_vec(), llm_a);
+           llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
+           llm_token_map.insert(b"\"".to_vec(), llm_quote);
+      -    let max_original_llm_token_id = 2;
+      +    llm_token_map.insert(b";".to_vec(), llm_semi);
+      +    let max_original_llm_token_id = 3;
+       
+           // 3. Create the GrammarConstraint
+           let constraint = GrammarConstraint::from_compiled_grammar(
+               compiled_grammar,
+               llm_token_map,
+      -        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+      +        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+               max_original_llm_token_id,
+           );
+           println!("Tokenizer: {}", constraint.tokenizer);
+      @@ -1560,15 +1564,15 @@
+           state.print_gss();
+           let mask2 = state.get_mask();
+       
+      -    // After committing "a", the only valid continuation from the LLM vocabulary is another "a"
+      -    // to form a longer identifier (e.g., "aa"). The path where "a" is a complete identifier
+      -    // would require an operator (+, *, ==) or a semicolon, none of which are available as tokens.
+      -    let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0]);
+      +    // After committing "a", two paths are possible:
+      +    // 1. "a" is an incomplete IDENTIFIER. The next token can be "a" to continue it.
+      +    // 2. "a" is a complete IDENTIFIER, which forms a complete expression. The next token must be ";".
+      +    let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0, llm_semi.0]);
+           assert_eq!(
+               mask2,
+               expected_mask2,
+      -        "After 'a', mask should only allow 'a' to continue the identifier"
+      +        "After 'a', mask should allow continuing the identifier ('a') or finishing the statement (';')"
+           );
+       
+           Ok(())
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_basic.rs
+      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_basic.rs.
+    metadata:
+  - user: 'Changes committed with message: "test: Simplify grammar in test_js_simplified_ebnf_string
+      to isolate optionality bug"'
     metadata:
 ...

@@ -1533,10 +1533,12 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     let llm_a = LLMTokenID(0);
     let llm_not_quote = LLMTokenID(1);
     let llm_quote = LLMTokenID(2);
+    let llm_semi = LLMTokenID(3);
     llm_token_map.insert(b"a".to_vec(), llm_a);
     llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
     llm_token_map.insert(b"\"".to_vec(), llm_quote);
-    let max_original_llm_token_id = 2;
+    llm_token_map.insert(b";".to_vec(), llm_semi);
+    let max_original_llm_token_id = 3;
 
     // 3. Create the GrammarConstraint
     let constraint = GrammarConstraint::from_compiled_grammar(
@@ -1570,14 +1572,14 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     state.print_gss();
     let mask2 = state.get_mask();
 
-    // After committing "a", the only valid continuation from the LLM vocabulary is another "a"
-    // to form a longer identifier (e.g., "aa"). The path where "a" is a complete identifier
-    // would require an operator (+, *, ==) or a semicolon, none of which are available as tokens.
-    let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0]);
+    // After committing "a", two paths are possible:
+    // 1. "a" is an incomplete IDENTIFIER. The next token can be "a" to continue it.
+    // 2. "a" is a complete IDENTIFIER, which forms a complete expression. The next token must be ";".
+    let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0, llm_semi.0]);
     assert_eq!(
         mask2,
         expected_mask2,
-        "After 'a', mask should only allow 'a' to continue the identifier"
+        "After 'a', mask should allow continuing the identifier ('a') or finishing the statement (';')"
     );
 
     Ok(())
