@@ -1428,6 +1428,7 @@ impl GrammarConstraint {
             },
             |precomputed_node_data, glr_s| {
                 reset();
+                timeit!("precompute3 process node", {
 
                 crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
                     &mut glr_s.active_state.stack,
@@ -1492,6 +1493,7 @@ impl GrammarConstraint {
                 reset();
 
                 keep_going
+                })
             },
         );
 
