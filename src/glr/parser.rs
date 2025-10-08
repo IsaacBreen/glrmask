@@ -2304,7 +2304,7 @@ impl GLRParser {
             // Define the GSS node if it hasn't been visited yet
             if visited_nodes.insert(node_ptr) {
                 let acc_str = crate::datastructures::gss_leveled_adapter::format_acc(
-                    &node_arc,
+                    &node_arc.inner.reduce_acc().unwrap(),
                     &self.terminal_map,
                     original_internal_bimap,
                     llm_token_map,
