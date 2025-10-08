@@ -955,6 +955,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // This produces a constrained copy of the state.
         let constrained_state_opt = if let Some(bv) = filter {
             let mut constrained = state.clone();
+            timeit!("GLRParserState::handle_action::ConstrainState", {
             if let Some(god) = constrained.trie2_god.as_ref() {
                 let tokens_all = LLMTokenBV::max_ones();
                 let key = (0, tokens_all.clone());
@@ -974,6 +975,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     &mut memo,
                 );
             }
+            });
             Some(constrained)
         } else {
             None
