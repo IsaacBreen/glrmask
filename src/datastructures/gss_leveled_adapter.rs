@@ -157,7 +157,13 @@ pub fn print_gss_forest(
     }
     writeln!(&mut out, "GSS Forest (leveled adapter):").unwrap();
     for (i, r) in roots.iter().enumerate() {
-        writeln!(&mut out, "Root {}:", i).unwrap();
+        // Use label if available
+        if let Some(labels) = _config.labels {
+            assert!(labels.len() == roots.len());
+            writeln!(&mut out, "{}", labels[i]).unwrap();
+        } else {
+            writeln!(&mut out, " Root {}:", i).unwrap();
+        }
         let stacks = r.inner.to_stacks();
         for (path, acc) in stacks {
             let mut sids: Vec<_> = path.iter().map(|e| e.state_id).collect();
