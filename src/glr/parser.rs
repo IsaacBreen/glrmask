@@ -961,6 +961,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 let key = (0, tokens_all.clone());
                 let mut memo = PruneAndTransformRecursiveMemo::default();
                 let mut dest_provider = || {
+                    timeit!("GLRParserState::handle_action::ConstrainState::DestProvider", {});
                     PrecomputeNode3Index::new(
                         god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
                     )
