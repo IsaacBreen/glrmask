@@ -181,12 +181,15 @@ def _generate_and_print_summary(df: pd.DataFrame, title: str, equivalence_info: 
         # Reorder columns for display
         summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
     else:
-        summary = summary[['count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
+        summary['equivalent'] = '-'
+        summary['mask_mismatch_count'] = '-'
+        summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
 
 
     # Format for printing
-    summary[['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']] *= 1000  # convert to ms
-    summary = summary.rename(columns=lambda c: c + ' (ms)' if c not in ['equivalent', 'mask_mismatch_count', 'count'] else c)
+    numeric_cols = ['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']
+    summary[numeric_cols] *= 1000  # convert to ms
+    summary = summary.rename(columns=lambda c: c + ' (ms)' if c in numeric_cols else c)
 
     print(summary.to_string(float_format="%.4f"))
 

@@ -6165,12 +6165,15 @@ local_system:
               # Reorder columns for display
               summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
           else:
-              summary = summary[['count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
+              summary['equivalent'] = '-'
+              summary['mask_mismatch_count'] = '-'
+              summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
 
 
           # Format for printing
-          summary[['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']] *= 1000  # convert to ms
-          summary = summary.rename(columns=lambda c: c + ' (ms)' if c not in ['equivalent', 'mask_mismatch_count', 'count'] else c)
+          numeric_cols = ['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']
+          summary[numeric_cols] *= 1000  # convert to ms
+          summary = summary.rename(columns=lambda c: c + ' (ms)' if c in numeric_cols else c)
 
           print(summary.to_string(float_format="%.4f"))
 
@@ -16034,5 +16037,160 @@ messages:
   - user: 'Changes committed with message: "Refactor benchmark analyzer to separate
       get_mask/commit stats and enhance mask mismatch reporting with token representations
       and vocab summary"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt3.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/benchmark_analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/benchmark_runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/common_interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/create_additional_benchmark_plots.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/equality.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/optimization_coordinator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/optimizer_general.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/reduce_constraint.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/stats.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/run_benchmarks.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      ```
+      --- get_mask() Timings ---
+                                                                equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
+      model                                                                                                                                                                  
+      bruteforce_model__js_grammar_constraint                            ✅                    0     12    10.5035   11.7864    0.3565   11.3403   17.4161   38.4671   41.0484
+      precompute3_model_pure_python_opt3__js_grammar_constraint          ❌                    5     12     2.9657    2.8373    0.3488    3.2286    5.0568    9.4407    9.9715
+
+      --- commit() Timings ---
+                                                                 count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
+      model                                                                                                                                  
+      bruteforce_model__js_grammar_constraint                       12     0.1523    0.2009    0.0026    0.1057    0.4609    0.5960    0.6096
+      precompute3_model_pure_python_opt3__js_grammar_constraint     12     1.1567    0.7525    0.4751    1.1176    2.1359    2.6362    2.6957
+      ```
+
+      Make sure the cols line up even between the tables.
+    metadata:
+  - assistant: |-
+      You're right, that's an important detail for readability. The columns should align perfectly between the two tables.
+
+      Here are the step-by-step instructions and the git diff to enforce column alignment.
+
+      ### Step-by-step Instructions
+
+      The change is confined to a single function in `python/aug25/benchmark_analyzer.py`.
+
+      1.  **Locate the Summary Helper Function**
+
+          In `python/aug25/benchmark_analyzer.py`, find the function `_generate_and_print_summary`.
+
+      2.  **Modify the `else` Block**
+
+          Inside this function, there is an `if/else` block that handles adding the `equivalent` and `mask_mismatch_count` columns. The `else` branch is executed for the `commit()` summary, which doesn't have this information.
+
+          Modify this `else` block to:
+          *   Add two new placeholder columns named `equivalent` and `mask_mismatch_count` to the `summary` DataFrame, filling them with a dash (`-`).
+          *   Reorder the columns to match the exact same order as the `if` block, ensuring a consistent structure for both tables.
+
+      This will cause pandas to render both tables with the same column layout, making them align perfectly.
+
+      ### Git Diff
+
+      Here is the git diff to apply this change.
+
+      ```diff
+      diff --git a/python/aug25/benchmark_analyzer.py b/python/aug25/benchmark_analyzer.py
+      --- a/python/aug25/benchmark_analyzer.py
+      +++ b/python/aug25/benchmark_analyzer.py
+      @@ -179,13 +179,15 @@
+               summary = summary.join(eq_series).join(mm_series)
+               # Reorder columns for display
+               summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
+           else:
+      -        summary = summary[['count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
+      +        summary['equivalent'] = '-'
+      +        summary['mask_mismatch_count'] = '-'
+      +        summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
+       
+       
+           # Format for printing
+      -    summary[['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']] *= 1000  # convert to ms
+      -    summary = summary.rename(columns=lambda c: c + ' (ms)' if c not in ['equivalent', 'mask_mismatch_count', 'count'] else c)
+      +    numeric_cols = ['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']
+      +    summary[numeric_cols] *= 1000  # convert to ms
+      +    summary = summary.rename(columns=lambda c: c + ' (ms)' if c in numeric_cols else c)
+       
+           print(summary.to_string(float_format="%.4f"))
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/benchmark_analyzer.py
+      Applying patch to 'python/aug25/benchmark_analyzer.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/benchmark_analyzer.py.
+    metadata:
+  - user: 'Changes committed with message: "Align summary table columns between get_mask()
+      and commit() statistics by standardizing DataFrame structure"'
     metadata:
 ...
