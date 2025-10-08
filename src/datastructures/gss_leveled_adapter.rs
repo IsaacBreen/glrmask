@@ -547,6 +547,7 @@ impl<'a> GSSPopperItemPeek<'a> {
 }
 
 // --- Roots & helpers ---
+#[time_it]
 pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
     let mut out: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
     for n in nodes {
@@ -884,6 +885,7 @@ pub(crate) fn deep_add_precompute_trie_edges(
     });
 }
 
+#[time_it]
 pub(crate) fn merge_stored_trie_nodes(
     root_arc: &mut Arc<GSSNode>,
     _memo: &mut PruneAndTransformRecursiveMemo,
