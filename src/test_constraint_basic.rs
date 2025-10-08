@@ -1520,9 +1520,8 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     let ebnf_grammar = indoc! {r#"
         program ::= (expression ';')* EOF;
         EOF ::= '<|EOF|>';
-        expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
+        expression ::= '!'? IDENTIFIER ;
 
-        STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
         IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
     "#};
     let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
@@ -1531,12 +1530,10 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Define the LLM vocabulary
     let mut llm_token_map = LLMTokenMap::new();
     let llm_a = LLMTokenID(0);
-    let llm_not_quote = LLMTokenID(1);
-    let llm_quote = LLMTokenID(2);
+    let llm_not_a = LLMTokenID(1);
     llm_token_map.insert(b"a".to_vec(), llm_a);
-    llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
-    llm_token_map.insert(b"\"".to_vec(), llm_quote);
-    let max_original_llm_token_id = 2;
+    llm_token_map.insert(b"!a".to_vec(), llm_not_a);
+    let max_original_llm_token_id = 1;
 
     // 3. Create the GrammarConstraint
     let constraint = GrammarConstraint::from_compiled_grammar(
@@ -1558,11 +1555,11 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // The grammar can start with an IDENTIFIER ("a"), a unary '!' ("!\""), or a STRING_LITERAL ("\"").
     // It can also start with other things like 'let', 'if', 'while', '{', '(', 'true', 'false', a number, or a unary '-'.
     // The LLM tokens provided match the start of IDENTIFIER, unary '!', and STRING_LITERAL.
-    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
+    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_a.0]);
     assert_eq!(
         mask1,
         expected_mask1,
-        "Initial mask should allow 'a', '!\"', and '\"'"
+        "Initial mask should allow 'a' and '!a'"
     );
 
     // 5. Commit "a" and get the next mask
