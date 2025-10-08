@@ -4032,19 +4032,7 @@ local_system:
 
               // --- Statements (Core Imperative Set) ---
               statement_list ::= statement+ ;
-
-              statement ::=
-                  block
-                | declaration_statement
-                | if_statement
-                | while_statement
-                | expression_statement
-                ;
-
-              block ::= '{' statement_list? '}' ;
-              declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';' ;
-              if_statement ::= 'if' '(' expression ')' statement ; // No 'else'
-              while_statement ::= 'while' '(' expression ')' statement ;
+              statement ::= expression_statement;
               expression_statement ::= expression ';' ;
 
               // --- Expressions (Completely Flattened) ---
@@ -12603,5 +12591,96 @@ messages:
     metadata:
   - user: 'Changes committed with message: "test: Iteratively simplify grammar in
       test_js_simplified_ebnf_string"'
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_basic.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - assistant: |-
+      Excellent. Let's proceed with another round of simplification. The last step was helpful. Now, we'll focus on removing the statement-level complexity, as it's unlikely to be related to the specific error, which seems to be about what can follow an identifier within an expression.
+
+      This change will remove all statement types except for `expression_statement`, and also get rid of the `statement_list` concept. This will significantly reduce the number of rules and non-terminals for the parser to handle.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the test file**: `src/test_constraint_basic.rs`.
+      2.  **Locate the test**: Find the function `test_js_simplified_ebnf_string`.
+      3.  **Modify the EBNF grammar string**: We will replace the entire statement-handling part of the grammar with a much simpler structure.
+
+          Find these lines:
+          ```ebnf
+              // --- Statements (Core Imperative Set) ---
+              statement_list ::= statement+ ;
+
+              statement ::=
+                  block
+                | declaration_statement
+                | if_statement
+                | while_statement
+                | expression_statement
+                ;
+
+              block ::= '{' statement_list? '}' ;
+              declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';' ;
+              if_statement ::= 'if' '(' expression ')' statement ; // No 'else'
+              while_statement ::= 'while' '(' expression ')' statement ;
+              expression_statement ::= expression ';' ;
+          ```
+
+          And replace them with this simplified block:
+          ```ebnf
+              // --- Statements (Core Imperative Set) ---
+              statement_list ::= statement+ ;
+              statement ::= expression_statement;
+              expression_statement ::= expression ';' ;
+          ```
+          This change makes `expression_statement` the only valid type of statement, and removes the now-unnecessary definitions for `block`, `if_statement`, etc.
+
+      ### Git Diff
+
+      Here is the git patch that applies the changes described above.
+
+      ```diff
+      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
+      index 111b111..222b222 100644
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -1533,20 +1533,8 @@
+       
+               // --- Statements (Core Imperative Set) ---
+               statement_list ::= statement+ ;
+      -
+      -        statement ::=
+      -            block
+      -          | declaration_statement
+      -          | if_statement
+      -          | while_statement
+      -          | expression_statement
+      -          ;
+      -
+      -        block ::= '{' statement_list? '}' ;
+      -        declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';' ;
+      -        if_statement ::= 'if' '(' expression ')' statement ; // No 'else'
+      -        while_statement ::= 'while' '(' expression ')' statement ;
+      +        statement ::= expression_statement;
+               expression_statement ::= expression ';' ;
+       
+               // --- Expressions (Completely Flattened) ---
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_basic.rs
+      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_basic.rs.
+    metadata:
+  - user: 'Changes committed with message: "test: Simplify statement and expression
+      rules in test_js_simplified_ebnf_string grammar"'
     metadata:
 ...

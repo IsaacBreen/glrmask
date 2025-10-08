@@ -1529,19 +1529,7 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 
         // --- Statements (Core Imperative Set) ---
         statement_list ::= statement+ ;
-
-        statement ::=
-            block
-          | declaration_statement
-          | if_statement
-          | while_statement
-          | expression_statement
-          ;
-
-        block ::= '{' statement_list? '}' ;
-        declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';' ;
-        if_statement ::= 'if' '(' expression ')' statement ; // No 'else'
-        while_statement ::= 'while' '(' expression ')' statement ;
+        statement ::= expression_statement;
         expression_statement ::= expression ';' ;
 
         // --- Expressions (Completely Flattened) ---
