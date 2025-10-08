@@ -1514,14 +1514,48 @@ fn test_constraint_expression_cycle() {
 }
 
 #[test]
+#[test]
 fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load and compile the grammar from the EBNF file
     let ebnf_grammar = indoc! {r#"
-        program ::= expression_statement? EOF;
+        // Instruct the parser to ignore Whitespace and single-line Comments.
+        #![ignore(IGNORE)]
+
+        program ::= statement_list? EOF;
         EOF ::= '<|EOF|>';
 
-        expression_statement ::= expression ';';
-        expression ::= '!'? (IDENTIFIER | STRING_LITERAL);
+        // --- Lexical Grammar (Minimal) ---
+        IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
+
+        // --- Statements (Core Imperative Set) ---
+        statement_list ::= statement+ ;
+
+        statement ::=
+            block
+          | declaration_statement
+          | if_statement
+          | while_statement
+          | expression_statement
+          ;
+
+        block ::= '{' statement_list? '}' ;
+        declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';' ;
+        if_statement ::= 'if' '(' expression ')' statement ; // No 'else'
+        while_statement ::= 'while' '(' expression ')' statement ;
+        expression_statement ::= expression ';' ;
+
+        // --- Expressions (Completely Flattened) ---
+        expression ::= term ( ( '+' | '*' | '==' ) term )* ; // All operators have same precedence
+
+        term ::= '!'? primary ; // Unary operators
+
+        primary ::=
+            IDENTIFIER
+          | literal
+          ;
+
+        // --- Literals and Terminals (Minimal) ---
+        literal ::= STRING_LITERAL ;
 
         STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
         IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
