@@ -51,6 +51,7 @@ pub struct Trie3Config {
     pub prune_dead_paths: bool,
     pub compress_edges: bool,
     pub merge_nodes_exact: Trie3MergeConfig,
+    pub merge_nodes_structural: bool,
     pub merge_nodes_ultrafast: bool,
     pub prune_nodes_not_reaching_end: bool,
     pub simplify_llm_token_bvs: bool,
@@ -69,6 +70,7 @@ impl Default for Trie3Config {
             prune_dead_paths: true,
             compress_edges: true,
             merge_nodes_exact: Trie3MergeConfig::default(),
+            merge_nodes_structural: true,
             merge_nodes_ultrafast: true,
             prune_nodes_not_reaching_end: true,
             simplify_llm_token_bvs: false,
@@ -89,6 +91,7 @@ impl Trie3Config {
             prune_dead_paths: false,
             compress_edges: false,
             merge_nodes_exact: Trie3MergeConfig::off(),
+            merge_nodes_structural: false,
             merge_nodes_ultrafast: false,
             prune_nodes_not_reaching_end: false,
             simplify_llm_token_bvs: false,
@@ -231,6 +234,12 @@ pub fn optimize_trie3_size(
         if config.gc {
             run_pass!("Garbage collection (pre-merge)", {
                 Trie::gc(&trie3_god, &roots.values().cloned().collect::<Vec<_>>());
+            });
+        }
+
+        if config.merge_nodes_structural {
+            run_pass!("Merging nodes (structural)", {
+                merge_nodes_trie3_structural(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
             });
         }
 
@@ -1172,6 +1181,133 @@ fn merge_nodes_trie3_impl(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3
             for (i, &c) in final_partition.iter().enumerate() {
                 if c == class_id {
                     new_live_tokens |= &old_of[i].read(trie3_god).unwrap().value.live_tokens;
+                }
+            }
+
+            let mut guard = rep_idx.write(trie3_god).unwrap();
+            *guard.children_mut() = new_children;
+            guard.value.live_tokens = new_live_tokens;
+        }
+    }
+
+    for root_idx in roots.values_mut() {
+        *root_idx = *node_to_rep.get(root_idx).unwrap();
+    }
+
+    let final_roots_vec: Vec<_> = roots.values().cloned().collect();
+    Trie::recompute_all_max_depths(trie3_god, &final_roots_vec);
+}
+
+fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, PrecomputeNode3Index>, trie3_god: &Trie3GodWrapper, max_iters: usize) {
+    crate::debug!(2, "Merging structurally equivalent subtrees in precomputed trie 3 (max_iters={}).", max_iters);
+
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie3_god, &roots_vec);
+    if all_nodes.is_empty() { return; }
+
+    let mut dense_of: HashMap<Trie2Index, usize> = HashMap::new();
+    let mut old_of: Vec<Trie2Index> = Vec::with_capacity(all_nodes.len());
+    for (i, node_idx) in all_nodes.iter().enumerate() {
+        dense_of.insert(*node_idx, i);
+        old_of.push(*node_idx);
+    }
+    let n = all_nodes.len();
+
+    let mut ends: Vec<bool> = vec![false; n];
+    type RawEdge3 = (usize, LLMTokenBV, usize, StateIDBV);
+    let mut raw_edges: Vec<Vec<RawEdge3>> = vec![Vec::new(); n];
+
+    for (u_dense, u_idx) in old_of.iter().enumerate() {
+        let guard = u_idx.read(trie3_god).unwrap();
+        ends[u_dense] = guard.value.end;
+        for (ek, dest_map) in guard.children() {
+            for (v_idx, bv) in dest_map {
+                if let Some(&v_dense) = dense_of.get(v_idx) {
+                    raw_edges[u_dense].push((ek.0, ek.1.clone(), v_dense, bv.clone()));
+                }
+            }
+        }
+    }
+
+    let mut prev_class: Vec<usize> = (0..n).map(|i| if ends[i] { 1 } else { 0 }).collect();
+
+    for it in 0..max_iters {
+        // Signature is (end_flag, map<(pop, dest_class) -> set<StateIDBV>>)
+        type SignatureStructural3 = (bool, BTreeMap<(usize, usize), BTreeSet<StateIDBV>>);
+
+        let mut sig_to_id: HashMap<SignatureStructural3, usize> = HashMap::new();
+        let mut new_class = vec![0; n];
+        let mut next_id = 0;
+        let mut changes = 0;
+
+        #[cfg(not(rustrover))]
+        let its = tqdm!(0..n, desc = format!("Trie3 Merge Structural Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
+        #[cfg(rustrover)]
+        let its = 0..n;
+        for u in its {
+            let mut aggr: BTreeMap<(usize, usize), BTreeSet<StateIDBV>> = BTreeMap::new();
+            for (p, _bv_key, v_dense, sids) in &raw_edges[u] {
+                let dest_class = prev_class[*v_dense];
+                let key = (*p, dest_class);
+                aggr.entry(key).or_default().insert(sids.clone());
+            }
+
+            let sig: SignatureStructural3 = (ends[u], aggr);
+
+            let cid = *sig_to_id.entry(sig).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id
+            });
+
+            new_class[u] = cid;
+            if new_class[u] != prev_class[u] {
+                changes += 1;
+            }
+        }
+
+        crate::debug!(3, "Trie3 structural merge iter {}: classes={}, changes={}", it + 1, next_id, changes);
+        prev_class = new_class;
+        if changes == 0 { break; }
+    }
+
+    let final_partition = prev_class;
+    let num_classes = final_partition.iter().max().map_or(0, |m| m + 1);
+
+    let mut representatives: Vec<Option<Trie2Index>> = vec![None; num_classes];
+    for (u_dense, &class_id) in final_partition.iter().enumerate() {
+        if representatives[class_id].is_none() {
+            representatives[class_id] = Some(old_of[u_dense]);
+        }
+    }
+
+    let mut node_to_rep: HashMap<Trie2Index, Trie2Index> = HashMap::new();
+    for (u_dense, &class_id) in final_partition.iter().enumerate() {
+        node_to_rep.insert(old_of[u_dense], representatives[class_id].unwrap());
+    }
+
+    for class_id in 0..num_classes {
+        if let Some(rep_idx) = representatives[class_id] {
+            let nodes_in_class: Vec<Trie2Index> = final_partition.iter().enumerate()
+                .filter(|(_, &c)| c == class_id)
+                .map(|(i, _)| old_of[i])
+                .collect();
+
+            let mut new_children = BTreeMap::new();
+            let mut new_live_tokens = LLMTokenBV::zeros();
+
+            for node_idx in &nodes_in_class {
+                let guard = node_idx.read(trie3_god).unwrap();
+                new_live_tokens |= &guard.value.live_tokens;
+                for ((pop, llm_bv), dest_map) in guard.children() {
+                    for (dest_idx, sids) in dest_map {
+                        let dest_rep_idx = *node_to_rep.get(dest_idx).unwrap();
+                        
+                        let new_dest_map = new_children.entry((*pop, llm_bv.clone())).or_insert_with(OrderedHashMap::new);
+                        new_dest_map.entry(dest_rep_idx)
+                            .and_modify(|e| *e |= sids)
+                            .or_insert_with(|| sids.clone());
+                    }
                 }
             }
 
