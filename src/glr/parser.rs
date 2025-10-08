@@ -1631,8 +1631,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             }
                             std::collections::hash_map::Entry::Vacant(vacant) => {
                                 let new_dest = PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
-                                let new_tokens = acc.llm_tokens_union.clone();
-                                vacant.insert((new_dest.clone(), new_tokens));
+                                vacant.insert((new_dest.clone(), LLMTokenBV::max_ones()));
                                 (new_dest, true)
                             }
                         }
