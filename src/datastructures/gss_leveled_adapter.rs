@@ -15,6 +15,7 @@ use crate::datastructures::trie::Trie2Index;
 use crate::glr::grammar::Terminal;
 use crate::glr::parser::{GLRParser, ParseStateEdgeContent};
 use crate::glr::table::{StateID, TerminalID};
+use crate::hit;
 use crate::tokenizer::LLMTokenID;
 
 // Adapter aliases for precompute-trie types (referencing constraint.rs)
@@ -64,6 +65,7 @@ impl Acc {
 
 impl LGMerge for Acc {
     fn merge(&self, other: &Self) -> Self {
+        hit!("LGMerge for Acc");
         Acc {
             llm_tokens_union: &self.llm_tokens_union | &other.llm_tokens_union,
             terminals_union: &self.terminals_union | &other.terminals_union,
