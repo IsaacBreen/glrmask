@@ -696,6 +696,7 @@ local_system:
           _memo: &mut PruneAndTransformRecursiveMemo,
           stored_trie_god: &StoredTrieGodWrapper,
       ) {
+          let mut new_destinations = BTreeMap::new();
           transform_all(root_arc, |a| {
               let mut needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
               let mut keep: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
@@ -721,12 +722,17 @@ local_system:
                   return Some(a.clone());
               }
 
-              // Create a brand new destination node for this Acc.
-              let new_dest = StoredPrecomputeNodeIndex::new(
-                  stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                      crate::constraint::PrecomputedNodeContents::internal(),
-                  )),
-              );
+              // Look up or create a destination node for this set of sources.
+              let new_dest = new_destinations
+                  .entry(needs_edge.clone())
+                  .or_insert_with(|| {
+                      StoredPrecomputeNodeIndex::new(
+                          stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                              crate::constraint::PrecomputedNodeContents::internal(),
+                          )),
+                      )
+                  })
+                  .clone();
 
               // Insert edges from each source that needs it to the new destination.
               let edge_key = (0, allowed_tokens.clone());
@@ -1029,6 +1035,1138 @@ local_system:
       }
   prev_file_contents:
     src/datastructures/gss_leveled_adapter.rs: |-
+      use std::cmp::Ordering;
+      use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+      use std::fmt::{Debug, Write};
+      use std::hash::{Hash, Hasher};
+      use std::sync::Arc;
+
+      use bimap::BiBTreeMap;
+      use profiler_macro::time_it;
+      use crate::constraint::StateIDBV;
+      use crate::constraint::{LLMTokenBV, TerminalBV};
+      use crate::datastructures::hybrid_bitset::HybridBitset;
+      use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
+      use crate::datastructures::leveled_gss::{LeveledGSS, Merge as LGMerge};
+      use crate::datastructures::trie::Trie2Index;
+      use crate::glr::grammar::Terminal;
+      use crate::glr::parser::{GLRParser, ParseStateEdgeContent};
+      use crate::glr::table::{StateID, TerminalID};
+      use crate::tokenizer::LLMTokenID;
+
+      // Adapter aliases for precompute-trie types (referencing constraint.rs)
+      pub type StoredPrecomputeNodeIndex = crate::constraint::PrecomputeNode3Index;
+      pub type StoredTrieGodWrapper = crate::constraint::Trie3GodWrapper;
+
+      // --- Acc type compatible with LeveledGSS A ---
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct Acc {
+          pub llm_tokens_union: HybridBitset,
+          pub terminals_union: HybridL2Bitset,
+          pub stored_trie_nodes: BTreeSet<StoredPrecomputeNodeIndex>,
+      }
+
+      impl Acc {
+          pub fn new_fresh() -> Self {
+              Self {
+                  llm_tokens_union: HybridBitset::max_ones(),
+                  terminals_union: HybridL2Bitset::all(),
+                  stored_trie_nodes: BTreeSet::new(),
+              }
+          }
+          pub fn new_dead() -> Self {
+              Self {
+                  llm_tokens_union: HybridBitset::zeros(),
+                  terminals_union: HybridL2Bitset::all(),
+                  stored_trie_nodes: BTreeSet::new(),
+              }
+          }
+          pub fn is_default(&self) -> bool {
+              self.llm_tokens_union == HybridBitset::max_ones()
+                  && self.terminals_union == HybridL2Bitset::all()
+                  && self.stored_trie_nodes.is_empty()
+          }
+          pub fn union_llm_tokens(&self) -> HybridBitset {
+              self.llm_tokens_union.clone()
+          }
+
+          pub fn stored_trie_nodes(&self) -> &BTreeSet<StoredPrecomputeNodeIndex> {
+              &self.stored_trie_nodes
+          }
+
+          pub fn stored_trie_nodes_mut(&mut self) -> &mut BTreeSet<StoredPrecomputeNodeIndex> {
+              &mut self.stored_trie_nodes
+          }
+      }
+
+      impl LGMerge for Acc {
+          fn merge(&self, other: &Self) -> Self {
+              Acc {
+                  llm_tokens_union: &self.llm_tokens_union | &other.llm_tokens_union,
+                  terminals_union: &self.terminals_union | &other.terminals_union,
+                  stored_trie_nodes: &self.stored_trie_nodes | &other.stored_trie_nodes,
+              }
+          }
+      }
+
+      // --- Minimal GSSStats for logging/debug ---
+      #[derive(Debug, Clone, Default, PartialEq)]
+      pub struct GSSStats {
+          pub(crate) num_roots: usize,
+          pub(crate) num_root_predecessors: usize,
+          pub(crate) num_unique_root_predecessor_keys: usize,
+          pub(crate) total_edges: usize,
+          pub(crate) unique_nodes: usize,
+          pub(crate) num_leaves: usize,
+          pub(crate) structurally_unique_nodes: usize,
+          pub(crate) structural_redundancy: f64,
+          pub(crate) num_redundant_nodes: usize,
+          pub(crate) max_depth: usize,
+          pub(crate) average_depth: f64,
+          pub(crate) merge_points: usize,
+          pub(crate) max_predecessors_with_values: usize,
+          pub(crate) average_predecessors_with_values: f64,
+      }
+
+      #[time_it]
+      pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
+          let mut stats = GSSStats::default();
+          stats.num_roots = roots.len();
+          let mut total_depth: usize = 0;
+          let mut paths: usize = 0;
+          let mut max_depth = 0;
+          let mut total_edges = 0;
+          let mut num_root_predecessors = 0usize;
+          let mut unique_root_keys = BTreeSet::new();
+          for r in roots {
+              let info = r.inner.paths_info();
+              paths += info.num_paths;
+              total_depth += info.total_depth;
+              total_edges += info.total_depth;
+              max_depth = max_depth.max(r.inner.max_depth() as usize);
+
+              if let Some(peek) = r.inner.peek().into_iter().next() {
+                  unique_root_keys.insert(peek);
+              }
+              num_root_predecessors += r.inner.peek().len();
+          }
+          stats.max_depth = max_depth;
+          stats.total_edges = total_edges;
+          stats.unique_nodes = paths;
+          stats.num_leaves = paths;
+          stats.num_root_predecessors = num_root_predecessors;
+          stats.num_unique_root_predecessor_keys = unique_root_keys.len();
+          if paths > 0 {
+              stats.average_depth = total_depth as f64 / paths as f64;
+              stats.average_predecessors_with_values = (num_root_predecessors as f64) / (roots.len().max(1) as f64);
+          }
+          stats
+      }
+
+      // --- GSS printer config & helpers ---
+      pub struct GSSPrintConfig<'a> {
+          pub(crate) labels: Option<&'a [String]>,
+          pub(crate) max_edges: usize,
+          pub(crate) original_internal_bimap: Option<&'a BTreeMap<usize, usize>>,
+          pub(crate) llm_token_map: Option<&'a BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          pub(crate) verbose: bool,
+      }
+      impl<'a> Default for GSSPrintConfig<'a> {
+          fn default() -> Self {
+              Self {
+                  labels: None,
+                  max_edges: usize::MAX,
+                  original_internal_bimap: None,
+                  llm_token_map: None,
+                  verbose: false,
+              }
+          }
+      }
+
+      pub fn print_gss_forest(
+          roots: &[Arc<GSSNode>],
+          terminal_map: &BiBTreeMap<crate::glr::grammar::Terminal, TerminalID>,
+          config: &GSSPrintConfig,
+      ) -> (String, Vec<StateID>) {
+          let mut out = String::new();
+          let mut state_ids_in_order = Vec::new();
+          if roots.is_empty() {
+              return ("GSS Forest: (No roots)".to_string(), state_ids_in_order);
+          }
+          writeln!(&mut out, "GSS Forest (leveled adapter):").unwrap();
+          for (i, r) in roots.iter().enumerate() {
+              // Use label if available
+              if let Some(labels) = config.labels {
+                  assert!(labels.len() == roots.len());
+                  writeln!(&mut out, "{}", labels[i]).unwrap();
+              } else {
+                  writeln!(&mut out, " Root {}:", i).unwrap();
+              }
+              let stacks = r.inner.to_stacks();
+              for (path, acc) in stacks {
+                  let sids: Vec<_> = path.iter().map(|e| e.state_id).collect();
+                  for sid in &sids {
+                      if !state_ids_in_order.contains(sid) {
+                          state_ids_in_order.push(*sid);
+                      }
+                  }
+                  let s: Vec<_> = sids.iter().map(|s| s.0.to_string()).collect();
+                  let acc_str = format_acc(
+                      &acc,
+                      terminal_map,
+                      config.original_internal_bimap,
+                      config.llm_token_map,
+                      config,
+                  );
+                  if acc_str.is_empty() {
+                      writeln!(&mut out, "  - [{}]", s.join(" ")).unwrap();
+                  } else {
+                      writeln!(&mut out, "  - [{}] {}", s.join(" "), acc_str).unwrap();
+                  }
+              }
+          }
+          (out, state_ids_in_order)
+      }
+
+      pub fn find_longest_path(root: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
+          root.inner
+              .get_longest_path()
+              .map(|(p, _a)| p.into_iter().map(|e| (e, root.clone())).collect())
+      }
+
+      pub fn sample_path<'a>(roots: &[&'a GSSNode], _seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
+          roots
+              .get(0)
+              .map(|r| r.inner.get_first_path().map(|(p, _)| p).unwrap_or_default())
+      }
+
+      // --- GSS wrapper ---
+      #[derive(Clone)]
+      pub struct GSSNode {
+          pub(crate) inner: LeveledGSS<ParseStateEdgeContent, Acc>,
+      }
+
+      impl Debug for GSSNode {
+          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+              write!(f, "GSSNode(len_paths={})", self.inner.num_paths())
+          }
+      }
+
+      impl PartialEq for GSSNode {
+          fn eq(&self, other: &Self) -> bool {
+              self.inner == other.inner
+          }
+      }
+      impl Eq for GSSNode {}
+      impl PartialOrd for GSSNode {
+          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+              self.inner.partial_cmp(&other.inner)
+          }
+      }
+      impl Ord for GSSNode {
+          fn cmp(&self, other: &Self) -> Ordering {
+              self.inner.cmp(&other.inner)
+          }
+      }
+      impl Hash for GSSNode {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              self.inner.hash(state);
+          }
+      }
+
+      impl GSSNode {
+          pub fn new(acc: Acc) -> Self {
+              GSSNode {
+                  inner: LeveledGSS::from_stacks(&vec![(vec![], acc)]),
+              }
+          }
+          pub fn new_fresh() -> Self {
+              GSSNode {
+                  inner: LeveledGSS::from_stacks(&vec![(vec![], Acc::new_fresh())]),
+              }
+          }
+          pub fn new_dead() -> Self {
+              // Represent dead as empty; allowed_llm_tokens() on empty returns zeros.
+              GSSNode {
+                  inner: LeveledGSS::empty(),
+              }
+          }
+
+          // Helper: append a value to all stacks; if empty, create singleton stack.
+          fn push_all(
+              inner: &LeveledGSS<ParseStateEdgeContent, Acc>,
+              edge: ParseStateEdgeContent,
+          ) -> LeveledGSS<ParseStateEdgeContent, Acc> {
+              if inner.is_empty() {
+                  LeveledGSS::from_stacks(&[(vec![edge], Acc::new_fresh())])
+              } else {
+                  inner.push(edge)
+              }
+          }
+
+          pub fn push(&self, edge_value: ParseStateEdgeContent) -> Self {
+              GSSNode {
+                  inner: Self::push_all(&self.inner, edge_value),
+              }
+          }
+          pub fn push_many(&self, edge_values: Vec<ParseStateEdgeContent>) -> Self {
+              if edge_values.is_empty() {
+                  return self.clone();
+              }
+              let mut merged = LeveledGSS::empty();
+              for e in edge_values {
+                  let next = Self::push_all(&self.inner, e);
+                  merged = merged.merge(&next);
+              }
+              GSSNode { inner: merged }
+          }
+
+          pub fn is_empty(&self) -> bool {
+              self.inner.is_empty() || self.inner.max_depth() == 0
+          }
+          pub fn is_alive(&self) -> bool {
+              !self.is_empty() && !self.allowed_llm_tokens().is_empty()
+          }
+          pub fn is_ok(&self) -> bool {
+              self.is_alive()
+          }
+          pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
+              self.inner
+                  .reduce_acc()
+                  .map_or(HybridBitset::zeros(), |acc| acc.llm_tokens_union)
+          }
+          pub fn disallowed_terminals(&self) -> HybridL2Bitset {
+              self.inner
+                  .reduce_acc()
+                  .map(|acc| acc.terminals_union.complement())
+                  .unwrap_or_else(|| HybridL2Bitset::all().complement())
+          }
+          pub fn max_depth(&self) -> usize {
+              self.inner.max_depth() as usize
+          }
+          pub fn flatten(&self) -> Vec<(Vec<ParseStateEdgeContent>, Acc)> {
+              self.inner.to_stacks()
+          }
+
+          pub fn print(&self) -> String {
+              let (s, _sid) = print_gss_forest(&[Arc::new(self.clone())], &BiBTreeMap::new(), &GSSPrintConfig::default());
+              s
+          }
+
+          pub fn merge_with_depth(&mut self, _merge_depth: usize, other: &Self) {
+              self.inner = self.inner.merge(&other.inner);
+          }
+          pub fn merged(mut self, other: Self, depth: usize) -> Self {
+              self.merge_with_depth(depth, &other);
+              self
+          }
+
+          pub fn merge_many_with_depth(merge_depth: usize, nodes: impl IntoIterator<Item = Arc<GSSNode>>) -> Arc<GSSNode> {
+              let mut it = nodes.into_iter();
+              if let Some(first) = it.next() {
+                  let mut acc = (*first).clone();
+                  for n in it {
+                      acc.merge_with_depth(merge_depth, &n);
+                  }
+                  Arc::new(acc)
+              } else {
+                  Arc::new(GSSNode::new_dead())
+              }
+          }
+
+          pub fn predecessors(&self) -> BTreeMap<ParseStateEdgeContent, BTreeMap<isize, Vec<Arc<GSSNode>>>> {
+              self.inner
+                  .predecessors()
+                  .into_iter()
+                  .map(|(edge_val, preds_by_depth)| {
+                      let new_preds_by_depth = preds_by_depth
+                          .into_iter()
+                          .map(|(depth, gss_vec)| {
+                              let new_gss_vec = gss_vec.into_iter().map(|gss| Arc::new(GSSNode { inner: gss })).collect();
+                              (depth, new_gss_vec)
+                          })
+                          .collect();
+                      (edge_val, new_preds_by_depth)
+                  })
+                  .collect()
+          }
+
+          pub fn num_predecessors(&self) -> usize {
+              self.inner.peek().len()
+          }
+
+          pub fn popn(&self, n: usize) -> GSSPopper {
+              let mut popper = GSSPopper {
+                  inner: self.inner.clone(),
+                  below_bottom: BTreeMap::new(),
+              };
+              popper.popn(n);
+              popper
+          }
+
+          pub(crate) fn peek_iter(parent_arc: &Arc<GSSNode>) -> impl Iterator<Item = GSSPeek<'_>> {
+              let keys: Vec<_> = parent_arc.inner.peek().into_iter().collect();
+              GSSPeekIter {
+                  parent: &parent_arc.inner,
+                  keys,
+                  idx: 0,
+              }
+          }
+
+          pub fn fuse_predecessors(&mut self, levels: usize) {
+              if levels == 0 {
+                  return;
+              }
+              let self_arc = Arc::new(self.clone());
+              let mut memo = HashMap::new();
+              let fused_arc = fuse_predecessors_recursive(&self_arc, levels, &mut memo);
+              if !Arc::ptr_eq(&self_arc, &fused_arc) {
+                  *self = (*fused_arc).clone();
+              }
+          }
+
+          pub fn fuse_predecessors_recursive(&self, levels: usize, _memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
+              let self_arc = Arc::new(self.clone());
+              let mut dummy_memo = HashMap::new();
+              fuse_predecessors_recursive(&self_arc, levels, &mut dummy_memo)
+          }
+      }
+
+      // --- GSSPeek & iterator (updated to borrow LeveledGSS directly) ---
+      pub struct GSSPeek<'a> {
+          parent_arc: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          edge_value: ParseStateEdgeContent,
+      }
+      struct GSSPeekIter<'a> {
+          parent: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          keys: Vec<ParseStateEdgeContent>,
+          idx: usize,
+      }
+      impl<'a> Iterator for GSSPeekIter<'a> {
+          type Item = GSSPeek<'a>;
+          fn next(&mut self) -> Option<Self::Item> {
+              if self.idx >= self.keys.len() {
+                  None
+              } else {
+                  let ev = self.keys[self.idx].clone();
+                  self.idx += 1;
+                  Some(GSSPeek {
+                      parent_arc: self.parent,
+                      edge_value: ev,
+                  })
+              }
+          }
+      }
+      impl<'a> GSSPeek<'a> {
+          pub fn edge_value(&self) -> &ParseStateEdgeContent {
+              &self.edge_value
+          }
+          pub fn isolated_parent(&self) -> Arc<GSSNode> {
+              let iso = self.parent_arc.isolate(Some(self.edge_value.clone()));
+              Arc::new(GSSNode { inner: iso })
+          }
+          pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+              let iso = self.isolated_parent();
+              iso.as_ref().push(edge_value)
+          }
+          pub fn popn(&self, n: usize) -> GSSPopper {
+              self.isolated_parent().popn(n)
+          }
+          pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
+              self.isolated_parent().allowed_llm_tokens()
+          }
+      }
+
+      // --- Popper ---
+      pub struct GSSPopper {
+          inner: LeveledGSS<ParseStateEdgeContent, Acc>,
+          below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Acc>>,
+      }
+      pub struct GSSPopperItem {
+          inner: LeveledGSS<ParseStateEdgeContent, Acc>,
+      }
+      pub struct GSSPopperItemPeek<'a> {
+          parent_arc: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          edge_value: &'a ParseStateEdgeContent,
+      }
+
+      impl GSSPopper {
+          pub fn new_from_node(node: Arc<GSSNode>, _acc: Arc<Acc>) -> Self {
+              GSSPopper { inner: node.inner.clone(), below_bottom: BTreeMap::new() }
+          }
+          pub fn iter(&self) -> impl Iterator<Item = GSSPopperItem> {
+              let keys: Vec<_> = self.inner.peek().into_iter().collect();
+              let parent = self.inner.clone();
+              keys.into_iter().map(move |edge| {
+                  let iso = parent.isolate(Some(edge));
+                  GSSPopperItem { inner: iso }
+              })
+          }
+          pub fn below_bottom(&self) -> &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Acc>> {
+              &self.below_bottom
+          }
+          pub fn num_predecessors(&self) -> usize {
+              self.inner.peek().len()
+          }
+          pub fn popn(&mut self, n: usize) {
+              for _ in 0..n {
+                  self.pop();
+              }
+          }
+          pub fn pop(&mut self) {
+              let mut inner = self.inner.clone();
+              let mut belows: BTreeMap<_, _> = self.below_bottom.iter().map(|(k, v)| (*k + 1, v.clone())).collect();
+              let new_below_slice = inner.filter_by_length(Some(1), Some(1));
+              if !new_below_slice.is_empty() {
+                  let mut new_below_map = BTreeMap::new();
+                  for edge in new_below_slice.peek() {
+                      let isolated = new_below_slice.isolate(Some(edge.clone()));
+                      if let Some(acc) = isolated.reduce_acc() {
+                          new_below_map.insert(edge, acc);
+                      }
+                  }
+                  if !new_below_map.is_empty() {
+                      belows.insert(1, new_below_map);
+                  }
+              }
+              self.below_bottom = belows;
+              inner = inner.pop();
+              inner = inner.filter_by_length(Some(1), None);
+              self.inner = inner;
+          }
+      }
+
+      impl GSSPopperItem {
+          pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
+              let keys: Vec<_> = self.inner.peek().into_iter().collect();
+              GSSPopperItemPeekIter {
+                  parent: &self.inner,
+                  keys,
+                  idx: 0,
+              }
+          }
+          pub(crate) fn resolved_acc(&self) -> Acc {
+              self.inner.reduce_acc().unwrap_or_else(Acc::new_dead)
+          }
+      }
+      struct GSSPopperItemPeekIter<'a> {
+          parent: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          keys: Vec<ParseStateEdgeContent>,
+          idx: usize,
+      }
+      impl<'a> Iterator for GSSPopperItemPeekIter<'a> {
+          type Item = GSSPopperItemPeek<'a>;
+          fn next(&mut self) -> Option<Self::Item> {
+              if self.idx >= self.keys.len() {
+                  None
+              } else {
+                  let ev = &self.keys[self.idx];
+                  self.idx += 1;
+                  Some(GSSPopperItemPeek {
+                      parent_arc: self.parent,
+                      edge_value: unsafe { &*(ev as *const ParseStateEdgeContent) },
+                  })
+              }
+          }
+      }
+      impl<'a> GSSPopperItemPeek<'a> {
+          pub fn edge_value(&self) -> &'a ParseStateEdgeContent {
+              self.edge_value
+          }
+          pub fn isolated_parent(&self) -> Arc<GSSNode> {
+              let iso = self.parent_arc.isolate(Some(self.edge_value.clone()));
+              Arc::new(GSSNode { inner: iso })
+          }
+          pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+              let iso = self.isolated_parent();
+              iso.as_ref().push(edge_value)
+          }
+      }
+
+      // --- Roots & helpers ---
+      pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
+          let mut out: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
+          for n in nodes {
+              for edge in n.inner.peek() {
+                  let iso = n.inner.isolate(Some(edge.clone()));
+                  if let Some(acc) = iso.reduce_acc() {
+                      out.entry(edge).or_default().insert(Arc::new(acc));
+                  }
+              }
+          }
+          out
+      }
+
+      // --- Transformations (simplified) ---
+      fn transform_all(root_arc: &mut Arc<GSSNode>, f: impl FnMut(&Acc) -> Option<Acc>) {
+          let new_inner = root_arc.inner.apply_and_prune(f);
+          *root_arc = Arc::new(GSSNode { inner: new_inner });
+      }
+
+      pub type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<Arc<GSSNode>>>;
+
+      pub fn allow_only_llm_tokens_and_prune(root_arc: &mut Arc<GSSNode>, allowed_tokens: &LLMTokenBV) {
+          let mut memo = HashMap::new();
+          allow_only_llm_tokens_and_prune_arc(root_arc, allowed_tokens, &mut memo);
+      }
+
+      pub(crate) fn allow_only_llm_tokens_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          allowed_tokens: &LLMTokenBV,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              na.llm_tokens_union &= allowed_tokens;
+              if na.llm_tokens_union.is_empty() {
+                  None
+              } else {
+                  Some(na)
+              }
+          });
+      }
+
+      pub(crate) fn disallow_llm_tokens_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          tokens_to_disallow: &LLMTokenBV,
+          memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          let allowed = HybridBitset::max_ones() - tokens_to_disallow.clone();
+          allow_only_llm_tokens_and_prune_arc(root_arc, &allowed, memo);
+      }
+
+      pub fn reset_llm_tokens(root_arc: &mut Arc<GSSNode>, _memo: &mut PruneAndTransformRecursiveMemo) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              na.llm_tokens_union = HybridBitset::max_ones();
+              Some(na)
+          });
+      }
+
+      pub(crate) fn reset_terminals(root_arc: &mut Arc<GSSNode>, _memo: &mut PruneAndTransformRecursiveMemo) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              na.terminals_union = HybridL2Bitset::all();
+              Some(na)
+          });
+      }
+
+      pub(crate) fn disallow_terminals_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          disallowed_terminals: &HybridL2Bitset,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              println!("Disallowing terminals: {:?}", disallowed_terminals);
+              println!("Before: {:?}", na.terminals_union);
+              na.terminals_union -= disallowed_terminals;
+              println!("After: {:?}", na.terminals_union);
+              Some(na)
+          });
+      }
+
+      pub fn prune_llm_tokens_by_disallowed_terminals(
+          root_arc: &mut Arc<GSSNode>,
+          possible_matches: &BTreeMap<crate::tokenizer::TokenizerStateID, BTreeMap<crate::types::TerminalID, LLMTokenBV>>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          // Very simplified: keep as-is (no change). Implement exact logic later.
+          let _ = possible_matches;
+          let _ = root_arc;
+      }
+
+      pub fn prune_disallowed_terminals(
+          root_arc: &mut Arc<GSSNode>,
+          matched_terminals: &BTreeMap<crate::tokenizer::TokenizerStateID, TerminalBV>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          let matched = matched_terminals.clone();
+          let all = HybridBitset::max_ones();
+          transform_all(root_arc, |a| {
+              for (sid, bv) in &matched {
+                  let allowed = a.terminals_union.get_l2_bitset(sid.0).unwrap_or(&all);
+                  if !bv.is_subset(allowed) {
+                      return None;
+                  }
+              }
+              Some(a.clone())
+          });
+      }
+
+      pub fn map_allowed_terminals_tokenizer_states(
+          root_arc: &mut Arc<GSSNode>,
+          map: &BTreeMap<crate::tokenizer::TokenizerStateID, crate::tokenizer::TokenizerStateID>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          let mapping = map.clone();
+          transform_all(root_arc, |a| {
+              let mut new_map = BTreeMap::new();
+              for (old, new) in &mapping {
+                  if let Some(bv) = a.terminals_union.get_l2_bitset(old.0) {
+                      new_map
+                          .entry(new.0)
+                          .and_modify(|b: &mut HybridBitset| *b |= bv.clone())
+                          .or_insert_with(|| bv.clone());
+                  }
+              }
+              let mut out = HybridL2Bitset::all();
+              for (sid, bv) in new_map {
+                  out.insert_l2_bitset(sid, bv);
+              }
+              let mut na = a.clone();
+              na.terminals_union = out;
+              Some(na)
+          });
+      }
+
+      pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          allowed_tokens: &LLMTokenBV,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+          stored_trie_god: &StoredTrieGodWrapper,
+      ) {
+          // --- Global Analysis: Find common subsets (macros) ---
+          let all_accs: Vec<Acc> = root_arc.inner.to_stacks().into_iter().map(|(_, acc)| acc).collect();
+          let mut all_needs_edge_sets = Vec::new();
+          for acc in &all_accs {
+              let needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = acc
+                  .stored_trie_nodes()
+                  .iter()
+                  .filter(|node| {
+                      !node
+                          .as_arc()
+                          .read(stored_trie_god)
+                          .expect("poison")
+                          .value
+                          .live_tokens
+                          .is_subset(allowed_tokens)
+                  })
+                  .cloned()
+                  .collect();
+              if !needs_edge.is_empty() {
+                  all_needs_edge_sets.push(needs_edge);
+              }
+          }
+
+          let mut pair_counts: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, usize> = BTreeMap::new();
+          for needs_edge_set in &all_needs_edge_sets {
+              let nodes: Vec<_> = needs_edge_set.iter().cloned().collect();
+              if nodes.len() >= 2 {
+                  for i in 0..nodes.len() {
+                      for j in (i + 1)..nodes.len() {
+                          let mut pair = BTreeSet::new();
+                          pair.insert(nodes[i].clone());
+                          pair.insert(nodes[j].clone());
+                          *pair_counts.entry(pair).or_insert(0) += 1;
+                      }
+                  }
+              }
+          }
+
+          let mut macros: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, StoredPrecomputeNodeIndex> = BTreeMap::new();
+          for (pair, count) in pair_counts {
+              if count > 1 { // Only create macros for pairs that are reused.
+                  let dest_node = StoredPrecomputeNodeIndex::new(
+                      stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                          crate::constraint::PrecomputedNodeContents::internal(),
+                      )),
+                  );
+                  macros.insert(pair, dest_node);
+              }
+          }
+          let sorted_macros: Vec<_> = macros.into_iter().collect();
+
+          // --- Transformation ---
+          let mut new_destinations_for_leftovers = BTreeMap::new();
+          transform_all(root_arc, |acc| {
+              let mut na = acc.clone();
+              let original_nodes = na.stored_trie_nodes.clone();
+              let mut needs_edge: BTreeSet<_> = original_nodes
+                  .iter()
+                  .filter(|node| {
+                      !node
+                      .as_arc()
+                      .read(stored_trie_god)
+                      .expect("poison")
+                      .value
+                      .live_tokens
+                          .is_subset(allowed_tokens)
+                  })
+                  .cloned()
+                  .collect();
+
+              if needs_edge.is_empty() {
+                  return Some(na);
+              }
+
+              let mut final_nodes = original_nodes.difference(&needs_edge).cloned().collect::<BTreeSet<_>>();
+
+              // Greedily apply discovered macros
+              for (macro_nodes, macro_dest) in &sorted_macros {
+                  if macro_nodes.is_subset(&needs_edge) {
+                      let edge_key = (0, allowed_tokens.clone());
+                      let edge_value = StateIDBV::max_ones();
+                      for src in macro_nodes {
+                          let inserter = crate::datastructures::trie::EdgeInserter::new(
+                              stored_trie_god,
+                              src.as_arc().clone(),
+                              edge_key.clone(),
+                              edge_value.clone(),
+                              |e, n| *e |= n,
+                              |node_value, _| node_value.live_tokens |= allowed_tokens,
+                              |_, _| {},
+                          );
+                          inserter.try_destination(macro_dest.clone()).expect("Cycle detected");
+                      }
+                      macro_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+                      final_nodes.insert(macro_dest.clone());
+                      needs_edge = needs_edge.difference(macro_nodes).cloned().collect();
+                  }
+              }
+
+              // Handle leftovers using the original "macro for the whole set" logic
+              if !needs_edge.is_empty() {
+                  let new_dest = new_destinations_for_leftovers
+                      .entry(needs_edge.clone())
+                      .or_insert_with(|| {
+                          StoredPrecomputeNodeIndex::new(
+                              stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                                  crate::constraint::PrecomputedNodeContents::internal(),
+                              )),
+                          )
+                      })
+                      .clone();
+
+                  let edge_key = (0, allowed_tokens.clone());
+                  let edge_value = StateIDBV::max_ones();
+                  for src in &needs_edge {
+                      let inserter = crate::datastructures::trie::EdgeInserter::new(
+                          stored_trie_god,
+                          src.as_arc().clone(),
+                          edge_key.clone(),
+                          edge_value.clone(),
+                          |e, n| *e |= n,
+                          |node_value, _| node_value.live_tokens |= allowed_tokens,
+                          |_, _| {},
+                      );
+                      inserter.try_destination(new_dest.clone()).expect("Cycle detected");
+                  }
+                  new_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+                  final_nodes.insert(new_dest);
+              }
+
+              na.stored_trie_nodes = final_nodes;
+              Some(na)
+          });
+      }
+
+      pub fn simplify(_states: &mut BTreeMap<crate::tokenizer::TokenizerStateID, Arc<GSSNode>>) {}
+      pub(crate) fn simplify_roots_in_place(_roots: &mut [Arc<GSSNode>]) {}
+      pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
+          let fused_inner = node_arc.inner.fuse(Some(levels as isize));
+          if fused_inner.is(&node_arc.inner) {
+              node_arc.clone()
+          } else {
+              Arc::new(GSSNode { inner: fused_inner })
+          }
+      }
+
+      impl GSSNode {
+          pub fn reset_llm_tokens(&mut self) {
+              let mut memo = PruneAndTransformRecursiveMemo::new();
+              let mut arc = Arc::new(self.clone());
+              reset_llm_tokens(&mut arc, &mut memo);
+              *self = (*arc).clone();
+          }
+      }
+
+      // --- Trie-utils stubs (no-ops) ---
+      pub(crate) fn deep_add_precompute_trie_edges(
+          root_arc: &mut Arc<GSSNode>,
+          god: &StoredTrieGodWrapper,
+          edge_key: &(usize, LLMTokenBV),
+          edge_value: &StateIDBV,
+          tokens_for_update: &LLMTokenBV,
+          destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          transform_all(root_arc, |acc| {
+              if acc.stored_trie_nodes().is_empty() {
+                  return Some(acc.clone());
+              }
+
+              let destination = destination_provider();
+
+              for source_wrapper in acc.stored_trie_nodes() {
+                  let source_arc = source_wrapper.as_arc().clone();
+
+                  let inserter = crate::datastructures::trie::EdgeInserter::new(
+                      god,
+                      source_arc,
+                      edge_key.clone(),
+                      edge_value.clone(),
+                      |e, n| *e |= n,
+                      |node_value, _edge_value| node_value.live_tokens |= tokens_for_update,
+                      |_, _| {}, // Unconditional insertion
+                  );
+                  inserter.try_destination(destination.clone()).expect("Cycle detected when adding precompute trie edges");
+              }
+
+              destination.write(god).expect("poison").value.live_tokens |= tokens_for_update;
+
+              let mut new_acc = acc.clone();
+              *new_acc.stored_trie_nodes_mut() = BTreeSet::from([destination]);
+              Some(new_acc)
+          });
+      }
+
+      pub(crate) fn merge_stored_trie_nodes(
+          root_arc: &mut Arc<GSSNode>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+          stored_trie_god: &StoredTrieGodWrapper,
+      ) {
+          let mut new_destinations = BTreeMap::new();
+
+          transform_all(root_arc, |acc| {
+              if !acc.stored_trie_nodes().iter().any(
+                  |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != acc.llm_tokens_union
+              ) {
+                  return Some(acc.clone());
+              }
+
+              let mut new_acc = acc.clone();
+              // Create a single new destination for this merge operation.
+              let new_destination = new_destinations.entry((new_acc.stored_trie_nodes().clone(), acc.llm_tokens_union.clone()))
+                  .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(crate::constraint::PrecomputedNodeContents::internal()))))
+                  .clone();
+
+              let edge_key = (0, new_acc.llm_tokens_union.clone());
+              let edge_value = crate::constraint::StateIDBV::max_ones();
+              let tokens_for_edge = new_acc.llm_tokens_union.clone();
+
+              for source_wrapper in new_acc.stored_trie_nodes() {
+                  let source_arc = source_wrapper.as_arc().clone();
+
+                  let inserter = crate::datastructures::trie::EdgeInserter::new(
+                      stored_trie_god,
+                      source_arc,
+                      edge_key.clone(),
+                      edge_value.clone(),
+                      |e, n| *e |= n,
+                      |node_value, _edge_value| node_value.live_tokens |= &tokens_for_edge,
+                      |_, _| {}, // Unconditional insertion
+                  );
+                  inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging stored_trie nodes; this should be impossible.");
+              }
+
+              new_destination.write(stored_trie_god).expect("poison").value.live_tokens |= &tokens_for_edge;
+
+              new_acc.stored_trie_nodes = BTreeSet::from([new_destination]);
+              Some(new_acc)
+          });
+      }
+
+      pub(crate) fn is_simple_gss(
+          node: &Arc<GSSNode>,
+          hallucinated_state_id: StateID,
+      ) -> Option<(StateID, Arc<Acc>)> {
+          if let Some((path, acc)) = node.inner.as_single_path() {
+              // Path must have length 2. The path is from leaf to root.
+              if path.len() == 2 {
+                  let edge_to_leaf = &path[0];
+                  let edge_to_middle = &path[1];
+
+                  // The edge into the leaf must be the hallucinated one.
+                  if edge_to_leaf.state_id == hallucinated_state_id {
+                      let state_id_x = edge_to_middle.state_id;
+                      // The leaf must have stored_trie_nodes.
+                      if !acc.stored_trie_nodes().is_empty() {
+                          return Some((state_id_x, Arc::new(acc)));
+                      }
+                  }
+              }
+          }
+          None
+      }
+
+      // helper used by parser logging
+      pub fn popn_collect_isolated_parents(node_arc: &Arc<GSSNode>, n: usize) -> Vec<(StateID, Arc<GSSNode>)> {
+          let popped = node_arc.inner.popn(n as isize);
+          let mut out = Vec::new();
+          for edge in popped.peek() {
+              let iso_inner = popped.isolate(Some(edge.clone()));
+              let num_paths = iso_inner.num_paths();
+              if num_paths > 0 {
+                  let gss_node = Arc::new(GSSNode { inner: iso_inner });
+                  for _ in 0..num_paths {
+                      out.push((edge.state_id, gss_node.clone()));
+                  }
+              }
+          }
+          out
+      }
+
+      // Compatibility for formatting acc (used by printer)
+      pub(crate) fn format_acc(
+          acc: &Acc,
+          terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+          original_internal_bimap: Option<&BTreeMap<usize, usize>>,
+          llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          config: &GSSPrintConfig,
+      ) -> String {
+          let _ = (original_internal_bimap, llm_token_map);
+
+          if config.verbose {
+              // In verbose mode, print the full debug representation of the Acc.
+              return format!("[acc: {:?}]", acc);
+          }
+
+          let summarize_llm = |bv: &HybridBitset, label: &str| -> Option<String> {
+              if *bv == HybridBitset::max_ones() {
+                  return None;
+              }
+              if bv.is_empty() {
+                  return Some(format!("{}=∅", label));
+              }
+              let total = bv.len();
+              const MAX_SHOW: usize = 8;
+              let sample: Vec<String> = bv.iter().take(MAX_SHOW).map(|id| id.to_string()).collect();
+              if total > MAX_SHOW {
+                  Some(format!("{}({}): [{} …]", label, total, sample.join(", ")))
+              } else {
+                  Some(format!("{}({}): [{}]", label, total, sample.join(", ")))
+              }
+          };
+
+          let summarize_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> Option<String> {
+              let mut any_disallowed = false;
+              let mut parts = Vec::new();
+              const MAX_RANGES_TO_SHOW: usize = 3;
+              for (range, allowed_bv) in allowed_terminals.range_values() {
+                  let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
+                  if disallowed_bv.is_empty() {
+                      continue;
+                  }
+                  any_disallowed = true;
+                  if parts.len() >= MAX_RANGES_TO_SHOW {
+                      break;
+                  }
+                  let range_str = if range.start() == range.end() {
+                      format!("{}", range.start())
+                  } else {
+                      format!("{}..={}", range.start(), range.end())
+                  };
+
+                  if disallowed_bv == HybridBitset::max_ones() {
+                      parts.push(format!("state(s) {}: all", range_str));
+                      continue;
+                  }
+
+                  const MAX_NAMES_TO_SHOW: usize = 5;
+                  let num_disallowed = disallowed_bv.len();
+                  let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES_TO_SHOW)
+                      .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
+                          .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.to_string()))
+                      .collect();
+                  let names_str = names.join(", ");
+
+                  if num_disallowed > MAX_NAMES_TO_SHOW {
+                      parts.push(format!("state(s) {} ({}): [{}, …]", range_str, num_disallowed, names_str));
+                  } else {
+                      parts.push(format!("state(s) {}: [{}]", range_str, names_str));
+                  }
+              }
+              if !any_disallowed {
+                  None
+              } else if parts.is_empty() {
+                  Some(format!("Disallowed {}(…)", label))
+              } else {
+                  Some(format!("Disallowed {}({})", label, parts.join("; ")))
+              }
+          };
+
+          let union_llm_opt = summarize_llm(&acc.llm_tokens_union, "LLM(U)");
+          let union_terminals_opt = summarize_disallowed_terminals(&acc.terminals_union, "Term(U)");
+
+          let stored_trie_nodes_str = {
+              const MAX_PTRS_TO_SHOW: usize = 5;
+              let n = acc.stored_trie_nodes().len();
+              if n == 0 {
+                  None
+              } else if n <= MAX_PTRS_TO_SHOW {
+                  let ptrs: Vec<String> = acc
+                      .stored_trie_nodes()
+                      .iter()
+                      .map(|wrapper| format!("{}", wrapper.as_arc()))
+                      .collect();
+                  Some(format!("Trie(n={}, [{}])", n, ptrs.join(", ")))
+              } else {
+                  let ptrs_sample: Vec<String> = acc
+                      .stored_trie_nodes()
+                      .iter()
+                      .take(MAX_PTRS_TO_SHOW)
+                      .map(|wrapper| format!("{}", wrapper.as_arc()))
+                      .collect();
+                  let remaining = n - MAX_PTRS_TO_SHOW;
+                  Some(format!("Trie(n={}, first {}: {}, …; +{} more)", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining))
+              }
+          };
+
+          let mut parts: Vec<String> = Vec::new();
+          if let Some(s) = union_llm_opt { parts.push(s); }
+          if let Some(s) = union_terminals_opt { parts.push(s); }
+          if let Some(s) = stored_trie_nodes_str { parts.push(s); }
+
+          if parts.is_empty() {
+              String::new()
+          } else {
+              format!("[{}]", parts.join(", "))
+          }
+      }
+  diffs_applied_this_send: true
+  core_guidance_inserted: true
+  prev_apply_mode: git-llm
+system:
+  message: |-
+    You are a helpful assistant.
+    Respond in markdown format.
+    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
+    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
+  model:
+    - cp
+  code_completion_model:
+    - cp
+  commit_message_model:
+    - gemini/gemini-flash-lite-latest
+  diff_correction_model:
+    - gf
+  max_completion_tokens:
+  temperature: 0.0
+  apply_mode: git-llm
+  llm_context_mode: full
+messages:
+  - user: |-
+      Developer note (core guidance):
+      - Respond in markdown format.
+      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
+      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
+      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
+      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
+        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
+      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
+      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
+      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
+      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
+
+
+      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
+    metadata:
+      kind: core-guidance
+      role: developer
+      ephemeral: false
+  - user: |-
+      ```rust 'src/datastructures/gss_leveled_adapter.rs'
       use std::cmp::Ordering;
       use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
       use std::fmt::{Debug, Write};
@@ -2057,1078 +3195,346 @@ local_system:
               format!("[{}]", parts.join(", "))
           }
       }
-  diffs_applied_this_send: true
-  core_guidance_inserted: true
-  prev_apply_mode: git-llm
-system:
-  message: |-
-    You are a helpful assistant.
-    Respond in markdown format.
-    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
-    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
-  model:
-    - cp
-  code_completion_model:
-    - cp
-  commit_message_model:
-    - gemini/gemini-flash-lite-latest
-  diff_correction_model:
-    - gf
-  max_completion_tokens:
-  temperature: 0.0
-  apply_mode: git-llm
-  llm_context_mode: full
-messages:
-  - user: |-
-      Developer note (core guidance):
-      - Respond in markdown format.
-      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
-      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
-      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
-      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
-        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
-      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
-      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
-      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
-      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
-
-
-      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
-    metadata:
-      kind: core-guidance
-      role: developer
-      ephemeral: false
-  - user: |-
-      ```rust 'src/datastructures/gss_leveled_adapter.rs'
-      use std::cmp::Ordering;
-      use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-      use std::fmt::{Debug, Write};
-      use std::hash::{Hash, Hasher};
-      use std::sync::Arc;
-
-      use bimap::BiBTreeMap;
-      use profiler_macro::time_it;
-      use crate::constraint::StateIDBV;
-      use crate::constraint::{LLMTokenBV, TerminalBV};
-      use crate::datastructures::hybrid_bitset::HybridBitset;
-      use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
-      use crate::datastructures::leveled_gss::{LeveledGSS, Merge as LGMerge};
-      use crate::datastructures::trie::Trie2Index;
-      use crate::glr::grammar::Terminal;
-      use crate::glr::parser::{GLRParser, ParseStateEdgeContent};
-      use crate::glr::table::{StateID, TerminalID};
-      use crate::tokenizer::LLMTokenID;
-
-      // Adapter aliases for precompute-trie types (referencing constraint.rs)
-      pub type StoredPrecomputeNodeIndex = crate::constraint::PrecomputeNode3Index;
-      pub type StoredTrieGodWrapper = crate::constraint::Trie3GodWrapper;
-
-      // --- Acc type compatible with LeveledGSS A ---
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct Acc {
-          pub llm_tokens_union: HybridBitset,
-          pub terminals_union: HybridL2Bitset,
-          pub stored_trie_nodes: BTreeSet<StoredPrecomputeNodeIndex>,
-      }
-
-      impl Acc {
-          pub fn new_fresh() -> Self {
-              Self {
-                  llm_tokens_union: HybridBitset::max_ones(),
-                  terminals_union: HybridL2Bitset::all(),
-                  stored_trie_nodes: BTreeSet::new(),
-              }
-          }
-          pub fn new_dead() -> Self {
-              Self {
-                  llm_tokens_union: HybridBitset::zeros(),
-                  terminals_union: HybridL2Bitset::all(),
-                  stored_trie_nodes: BTreeSet::new(),
-              }
-          }
-          pub fn is_default(&self) -> bool {
-              self.llm_tokens_union == HybridBitset::max_ones()
-                  && self.terminals_union == HybridL2Bitset::all()
-                  && self.stored_trie_nodes.is_empty()
-          }
-          pub fn union_llm_tokens(&self) -> HybridBitset {
-              self.llm_tokens_union.clone()
-          }
-
-          pub fn stored_trie_nodes(&self) -> &BTreeSet<StoredPrecomputeNodeIndex> {
-              &self.stored_trie_nodes
-          }
-
-          pub fn stored_trie_nodes_mut(&mut self) -> &mut BTreeSet<StoredPrecomputeNodeIndex> {
-              &mut self.stored_trie_nodes
-          }
-      }
-
-      impl LGMerge for Acc {
-          fn merge(&self, other: &Self) -> Self {
-              Acc {
-                  llm_tokens_union: &self.llm_tokens_union | &other.llm_tokens_union,
-                  terminals_union: &self.terminals_union | &other.terminals_union,
-                  stored_trie_nodes: &self.stored_trie_nodes | &other.stored_trie_nodes,
-              }
-          }
-      }
-
-      // --- Minimal GSSStats for logging/debug ---
-      #[derive(Debug, Clone, Default, PartialEq)]
-      pub struct GSSStats {
-          pub(crate) num_roots: usize,
-          pub(crate) num_root_predecessors: usize,
-          pub(crate) num_unique_root_predecessor_keys: usize,
-          pub(crate) total_edges: usize,
-          pub(crate) unique_nodes: usize,
-          pub(crate) num_leaves: usize,
-          pub(crate) structurally_unique_nodes: usize,
-          pub(crate) structural_redundancy: f64,
-          pub(crate) num_redundant_nodes: usize,
-          pub(crate) max_depth: usize,
-          pub(crate) average_depth: f64,
-          pub(crate) merge_points: usize,
-          pub(crate) max_predecessors_with_values: usize,
-          pub(crate) average_predecessors_with_values: f64,
-      }
-
-      #[time_it]
-      pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
-          let mut stats = GSSStats::default();
-          stats.num_roots = roots.len();
-          let mut total_depth: usize = 0;
-          let mut paths: usize = 0;
-          let mut max_depth = 0;
-          let mut total_edges = 0;
-          let mut num_root_predecessors = 0usize;
-          let mut unique_root_keys = BTreeSet::new();
-          for r in roots {
-              let info = r.inner.paths_info();
-              paths += info.num_paths;
-              total_depth += info.total_depth;
-              total_edges += info.total_depth;
-              max_depth = max_depth.max(r.inner.max_depth() as usize);
-
-              if let Some(peek) = r.inner.peek().into_iter().next() {
-                  unique_root_keys.insert(peek);
-              }
-              num_root_predecessors += r.inner.peek().len();
-          }
-          stats.max_depth = max_depth;
-          stats.total_edges = total_edges;
-          stats.unique_nodes = paths;
-          stats.num_leaves = paths;
-          stats.num_root_predecessors = num_root_predecessors;
-          stats.num_unique_root_predecessor_keys = unique_root_keys.len();
-          if paths > 0 {
-              stats.average_depth = total_depth as f64 / paths as f64;
-              stats.average_predecessors_with_values = (num_root_predecessors as f64) / (roots.len().max(1) as f64);
-          }
-          stats
-      }
-
-      // --- GSS printer config & helpers ---
-      pub struct GSSPrintConfig<'a> {
-          pub(crate) labels: Option<&'a [String]>,
-          pub(crate) max_edges: usize,
-          pub(crate) original_internal_bimap: Option<&'a BTreeMap<usize, usize>>,
-          pub(crate) llm_token_map: Option<&'a BiBTreeMap<Vec<u8>, LLMTokenID>>,
-          pub(crate) verbose: bool,
-      }
-      impl<'a> Default for GSSPrintConfig<'a> {
-          fn default() -> Self {
-              Self {
-                  labels: None,
-                  max_edges: usize::MAX,
-                  original_internal_bimap: None,
-                  llm_token_map: None,
-                  verbose: false,
-              }
-          }
-      }
-
-      pub fn print_gss_forest(
-          roots: &[Arc<GSSNode>],
-          terminal_map: &BiBTreeMap<crate::glr::grammar::Terminal, TerminalID>,
-          config: &GSSPrintConfig,
-      ) -> (String, Vec<StateID>) {
-          let mut out = String::new();
-          let mut state_ids_in_order = Vec::new();
-          if roots.is_empty() {
-              return ("GSS Forest: (No roots)".to_string(), state_ids_in_order);
-          }
-          writeln!(&mut out, "GSS Forest (leveled adapter):").unwrap();
-          for (i, r) in roots.iter().enumerate() {
-              // Use label if available
-              if let Some(labels) = config.labels {
-                  assert!(labels.len() == roots.len());
-                  writeln!(&mut out, "{}", labels[i]).unwrap();
-              } else {
-                  writeln!(&mut out, " Root {}:", i).unwrap();
-              }
-              let stacks = r.inner.to_stacks();
-              for (path, acc) in stacks {
-                  let sids: Vec<_> = path.iter().map(|e| e.state_id).collect();
-                  for sid in &sids {
-                      if !state_ids_in_order.contains(sid) {
-                          state_ids_in_order.push(*sid);
-                      }
-                  }
-                  let s: Vec<_> = sids.iter().map(|s| s.0.to_string()).collect();
-                  let acc_str = format_acc(
-                      &acc,
-                      terminal_map,
-                      config.original_internal_bimap,
-                      config.llm_token_map,
-                      config,
-                  );
-                  if acc_str.is_empty() {
-                      writeln!(&mut out, "  - [{}]", s.join(" ")).unwrap();
-                  } else {
-                      writeln!(&mut out, "  - [{}] {}", s.join(" "), acc_str).unwrap();
-                  }
-              }
-          }
-          (out, state_ids_in_order)
-      }
-
-      pub fn find_longest_path(root: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
-          root.inner
-              .get_longest_path()
-              .map(|(p, _a)| p.into_iter().map(|e| (e, root.clone())).collect())
-      }
-
-      pub fn sample_path<'a>(roots: &[&'a GSSNode], _seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
-          roots
-              .get(0)
-              .map(|r| r.inner.get_first_path().map(|(p, _)| p).unwrap_or_default())
-      }
-
-      // --- GSS wrapper ---
-      #[derive(Clone)]
-      pub struct GSSNode {
-          pub(crate) inner: LeveledGSS<ParseStateEdgeContent, Acc>,
-      }
-
-      impl Debug for GSSNode {
-          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-              write!(f, "GSSNode(len_paths={})", self.inner.num_paths())
-          }
-      }
-
-      impl PartialEq for GSSNode {
-          fn eq(&self, other: &Self) -> bool {
-              self.inner == other.inner
-          }
-      }
-      impl Eq for GSSNode {}
-      impl PartialOrd for GSSNode {
-          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-              self.inner.partial_cmp(&other.inner)
-          }
-      }
-      impl Ord for GSSNode {
-          fn cmp(&self, other: &Self) -> Ordering {
-              self.inner.cmp(&other.inner)
-          }
-      }
-      impl Hash for GSSNode {
-          fn hash<H: Hasher>(&self, state: &mut H) {
-              self.inner.hash(state);
-          }
-      }
-
-      impl GSSNode {
-          pub fn new(acc: Acc) -> Self {
-              GSSNode {
-                  inner: LeveledGSS::from_stacks(&vec![(vec![], acc)]),
-              }
-          }
-          pub fn new_fresh() -> Self {
-              GSSNode {
-                  inner: LeveledGSS::from_stacks(&vec![(vec![], Acc::new_fresh())]),
-              }
-          }
-          pub fn new_dead() -> Self {
-              // Represent dead as empty; allowed_llm_tokens() on empty returns zeros.
-              GSSNode {
-                  inner: LeveledGSS::empty(),
-              }
-          }
-
-          // Helper: append a value to all stacks; if empty, create singleton stack.
-          fn push_all(
-              inner: &LeveledGSS<ParseStateEdgeContent, Acc>,
-              edge: ParseStateEdgeContent,
-          ) -> LeveledGSS<ParseStateEdgeContent, Acc> {
-              if inner.is_empty() {
-                  LeveledGSS::from_stacks(&[(vec![edge], Acc::new_fresh())])
-              } else {
-                  inner.push(edge)
-              }
-          }
-
-          pub fn push(&self, edge_value: ParseStateEdgeContent) -> Self {
-              GSSNode {
-                  inner: Self::push_all(&self.inner, edge_value),
-              }
-          }
-          pub fn push_many(&self, edge_values: Vec<ParseStateEdgeContent>) -> Self {
-              if edge_values.is_empty() {
-                  return self.clone();
-              }
-              let mut merged = LeveledGSS::empty();
-              for e in edge_values {
-                  let next = Self::push_all(&self.inner, e);
-                  merged = merged.merge(&next);
-              }
-              GSSNode { inner: merged }
-          }
-
-          pub fn is_empty(&self) -> bool {
-              self.inner.is_empty() || self.inner.max_depth() == 0
-          }
-          pub fn is_alive(&self) -> bool {
-              !self.is_empty() && !self.allowed_llm_tokens().is_empty()
-          }
-          pub fn is_ok(&self) -> bool {
-              self.is_alive()
-          }
-          pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
-              self.inner
-                  .reduce_acc()
-                  .map_or(HybridBitset::zeros(), |acc| acc.llm_tokens_union)
-          }
-          pub fn disallowed_terminals(&self) -> HybridL2Bitset {
-              self.inner
-                  .reduce_acc()
-                  .map(|acc| acc.terminals_union.complement())
-                  .unwrap_or_else(|| HybridL2Bitset::all().complement())
-          }
-          pub fn max_depth(&self) -> usize {
-              self.inner.max_depth() as usize
-          }
-          pub fn flatten(&self) -> Vec<(Vec<ParseStateEdgeContent>, Acc)> {
-              self.inner.to_stacks()
-          }
-
-          pub fn print(&self) -> String {
-              let (s, _sid) = print_gss_forest(&[Arc::new(self.clone())], &BiBTreeMap::new(), &GSSPrintConfig::default());
-              s
-          }
-
-          pub fn merge_with_depth(&mut self, _merge_depth: usize, other: &Self) {
-              self.inner = self.inner.merge(&other.inner);
-          }
-          pub fn merged(mut self, other: Self, depth: usize) -> Self {
-              self.merge_with_depth(depth, &other);
-              self
-          }
-
-          pub fn merge_many_with_depth(merge_depth: usize, nodes: impl IntoIterator<Item = Arc<GSSNode>>) -> Arc<GSSNode> {
-              let mut it = nodes.into_iter();
-              if let Some(first) = it.next() {
-                  let mut acc = (*first).clone();
-                  for n in it {
-                      acc.merge_with_depth(merge_depth, &n);
-                  }
-                  Arc::new(acc)
-              } else {
-                  Arc::new(GSSNode::new_dead())
-              }
-          }
-
-          pub fn predecessors(&self) -> BTreeMap<ParseStateEdgeContent, BTreeMap<isize, Vec<Arc<GSSNode>>>> {
-              self.inner
-                  .predecessors()
-                  .into_iter()
-                  .map(|(edge_val, preds_by_depth)| {
-                      let new_preds_by_depth = preds_by_depth
-                          .into_iter()
-                          .map(|(depth, gss_vec)| {
-                              let new_gss_vec = gss_vec.into_iter().map(|gss| Arc::new(GSSNode { inner: gss })).collect();
-                              (depth, new_gss_vec)
-                          })
-                          .collect();
-                      (edge_val, new_preds_by_depth)
-                  })
-                  .collect()
-          }
-
-          pub fn num_predecessors(&self) -> usize {
-              self.inner.peek().len()
-          }
-
-          pub fn popn(&self, n: usize) -> GSSPopper {
-              let mut popper = GSSPopper {
-                  inner: self.inner.clone(),
-                  below_bottom: BTreeMap::new(),
-              };
-              popper.popn(n);
-              popper
-          }
-
-          pub(crate) fn peek_iter(parent_arc: &Arc<GSSNode>) -> impl Iterator<Item = GSSPeek<'_>> {
-              let keys: Vec<_> = parent_arc.inner.peek().into_iter().collect();
-              GSSPeekIter {
-                  parent: &parent_arc.inner,
-                  keys,
-                  idx: 0,
-              }
-          }
-
-          pub fn fuse_predecessors(&mut self, levels: usize) {
-              if levels == 0 {
-                  return;
-              }
-              let self_arc = Arc::new(self.clone());
-              let mut memo = HashMap::new();
-              let fused_arc = fuse_predecessors_recursive(&self_arc, levels, &mut memo);
-              if !Arc::ptr_eq(&self_arc, &fused_arc) {
-                  *self = (*fused_arc).clone();
-              }
-          }
-
-          pub fn fuse_predecessors_recursive(&self, levels: usize, _memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
-              let self_arc = Arc::new(self.clone());
-              let mut dummy_memo = HashMap::new();
-              fuse_predecessors_recursive(&self_arc, levels, &mut dummy_memo)
-          }
-      }
-
-      // --- GSSPeek & iterator (updated to borrow LeveledGSS directly) ---
-      pub struct GSSPeek<'a> {
-          parent_arc: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
-          edge_value: ParseStateEdgeContent,
-      }
-      struct GSSPeekIter<'a> {
-          parent: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
-          keys: Vec<ParseStateEdgeContent>,
-          idx: usize,
-      }
-      impl<'a> Iterator for GSSPeekIter<'a> {
-          type Item = GSSPeek<'a>;
-          fn next(&mut self) -> Option<Self::Item> {
-              if self.idx >= self.keys.len() {
-                  None
-              } else {
-                  let ev = self.keys[self.idx].clone();
-                  self.idx += 1;
-                  Some(GSSPeek {
-                      parent_arc: self.parent,
-                      edge_value: ev,
-                  })
-              }
-          }
-      }
-      impl<'a> GSSPeek<'a> {
-          pub fn edge_value(&self) -> &ParseStateEdgeContent {
-              &self.edge_value
-          }
-          pub fn isolated_parent(&self) -> Arc<GSSNode> {
-              let iso = self.parent_arc.isolate(Some(self.edge_value.clone()));
-              Arc::new(GSSNode { inner: iso })
-          }
-          pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
-              let iso = self.isolated_parent();
-              iso.as_ref().push(edge_value)
-          }
-          pub fn popn(&self, n: usize) -> GSSPopper {
-              self.isolated_parent().popn(n)
-          }
-          pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
-              self.isolated_parent().allowed_llm_tokens()
-          }
-      }
-
-      // --- Popper ---
-      pub struct GSSPopper {
-          inner: LeveledGSS<ParseStateEdgeContent, Acc>,
-          below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Acc>>,
-      }
-      pub struct GSSPopperItem {
-          inner: LeveledGSS<ParseStateEdgeContent, Acc>,
-      }
-      pub struct GSSPopperItemPeek<'a> {
-          parent_arc: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
-          edge_value: &'a ParseStateEdgeContent,
-      }
-
-      impl GSSPopper {
-          pub fn new_from_node(node: Arc<GSSNode>, _acc: Arc<Acc>) -> Self {
-              GSSPopper { inner: node.inner.clone(), below_bottom: BTreeMap::new() }
-          }
-          pub fn iter(&self) -> impl Iterator<Item = GSSPopperItem> {
-              let keys: Vec<_> = self.inner.peek().into_iter().collect();
-              let parent = self.inner.clone();
-              keys.into_iter().map(move |edge| {
-                  let iso = parent.isolate(Some(edge));
-                  GSSPopperItem { inner: iso }
-              })
-          }
-          pub fn below_bottom(&self) -> &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Acc>> {
-              &self.below_bottom
-          }
-          pub fn num_predecessors(&self) -> usize {
-              self.inner.peek().len()
-          }
-          pub fn popn(&mut self, n: usize) {
-              for _ in 0..n {
-                  self.pop();
-              }
-          }
-          pub fn pop(&mut self) {
-              let mut inner = self.inner.clone();
-              let mut belows: BTreeMap<_, _> = self.below_bottom.iter().map(|(k, v)| (*k + 1, v.clone())).collect();
-              let new_below_slice = inner.filter_by_length(Some(1), Some(1));
-              if !new_below_slice.is_empty() {
-                  let mut new_below_map = BTreeMap::new();
-                  for edge in new_below_slice.peek() {
-                      let isolated = new_below_slice.isolate(Some(edge.clone()));
-                      if let Some(acc) = isolated.reduce_acc() {
-                          new_below_map.insert(edge, acc);
-                      }
-                  }
-                  if !new_below_map.is_empty() {
-                      belows.insert(1, new_below_map);
-                  }
-              }
-              self.below_bottom = belows;
-              inner = inner.pop();
-              inner = inner.filter_by_length(Some(1), None);
-              self.inner = inner;
-          }
-      }
-
-      impl GSSPopperItem {
-          pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
-              let keys: Vec<_> = self.inner.peek().into_iter().collect();
-              GSSPopperItemPeekIter {
-                  parent: &self.inner,
-                  keys,
-                  idx: 0,
-              }
-          }
-          pub(crate) fn resolved_acc(&self) -> Acc {
-              self.inner.reduce_acc().unwrap_or_else(Acc::new_dead)
-          }
-      }
-      struct GSSPopperItemPeekIter<'a> {
-          parent: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
-          keys: Vec<ParseStateEdgeContent>,
-          idx: usize,
-      }
-      impl<'a> Iterator for GSSPopperItemPeekIter<'a> {
-          type Item = GSSPopperItemPeek<'a>;
-          fn next(&mut self) -> Option<Self::Item> {
-              if self.idx >= self.keys.len() {
-                  None
-              } else {
-                  let ev = &self.keys[self.idx];
-                  self.idx += 1;
-                  Some(GSSPopperItemPeek {
-                      parent_arc: self.parent,
-                      edge_value: unsafe { &*(ev as *const ParseStateEdgeContent) },
-                  })
-              }
-          }
-      }
-      impl<'a> GSSPopperItemPeek<'a> {
-          pub fn edge_value(&self) -> &'a ParseStateEdgeContent {
-              self.edge_value
-          }
-          pub fn isolated_parent(&self) -> Arc<GSSNode> {
-              let iso = self.parent_arc.isolate(Some(self.edge_value.clone()));
-              Arc::new(GSSNode { inner: iso })
-          }
-          pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
-              let iso = self.isolated_parent();
-              iso.as_ref().push(edge_value)
-          }
-      }
-
-      // --- Roots & helpers ---
-      pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
-          let mut out: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
-          for n in nodes {
-              for edge in n.inner.peek() {
-                  let iso = n.inner.isolate(Some(edge.clone()));
-                  if let Some(acc) = iso.reduce_acc() {
-                      out.entry(edge).or_default().insert(Arc::new(acc));
-                  }
-              }
-          }
-          out
-      }
-
-      // --- Transformations (simplified) ---
-      fn transform_all(root_arc: &mut Arc<GSSNode>, f: impl FnMut(&Acc) -> Option<Acc>) {
-          let new_inner = root_arc.inner.apply_and_prune(f);
-          *root_arc = Arc::new(GSSNode { inner: new_inner });
-      }
-
-      pub type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<Arc<GSSNode>>>;
-
-      pub fn allow_only_llm_tokens_and_prune(root_arc: &mut Arc<GSSNode>, allowed_tokens: &LLMTokenBV) {
-          let mut memo = HashMap::new();
-          allow_only_llm_tokens_and_prune_arc(root_arc, allowed_tokens, &mut memo);
-      }
-
-      pub(crate) fn allow_only_llm_tokens_and_prune_arc(
-          root_arc: &mut Arc<GSSNode>,
-          allowed_tokens: &LLMTokenBV,
-          _memo: &mut PruneAndTransformRecursiveMemo,
-      ) {
-          transform_all(root_arc, |a| {
-              let mut na = a.clone();
-              na.llm_tokens_union &= allowed_tokens;
-              if na.llm_tokens_union.is_empty() {
-                  None
-              } else {
-                  Some(na)
-              }
-          });
-      }
-
-      pub(crate) fn disallow_llm_tokens_and_prune_arc(
-          root_arc: &mut Arc<GSSNode>,
-          tokens_to_disallow: &LLMTokenBV,
-          memo: &mut PruneAndTransformRecursiveMemo,
-      ) {
-          let allowed = HybridBitset::max_ones() - tokens_to_disallow.clone();
-          allow_only_llm_tokens_and_prune_arc(root_arc, &allowed, memo);
-      }
-
-      pub fn reset_llm_tokens(root_arc: &mut Arc<GSSNode>, _memo: &mut PruneAndTransformRecursiveMemo) {
-          transform_all(root_arc, |a| {
-              let mut na = a.clone();
-              na.llm_tokens_union = HybridBitset::max_ones();
-              Some(na)
-          });
-      }
-
-      pub(crate) fn reset_terminals(root_arc: &mut Arc<GSSNode>, _memo: &mut PruneAndTransformRecursiveMemo) {
-          transform_all(root_arc, |a| {
-              let mut na = a.clone();
-              na.terminals_union = HybridL2Bitset::all();
-              Some(na)
-          });
-      }
-
-      pub(crate) fn disallow_terminals_and_prune_arc(
-          root_arc: &mut Arc<GSSNode>,
-          disallowed_terminals: &HybridL2Bitset,
-          _memo: &mut PruneAndTransformRecursiveMemo,
-      ) {
-          transform_all(root_arc, |a| {
-              let mut na = a.clone();
-              println!("Disallowing terminals: {:?}", disallowed_terminals);
-              println!("Before: {:?}", na.terminals_union);
-              na.terminals_union -= disallowed_terminals;
-              println!("After: {:?}", na.terminals_union);
-              Some(na)
-          });
-      }
-
-      pub fn prune_llm_tokens_by_disallowed_terminals(
-          root_arc: &mut Arc<GSSNode>,
-          possible_matches: &BTreeMap<crate::tokenizer::TokenizerStateID, BTreeMap<crate::types::TerminalID, LLMTokenBV>>,
-          _memo: &mut PruneAndTransformRecursiveMemo,
-      ) {
-          // Very simplified: keep as-is (no change). Implement exact logic later.
-          let _ = possible_matches;
-          let _ = root_arc;
-      }
-
-      pub fn prune_disallowed_terminals(
-          root_arc: &mut Arc<GSSNode>,
-          matched_terminals: &BTreeMap<crate::tokenizer::TokenizerStateID, TerminalBV>,
-          _memo: &mut PruneAndTransformRecursiveMemo,
-      ) {
-          let matched = matched_terminals.clone();
-          let all = HybridBitset::max_ones();
-          transform_all(root_arc, |a| {
-              for (sid, bv) in &matched {
-                  let allowed = a.terminals_union.get_l2_bitset(sid.0).unwrap_or(&all);
-                  if !bv.is_subset(allowed) {
-                      return None;
-                  }
-              }
-              Some(a.clone())
-          });
-      }
-
-      pub fn map_allowed_terminals_tokenizer_states(
-          root_arc: &mut Arc<GSSNode>,
-          map: &BTreeMap<crate::tokenizer::TokenizerStateID, crate::tokenizer::TokenizerStateID>,
-          _memo: &mut PruneAndTransformRecursiveMemo,
-      ) {
-          let mapping = map.clone();
-          transform_all(root_arc, |a| {
-              let mut new_map = BTreeMap::new();
-              for (old, new) in &mapping {
-                  if let Some(bv) = a.terminals_union.get_l2_bitset(old.0) {
-                      new_map
-                          .entry(new.0)
-                          .and_modify(|b: &mut HybridBitset| *b |= bv.clone())
-                          .or_insert_with(|| bv.clone());
-                  }
-              }
-              let mut out = HybridL2Bitset::all();
-              for (sid, bv) in new_map {
-                  out.insert_l2_bitset(sid, bv);
-              }
-              let mut na = a.clone();
-              na.terminals_union = out;
-              Some(na)
-          });
-      }
-
-      pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
-          root_arc: &mut Arc<GSSNode>,
-          allowed_tokens: &LLMTokenBV,
-          _memo: &mut PruneAndTransformRecursiveMemo,
-          stored_trie_god: &StoredTrieGodWrapper,
-      ) {
-          transform_all(root_arc, |a| {
-              let mut needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
-              let mut keep: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
-
-              for node in a.stored_trie_nodes() {
-                  let live = node
-                      .as_arc()
-                      .read(stored_trie_god)
-                      .expect("poison")
-                      .value
-                      .live_tokens
-                      .clone();
-                  if live.is_subset(allowed_tokens) {
-                      // No edge needed; keep this node unchanged.
-                      keep.insert(node.clone());
-                  } else {
-                      // This node has tokens outside the allowed set; it needs an edge.
-                      needs_edge.insert(node.clone());
-                  }
-              }
-
-              if needs_edge.is_empty() {
-                  return Some(a.clone());
-              }
-
-              // Create a brand new destination node for this Acc.
-              let new_dest = StoredPrecomputeNodeIndex::new(
-                  stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                      crate::constraint::PrecomputedNodeContents::internal(),
-                  )),
-              );
-
-              // Insert edges from each source that needs it to the new destination.
-              let edge_key = (0, allowed_tokens.clone());
-              let edge_value = StateIDBV::max_ones();
-              for src in &needs_edge {
-                  let inserter = crate::datastructures::trie::EdgeInserter::new(
-                      stored_trie_god,
-                      src.as_arc().clone(),
-                      edge_key.clone(),
-                      edge_value.clone(),
-                      |e, n| *e |= n,
-                      |node_value, _edge_value| node_value.live_tokens |= allowed_tokens,
-                      |_, _| {}, // Unconditional insertion
-                  );
-                  inserter
-                      .try_destination(new_dest.clone())
-                      .expect("Cycle detected when adding allowed llm tokens on stored trie nodes");
-              }
-
-              // Ensure destination's live tokens reflect (at least) the allowed set.
-              new_dest
-                  .write(stored_trie_god)
-                  .expect("poison")
-                  .value
-                  .live_tokens
-                  |= allowed_tokens;
-
-              // Build the final set: keep unchanged nodes and add the new destination.
-              let mut final_nodes = keep;
-              final_nodes.insert(new_dest);
-
-              let mut na = a.clone();
-              na.stored_trie_nodes = final_nodes;
-              Some(na)
-          });
-      }
-
-      pub fn simplify(_states: &mut BTreeMap<crate::tokenizer::TokenizerStateID, Arc<GSSNode>>) {}
-      pub(crate) fn simplify_roots_in_place(_roots: &mut [Arc<GSSNode>]) {}
-      pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
-          let fused_inner = node_arc.inner.fuse(Some(levels as isize));
-          if fused_inner.is(&node_arc.inner) {
-              node_arc.clone()
-          } else {
-              Arc::new(GSSNode { inner: fused_inner })
-          }
-      }
-
-      impl GSSNode {
-          pub fn reset_llm_tokens(&mut self) {
-              let mut memo = PruneAndTransformRecursiveMemo::new();
-              let mut arc = Arc::new(self.clone());
-              reset_llm_tokens(&mut arc, &mut memo);
-              *self = (*arc).clone();
-          }
-      }
-
-      // --- Trie-utils stubs (no-ops) ---
-      pub(crate) fn deep_add_precompute_trie_edges(
-          root_arc: &mut Arc<GSSNode>,
-          god: &StoredTrieGodWrapper,
-          edge_key: &(usize, LLMTokenBV),
-          edge_value: &StateIDBV,
-          tokens_for_update: &LLMTokenBV,
-          destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
-          _memo: &mut PruneAndTransformRecursiveMemo,
-      ) {
-          transform_all(root_arc, |acc| {
-              if acc.stored_trie_nodes().is_empty() {
-                  return Some(acc.clone());
-              }
-
-              let destination = destination_provider();
-
-              for source_wrapper in acc.stored_trie_nodes() {
-                  let source_arc = source_wrapper.as_arc().clone();
-
-                  let inserter = crate::datastructures::trie::EdgeInserter::new(
-                      god,
-                      source_arc,
-                      edge_key.clone(),
-                      edge_value.clone(),
-                      |e, n| *e |= n,
-                      |node_value, _edge_value| node_value.live_tokens |= tokens_for_update,
-                      |_, _| {}, // Unconditional insertion
-                  );
-                  inserter.try_destination(destination.clone()).expect("Cycle detected when adding precompute trie edges");
-              }
-
-              destination.write(god).expect("poison").value.live_tokens |= tokens_for_update;
-
-              let mut new_acc = acc.clone();
-              *new_acc.stored_trie_nodes_mut() = BTreeSet::from([destination]);
-              Some(new_acc)
-          });
-      }
-
-      pub(crate) fn merge_stored_trie_nodes(
-          root_arc: &mut Arc<GSSNode>,
-          _memo: &mut PruneAndTransformRecursiveMemo,
-          stored_trie_god: &StoredTrieGodWrapper,
-      ) {
-          let mut new_destinations = BTreeMap::new();
-
-          transform_all(root_arc, |acc| {
-              if !acc.stored_trie_nodes().iter().any(
-                  |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != acc.llm_tokens_union
-              ) {
-                  return Some(acc.clone());
-              }
-
-              let mut new_acc = acc.clone();
-              // Create a single new destination for this merge operation.
-              let new_destination = new_destinations.entry((new_acc.stored_trie_nodes().clone(), acc.llm_tokens_union.clone()))
-                  .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(crate::constraint::PrecomputedNodeContents::internal()))))
-                  .clone();
-
-              let edge_key = (0, new_acc.llm_tokens_union.clone());
-              let edge_value = crate::constraint::StateIDBV::max_ones();
-              let tokens_for_edge = new_acc.llm_tokens_union.clone();
-
-              for source_wrapper in new_acc.stored_trie_nodes() {
-                  let source_arc = source_wrapper.as_arc().clone();
-
-                  let inserter = crate::datastructures::trie::EdgeInserter::new(
-                      stored_trie_god,
-                      source_arc,
-                      edge_key.clone(),
-                      edge_value.clone(),
-                      |e, n| *e |= n,
-                      |node_value, _edge_value| node_value.live_tokens |= &tokens_for_edge,
-                      |_, _| {}, // Unconditional insertion
-                  );
-                  inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging stored_trie nodes; this should be impossible.");
-              }
-
-              new_destination.write(stored_trie_god).expect("poison").value.live_tokens |= &tokens_for_edge;
-
-              new_acc.stored_trie_nodes = BTreeSet::from([new_destination]);
-              Some(new_acc)
-          });
-      }
-
-      pub(crate) fn is_simple_gss(
-          node: &Arc<GSSNode>,
-          hallucinated_state_id: StateID,
-      ) -> Option<(StateID, Arc<Acc>)> {
-          if let Some((path, acc)) = node.inner.as_single_path() {
-              // Path must have length 2. The path is from leaf to root.
-              if path.len() == 2 {
-                  let edge_to_leaf = &path[0];
-                  let edge_to_middle = &path[1];
-
-                  // The edge into the leaf must be the hallucinated one.
-                  if edge_to_leaf.state_id == hallucinated_state_id {
-                      let state_id_x = edge_to_middle.state_id;
-                      // The leaf must have stored_trie_nodes.
-                      if !acc.stored_trie_nodes().is_empty() {
-                          return Some((state_id_x, Arc::new(acc)));
-                      }
-                  }
-              }
-          }
-          None
-      }
-
-      // helper used by parser logging
-      pub fn popn_collect_isolated_parents(node_arc: &Arc<GSSNode>, n: usize) -> Vec<(StateID, Arc<GSSNode>)> {
-          let popped = node_arc.inner.popn(n as isize);
-          let mut out = Vec::new();
-          for edge in popped.peek() {
-              let iso_inner = popped.isolate(Some(edge.clone()));
-              let num_paths = iso_inner.num_paths();
-              if num_paths > 0 {
-                  let gss_node = Arc::new(GSSNode { inner: iso_inner });
-                  for _ in 0..num_paths {
-                      out.push((edge.state_id, gss_node.clone()));
-                  }
-              }
-          }
-          out
-      }
-
-      // Compatibility for formatting acc (used by printer)
-      pub(crate) fn format_acc(
-          acc: &Acc,
-          terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-          original_internal_bimap: Option<&BTreeMap<usize, usize>>,
-          llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
-          config: &GSSPrintConfig,
-      ) -> String {
-          let _ = (original_internal_bimap, llm_token_map);
-
-          if config.verbose {
-              // In verbose mode, print the full debug representation of the Acc.
-              return format!("[acc: {:?}]", acc);
-          }
-
-          let summarize_llm = |bv: &HybridBitset, label: &str| -> Option<String> {
-              if *bv == HybridBitset::max_ones() {
-                  return None;
-              }
-              if bv.is_empty() {
-                  return Some(format!("{}=∅", label));
-              }
-              let total = bv.len();
-              const MAX_SHOW: usize = 8;
-              let sample: Vec<String> = bv.iter().take(MAX_SHOW).map(|id| id.to_string()).collect();
-              if total > MAX_SHOW {
-                  Some(format!("{}({}): [{} …]", label, total, sample.join(", ")))
-              } else {
-                  Some(format!("{}({}): [{}]", label, total, sample.join(", ")))
-              }
-          };
-
-          let summarize_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> Option<String> {
-              let mut any_disallowed = false;
-              let mut parts = Vec::new();
-              const MAX_RANGES_TO_SHOW: usize = 3;
-              for (range, allowed_bv) in allowed_terminals.range_values() {
-                  let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
-                  if disallowed_bv.is_empty() {
-                      continue;
-                  }
-                  any_disallowed = true;
-                  if parts.len() >= MAX_RANGES_TO_SHOW {
-                      break;
-                  }
-                  let range_str = if range.start() == range.end() {
-                      format!("{}", range.start())
-                  } else {
-                      format!("{}..={}", range.start(), range.end())
-                  };
-
-                  if disallowed_bv == HybridBitset::max_ones() {
-                      parts.push(format!("state(s) {}: all", range_str));
-                      continue;
-                  }
-
-                  const MAX_NAMES_TO_SHOW: usize = 5;
-                  let num_disallowed = disallowed_bv.len();
-                  let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES_TO_SHOW)
-                      .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
-                          .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.to_string()))
-                      .collect();
-                  let names_str = names.join(", ");
-
-                  if num_disallowed > MAX_NAMES_TO_SHOW {
-                      parts.push(format!("state(s) {} ({}): [{}, …]", range_str, num_disallowed, names_str));
-                  } else {
-                      parts.push(format!("state(s) {}: [{}]", range_str, names_str));
-                  }
-              }
-              if !any_disallowed {
-                  None
-              } else if parts.is_empty() {
-                  Some(format!("Disallowed {}(…)", label))
-              } else {
-                  Some(format!("Disallowed {}({})", label, parts.join("; ")))
-              }
-          };
-
-          let union_llm_opt = summarize_llm(&acc.llm_tokens_union, "LLM(U)");
-          let union_terminals_opt = summarize_disallowed_terminals(&acc.terminals_union, "Term(U)");
-
-          let stored_trie_nodes_str = {
-              const MAX_PTRS_TO_SHOW: usize = 5;
-              let n = acc.stored_trie_nodes().len();
-              if n == 0 {
-                  None
-              } else if n <= MAX_PTRS_TO_SHOW {
-                  let ptrs: Vec<String> = acc
-                      .stored_trie_nodes()
-                      .iter()
-                      .map(|wrapper| format!("{}", wrapper.as_arc()))
-                      .collect();
-                  Some(format!("Trie(n={}, [{}])", n, ptrs.join(", ")))
-              } else {
-                  let ptrs_sample: Vec<String> = acc
-                      .stored_trie_nodes()
-                      .iter()
-                      .take(MAX_PTRS_TO_SHOW)
-                      .map(|wrapper| format!("{}", wrapper.as_arc()))
-                      .collect();
-                  let remaining = n - MAX_PTRS_TO_SHOW;
-                  Some(format!("Trie(n={}, first {}: {}, …; +{} more)", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining))
-              }
-          };
-
-          let mut parts: Vec<String> = Vec::new();
-          if let Some(s) = union_llm_opt { parts.push(s); }
-          if let Some(s) = union_terminals_opt { parts.push(s); }
-          if let Some(s) = stored_trie_nodes_str { parts.push(s); }
-
-          if parts.is_empty() {
-              String::new()
-          } else {
-              format!("[{}]", parts.join(", "))
-          }
-      }
       ```
     metadata:
       filename: src/datastructures/gss_leveled_adapter.rs
-  - user: Modify `allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc` so at
-      the begininng of the function, outside the closure, it defines a map from btreeset
-      of node IDs to a dst node ID. Before creating a new `new_dest`, it checks whether
-      the `needs_edge` set is already in this map and uses the existing dst if so.
+  - user: |-
+      ``````ad-assistant_message
+      collapse: closed
+      title: gpt-5
+
+      Problem name: Macro Sets
+
+      Summary
+      You are given N sets of integers drawn from a common universe 1..M. There is also a forbidden set F ⊆ {1..M}. You may introduce new symbols (called macros), where each macro is defined as a fixed subset of base elements. You may apply any macro to any input set if and only if that set contains all elements of the macro’s definition; applying a macro replaces all those elements with a single new symbol.
+
+      Goal: Remove all forbidden elements from every set by applying macros, while minimizing a single score that balances “how many items are left in the sets” against “how many macros you invented.”
+
+      This is a challenge/optimization task: you output a candidate solution (macros and where you apply them), and the judge scores it with the given formula. Lower is better.
+
+      Formal definition
+
+      - Universe:
+        - M base symbols: {1, 2, ..., M}
+        - N input sets: S1, S2, ..., SN, each Si ⊆ {1..M}
+        - Forbidden set: F ⊆ {1..M}
+
+      - Macros:
+        - You may define k ≥ 0 macros. Each macro j (1 ≤ j ≤ k) is a non-empty subset Aj ⊆ {1..M}.
+        - Each macro j corresponds to a fresh distinct token zj (think of IDs M+1, M+2, …, M+k). These zj do not appear in the input and cannot be used inside Aj (macros are defined only over base symbols).
+        - All Aj must be distinct (no duplicate macro definitions).
+
+      - Applying macros to sets:
+        - For each set Si you choose a subset of macros Ti ⊆ {1..k} to apply.
+        - Validity for a given set Si:
+          - For every j ∈ Ti, Aj ⊆ Si (the set contains the macro’s elements).
+          - The macro applications must be disjoint: for any distinct j1, j2 ∈ Ti, Aj1 ∩ Aj2 = ∅. (An element cannot be replaced twice.)
+        - After applying Ti to Si, the resulting set S′i is:
+          S′i = (Si \ ⋃(j∈Ti) Aj) ∪ { zj | j ∈ Ti }
+        - Note: Any base element not covered by a macro in Ti remains in S′i as-is. You cannot delete base elements directly; the only way to remove a base element is to cover it with some applied macro.
+
+      - Forbidden elements constraint:
+        - For every i, S′i ∩ F = ∅ must hold.
+        - Equivalently: For every i and every x ∈ (Si ∩ F), x must belong to at least one Aj with j ∈ Ti. (Every occurrence of a forbidden element must be replaced by some macro application in that set.)
+
+      Objective (score)
+      Given an integer penalty parameter λ ≥ 0 (provided in the input), the score of your solution is:
+
+      Score = (sum over i=1..N of |S′i|) + λ · k
+
+      - The first term is the total number of tokens remaining across all final sets after replacements (counting both remaining base items and macro tokens).
+      - The second term penalizes the number of macros you define.
+
+      Minimize the score. Among all valid outputs, lower score is better.
+
+      Input format
+      - First line: N M λ
+        - N: number of sets (1 ≤ N ≤ 2⋅10^3)
+        - M: size of base universe (1 ≤ M ≤ 2⋅10^3)
+        - λ: non-negative integer penalty per macro (0 ≤ λ ≤ 10^9)
+
+      - Second line: f c1 c2 ... cf
+        - f: number of forbidden elements (0 ≤ f ≤ M)
+        - c1..cf: distinct integers in [1..M] forming F
+
+      - Next N lines: one line per set Si
+        - Each line: t a1 a2 ... at
+          - t: size of Si (0 ≤ t ≤ M)
+          - a1..at: distinct integers in [1..M]
+
+      All sets in the input contain distinct elements (no duplicates within a set).
+
+      Output format
+      - First line: k
+        - k: number of macros you define (0 ≤ k ≤ Kmax; see constraints)
+
+      - Next k lines: macro definitions
+        - Line j (1-based): r b1 b2 ... br
+          - r: size of Aj (1 ≤ r ≤ M)
+          - b1..br: distinct integers in [1..M]
+
+      - Next N lines: macro applications per set
+        - Line i: q m1 m2 ... mq
+          - q: number of macros you apply to Si (0 ≤ q ≤ k)
+          - m1..mq: distinct integers in [1..k] (indices of macros)
+
+      Validity conditions (the judge will check)
+      Your output is invalid (and will be rejected or scored as “invalid”) if any of the following holds:
+      - Any macro Aj is empty, contains elements outside [1..M], or duplicates another macro definition exactly.
+      - For any set Si:
+        - Any referenced macro index is out of range.
+        - Aj ⊄ Si for some applied j ∈ Ti.
+        - There exist j1 ≠ j2 in Ti with Aj1 ∩ Aj2 ≠ ∅ (overlap).
+        - After applying Ti, S′i still contains a forbidden element (S′i ∩ F ≠ ∅).
+
+      If the output is valid, the judge computes S′i for all i, then the score using the formula above.
+
+      Constraints and limits
+      - N ≤ 2000, M ≤ 2000
+      - Sum of input set sizes ∑i |Si| ≤ 2⋅10^5
+      - Kmax (maximum macros you may print): 2⋅10^5
+      - Time limit and memory limit: per contest environment (typical values are fine; checking a solution is O(∑|Si| + total macro size)).
+
+      Notes and clarifications
+      - “Consistent across sets”: A macro represents a fixed subset Aj of base symbols. Anywhere you use macro j, you must replace exactly those same base symbols Aj, no more and no fewer. You decide per set whether to use it.
+      - You cannot define macros over other macros; Aj must contain only base symbols in [1..M].
+      - You cannot remove base elements directly; an element disappears from a set only if it is covered by an applied macro. That is why forbidden elements must be covered by some macro application in every set where they appear.
+      - Size-1 macros are allowed. They can be useful to remove single forbidden items when λ is small enough, but they cost λ each.
+      - You may define macros that do not include forbidden items; if they reduce the token count enough to offset the λ penalty, they can improve your score.
+      - This problem is NP-hard in general (it generalizes set packing/dictionary compression). You are not expected to find the true optimum on large inputs; heuristics are welcome.
+
+      Example
+
+      Input
+      3 6 2
+      2 1 6
+      3 1 2 3
+      4 1 2 4 6
+      3 2 3 5
+
+      Explanation of input:
+      - N=3 sets over M=6 base symbols. λ=2.
+      - Forbidden set F={1,6}.
+      - S1={1,2,3}, S2={1,2,4,6}, S3={2,3,5}.
+
+      Sample output
+      2
+      2 1 2
+      2 4 6
+      1 1
+      2 1 2
+      0
+
+      Explanation:
+      - Macros:
+        - j=1: A1={1,2}
+        - j=2: A2={4,6}
+      - Applications:
+        - For S1, apply macro 1: replace {1,2} with z1 → S′1={z1,3} (size 2), no forbidden elements remain.
+        - For S2, apply macros 1 and 2: replace {1,2} with z1 and {4,6} with z2 → S′2={z1,z2} (size 2), no forbidden elements remain.
+        - For S3, apply none: S′3={2,3,5} (size 3), which already contains no forbidden elements.
+
+      Score:
+      - Total size: |S′1|+|S′2|+|S′3| = 2+2+3 = 7
+      - k=2 macros, λ=2 → penalty 4
+      - Total score = 7 + 4 = 11
+
+      Alternative “classic” variant (optional)
+      If you prefer a single-objective, non-challenge formulation with a hard constraint instead of a penalty, replace the score with:
+      - Minimize sum_i |S′i| subject to k ≤ K (given in input).
+      All other rules (macros, validity, forbidden coverage) remain the same.
+
+      This variant avoids tuning λ and replaces it with a hard cap K on the number of macros.
+
+      Your solution will also be graded on runtime performance.
+
+      End of problem statement.
+
+      ``````
+
+      ...
+
+      ``````ad-assistant_message
+      collapse: closed
+      title: gpt-5 solution
+
+      Here is a practical way to build a correct solver and get a decent score quickly, plus how to push it further if you want.
+
+      What we optimize
+      - You must remove every forbidden element from every set by replacing elements with fixed macros (subsets of base symbols).
+      - A macro j, Aj, used in a set saves |Aj|-1 tokens in that set (you remove |Aj| base tokens, add 1 macro token).
+      - You pay λ once per macro you define (not per use).
+      - You must ensure that, for each set, all forbidden items are covered by some applied macros, and the applied macros in that set are disjoint.
+
+      Three always-valid baselines (good to have as fallbacks)
+      1) Singletons for every forbidden element:
+         - Define k = |F| macros Aj = {x} for all x in F.
+         - Apply macro {x} in every set containing x.
+         - Validity: trivial. Score = sum_i |Si| + λ·|F|.
+         - Often poor if λ > 0, but always valid and tiny to implement.
+
+      2) One macro per “forbidden pattern” per set:
+         - For each set i with f_i = |Si ∩ F| > 0, define Aj = Si ∩ F. Reuse the same macro across sets if their forbidden subsets are equal.
+         - Apply that macro once in each such set.
+         - Score = sum_i |Si \ F| + (#sets with f_i>0) + λ·k', where k' is the number of distinct forbidden-subsets across sets.
+         - Much better than singletons when sets share the same forbidden subset, and usually better than full-set macros when λ is large.
+
+      3) One macro per distinct full set:
+         - For each distinct set Si, define Aj = Si; apply it to that set.
+         - Score = N + λ·(#distinct sets).
+         - Excellent if λ is small (λ=0 gives the minimum possible total size N). Otherwise often worse than (2).
+
+      A greedy solver that usually scores well
+      Idea: Think of a “dictionary” of macros that you can reuse in many sets. Each time you add a macro to the dictionary you should be sure that the total tokens you can save by applying it (across all sets, without overlapping others) is at least λ, otherwise it hurts the score. Start with a plan that guarantees coverage, then add useful macros; or add useful macros first and finish with a coverage step.
+
+      Data structures to keep it fast
+      - Represent each set Si as a bitset of M bits (M ≤ 2000). Also keep for each set a dynamic bitset used_i marking elements already “consumed” by macros you’ve decided to apply in that set; initially all zeros.
+      - For each base symbol u in [1..M], keep a bitset setsWith[u] of length N indicating which sets contain u (vertical index).
+      - Store each macro Aj as a sorted vector and a bitset AjBits.
+      - Keep an application list apply[i] = list of macro ids you’ll apply to set i.
+
+      Candidate macro generation (focus on those that include forbidden elements)
+      Goal: Generate a few thousand promising macros; keep it cheap.
+
+      1) Pairs anchored on forbiddens:
+         - For each forbidden x in F:
+           - For each y in [1..M] that co-occurs with x in at least 2 sets (estimate via popcount(setsWith[x] & setsWith[y])), form candidate {x, y}.
+           - Keep only the top K_y per x by support (e.g., K_y = 50). Save support sup({x,y}) and size |{x,y}|=2.
+
+      2) Small forbidden-only groups:
+         - For each pair of forbiddens {x, y} with support ≥ 2, keep it.
+         - Optionally expand {x, y} by adding a third forbidden z that maximizes support; only keep a few top triples per pair if sup ≥ 2.
+         - Larger forbidden-only sets are typically too specific; cap size at 3–4.
+
+      3) Greedy “context expansion” per forbidden:
+         - For each forbidden x: start A = {x}, sup = freq(x).
+         - Iteratively consider adding a y ≠ x to A to maximize Δ = sup(A ∪ {y})·(|A|) − sup(A)·(|A|-1). In other words, see if sup grows enough to pay for larger size; stop when no y improves or |A| hits a small cap (e.g., 5–7), and sup(A ∪ {y}) ≥ 2.
+         - Keep the best A seen along the way (highest sup(A)·(|A|-1) − λ, or simply highest sup(A)·(|A|-1)).
+
+      4) Optional non-forbidden-only pairs:
+         - If you have time, mine frequent pairs among non-forbidden symbols with support ≥ 2; restrict to frequent base symbols only to keep counts small. These can be added later to compress remaining non-forbidden tokens.
+
+      Deduplicate candidate macros by their sorted element lists.
+
+      Greedy selection (global order; enforce disjointness on-the-fly)
+      - For each candidate Aj compute a cheap optimistic score w0 = sup(Aj)·(|Aj|-1) − λ. Drop those with w0 ≤ 0.
+      - Sort the remaining candidates by w0 descending.
+      - Iterate in that order; for candidate Aj:
+        - Find the sets where it can still be used without overlap:
+          - Candidate support sets S = indices i such that Aj ⊆ Si (use vertical bitsets you’ve already intersected) and also used_i ∧ AjBits == 0 (Aj is disjoint from macros already decided for i).
+        - Realized incremental gain is G = |S|·(|Aj|-1).
+        - If G > λ:
+          - Accept Aj. For each i in S: apply it (append macro id to apply[i]) and set used_i |= AjBits.
+          - Add Aj to the dictionary (macros list).
+        - Else skip Aj.
+      - This enforces disjointness within each set and only takes macros that pay for themselves.
+
+      Guaranteed coverage step (must remove all forbidden elements)
+      At this point many forbidden occurrences are already covered (because many of your chosen macros include forbiddens). For what remains:
+
+      You have two fallback flavors. Pick the cheaper one (evaluate both quickly):
+
+      A) Singletons per forbidden element that still appears uncovered anywhere:
+         - For each forbidden x where there exists a set i with x ∈ Si and x not covered yet (used_i does not include x), define macro {x} if not already defined, and apply it to all such sets.
+         - Adds at most |F| macros; token counts of those sets do not change, but feasibility is guaranteed.
+
+      B) One “leftover forbidden subset” per set:
+         - For each set i, let U_i = (Si ∩ F) \ used_i. If U_i ≠ ∅, try to reuse or define a macro U_i and apply it to i.
+         - This reduces the per-set token count by |U_i|-1, but can add many distinct macros (one per distinct U_i).
+
+      Choose A or B based on score:
+      - A adds λ·(#forbidden with any uncovered occurrence) to macros count and saves 0 tokens.
+      - B adds λ·(#distinct U_i) to macros and saves Σ_i (|U_i|-1) tokens.
+      Compute both totals and choose the better. In practice, A is usually safer (fewer macros) when λ is nontrivial; B can win if many sets have large U_i but only few distinct shapes.
+
+      Optional extra compression on non-forbidden leftovers
+      - After coverage is guaranteed (all Si have no F left), you can add macros that contain only non-forbidden symbols to reduce sizes further. Use the same greedy selection as above with the current used_i masks; accept only if incremental G > λ. Since these don’t help coverage, keep them conservative.
+
+      Optional post-processing (if you want to squeeze a few more points)
+      - Try dropping a macro: temporarily remove macro j from dictionary and re-run per-set greedy application with the remaining macros; if total score doesn’t get worse (or improves), keep it dropped. This is a hill-climb removal pass; it’s quick if you only test a subset (e.g., the least-used macros).
+
+      Complexity and practical caps
+      - N, M ≤ 2000. Bitsets of length M or N fit in 32–64 64-bit words; intersections and popcounts are cheap.
+      - Candidate generation:
+        - For each forbidden x, keeping top K_y (e.g., 50) co-occurrences gives O(|F|·K_y) pair candidates.
+        - A few thousand to tens of thousands of candidates are fine.
+      - Greedy selection:
+        - For each accepted macro, you visit only its support sets and update used_i and apply[i].
+        - With reasonable caps, total runtime is dominated by bitset ops and should be well within limits.
+
+      Output construction
+      - First line: k = number of macros you decided to keep (accepted candidates + whichever fallback flavor you chose).
+      - Next k lines: macro definitions as “r b1 b2 … br” with b’s sorted and unique; ensure no duplicate Aj lines.
+      - Next N lines: for each set i, the indices of macros you decided to apply to i (apply[i]). The order doesn’t matter. Make sure they are pairwise disjoint in i and cover all forbidden tokens in i.
+
+      What to do depending on λ (quick guidance)
+      - λ = 0:
+        - Best is to define Aj = Si for every set (or for every distinct Si) and apply once per set. Score = N. You may also include other macros but it won’t help.
+      - Small λ:
+        - The greedy dictionary will pick many useful macros; also consider non-forbidden-only macros.
+      - Medium/large λ:
+        - Expect far fewer accepted candidates (only very frequent and large Aj survive). The fallback coverage choice matters a lot; singleton fallback is often safest.
+      - Very large λ:
+        - You will accept almost no candidate macro. Then your fallback dominates the score; compare singleton fallback vs per-set forbidden-subset fallback and choose the better.
+
+      Worked tiny example (the sample)
+      Input:
+      N=3 M=6 λ=2
+      F={1,6}
+      S1={1,2,3}, S2={1,2,4,6}, S3={2,3,5}
+
+      - Pairs with forbiddens:
+        - {1,2}: appears in S1, S2 ⇒ support 2 ⇒ gain 2·(2-1)=2; 2>λ(=2)? No (needs strictly greater to be safe), treat as borderline; accept if ≥ or > depending on your tie policy.
+        - {4,6}: appears in S2 ⇒ support 1 ⇒ gain 1·(2-1)=1 < λ, don’t accept.
+      - Suppose you accept {1,2} (tie in your favor).
+        - Apply to S1, S2; used marks these elements.
+      - Coverage:
+        - Remaining forbidden 6 in S2, and none in S1 or S3. With singleton fallback:
+          - Define {6}; apply in S2. k = 2 macros; sizes S′1=2, S′2=2, S′3=3; score 7 + 2λ = 11, same as sample.
+        - With per-set-fallback on leftover forbiddens:
+          - Leftover U_2={6}; define {6}; same as above here.
+
+      Implementation checklist
+      - Parsing and bitsets: build Si bitsets and setsWith[u] bitsets; store F in a boolean array isForbidden[u].
+      - Candidate mining:
+        - Quickly compute supports with intersections of setsWith bitsets.
+        - Keep only top K per forbidden to cap candidates.
+        - Deduplicate candidates using a hash (vector<int> as key).
+      - Greedy selection:
+        - Keep used_i bitsets initially zero.
+        - For each candidate Aj in descending w0, compute realized G and decide to accept; update used_i and apply[i] if you do.
+      - Coverage fallback:
+        - Compute uncovered forbiddens in each set.
+        - Choose singleton fallback or per-set forbidden-subset fallback based on score comparison; define required macros and append to apply[i].
+      - Optional non-forbidden pass and macro drop pass.
+      - Output writer:
+        - Number macros and print them.
+        - For each set, print indices of macros recorded in apply[i].
+      - Validity check:
+        - For each set, ensure all forbidden tokens are covered by some applied macro and that applied macros are pairwise disjoint.
+
+      Why this works reasonably well
+      - The greedy dictionary only accepts macros whose actual realized savings across sets exceed λ. That keeps k small enough and score improvements real.
+      - Disjointness is enforced by “used_i” masks at selection time; you never create conflicts.
+      - Coverage is guaranteed by the fallback step.
+      - You can tune K_y, max macro size, and tie-breaking to balance speed and quality.
+
+      If you want a compact solution in few lines of code quickly
+      - Start with baseline (2): one macro per distinct forbidden subset per set. It’s short to write and usually much better than singletons.
+      - Then add the greedy selection of a few high-support pairs (anchored on forbiddens) and apply them before the fallback. Keep it simple: pairs only, no expansion, accept if realized gain > λ, fallback with singletons. This will already beat the baseline on many inputs.
+
+
+      ``````
+
+      ```bash
+      chatllm send --init --code-completion-model cp --attach src/datastructures/gss_leveled_adapter.rs --apply git-llm --model cp --paste
+      ```
+
+      Rewrite `allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc` and `merge_stored_trie_nodes` using this solution to the problem.
+      The 'forbidden set' condition here is equivalent to our calculation of `needs_edge`.
+      The 'integers' are equivalent to node IDs.
+
+      Note that `merge_stored_trie_nodes` doesn't have a 'forbidden set' - or the 'forbidden set' is empty.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -3147,92 +3553,1016 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to modify the `allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc` function, followed by the corresponding git diff.
+      Based on the provided problem description for "Macro Sets" and its solution, I will rewrite the `allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc` and `merge_stored_trie_nodes` functions.
+
+      The core idea is to enhance the reuse of newly created trie nodes. The original implementation only reused a new destination node if the set of source nodes was *exactly identical* between two operations. The provided solution suggests a more advanced strategy: identifying smaller, common *subsets* of nodes (called "macros") and creating reusable destination nodes for them. This allows for more efficient compression of the graph structure.
+
+      My implementation will adopt a simplified version of this strategy:
+      1.  **Global Analysis**: Before modifying the GSS, the function will perform a global analysis of all relevant `Acc` leaves to identify all sets of nodes that need to be replaced.
+      2.  **Macro Discovery**: It will then find common pairs of nodes that frequently appear together within these sets. Each frequent pair will become a "macro," with a dedicated new destination node.
+      3.  **Greedy Application**: When processing each `Acc`, the function will first try to replace nodes using these pre-discovered, highly-reusable "macros."
+      4.  **Leftover Handling**: Any nodes not covered by the common macros will be grouped and replaced using the original logic, ensuring all necessary transformations occur.
+
+      This approach better reflects the greedy, reuse-focused strategy from the "Macro Sets" solution.
+
+      ---
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/datastructures/gss_leveled_adapter.rs`.**
+      #### File: `src/datastructures/gss_leveled_adapter.rs`
 
-      2.  **Navigate to the `allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc` function.**
+      1.  Navigate to the function `allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc`.
+      2.  Replace its entire body with the new implementation, which incorporates the global analysis and greedy macro application logic.
+      3.  Navigate to the function `merge_stored_trie_nodes`.
+      4.  Replace its entire body with the new implementation, which applies the same macro-based compression strategy for merging nodes.
 
-      3.  **Introduce a memoization map:** At the very beginning of the function body, insert the following line to declare a map that will cache newly created destination nodes:
-
-          ```rust
-          let mut new_destinations = BTreeMap::new();
-          ```
-
-      4.  **Use the memoization map to create destination nodes:** Inside the `transform_all` closure, locate and replace the code block that creates the `new_dest` variable.
-
-          **Delete** the following lines:
-          ```rust
-          // Create a brand new destination node for this Acc.
-          let new_dest = StoredPrecomputeNodeIndex::new(
-              stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                  crate::constraint::PrecomputedNodeContents::internal(),
-              )),
-          );
-          ```
-
-          **In its place, insert** this new block. It checks the `new_destinations` map for an existing destination node for the current set of source nodes (`needs_edge`) before creating a new one.
-
-          ```rust
-          // Look up or create a destination node for this set of sources.
-          let new_dest = new_destinations
-              .entry(needs_edge.clone())
-              .or_insert_with(|| {
-                  StoredPrecomputeNodeIndex::new(
-                      stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                          crate::constraint::PrecomputedNodeContents::internal(),
-                      )),
-                  )
-              })
-              .clone();
-          ```
-
-      After these changes, the function will reuse destination trie nodes for identical sets of source nodes within a single call, improving efficiency.
+      ---
 
       ### Git Diff
 
-      Here is the git diff for the changes described above:
-
       ```diff
-      diff --git a/src/datastructures/gss_leveled_adapter.rs b/src/datastructures/gss_leveled_adapter.rs
-      index 2111188..119988a 100644
       --- a/src/datastructures/gss_leveled_adapter.rs
       +++ b/src/datastructures/gss_leveled_adapter.rs
-      @@ -704,6 +704,7 @@
+      @@ -710,78 +710,128 @@
+           allowed_tokens: &LLMTokenBV,
            _memo: &mut PruneAndTransformRecursiveMemo,
            stored_trie_god: &StoredTrieGodWrapper,
        ) {
-      +    let mut new_destinations = BTreeMap::new();
-           transform_all(root_arc, |a| {
-               let mut needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
-               let mut keep: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
-      @@ -728,13 +729,17 @@
-                   return Some(a.clone());
-               }
-       
-      -        // Create a brand new destination node for this Acc.
-      -        let new_dest = StoredPrecomputeNodeIndex::new(
-      -            stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-      -                crate::constraint::PrecomputedNodeContents::internal(),
-      -            )),
-      -        );
-      +        // Look up or create a destination node for this set of sources.
-      +        let new_dest = new_destinations
-      +            .entry(needs_edge.clone())
-      +            .or_insert_with(|| {
-      +                StoredPrecomputeNodeIndex::new(
-      +                    stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-      +                        crate::constraint::PrecomputedNodeContents::internal(),
-      +                    )),
-      +                )
+      -    let mut new_destinations = BTreeMap::new();
+      -    transform_all(root_arc, |a| {
+      -        let mut needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
+      -        let mut keep: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
+      -
+      -        for node in a.stored_trie_nodes() {
+      -            let live = node
+      +    // --- Global Analysis: Find common subsets (macros) ---
+      +    let all_accs: Vec<Acc> = root_arc.inner.to_stacks().into_iter().map(|(_, acc)| acc).collect();
+      +    let mut all_needs_edge_sets = Vec::new();
+      +    for acc in &all_accs {
+      +        let needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = acc
+      +            .stored_trie_nodes()
+      +            .iter()
+      +            .filter(|node| {
+      +                !node
+      +                    .as_arc()
+      +                    .read(stored_trie_god)
+      +                    .expect("poison")
+      +                    .value
+      +                    .live_tokens
+      +                    .is_subset(allowed_tokens)
       +            })
-      +            .clone();
-       
-               // Insert edges from each source that needs it to the new destination.
-               let edge_key = (0, allowed_tokens.clone());
+      +            .cloned()
+      +            .collect();
+      +        if !needs_edge.is_empty() {
+      +            all_needs_edge_sets.push(needs_edge);
+      +        }
+      +    }
+      +
+      +    let mut pair_counts: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, usize> = BTreeMap::new();
+      +    for needs_edge_set in &all_needs_edge_sets {
+      +        let nodes: Vec<_> = needs_edge_set.iter().cloned().collect();
+      +        if nodes.len() >= 2 {
+      +            for i in 0..nodes.len() {
+      +                for j in (i + 1)..nodes.len() {
+      +                    let mut pair = BTreeSet::new();
+      +                    pair.insert(nodes[i].clone());
+      +                    pair.insert(nodes[j].clone());
+      +                    *pair_counts.entry(pair).or_insert(0) += 1;
+      +                }
+      +            }
+      +        }
+      +    }
+      +
+      +    let mut macros: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, StoredPrecomputeNodeIndex> = BTreeMap::new();
+      +    for (pair, count) in pair_counts {
+      +        if count > 1 { // Only create macros for pairs that are reused.
+      +            let dest_node = StoredPrecomputeNodeIndex::new(
+      +                stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+      +                    crate::constraint::PrecomputedNodeContents::internal(),
+      +                )),
+      +            );
+      +            macros.insert(pair, dest_node);
+      +        }
+      +    }
+      +    let sorted_macros: Vec<_> = macros.into_iter().collect();
+      +
+      +    // --- Transformation ---
+      +    let mut new_destinations_for_leftovers = BTreeMap::new();
+      +    transform_all(root_arc, |acc| {
+      +        let mut na = acc.clone();
+      +        let original_nodes = na.stored_trie_nodes.clone();
+      +        let mut needs_edge: BTreeSet<_> = original_nodes
+      +            .iter()
+      +            .filter(|node| {
+      +                !node
+      +                    .as_arc()
+      +                    .read(stored_trie_god)
+      +                    .expect("poison")
+      +                    .value
+      +                    .live_tokens
+      +                    .is_subset(allowed_tokens)
+      +            })
+      +            .cloned()
+      +            .collect();
+      +
+      +        if needs_edge.is_empty() {
+      +            return Some(na);
+      +        }
+      +
+      +        let mut final_nodes = original_nodes.difference(&needs_edge).cloned().collect::<BTreeSet<_>>();
+      +
+      +        // Greedily apply discovered macros
+      +        for (macro_nodes, macro_dest) in &sorted_macros {
+      +            if macro_nodes.is_subset(&needs_edge) {
+      +                let edge_key = (0, allowed_tokens.clone());
+      +                let edge_value = StateIDBV::max_ones();
+      +                for src in macro_nodes {
+      +                    let inserter = crate::datastructures::trie::EdgeInserter::new(
+      +                        stored_trie_god,
+      +                        src.as_arc().clone(),
+      +                        edge_key.clone(),
+      +                        edge_value.clone(),
+      +                        |e, n| *e |= n,
+      +                        |node_value, _| node_value.live_tokens |= allowed_tokens,
+      +                        |_, _| {},
+      +                    );
+      +                    inserter.try_destination(macro_dest.clone()).expect("Cycle detected");
+      +                }
+      +                macro_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+      +                final_nodes.insert(macro_dest.clone());
+      +                needs_edge = needs_edge.difference(macro_nodes).cloned().collect();
+      +            }
+      +        }
+      +
+      +        // Handle leftovers using the original "macro for the whole set" logic
+      +        if !needs_edge.is_empty() {
+      +            let new_dest = new_destinations_for_leftovers
+      +                .entry(needs_edge.clone())
+      +                .or_insert_with(|| {
+      +                    StoredPrecomputeNodeIndex::new(
+      +                        stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+      +                            crate::constraint::PrecomputedNodeContents::internal(),
+      +                        )),
+      +                    )
+      +                })
+      +                .clone();
+      +
+      +            let edge_key = (0, allowed_tokens.clone());
+      +            let edge_value = StateIDBV::max_ones();
+      +            for src in &needs_edge {
+      +                let inserter = crate::datastructures::trie::EdgeInserter::new(
+      +                    stored_trie_god,
+      +                    src.as_arc().clone(),
+      +                    edge_key.clone(),
+      +                    edge_value.clone(),
+      +                    |e, n| *e |= n,
+      +                    |node_value, _| node_value.live_tokens |= allowed_tokens,
+      +                    |_, _| {},
+      +                );
+      +                inserter.try_destination(new_dest.clone()).expect("Cycle detected");
+      +            }
+      +            new_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+      +            final_nodes.insert(new_dest);
+      +        }
+      +
+      +        na.stored_trie_nodes = final_nodes;
+      +        Some(na)
+      +    });
+      +}
+      +
+      +pub fn simplify(_states: &mut BTreeMap<crate::tokenizer::TokenizerStateID, Arc<GSSNode>>) {}
+      +pub(crate) fn simplify_roots_in_place(_roots: &mut [Arc<GSSNode>]) {}
+      +pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
+      +    let fused_inner = node_arc.inner.fuse(Some(levels as isize));
+      +    if fused_inner.is(&node_arc.inner) {
+      +        node_arc.clone()
+      +    } else {
+      +        Arc::new(GSSNode { inner: fused_inner })
+      +    }
+      +}
+      +
+      +impl GSSNode {
+      +    pub fn reset_llm_tokens(&mut self) {
+      +        let mut memo = PruneAndTransformRecursiveMemo::new();
+      +        let mut arc = Arc::new(self.clone());
+      +        reset_llm_tokens(&mut arc, &mut memo);
+      +        *self = (*arc).clone();
+      +    }
+      +}
+      +
+      +// --- Trie-utils stubs (no-ops) ---
+      +pub(crate) fn deep_add_precompute_trie_edges(
+      +    root_arc: &mut Arc<GSSNode>,
+      +    god: &StoredTrieGodWrapper,
+      +    edge_key: &(usize, LLMTokenBV),
+      +    edge_value: &StateIDBV,
+      +    tokens_for_update: &LLMTokenBV,
+      +    destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
+      +    _memo: &mut PruneAndTransformRecursiveMemo,
+      +) {
+      +    transform_all(root_arc, |acc| {
+      +        if acc.stored_trie_nodes().is_empty() {
+      +            return Some(acc.clone());
+      +        }
+      +
+      +        let destination = destination_provider();
+      +
+      +        for source_wrapper in acc.stored_trie_nodes() {
+      +            let source_arc = source_wrapper.as_arc().clone();
+      +
+      +            let inserter = crate::datastructures::trie::EdgeInserter::new(
+      +                god,
+      +                source_arc,
+      +                edge_key.clone(),
+      +                edge_value.clone(),
+      +                |e, n| *e |= n,
+      +                |node_value, _edge_value| node_value.live_tokens |= tokens_for_update,
+      +                |_, _| {}, // Unconditional insertion
+      +            );
+      +            inserter.try_destination(destination.clone()).expect("Cycle detected when adding precompute trie edges");
+      +        }
+      +
+      +        destination.write(god).expect("poison").value.live_tokens |= tokens_for_update;
+      +
+      +        let mut new_acc = acc.clone();
+      +        *new_acc.stored_trie_nodes_mut() = BTreeSet::from([destination]);
+      +        Some(new_acc)
+      +    });
+      +}
+      +
+      +pub(crate) fn merge_stored_trie_nodes(
+      +    root_arc: &mut Arc<GSSNode>,
+      +    _memo: &mut PruneAndTransformRecursiveMemo,
+      +    stored_trie_god: &StoredTrieGodWrapper,
+      +) {
+      +    // --- Global Analysis: Find common subsets (macros) for compression ---
+      +    let all_accs: Vec<Acc> = root_arc.inner.to_stacks().into_iter().map(|(_, acc)| acc).collect();
+      +    let mut sets_to_merge = Vec::new();
+      +    for acc in &all_accs {
+      +        if acc.stored_trie_nodes().iter().any(|n| {
+      +            n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != acc.llm_tokens_union
+      +        }) {
+      +            sets_to_merge.push(acc.stored_trie_nodes().clone());
+      +        }
+      +    }
+      +
+      +    let mut pair_counts: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, usize> = BTreeMap::new();
+      +    for node_set in &sets_to_merge {
+      +        let nodes: Vec<_> = node_set.iter().cloned().collect();
+      +        if nodes.len() >= 2 {
+      +            for i in 0..nodes.len() {
+      +                for j in (i + 1)..nodes.len() {
+      +                    let mut pair = BTreeSet::new();
+      +                    pair.insert(nodes[i].clone());
+      +                    pair.insert(nodes[j].clone());
+      +                    *pair_counts.entry(pair).or_insert(0) += 1;
+      +                }
+      +            }
+      +        }
+      +    }
+      +
+      +    let mut macros: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, StoredPrecomputeNodeIndex> = BTreeMap::new();
+      +    for (pair, count) in pair_counts {
+      +        if count > 1 {
+      +            let dest_node = StoredPrecomputeNodeIndex::new(
+      +                stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+      +                    crate::constraint::PrecomputedNodeContents::internal(),
+      +                )),
+      +            );
+      +            macros.insert(pair, dest_node);
+      +        }
+      +    }
+      +    let sorted_macros: Vec<_> = macros.into_iter().collect();
+      +
+      +    // --- Transformation ---
+      +    let mut new_destinations_for_leftovers = BTreeMap::new();
+      +    transform_all(root_arc, |acc| {
+      +        let needs_merge = acc.stored_trie_nodes().iter().any(|n| {
+      +            n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != acc.llm_tokens_union
+      +        });
+      +
+      +        if !needs_merge {
+      +            return Some(acc.clone());
+      +        }
+      +
+      +        let mut na = acc.clone();
+      +        let mut nodes_to_merge = na.stored_trie_nodes.clone();
+      +        let mut final_nodes = BTreeSet::new();
+      +
+      +        // Greedily apply discovered macros
+      +        for (macro_nodes, macro_dest) in &sorted_macros {
+      +            if macro_nodes.is_subset(&nodes_to_merge) {
+      +                let edge_key = (0, acc.llm_tokens_union.clone());
+      +                let edge_value = crate::constraint::StateIDBV::max_ones();
+      +                for src in macro_nodes {
+      +                    let inserter = crate::datastructures::trie::EdgeInserter::new(
+      +                        stored_trie_god,
+      +                        src.as_arc().clone(),
+      +                        edge_key.clone(),
+      +                        edge_value.clone(),
+      +                        |e, n| *e |= n,
+      +                        |node_value, _| node_value.live_tokens |= &acc.llm_tokens_union,
+      +                        |_, _| {},
+      +                    );
+      +                    inserter.try_destination(macro_dest.clone()).expect("Cycle detected");
+      +                }
+      +                macro_dest.write(stored_trie_god).expect("poison").value.live_tokens |= &acc.llm_tokens_union;
+      +                final_nodes.insert(macro_dest.clone());
+      +                nodes_to_merge = nodes_to_merge.difference(macro_nodes).cloned().collect();
+      +            }
+      +        }
+      +
+      +        // Handle leftovers
+      +        if !nodes_to_merge.is_empty() {
+      +            let new_dest = new_destinations_for_leftovers
+      +                .entry((nodes_to_merge.clone(), acc.llm_tokens_union.clone()))
+      +                .or_insert_with(|| {
+      +                    StoredPrecomputeNodeIndex::new(
+      +                        stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+      +                            crate::constraint::PrecomputedNodeContents::internal(),
+      +                        )),
+      +                    )
+      +                })
+      +                .clone();
+      +
+      +            let edge_key = (0, acc.llm_tokens_union.clone());
+      +            let edge_value = crate::constraint::StateIDBV::max_ones();
+      +            for src in &nodes_to_merge {
+      +                let inserter = crate::datastructures::trie::EdgeInserter::new(
+      +                    stored_trie_god,
+      +                    src.as_arc().clone(),
+      +                    edge_key.clone(),
+      +                    edge_value.clone(),
+      +                    |e, n| *e |= n,
+      +                    |node_value, _| node_value.live_tokens |= &acc.llm_tokens_union,
+      +                    |_, _| {},
+      +                );
+      +                inserter.try_destination(new_dest.clone()).expect("Cycle detected");
+      +            }
+      +            new_dest.write(stored_trie_god).expect("poison").value.live_tokens |= &acc.llm_tokens_union;
+      +            final_nodes.insert(new_dest);
+      +        }
+      +
+      +        na.stored_trie_nodes = final_nodes;
+      +        Some(na)
+      +    });
+      +}
+      +
+      +pub(crate) fn is_simple_gss(
+      +    node: &Arc<GSSNode>,
+      +    hallucinated_state_id: StateID,
+      +) -> Option<(StateID, Arc<Acc>)> {
+      +    if let Some((path, acc)) = node.inner.as_single_path() {
+      +        // Path must have length 2. The path is from leaf to root.
+      +        if path.len() == 2 {
+      +            let edge_to_leaf = &path[0];
+      +            let edge_to_middle = &path[1];
+      +
+      +            // The edge into the leaf must be the hallucinated one.
+      +            if edge_to_leaf.state_id == hallucinated_state_id {
+      +                let state_id_x = edge_to_middle.state_id;
+      +                // The leaf must have stored_trie_nodes.
+      +                if !acc.stored_trie_nodes().is_empty() {
+      +                    return Some((state_id_x, Arc::new(acc)));
+      +                }
+      +            }
+      +        }
+      +    }
+      +    None
+      +}
+      +
+      +// helper used by parser logging
+      +pub fn popn_collect_isolated_parents(node_arc: &Arc<GSSNode>, n: usize) -> Vec<(StateID, Arc<GSSNode>)> {
+      +    let popped = node_arc.inner.popn(n as isize);
+      +    let mut out = Vec::new();
+      +    for edge in popped.peek() {
+      +        let iso_inner = popped.isolate(Some(edge.clone()));
+      +        let num_paths = iso_inner.num_paths();
+      +        if num_paths > 0 {
+      +            let gss_node = Arc::new(GSSNode { inner: iso_inner });
+      +            for _ in 0..num_paths {
+      +                out.push((edge.state_id, gss_node.clone()));
+      +            }
+      +        }
+      +    }
+      +    out
+      +}
+      +
+      +// Compatibility for formatting acc (used by printer)
+      +pub(crate) fn format_acc(
+      +    acc: &Acc,
+      +    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+      +    original_internal_bimap: Option<&BTreeMap<usize, usize>>,
+      +    llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+      +    config: &GSSPrintConfig,
+      +) -> String {
+      +    let _ = (original_internal_bimap, llm_token_map);
+      +
+      +    if config.verbose {
+      +        // In verbose mode, print the full debug representation of the Acc.
+      +        return format!("[acc: {:?}]", acc);
+      +    }
+      +
+      +    let summarize_llm = |bv: &HybridBitset, label: &str| -> Option<String> {
+      +        if *bv == HybridBitset::max_ones() {
+      +            return None;
+      +        }
+      +        if bv.is_empty() {
+      +            return Some(format!("{}=∅", label));
+      +        }
+      +        let total = bv.len();
+      +        const MAX_SHOW: usize = 8;
+      +        let sample: Vec<String> = bv.iter().take(MAX_SHOW).map(|id| id.to_string()).collect();
+      +        if total > MAX_SHOW {
+      +            Some(format!("{}({}): [{} …]", label, total, sample.join(", ")))
+      +        } else {
+      +            Some(format!("{}({}): [{}]", label, total, sample.join(", ")))
+      +        }
+      +    };
+      +
+      +    let summarize_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> Option<String> {
+      +        let mut any_disallowed = false;
+      +        let mut parts = Vec::new();
+      +        const MAX_RANGES_TO_SHOW: usize = 3;
+      +        for (range, allowed_bv) in allowed_terminals.range_values() {
+      +            let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
+      +            if disallowed_bv.is_empty() {
+      +                continue;
+      +            }
+      +            any_disallowed = true;
+      +            if parts.len() >= MAX_RANGES_TO_SHOW {
+      +                break;
+      +            }
+      +            let range_str = if range.start() == range.end() {
+      +                format!("{}", range.start())
+      +            } else {
+      +                format!("{}..={}", range.start(), range.end())
+      +            };
+      +
+      +            if disallowed_bv == HybridBitset::max_ones() {
+      +                parts.push(format!("state(s) {}: all", range_str));
+      +                continue;
+      +            }
+      +
+      +            const MAX_NAMES_TO_SHOW: usize = 5;
+      +            let num_disallowed = disallowed_bv.len();
+      +            let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES_TO_SHOW)
+      +                .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
+      +                    .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.to_string()))
+      +                .collect();
+      +            let names_str = names.join(", ");
+      +
+      +            if num_disallowed > MAX_NAMES_TO_SHOW {
+      +                parts.push(format!("state(s) {} ({}): [{}, …]", range_str, num_disallowed, names_str));
+      +            } else {
+      +                parts.push(format!("state(s) {}: [{}]", range_str, names_str));
+      +            }
+      +        }
+      +        if !any_disallowed {
+      +            None
+      +        } else if parts.is_empty() {
+      +            Some(format!("Disallowed {}(…)", label))
+      +        } else {
+      +            Some(format!("Disallowed {}({})", label, parts.join("; ")))
+      +        }
+      +    };
+      +
+      +    let union_llm_opt = summarize_llm(&acc.llm_tokens_union, "LLM(U)");
+      +    let union_terminals_opt = summarize_disallowed_terminals(&acc.terminals_union, "Term(U)");
+      +
+      +    let stored_trie_nodes_str = {
+      +        const MAX_PTRS_TO_SHOW: usize = 5;
+      +        let n = acc.stored_trie_nodes().len();
+      +        if n == 0 {
+      +            None
+      +        } else if n <= MAX_PTRS_TO_SHOW {
+      +            let ptrs: Vec<String> = acc
+                       .stored_trie_nodes()
+                       .iter()
+      -                .map(|wrapper| format!("{}", wrapper.as_arc()))
+      +                .map(|wrapper| format!("{}", wrapper.as_arc()))
+                       .collect();
+      -            if live.is_subset(allowed_tokens) {
+      -                // No edge needed; keep this node unchanged.
+      -                keep.insert(node.clone());
+      -            } else {
+      -                // This node has tokens outside the allowed set; it needs an edge.
+      -                needs_edge.insert(node.clone());
+      -            }
+      -        }
+      -
+      -        if needs_edge.is_empty() {
+      -            return Some(a.clone());
+      -        }
+      -
+      -        // Look up or create a destination node for this set of sources.
+      -        let new_dest = new_destinations
+      -            .entry(needs_edge.clone())
+      -            .or_insert_with(|| {
+      -                StoredPrecomputeNodeIndex::new(
+      -                    stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+      -                        crate::constraint::PrecomputedNodeContents::internal(),
+      -                    )),
+      -                )
+      -            })
+      -            .clone();
+      -
+      -        // Insert edges from each source that needs it to the new destination.
+      -        let edge_key = (0, allowed_tokens.clone());
+      -        let edge_value = StateIDBV::max_ones();
+      -        for src in &needs_edge {
+      -            let inserter = crate::datastructures::trie::EdgeInserter::new(
+      -                stored_trie_god,
+      -                src.as_arc().clone(),
+      -                edge_key.clone(),
+      -                edge_value.clone(),
+      -                |e, n| *e |= n,
+      -                |node_value, _edge_value| node_value.live_tokens |= allowed_tokens,
+      -                |_, _| {}, // Unconditional insertion
+      -            );
+      -            inserter
+      -                .try_destination(new_dest.clone())
+      -                .expect("Cycle detected when adding allowed llm tokens on stored trie nodes");
+      -        }
+      -
+      -        // Ensure destination's live tokens reflect (at least) the allowed set.
+      -        new_dest
+      -            .write(stored_trie_god)
+      -            .expect("poison")
+      -            .value
+      -            .live_tokens
+      -            |= allowed_tokens;
+      -
+      -        // Build the final set: keep unchanged nodes and add the new destination.
+      -        let mut final_nodes = keep;
+      -        final_nodes.insert(new_dest);
+      -
+      -        let mut na = a.clone();
+      -        na.stored_trie_nodes = final_nodes;
+      -        Some(na)
+      -    });
+      -}
+      -
+      -pub fn simplify(_states: &mut BTreeMap<crate::tokenizer::TokenizerStateID, Arc<GSSNode>>) {}
+      -pub(crate) fn simplify_roots_in_place(_roots: &mut [Arc<GSSNode>]) {}
+      -pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
+      -    let fused_inner = node_arc.inner.fuse(Some(levels as isize));
+      -    if fused_inner.is(&node_arc.inner) {
+      -        node_arc.clone()
+      -    } else {
+      -        Arc::new(GSSNode { inner: fused_inner })
+      -    }
+      -}
+      -
+      -impl GSSNode {
+      -    pub fn reset_llm_tokens(&mut self) {
+      -        let mut memo = PruneAndTransformRecursiveMemo::new();
+      -        let mut arc = Arc::new(self.clone());
+      -        reset_llm_tokens(&mut arc, &mut memo);
+      -        *self = (*arc).clone();
+      -    }
+      -}
+      -
+      -// --- Trie-utils stubs (no-ops) ---
+      -pub(crate) fn deep_add_precompute_trie_edges(
+      -    root_arc: &mut Arc<GSSNode>,
+      -    god: &StoredTrieGodWrapper,
+      -    edge_key: &(usize, LLMTokenBV),
+      -    edge_value: &StateIDBV,
+      -    tokens_for_update: &LLMTokenBV,
+      -    destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
+      -    _memo: &mut PruneAndTransformRecursiveMemo,
+      -) {
+      -    transform_all(root_arc, |acc| {
+      -        if acc.stored_trie_nodes().is_empty() {
+      -            return Some(acc.clone());
+      -        }
+      -
+      -        let destination = destination_provider();
+      -
+      -        for source_wrapper in acc.stored_trie_nodes() {
+      -            let source_arc = source_wrapper.as_arc().clone();
+      -
+      -            let inserter = crate::datastructures::trie::EdgeInserter::new(
+      -                god,
+      -                source_arc,
+      -                edge_key.clone(),
+      -                edge_value.clone(),
+      -                |e, n| *e |= n,
+      -                |node_value, _edge_value| node_value.live_tokens |= tokens_for_update,
+      -                |_, _| {}, // Unconditional insertion
+      -            );
+      -            inserter.try_destination(destination.clone()).expect("Cycle detected when adding precompute trie edges");
+      -        }
+      -
+      -        destination.write(god).expect("poison").value.live_tokens |= tokens_for_update;
+      -
+      -        let mut new_acc = acc.clone();
+      -        *new_acc.stored_trie_nodes_mut() = BTreeSet::from([destination]);
+      -        Some(new_acc)
+      -    });
+      -}
+      -
+      -pub(crate) fn merge_stored_trie_nodes(
+      -    root_arc: &mut Arc<GSSNode>,
+      -    _memo: &mut PruneAndTransformRecursiveMemo,
+      -    stored_trie_god: &StoredTrieGodWrapper,
+      -) {
+      -    let mut new_destinations = BTreeMap::new();
+      -
+      -    transform_all(root_arc, |acc| {
+      -        if !acc.stored_trie_nodes().iter().any(
+      -            |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != acc.llm_tokens_union
+      -        ) {
+      -            return Some(acc.clone());
+      -        }
+      -
+      -        let mut new_acc = acc.clone();
+      -        // Create a single new destination for this merge operation.
+      -        let new_destination = new_destinations.entry((new_acc.stored_trie_nodes().clone(), acc.llm_tokens_union.clone()))
+      -            .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(crate::constraint::PrecomputedNodeContents::internal()))))
+      -            .clone();
+      -
+      -        let edge_key = (0, new_acc.llm_tokens_union.clone());
+      -        let edge_value = crate::constraint::StateIDBV::max_ones();
+      -        let tokens_for_edge = new_acc.llm_tokens_union.clone();
+      -
+      -        for source_wrapper in new_acc.stored_trie_nodes() {
+      -            let source_arc = source_wrapper.as_arc().clone();
+      -
+      -            let inserter = crate::datastructures::trie::EdgeInserter::new(
+      -                stored_trie_god,
+      -                source_arc,
+      -                edge_key.clone(),
+      -                edge_value.clone(),
+      -                |e, n| *e |= n,
+      -                |node_value, _edge_value| node_value.live_tokens |= &tokens_for_edge,
+      -                |_, _| {}, // Unconditional insertion
+      -            );
+      -            inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging stored_trie nodes; this should be impossible.");
+      -        }
+      -
+      -        new_destination.write(stored_trie_god).expect("poison").value.live_tokens |= &tokens_for_edge;
+      -
+      -        new_acc.stored_trie_nodes = BTreeSet::from([new_destination]);
+      -        Some(new_acc)
+      -    });
+      -}
+      -
+      -pub(crate) fn is_simple_gss(
+      -    node: &Arc<GSSNode>,
+      -    hallucinated_state_id: StateID,
+      -) -> Option<(StateID, Arc<Acc>)> {
+      -    if let Some((path, acc)) = node.inner.as_single_path() {
+      -        // Path must have length 2. The path is from leaf to root.
+      -        if path.len() == 2 {
+      -            let edge_to_leaf = &path[0];
+      -            let edge_to_middle = &path[1];
+      -
+      -            // The edge into the leaf must be the hallucinated one.
+      -            if edge_to_leaf.state_id == hallucinated_state_id {
+      -                let state_id_x = edge_to_middle.state_id;
+      -                // The leaf must have stored_trie_nodes.
+      -                if !acc.stored_trie_nodes().is_empty() {
+      -                    return Some((state_id_x, Arc::new(acc)));
+      -                }
+      -            }
+      -        }
+      -    }
+      -    None
+      -}
+      -
+      -// helper used by parser logging
+      -pub fn popn_collect_isolated_parents(node_arc: &Arc<GSSNode>, n: usize) -> Vec<(StateID, Arc<GSSNode>)> {
+      -    let popped = node_arc.inner.popn(n as isize);
+      -    let mut out = Vec::new();
+      -    for edge in popped.peek() {
+      -        let iso_inner = popped.isolate(Some(edge.clone()));
+      -        let num_paths = iso_inner.num_paths();
+      -        if num_paths > 0 {
+      -            let gss_node = Arc::new(GSSNode { inner: iso_inner });
+      -            for _ in 0..num_paths {
+      -                out.push((edge.state_id, gss_node.clone()));
+      -            }
+      -        }
+      -    }
+      -    out
+      -}
+      -
+      -// Compatibility for formatting acc (used by printer)
+      -pub(crate) fn format_acc(
+      -    acc: &Acc,
+      -    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+      -    original_internal_bimap: Option<&BTreeMap<usize, usize>>,
+      -    llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+      -    config: &GSSPrintConfig,
+      -) -> String {
+      -    let _ = (original_internal_bimap, llm_token_map);
+      -
+      -    if config.verbose {
+      -        // In verbose mode, print the full debug representation of the Acc.
+      -        return format!("[acc: {:?}]", acc);
+      -    }
+      -
+      -    let summarize_llm = |bv: &HybridBitset, label: &str| -> Option<String> {
+      -        if *bv == HybridBitset::max_ones() {
+      -            return None;
+      -        }
+      -        if bv.is_empty() {
+      -            return Some(format!("{}=∅", label));
+      -        }
+      -        let total = bv.len();
+      -        const MAX_SHOW: usize = 8;
+      -        let sample: Vec<String> = bv.iter().take(MAX_SHOW).map(|id| id.to_string()).collect();
+      -        if total > MAX_SHOW {
+      -            Some(format!("{}({}): [{} …]", label, total, sample.join(", ")))
+      -        } else {
+      -            Some(format!("{}({}): [{}]", label, total, sample.join(", ")))
+      -        }
+      -    };
+      -
+      -    let summarize_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> Option<String> {
+      -        let mut any_disallowed = false;
+      -        let mut parts = Vec::new();
+      -        const MAX_RANGES_TO_SHOW: usize = 3;
+      -        for (range, allowed_bv) in allowed_terminals.range_values() {
+      -            let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
+      -            if disallowed_bv.is_empty() {
+      -                continue;
+      -            }
+      -            any_disallowed = true;
+      -            if parts.len() >= MAX_RANGES_TO_SHOW {
+      -                break;
+      -            }
+      -            let range_str = if range.start() == range.end() {
+      -                format!("{}", range.start())
+      -            } else {
+      -                format!("{}..={}", range.start(), range.end())
+      -            };
+      -
+      -            if disallowed_bv == HybridBitset::max_ones() {
+      -                parts.push(format!("state(s) {}: all", range_str));
+      -                continue;
+      -            }
+      -
+      -            const MAX_NAMES_TO_SHOW: usize = 5;
+      -            let num_disallowed = disallowed_bv.len();
+      -            let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES_TO_SHOW)
+      -                .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
+      -                    .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.to_string()))
+      -                .collect();
+      -            let names_str = names.join(", ");
+      -
+      -            if num_disallowed > MAX_NAMES_TO_SHOW {
+      -                parts.push(format!("state(s) {} ({}): [{}, …]", range_str, num_disallowed, names_str));
+      -            } else {
+      -                parts.push(format!("state(s) {}: [{}]", range_str, names_str));
+      -            }
+      -        }
+      -        if !any_disallowed {
+      -            None
+      -        } else if parts.is_empty() {
+      -            Some(format!("Disallowed {}(…)", label))
+      -        } else {
+      -            Some(format!("Disallowed {}({})", label, parts.join("; ")))
+      -        }
+      -    };
+      -
+      -    let union_llm_opt = summarize_llm(&acc.llm_tokens_union, "LLM(U)");
+      -    let union_terminals_opt = summarize_disallowed_terminals(&acc.terminals_union, "Term(U)");
+      -
+      -    let stored_trie_nodes_str = {
+      -        const MAX_PTRS_TO_SHOW: usize = 5;
+      -        let n = acc.stored_trie_nodes().len();
+      -        if n == 0 {
+      -            None
+      -        } else if n <= MAX_PTRS_TO_SHOW {
+      -            let ptrs: Vec<String> = acc
+      -                .stored_trie_nodes()
+      -                .iter()
+      -                .map(|wrapper| format!("{}", wrapper.as_arc()))
+      -                .collect();
+                   Some(format!("Trie(n={}, [{}])", n, ptrs.join(", ")))
+               } else {
+                   let ptrs_sample: Vec<String> = acc
 
+      ```
+    metadata:
+  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
+      applied now.
+    metadata:
+  - assistant: |-
+      ```diff
+      --- a/src/datastructures/gss_leveled_adapter.rs
+      +++ b/src/datastructures/gss_leveled_adapter.rs
+      @@ -694,79 +694,129 @@
+       pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
+           root_arc: &mut Arc<GSSNode>,
+           allowed_tokens: &LLMTokenBV,
+           _memo: &mut PruneAndTransformRecursiveMemo,
+           stored_trie_god: &StoredTrieGodWrapper,
+       ) {
+      -    let mut new_destinations = BTreeMap::new();
+      -    transform_all(root_arc, |a| {
+      -        let mut needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
+      -        let mut keep: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
+      -
+      -        for node in a.stored_trie_nodes() {
+      -            let live = node
+      +    // --- Global Analysis: Find common subsets (macros) ---
+      +    let all_accs: Vec<Acc> = root_arc.inner.to_stacks().into_iter().map(|(_, acc)| acc).collect();
+      +    let mut all_needs_edge_sets = Vec::new();
+      +    for acc in &all_accs {
+      +        let needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = acc
+      +            .stored_trie_nodes()
+      +            .iter()
+      +            .filter(|node| {
+      +                !node
+      +                    .as_arc()
+      +                    .read(stored_trie_god)
+      +                    .expect("poison")
+      +                    .value
+      +                    .live_tokens
+      +                    .is_subset(allowed_tokens)
+      +            })
+      +            .cloned()
+      +            .collect();
+      +        if !needs_edge.is_empty() {
+      +            all_needs_edge_sets.push(needs_edge);
+      +        }
+      +    }
+      +
+      +    let mut pair_counts: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, usize> = BTreeMap::new();
+      +    for needs_edge_set in &all_needs_edge_sets {
+      +        let nodes: Vec<_> = needs_edge_set.iter().cloned().collect();
+      +        if nodes.len() >= 2 {
+      +            for i in 0..nodes.len() {
+      +                for j in (i + 1)..nodes.len() {
+      +                    let mut pair = BTreeSet::new();
+      +                    pair.insert(nodes[i].clone());
+      +                    pair.insert(nodes[j].clone());
+      +                    *pair_counts.entry(pair).or_insert(0) += 1;
+      +                }
+      +            }
+      +        }
+      +    }
+      +
+      +    let mut macros: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, StoredPrecomputeNodeIndex> = BTreeMap::new();
+      +    for (pair, count) in pair_counts {
+      +        if count > 1 { // Only create macros for pairs that are reused.
+      +            let dest_node = StoredPrecomputeNodeIndex::new(
+      +                stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+      +                    crate::constraint::PrecomputedNodeContents::internal(),
+      +                )),
+      +            );
+      +            macros.insert(pair, dest_node);
+      +        }
+      +    }
+      +    let sorted_macros: Vec<_> = macros.into_iter().collect();
+      +
+      +    // --- Transformation ---
+      +    let mut new_destinations_for_leftovers = BTreeMap::new();
+      +    transform_all(root_arc, |acc| {
+      +        let mut na = acc.clone();
+      +        let original_nodes = na.stored_trie_nodes.clone();
+      +        let mut needs_edge: BTreeSet<_> = original_nodes
+      +            .iter()
+      +            .filter(|node| {
+      +                !node
+                       .as_arc()
+                       .read(stored_trie_god)
+                       .expect("poison")
+                       .value
+                       .live_tokens
+      -                .clone();
+      -            if live.is_subset(allowed_tokens) {
+      -                // No edge needed; keep this node unchanged.
+      -                keep.insert(node.clone());
+      -            } else {
+      -                // This node has tokens outside the allowed set; it needs an edge.
+      -                needs_edge.insert(node.clone());
+      -            }
+      -        }
+      -
+      -        if needs_edge.is_empty() {
+      -            return Some(a.clone());
+      -        }
+      -
+      -        // Look up or create a destination node for this set of sources.
+      -        let new_dest = new_destinations
+      -            .entry(needs_edge.clone())
+      -            .or_insert_with(|| {
+      -                StoredPrecomputeNodeIndex::new(
+      -                    stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+      -                        crate::constraint::PrecomputedNodeContents::internal(),
+      -                    )),
+      -                )
+      -            })
+      -            .clone();
+      -
+      -        // Insert edges from each source that needs it to the new destination.
+      -        let edge_key = (0, allowed_tokens.clone());
+      -        let edge_value = StateIDBV::max_ones();
+      -        for src in &needs_edge {
+      -            let inserter = crate::datastructures::trie::EdgeInserter::new(
+      -                stored_trie_god,
+      -                src.as_arc().clone(),
+      -                edge_key.clone(),
+      -                edge_value.clone(),
+      -                |e, n| *e |= n,
+      -                |node_value, _edge_value| node_value.live_tokens |= allowed_tokens,
+      -                |_, _| {}, // Unconditional insertion
+      -            );
+      -            inserter
+      -                .try_destination(new_dest.clone())
+      -                .expect("Cycle detected when adding allowed llm tokens on stored trie nodes");
+      -        }
+      -
+      -        // Ensure destination's live tokens reflect (at least) the allowed set.
+      -        new_dest
+      -            .write(stored_trie_god)
+      -            .expect("poison")
+      -            .value
+      -            .live_tokens
+      -            |= allowed_tokens;
+      -
+      -        // Build the final set: keep unchanged nodes and add the new destination.
+      -        let mut final_nodes = keep;
+      -        final_nodes.insert(new_dest);
+      -
+      -        let mut na = a.clone();
+      -        na.stored_trie_nodes = final_nodes;
+      -        Some(na)
+      -    });
+      +                    .is_subset(allowed_tokens)
+      +            })
+      +            .cloned()
+      +            .collect();
+      +
+      +        if needs_edge.is_empty() {
+      +            return Some(na);
+      +        }
+      +
+      +        let mut final_nodes = original_nodes.difference(&needs_edge).cloned().collect::<BTreeSet<_>>();
+      +
+      +        // Greedily apply discovered macros
+      +        for (macro_nodes, macro_dest) in &sorted_macros {
+      +            if macro_nodes.is_subset(&needs_edge) {
+      +                let edge_key = (0, allowed_tokens.clone());
+      +                let edge_value = StateIDBV::max_ones();
+      +                for src in macro_nodes {
+      +                    let inserter = crate::datastructures::trie::EdgeInserter::new(
+      +                        stored_trie_god,
+      +                        src.as_arc().clone(),
+      +                        edge_key.clone(),
+      +                        edge_value.clone(),
+      +                        |e, n| *e |= n,
+      +                        |node_value, _| node_value.live_tokens |= allowed_tokens,
+      +                        |_, _| {},
+      +                    );
+      +                    inserter.try_destination(macro_dest.clone()).expect("Cycle detected");
+      +                }
+      +                macro_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+      +                final_nodes.insert(macro_dest.clone());
+      +                needs_edge = needs_edge.difference(macro_nodes).cloned().collect();
+      +            }
+      +        }
+      +
+      +        // Handle leftovers using the original "macro for the whole set" logic
+      +        if !needs_edge.is_empty() {
+      +            let new_dest = new_destinations_for_leftovers
+      +                .entry(needs_edge.clone())
+      +                .or_insert_with(|| {
+      +                    StoredPrecomputeNodeIndex::new(
+      +                        stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+      +                            crate::constraint::PrecomputedNodeContents::internal(),
+      +                        )),
+      +                    )
+      +                })
+      +                .clone();
+      +
+      +            let edge_key = (0, allowed_tokens.clone());
+      +            let edge_value = StateIDBV::max_ones();
+      +            for src in &needs_edge {
+      +                let inserter = crate::datastructures::trie::EdgeInserter::new(
+      +                    stored_trie_god,
+      +                    src.as_arc().clone(),
+      +                    edge_key.clone(),
+      +                    edge_value.clone(),
+      +                    |e, n| *e |= n,
+      +                    |node_value, _| node_value.live_tokens |= allowed_tokens,
+      +                    |_, _| {},
+      +                );
+      +                inserter.try_destination(new_dest.clone()).expect("Cycle detected");
+      +            }
+      +            new_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+      +            final_nodes.insert(new_dest);
+      +        }
+      +
+      +        na.stored_trie_nodes = final_nodes;
+      +        Some(na)
+      +    });
+       }
       ```
     metadata:
   - user: |
@@ -3244,7 +4574,7 @@ messages:
       Applying patch to 'src/datastructures/gss_leveled_adapter.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/gss_leveled_adapter.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Cache destination node creation
-      in allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc"'
+  - user: 'Changes committed with message: "Refactor allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc
+      to use common pair detection for node consolidation."'
     metadata:
 ...

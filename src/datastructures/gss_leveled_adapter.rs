@@ -689,75 +689,136 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
     _memo: &mut PruneAndTransformRecursiveMemo,
     stored_trie_god: &StoredTrieGodWrapper,
 ) {
-    let mut new_destinations = BTreeMap::new();
-    transform_all(root_arc, |a| {
-        let mut needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
-        let mut keep: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
+    // --- Global Analysis: Find common subsets (macros) ---
+    let all_accs: Vec<Acc> = root_arc.inner.to_stacks().into_iter().map(|(_, acc)| acc).collect();
+    let mut all_needs_edge_sets = Vec::new();
+    for acc in &all_accs {
+        let needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = acc
+            .stored_trie_nodes()
+            .iter()
+            .filter(|node| {
+                !node
+                    .as_arc()
+                    .read(stored_trie_god)
+                    .expect("poison")
+                    .value
+                    .live_tokens
+                    .is_subset(allowed_tokens)
+            })
+            .cloned()
+            .collect();
+        if !needs_edge.is_empty() {
+            all_needs_edge_sets.push(needs_edge);
+        }
+    }
 
-        for node in a.stored_trie_nodes() {
-            let live = node
+    let mut pair_counts: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, usize> = BTreeMap::new();
+    for needs_edge_set in &all_needs_edge_sets {
+        let nodes: Vec<_> = needs_edge_set.iter().cloned().collect();
+        if nodes.len() >= 2 {
+            for i in 0..nodes.len() {
+                for j in (i + 1)..nodes.len() {
+                    let mut pair = BTreeSet::new();
+                    pair.insert(nodes[i].clone());
+                    pair.insert(nodes[j].clone());
+                    *pair_counts.entry(pair).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    let mut macros: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, StoredPrecomputeNodeIndex> = BTreeMap::new();
+    for (pair, count) in pair_counts {
+        if count > 1 { // Only create macros for pairs that are reused.
+            let dest_node = StoredPrecomputeNodeIndex::new(
+                stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                    crate::constraint::PrecomputedNodeContents::internal(),
+                )),
+            );
+            macros.insert(pair, dest_node);
+        }
+    }
+    let sorted_macros: Vec<_> = macros.into_iter().collect();
+
+    // --- Transformation ---
+    let mut new_destinations_for_leftovers = BTreeMap::new();
+    transform_all(root_arc, |acc| {
+        let mut na = acc.clone();
+        let original_nodes = na.stored_trie_nodes.clone();
+        let mut needs_edge: BTreeSet<_> = original_nodes
+            .iter()
+            .filter(|node| {
+                !node
                 .as_arc()
                 .read(stored_trie_god)
                 .expect("poison")
                 .value
                 .live_tokens
-                .clone();
-            if live.is_subset(allowed_tokens) {
-                // No edge needed; keep this node unchanged.
-                keep.insert(node.clone());
-            } else {
-                // This node has tokens outside the allowed set; it needs an edge.
-                needs_edge.insert(node.clone());
+                    .is_subset(allowed_tokens)
+            })
+            .cloned()
+            .collect();
+
+        if needs_edge.is_empty() {
+            return Some(na);
+        }
+
+        let mut final_nodes = original_nodes.difference(&needs_edge).cloned().collect::<BTreeSet<_>>();
+
+        // Greedily apply discovered macros
+        for (macro_nodes, macro_dest) in &sorted_macros {
+            if macro_nodes.is_subset(&needs_edge) {
+                let edge_key = (0, allowed_tokens.clone());
+                let edge_value = StateIDBV::max_ones();
+                for src in macro_nodes {
+                    let inserter = crate::datastructures::trie::EdgeInserter::new(
+                        stored_trie_god,
+                        src.as_arc().clone(),
+                        edge_key.clone(),
+                        edge_value.clone(),
+                        |e, n| *e |= n,
+                        |node_value, _| node_value.live_tokens |= allowed_tokens,
+                        |_, _| {},
+                    );
+                    inserter.try_destination(macro_dest.clone()).expect("Cycle detected");
+                }
+                macro_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+                final_nodes.insert(macro_dest.clone());
+                needs_edge = needs_edge.difference(macro_nodes).cloned().collect();
             }
         }
 
-        if needs_edge.is_empty() {
-            return Some(a.clone());
+        // Handle leftovers using the original "macro for the whole set" logic
+        if !needs_edge.is_empty() {
+            let new_dest = new_destinations_for_leftovers
+                .entry(needs_edge.clone())
+                .or_insert_with(|| {
+                    StoredPrecomputeNodeIndex::new(
+                        stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                            crate::constraint::PrecomputedNodeContents::internal(),
+                        )),
+                    )
+                })
+                .clone();
+
+            let edge_key = (0, allowed_tokens.clone());
+            let edge_value = StateIDBV::max_ones();
+            for src in &needs_edge {
+                let inserter = crate::datastructures::trie::EdgeInserter::new(
+                    stored_trie_god,
+                    src.as_arc().clone(),
+                    edge_key.clone(),
+                    edge_value.clone(),
+                    |e, n| *e |= n,
+                    |node_value, _| node_value.live_tokens |= allowed_tokens,
+                    |_, _| {},
+                );
+                inserter.try_destination(new_dest.clone()).expect("Cycle detected");
+            }
+            new_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+            final_nodes.insert(new_dest);
         }
 
-        // Look up or create a destination node for this set of sources.
-        let new_dest = new_destinations
-            .entry(needs_edge.clone())
-            .or_insert_with(|| {
-                StoredPrecomputeNodeIndex::new(
-                    stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                        crate::constraint::PrecomputedNodeContents::internal(),
-                    )),
-                )
-            })
-            .clone();
-
-        // Insert edges from each source that needs it to the new destination.
-        let edge_key = (0, allowed_tokens.clone());
-        let edge_value = StateIDBV::max_ones();
-        for src in &needs_edge {
-            let inserter = crate::datastructures::trie::EdgeInserter::new(
-                stored_trie_god,
-                src.as_arc().clone(),
-                edge_key.clone(),
-                edge_value.clone(),
-                |e, n| *e |= n,
-                |node_value, _edge_value| node_value.live_tokens |= allowed_tokens,
-                |_, _| {}, // Unconditional insertion
-            );
-            inserter
-                .try_destination(new_dest.clone())
-                .expect("Cycle detected when adding allowed llm tokens on stored trie nodes");
-        }
-
-        // Ensure destination's live tokens reflect (at least) the allowed set.
-        new_dest
-            .write(stored_trie_god)
-            .expect("poison")
-            .value
-            .live_tokens
-            |= allowed_tokens;
-
-        // Build the final set: keep unchanged nodes and add the new destination.
-        let mut final_nodes = keep;
-        final_nodes.insert(new_dest);
-
-        let mut na = a.clone();
         na.stored_trie_nodes = final_nodes;
         Some(na)
     });
