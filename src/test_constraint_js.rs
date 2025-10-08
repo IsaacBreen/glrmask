@@ -598,8 +598,8 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         llm_token_map.clone(),
         LLMTokenID(dummy_eof_placeholder),
         max_original_llm_token_id_val,
-        &GrammarConstraintConfig::default(),
-        // &GrammarConstraintConfig::off(),
+        // &GrammarConstraintConfig::default(),
+        &GrammarConstraintConfig::off(),
     );
     // grammar_constraint.dump_precomputed1();
     // grammar_constraint.dump_precomputed2();
