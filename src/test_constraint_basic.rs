@@ -1516,7 +1516,51 @@ fn test_constraint_expression_cycle() {
 #[test]
 fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load and compile the grammar from the EBNF file
-    let ebnf_grammar = fs::read_to_string("src/js_simplified3.ebnf")?;
+    let ebnf_grammar = indoc! {r#"
+        // Instruct the parser to ignore Whitespace and single-line Comments.
+        #![ignore(IGNORE)]
+
+        program ::= statement_list? EOF;
+        EOF ::= '<|EOF|>';
+
+        // --- Lexical Grammar (Minimal) ---
+        IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
+
+        // --- Statements (Core Imperative Set) ---
+        statement_list ::= statement+ ;
+
+        statement ::=
+            block
+          | declaration_statement
+          | if_statement
+          | while_statement
+          | expression_statement
+          ;
+
+        block ::= '{' statement_list? '}' ;
+        declaration_statement ::= 'let' IDENTIFIER ( '=' expression )? ';' ;
+        if_statement ::= 'if' '(' expression ')' statement ; // No 'else'
+        while_statement ::= 'while' '(' expression ')' statement ;
+        expression_statement ::= expression ';' ;
+
+        // --- Expressions (Completely Flattened) ---
+        expression ::= term ( ( '+' | '*' | '==' ) term )* ; // All operators have same precedence
+
+        term ::= ( '-' | '!' )? primary ; // Unary operators
+
+        primary ::=
+            IDENTIFIER
+          | literal
+          | '(' expression ')'
+          ;
+
+        // --- Literals and Terminals (Minimal) ---
+        literal ::= 'true' | 'false' | NUMERIC_LITERAL | STRING_LITERAL ;
+
+        NUMERIC_LITERAL ::= [0-9]+ ; // Integers only
+        STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
+        IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+    "#};
     let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
 
