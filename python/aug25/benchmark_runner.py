@@ -249,20 +249,37 @@ def run_benchmark(args, run_index: int = 0):
             Stats.get().reset()
             gc.disable()
             t_start_mask = time.perf_counter()
-            mask_rs = model.get_mask()
+            result = model.get_mask()
             t_end_mask = time.perf_counter()
             gc.enable()
-            get_mask_timings.append(t_end_mask - t_start_mask)
+
+            timing = t_end_mask - t_start_mask
+            mask_rs = result
+
+            if isinstance(result, dict) and result.get("type") == "timed_output":
+                if "output" in result and "time_sec" in result:
+                    mask_rs = result["output"]
+                    timing = float(result["time_sec"])
+                else:
+                    raise ValueError("Model returned timed_output dict for get_mask without 'output' or 'time_sec'.")
+
+            get_mask_timings.append(timing)
             # Export the mask for later cross-model comparison during analysis
             masks_ranges.append(mask_rs.to_ranges())
 
         # Advance the state
         gc.disable()
         t_start_commit = time.perf_counter()
-        model.commit(token_id)
+        result = model.commit(token_id)
         t_end_commit = time.perf_counter()
         gc.enable()
-        commit_timings.append(t_end_commit - t_start_commit)
+        timing = t_end_commit - t_start_commit
+        if isinstance(result, dict) and result.get("type") == "timed_output":
+            if "time_sec" in result:
+                timing = float(result["time_sec"])
+            else:
+                raise ValueError("Model returned timed_output dict for commit without 'time_sec'.")
+        commit_timings.append(timing)
 
     print("--- Benchmark finished ---")
 

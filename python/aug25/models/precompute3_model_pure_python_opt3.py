@@ -766,7 +766,7 @@ class Model(GraphProvider):
                         for sid in range(start, end + 1):
                             yield (edge.pop, sid, dest.dest_idx)
 
-    def commit(self, token_id: int):
+    def commit(self, token_id: int) -> Optional[Dict]:
         stats = Stats.get()
         stats.start('commit')
         token_bytes = self.id_to_token[token_id]
@@ -838,6 +838,11 @@ class Model(GraphProvider):
         self.state = merged
         stats.stop('commit')
 
+        return {
+            "type": "timed_output",
+            "time_sec": stats.times.get('commit', 0.0),
+        }
+
     def _process_token(self, gss: GSS, terminal_id: int) -> GSS:
         stats = Stats.get()
         p = 'commit.main_loop._process_token'
@@ -900,7 +905,7 @@ class Model(GraphProvider):
         stats.stop(f'{p}.total')
         return result
 
-    def get_mask(self) -> LLMTokenSet:
+    def get_mask(self) -> Union[RangeSetOut, Dict]:
         stats = Stats.get()
         stats.start('get_mask')
         stats.counts['get_mask.traversal.max_depth'] = 0
@@ -1113,7 +1118,11 @@ class Model(GraphProvider):
             if stats.times['get_mask.main_loop']*1000 > 1:
                 stats.report()
 
-        return original_indices
+        return {
+            "type": "timed_output",
+            "output": original_indices,
+            "time_sec": stats.times.get('get_mask.main_loop', 0.0),
+        }
 
     def finalize(self):
         """Called at the end of a benchmark run to perform any final actions, like printing stats."""
