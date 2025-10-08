@@ -29,22 +29,67 @@ def _normalize_intervals(ranges: Optional[List[List[int]]]) -> Tuple[Tuple[int, 
     merged.append((cs, ce))
     return tuple(merged)
 
-def _ranges_to_token_str(ranges: Tuple[Tuple[int, int], ...], id_to_token: Dict[int, bytes]) -> str:
-    """Converts token ID ranges to a descriptive string including token representations."""
+
+def _print_vocab_summary(id_to_token: Dict[int, bytes]):
+    """Prints a summarized, readable version of the vocabulary."""
+    print("\n--- Vocabulary Reference (Baseline) ---")
+    if len(id_to_token) > 300:
+        print(f"  Vocabulary has {len(id_to_token)} tokens (too large to display).")
+        print("-------------------------------------\n")
+        return
+
     if not id_to_token:
-        return str(ranges)  # Fallback if vocab is missing
+        print("  (Vocabulary is empty or was not loaded)")
+        print("-------------------------------------\n")
+        return
 
-    tokens = []
+    sorted_ids = sorted(id_to_token.keys())
+    digits = {ord(c) for c in "0123456789"}
+    lower = {ord(c) for c in "abcdefghijklmnopqrstuvwxyz"}
+    upper = {ord(c) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+
+    i = 0
+    while i < len(sorted_ids):
+        start_id = sorted_ids[i]
+        end_id = start_id
+        j = i + 1
+        while j < len(sorted_ids) and sorted_ids[j] == end_id + 1:
+            end_id = sorted_ids[j]
+            j += 1
+
+        start_tok, end_tok = id_to_token[start_id], id_to_token[end_id]
+        range_str = f"[{start_id}]" if start_id == end_id else f"[{start_id}..{end_id}]"
+
+        token_range = range(start_id, end_id + 1)
+        is_single_byte = all(len(id_to_token.get(k, b'')) == 1 for k in token_range)
+        
+        group_name = ""
+        if is_single_byte and len(token_range) > 2:
+            bytes_in_range = {id_to_token[k][0] for k in token_range}
+            if bytes_in_range.issubset(digits): group_name = " (digits)"
+            elif bytes_in_range.issubset(lower): group_name = " (lowercase)"
+            elif bytes_in_range.issubset(upper): group_name = " (uppercase)"
+
+        if start_id == end_id:
+            print(f"  - {range_str:<12}: {repr(start_tok)}")
+        else:
+            print(f"  - {range_str:<12}: {repr(start_tok)}..{repr(end_tok)}{group_name}")
+        i = j
+    print("-------------------------------------\n")
+
+def _format_ranges_as_tokens(ranges: Tuple[Tuple[int, int], ...], id_to_token: Dict[int, bytes]) -> str:
+    """Converts token ID ranges to a summary string of token representations."""
+    if not id_to_token:
+        return "[(vocab not loaded)]"
+    parts = []
     for start, end in ranges:
-        for i in range(start, end + 1):
-            tokens.append(repr(id_to_token.get(i, f"<?ID:{i}?>")))
-
-    MAX_TOKENS_TO_SHOW = 20
-    token_str = ", ".join(tokens[:MAX_TOKENS_TO_SHOW])
-    if len(tokens) > MAX_TOKENS_TO_SHOW:
-        token_str += f", ... ({len(tokens) - MAX_TOKENS_TO_SHOW} more)"
-
-    return f"{ranges} -> [{token_str}]"
+        start_tok_repr = repr(id_to_token.get(start, f"<?ID:{start}?>"))
+        if start == end:
+            parts.append(start_tok_repr)
+        else:
+            end_tok_repr = repr(id_to_token.get(end, f"<?ID:{end}?>"))
+            parts.append(f"{start_tok_repr}..{end_tok_repr}")
+    return f"[{', '.join(parts)}]"
 
 
 def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None, skip_plots: bool = False):
@@ -225,6 +270,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
     # Compute per-model mismatch indices against the baseline
     mismatch_indices_by_model: Dict[str, List[int]] = {}
     equivalent_by_model: Dict[str, bool] = {}
+    vocab_printed_for_baseline: bool = False
 
     have_masks = all(len(v) > 0 for v in masks_by_model.values())
 
@@ -242,9 +288,15 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
         mismatches: List[int] = []
         for i in range(length):
             if baseline_masks[i] != masks[i]:
+                if not vocab_printed_for_baseline:
+                    _print_vocab_summary(baseline_vocab)
+                    vocab_printed_for_baseline = True
+
                 print(f"Mask mismatch at token index {i} for model {model_name}")
-                print(f"Baseline: {_ranges_to_token_str(baseline_masks[i], baseline_vocab)}")
-                print(f"Current:  {_ranges_to_token_str(masks[i], current_vocab)}")
+                print(f"  Baseline (numeric): {baseline_masks[i]}")
+                print(f"  Current (numeric):  {masks[i]}")
+                print(f"  Baseline (tokens):  {_format_ranges_as_tokens(baseline_masks[i], baseline_vocab)}")
+                print(f"  Current (tokens):   {_format_ranges_as_tokens(masks[i], current_vocab)}")
                 mismatches.append(i)
         # If lengths differ, count extra indices as mismatches (conservative)
         if len(baseline_masks) != len(masks):

@@ -12,7 +12,7 @@ local_system:
     - python/aug25/reduce_constraint.py
     - python/aug25/stats.py
     - python/run_benchmarks.sh
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     python/aug25/models/precompute3_model_pure_python_opt3.py: |
@@ -6013,22 +6013,67 @@ local_system:
           merged.append((cs, ce))
           return tuple(merged)
 
-      def _ranges_to_token_str(ranges: Tuple[Tuple[int, int], ...], id_to_token: Dict[int, bytes]) -> str:
-          """Converts token ID ranges to a descriptive string including token representations."""
+
+      def _print_vocab_summary(id_to_token: Dict[int, bytes]):
+          """Prints a summarized, readable version of the vocabulary."""
+          print("\n--- Vocabulary Reference (Baseline) ---")
+          if len(id_to_token) > 300:
+              print(f"  Vocabulary has {len(id_to_token)} tokens (too large to display).")
+              print("-------------------------------------\n")
+              return
+
           if not id_to_token:
-              return str(ranges)  # Fallback if vocab is missing
+              print("  (Vocabulary is empty or was not loaded)")
+              print("-------------------------------------\n")
+              return
 
-          tokens = []
+          sorted_ids = sorted(id_to_token.keys())
+          digits = {ord(c) for c in "0123456789"}
+          lower = {ord(c) for c in "abcdefghijklmnopqrstuvwxyz"}
+          upper = {ord(c) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+
+          i = 0
+          while i < len(sorted_ids):
+              start_id = sorted_ids[i]
+              end_id = start_id
+              j = i + 1
+              while j < len(sorted_ids) and sorted_ids[j] == end_id + 1:
+                  end_id = sorted_ids[j]
+                  j += 1
+
+              start_tok, end_tok = id_to_token[start_id], id_to_token[end_id]
+              range_str = f"[{start_id}]" if start_id == end_id else f"[{start_id}..{end_id}]"
+
+              token_range = range(start_id, end_id + 1)
+              is_single_byte = all(len(id_to_token.get(k, b'')) == 1 for k in token_range)
+              
+              group_name = ""
+              if is_single_byte and len(token_range) > 2:
+                  bytes_in_range = {id_to_token[k][0] for k in token_range}
+                  if bytes_in_range.issubset(digits): group_name = " (digits)"
+                  elif bytes_in_range.issubset(lower): group_name = " (lowercase)"
+                  elif bytes_in_range.issubset(upper): group_name = " (uppercase)"
+
+              if start_id == end_id:
+                  print(f"  - {range_str:<12}: {repr(start_tok)}")
+              else:
+                  print(f"  - {range_str:<12}: {repr(start_tok)}..{repr(end_tok)}{group_name}")
+              i = j
+          print("-------------------------------------\n")
+
+      def _format_ranges_as_tokens(ranges: Tuple[Tuple[int, int], ...], id_to_token: Dict[int, bytes]) -> str:
+          """Converts token ID ranges to a summary string of token representations."""
+          if not id_to_token:
+              return "[(vocab not loaded)]"
+          parts = []
           for start, end in ranges:
-              for i in range(start, end + 1):
-                  tokens.append(repr(id_to_token.get(i, f"<?ID:{i}?>")))
-
-          MAX_TOKENS_TO_SHOW = 20
-          token_str = ", ".join(tokens[:MAX_TOKENS_TO_SHOW])
-          if len(tokens) > MAX_TOKENS_TO_SHOW:
-              token_str += f", ... ({len(tokens) - MAX_TOKENS_TO_SHOW} more)"
-
-          return f"{ranges} -> [{token_str}]"
+              start_tok_repr = repr(id_to_token.get(start, f"<?ID:{start}?>"))
+              if start == end:
+                  parts.append(start_tok_repr)
+              else:
+                  end_tok_repr = repr(id_to_token.get(end, f"<?ID:{end}?>"))
+                  parts.append(f"{start_tok_repr}..{end_tok_repr}")
+          return f"[{', '.join(parts)}]"
 
 
       def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None, skip_plots: bool = False):
@@ -6209,6 +6254,7 @@ local_system:
           # Compute per-model mismatch indices against the baseline
           mismatch_indices_by_model: Dict[str, List[int]] = {}
           equivalent_by_model: Dict[str, bool] = {}
+          vocab_printed_for_baseline: bool = False
 
           have_masks = all(len(v) > 0 for v in masks_by_model.values())
 
@@ -6226,9 +6272,15 @@ local_system:
               mismatches: List[int] = []
               for i in range(length):
                   if baseline_masks[i] != masks[i]:
+                      if not vocab_printed_for_baseline:
+                          _print_vocab_summary(baseline_vocab)
+                          vocab_printed_for_baseline = True
+
                       print(f"Mask mismatch at token index {i} for model {model_name}")
-                      print(f"Baseline: {_ranges_to_token_str(baseline_masks[i], baseline_vocab)}")
-                      print(f"Current:  {_ranges_to_token_str(masks[i], current_vocab)}")
+                      print(f"  Baseline (numeric): {baseline_masks[i]}")
+                      print(f"  Current (numeric):  {masks[i]}")
+                      print(f"  Baseline (tokens):  {_format_ranges_as_tokens(baseline_masks[i], baseline_vocab)}")
+                      print(f"  Current (tokens):   {_format_ranges_as_tokens(masks[i], current_vocab)}")
                       mismatches.append(i)
               # If lengths differ, count extra indices as mismatches (conservative)
               if len(baseline_masks) != len(masks):
@@ -14872,5 +14924,248 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Enhance benchmark analyzer to display
       token representations for mask mismatches by loading vocabulary."'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt3.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/benchmark_analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/benchmark_runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/common_interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/create_additional_benchmark_plots.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/equality.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/optimization_coordinator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/optimizer_general.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/reduce_constraint.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/stats.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/run_benchmarks.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      ```
+      --- Aggregating results from multiple runs using 'min' ---
+      Selected baseline: bruteforce_model__js_grammar_constraint
+      Mask mismatch at token index 1 for model precompute3_model_pure_python_opt3__js_grammar_constraint
+      Baseline: ((9, 10), (14, 24), (26, 26), (28, 28), (32, 57), (62, 62), (64, 89), (95, 96)) -> [b'*', b'+', b'/', b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b';', b'=', b'A', b'B', b'C', b'D', b'E', ... (50 more)]
+      Current:  ((14, 14), (26, 26), (95, 96)) -> [b'/', b';', b'\n', b' ']
+      ```
+      This is quite hard to read. I don't want to see every single token, just the start and end tokens of each range. You can assume that I know which tokens are adjacent.
+      Also I can barely make it out when it's on the same line as the numeric ranges. I think we gotta show the two numeric range sets baseline/current on consecutive lines, then show the two pretty token sets...
+
+      Also, print the whole vocab prettily and readably before that as a reference. Think about the best way to show it.
+      Maybe if there's more than 300 tokens, don't show them all. (300 because that lets us display 256, which is what we have if every byte is a token.)
+      eg we can group 0-9 if they're next to eachother, and just show the start and end token IDs and the start and end token.
+      And same for lowercase letters and uppercase letters...
+    metadata:
+  - assistant: |-
+      Of course. That's a great suggestion for improving readability. Here are the step-by-step instructions and the git diff to make the mismatch output clearer and provide a vocabulary reference.
+
+      ### Step-by-step Instructions
+
+      All changes will be in the file `python/aug25/benchmark_analyzer.py`.
+
+      1.  **Replace Token Formatting Function**
+
+          In `python/aug25/benchmark_analyzer.py`, delete the existing `_ranges_to_token_str` function.
+
+      2.  **Add New Helper Functions**
+
+          In its place (after the `_normalize_intervals` function), add two new helper functions:
+          *   `_print_vocab_summary`: This function will print a summarized, readable version of a model's vocabulary. It intelligently groups consecutive ranges of tokens like digits and letters.
+          *   `_format_ranges_as_tokens`: This function will create a compact string representing the start and end tokens for each range in a mask, e.g., `[b'*'..b'+', b'/']`.
+
+      3.  **Update Mismatch Reporting in `analyze_results`**
+
+          *   In the `analyze_results` function, just before the loop that starts with `for model_name, masks in masks_by_model.items():`, add a new flag: `vocab_printed_for_baseline = False`. This will ensure the vocabulary is only printed once.
+          *   Find the `if baseline_masks[i] != masks[i]:` block where mismatches are reported.
+          *   Inside this block, add logic to check if `vocab_printed_for_baseline` is false. If it is, call the new `_print_vocab_summary` function and set the flag to `True`.
+          *   Replace the old two-line `print` statement with a new four-line format that clearly separates the numeric ranges from the token representations for both the baseline and current model masks.
+
+      ### Git Diff
+
+      Here is the git diff to apply these changes.
+
+      ```diff
+      diff --git a/python/aug25/benchmark_analyzer.py b/python/aug25/benchmark_analyzer.py
+      --- a/python/aug25/benchmark_analyzer.py
+      +++ b/python/aug25/benchmark_analyzer.py
+      @@ -23,23 +23,61 @@
+           merged.append((cs, ce))
+           return tuple(merged)
+       
+      -def _ranges_to_token_str(ranges: Tuple[Tuple[int, int], ...], id_to_token: Dict[int, bytes]) -> str:
+      -    """Converts token ID ranges to a descriptive string including token representations."""
+      +
+      +def _print_vocab_summary(id_to_token: Dict[int, bytes]):
+      +    """Prints a summarized, readable version of the vocabulary."""
+      +    print("\n--- Vocabulary Reference (Baseline) ---")
+      +    if len(id_to_token) > 300:
+      +        print(f"  Vocabulary has {len(id_to_token)} tokens (too large to display).")
+      +        print("-------------------------------------\n")
+      +        return
+      +
+      +    if not id_to_token:
+      +        print("  (Vocabulary is empty or was not loaded)")
+      +        print("-------------------------------------\n")
+      +        return
+      +
+      +    sorted_ids = sorted(id_to_token.keys())
+      +    digits = {ord(c) for c in "0123456789"}
+      +    lower = {ord(c) for c in "abcdefghijklmnopqrstuvwxyz"}
+      +    upper = {ord(c) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+      +
+      +    i = 0
+      +    while i < len(sorted_ids):
+      +        start_id = sorted_ids[i]
+      +        end_id = start_id
+      +        j = i + 1
+      +        while j < len(sorted_ids) and sorted_ids[j] == end_id + 1:
+      +            end_id = sorted_ids[j]
+      +            j += 1
+      +
+      +        start_tok, end_tok = id_to_token[start_id], id_to_token[end_id]
+      +        range_str = f"[{start_id}]" if start_id == end_id else f"[{start_id}..{end_id}]"
+      +
+      +        token_range = range(start_id, end_id + 1)
+      +        is_single_byte = all(len(id_to_token.get(k, b'')) == 1 for k in token_range)
+      +        
+      +        group_name = ""
+      +        if is_single_byte and len(token_range) > 2:
+      +            bytes_in_range = {id_to_token[k][0] for k in token_range}
+      +            if bytes_in_range.issubset(digits): group_name = " (digits)"
+      +            elif bytes_in_range.issubset(lower): group_name = " (lowercase)"
+      +            elif bytes_in_range.issubset(upper): group_name = " (uppercase)"
+      +
+      +        if start_id == end_id:
+      +            print(f"  - {range_str:<12}: {repr(start_tok)}")
+      +        else:
+      +            print(f"  - {range_str:<12}: {repr(start_tok)}..{repr(end_tok)}{group_name}")
+      +        i = j
+      +    print("-------------------------------------\n")
+      +
+      +def _format_ranges_as_tokens(ranges: Tuple[Tuple[int, int], ...], id_to_token: Dict[int, bytes]) -> str:
+      +    """Converts token ID ranges to a summary string of token representations."""
+           if not id_to_token:
+      -        return str(ranges)  # Fallback if vocab is missing
+      -
+      -    tokens = []
+      +        return "[(vocab not loaded)]"
+      +    parts = []
+           for start, end in ranges:
+      -        for i in range(start, end + 1):
+      -            tokens.append(repr(id_to_token.get(i, f"<?ID:{i}?>")))
+      -
+      -    MAX_TOKENS_TO_SHOW = 20
+      -    token_str = ", ".join(tokens[:MAX_TOKENS_TO_SHOW])
+      -    if len(tokens) > MAX_TOKENS_TO_SHOW:
+      -        token_str += f", ... ({len(tokens) - MAX_TOKENS_TO_SHOW} more)"
+      -
+      -    return f"{ranges} -> [{token_str}]"
+      +        start_tok_repr = repr(id_to_token.get(start, f"<?ID:{start}?>"))
+      +        if start == end:
+      +            parts.append(start_tok_repr)
+      +        else:
+      +            end_tok_repr = repr(id_to_token.get(end, f"<?ID:{end}?>"))
+      +            parts.append(f"{start_tok_repr}..{end_tok_repr}")
+      +    return f"[{', '.join(parts)}]"
+       
+       
+       def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None, skip_plots: bool = False):
+      @@ -179,6 +217,7 @@
+           # Compute per-model mismatch indices against the baseline
+           mismatch_indices_by_model: Dict[str, List[int]] = {}
+           equivalent_by_model: Dict[str, bool] = {}
+      +    vocab_printed_for_baseline: bool = False
+       
+           have_masks = all(len(v) > 0 for v in masks_by_model.values())
+       
+      @@ -195,10 +234,15 @@
+               mismatches: List[int] = []
+               for i in range(length):
+                   if baseline_masks[i] != masks[i]:
+      +                if not vocab_printed_for_baseline:
+      +                    _print_vocab_summary(baseline_vocab)
+      +                    vocab_printed_for_baseline = True
+      +
+                       print(f"Mask mismatch at token index {i} for model {model_name}")
+      -                print(f"Baseline: {_ranges_to_token_str(baseline_masks[i], baseline_vocab)}")
+      -                print(f"Current:  {_ranges_to_token_str(masks[i], current_vocab)}")
+      +                print(f"  Baseline (numeric): {baseline_masks[i]}")
+      +                print(f"  Current (numeric):  {masks[i]}")
+      +                print(f"  Baseline (tokens):  {_format_ranges_as_tokens(baseline_masks[i], baseline_vocab)}")
+      +                print(f"  Current (tokens):   {_format_ranges_as_tokens(masks[i], current_vocab)}")
+                       mismatches.append(i)
+               # If lengths differ, count extra indices as mismatches (conservative)
+               if len(baseline_masks) != len(masks):
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/benchmark_analyzer.py
+      Applying patch to 'python/aug25/benchmark_analyzer.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/benchmark_analyzer.py.
+    metadata:
+  - user: 'Changes committed with message: "Enhance mask mismatch reporting in benchmark
+      analyzer to show token representations and print a summarized vocabulary reference."'
     metadata:
 ...
