@@ -1616,7 +1616,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     };
 
                     let (cached_dest, add_to_out) = timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS::CacheLookup", {
-                        self.below_bottom_cache.clear();
                         let entry = self.below_bottom_cache.entry(cache_key);
                         match entry {
                             std::collections::hash_map::Entry::Occupied(mut occupied) => {

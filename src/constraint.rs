@@ -1931,9 +1931,6 @@ impl<'r> Precomputer0<'r> {
         > = BTreeMap::new();
 
         for (sid, arc) in &self.roots {
-            if ![0, 1].contains(&sid.0) {
-                continue;
-            }
             assoc
                 .entry(*sid)
                 .or_default()
