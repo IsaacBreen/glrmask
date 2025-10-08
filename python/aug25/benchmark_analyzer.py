@@ -154,8 +154,23 @@ def _format_ranges_as_tokens(ranges: Tuple[Tuple[int, int], ...], id_to_token: D
                 # Start a new sub-range
                 sub_range_start_idx = i
                 current_group = next_group
-            
-    return ", ".join(all_parts)
+
+    # Truncation logic
+    MAX_LEN = 500
+    output_str = ""
+    truncated = False
+    for i, part in enumerate(all_parts):
+        # Tentative next string with separator
+        next_str = output_str + (", " if i > 0 else "") + part
+        if len(next_str) > MAX_LEN and i > 0:
+            truncated = True
+            break
+        output_str = next_str
+
+    if truncated:
+        output_str += ", ..."
+
+    return output_str
 
 def _format_numeric_ranges(ranges: Tuple[Tuple[int, int], ...]) -> str:
     """Converts numeric ranges to a clean string like '1..10, 12, 15..20'."""
