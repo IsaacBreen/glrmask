@@ -4023,8 +4023,9 @@ local_system:
           let ebnf_grammar = indoc! {r#"
               program ::= (expression ';')* EOF;
               EOF ::= '<|EOF|>';
-              expression ::= '!'? IDENTIFIER ;
+              expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
 
+              STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
               IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
           "#};
           let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
@@ -4033,10 +4034,12 @@ local_system:
           // 2. Define the LLM vocabulary
           let mut llm_token_map = LLMTokenMap::new();
           let llm_a = LLMTokenID(0);
-          let llm_not_a = LLMTokenID(1);
+          let llm_not_quote = LLMTokenID(1);
+          let llm_quote = LLMTokenID(2);
           llm_token_map.insert(b"a".to_vec(), llm_a);
-          llm_token_map.insert(b"!a".to_vec(), llm_not_a);
-          let max_original_llm_token_id = 1;
+          llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
+          llm_token_map.insert(b"\"".to_vec(), llm_quote);
+          let max_original_llm_token_id = 2;
 
           // 3. Create the GrammarConstraint
           let constraint = GrammarConstraint::from_compiled_grammar(
@@ -4058,11 +4061,11 @@ local_system:
           // The grammar can start with an IDENTIFIER ("a"), a unary '!' ("!\""), or a STRING_LITERAL ("\"").
           // It can also start with other things like 'let', 'if', 'while', '{', '(', 'true', 'false', a number, or a unary '-'.
           // The LLM tokens provided match the start of IDENTIFIER, unary '!', and STRING_LITERAL.
-          let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_a.0]);
+          let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
           assert_eq!(
               mask1,
               expected_mask1,
-              "Initial mask should allow 'a' and '!a'"
+              "Initial mask should allow 'a', '!\"', and '\"'"
           );
 
           // 5. Commit "a" and get the next mask
@@ -13426,192 +13429,5 @@ messages:
     metadata:
   - user: 'Changes committed with message: "test: Collapse program and expression
       rules to minimal failing grammar structure"'
-    metadata:
-  - user: |-
-      Diff of src/test_constraint_basic.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - assistant: |-
-      You're right to focus on the terminals. We can simplify the grammar significantly by removing the choice within the `expression` rule. This will eliminate the `STRING_LITERAL` terminal and focus the test on the interaction between the repeatable statement and the expression starting with an optional `!` followed by a stateful `IDENTIFIER`.
-
-      This change makes the grammar more minimal while preserving the core components (`*` and `?`) that seem to be causing the issue.
-
-      ### Step-by-step Instructions
-
-      1.  **Open the test file**: `src/test_constraint_basic.rs`.
-      2.  **Locate the test**: Find the function `test_js_simplified_ebnf_string`.
-      3.  **Simplify the grammar definition**:
-          a.  In the `ebnf_grammar` string, find the `expression` rule and remove the `STRING_LITERAL` alternative.
-              ```ebnf
-              expression ::= '!'? IDENTIFIER ;
-              ```
-          b.  Since `STRING_LITERAL` is no longer used, delete its definition.
-      4.  **Update the LLM vocabulary**: The vocabulary needs to be adjusted to match the new, simpler grammar. We will remove tokens related to `STRING_LITERAL` (`!"`, `"`) and add a token for the `! IDENTIFIER` case (`!a`).
-          
-          Replace this block:
-          ```rust
-          let mut llm_token_map = LLMTokenMap::new();
-          let llm_a = LLMTokenID(0);
-          let llm_not_quote = LLMTokenID(1);
-          let llm_quote = LLMTokenID(2);
-          llm_token_map.insert(b"a".to_vec(), llm_a);
-          llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
-          llm_token_map.insert(b"\"".to_vec(), llm_quote);
-          let max_original_llm_token_id = 2;
-          ```
-          With this new vocabulary:
-          ```rust
-          let mut llm_token_map = LLMTokenMap::new();
-          let llm_a = LLMTokenID(0);
-          let llm_not_a = LLMTokenID(1);
-          llm_token_map.insert(b"a".to_vec(), llm_a);
-          llm_token_map.insert(b"!a".to_vec(), llm_not_a);
-          let max_original_llm_token_id = 1;
-          ```
-      5.  **Update the initial mask assertion**: The expected initial mask must be updated to reflect the new vocabulary.
-
-          Replace this assertion:
-          ```rust
-          let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
-          assert_eq!(
-              mask1,
-              expected_mask1,
-              "Initial mask should allow 'a', '!\"', and '\"'"
-          );
-          ```
-          With this one:
-          ```rust
-          let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_a.0]);
-          assert_eq!(
-              mask1,
-              expected_mask1,
-              "Initial mask should allow 'a' and '!a'"
-          );
-          ```
-      The second assertion (after committing `"a"`) can remain the same, as it correctly states that only `"a"` should be allowed to continue the identifier. If the bug persists, the test will now fail because the mask will incorrectly include `!a`.
-
-      ### Git Diff
-
-      Here is the git patch that applies all the changes described above.
-
-      ```diff
-      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
-      index 888h888..deadbeef 100644
-      --- a/src/test_constraint_basic.rs
-      +++ b/src/test_constraint_basic.rs
-      @@ -1527,39 +1527,25 @@
-       
-               // --- Statements (Core Imperative Set) ---
-               expression_statement ::= expression ';' ;
-      -        expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
-      -
-      -        STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
-      +        expression ::= '!'? IDENTIFIER ;
-      +
-               IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
-           "#};
-           let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
-           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-       
-           // 2. Define the LLM vocabulary
-           let mut llm_token_map = LLMTokenMap::new();
-           let llm_a = LLMTokenID(0);
-      -    let llm_not_quote = LLMTokenID(1);
-      -    let llm_quote = LLMTokenID(2);
-      +    let llm_not_a = LLMTokenID(1);
-           llm_token_map.insert(b"a".to_vec(), llm_a);
-      -    llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
-      -    llm_token_map.insert(b"\"".to_vec(), llm_quote);
-      -    let max_original_llm_token_id = 2;
-      +    llm_token_map.insert(b"!a".to_vec(), llm_not_a);
-      +    let max_original_llm_token_id = 1;
-       
-           // 3. Create the GrammarConstraint
-           let constraint = GrammarConstraint::from_compiled_grammar(
-      @@ -1578,11 +1564,11 @@
-           // The grammar can start with an IDENTIFIER ("a"), a unary '!' ("!\""), or a STRING_LITERAL ("\"").
-           // It can also start with other things like 'let', 'if', 'while', '{', '(', 'true', 'false', a number, or a unary '-'.
-           // The LLM tokens provided match the start of IDENTIFIER, unary '!', and STRING_LITERAL.
-      -    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
-      +    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_a.0]);
-           assert_eq!(
-               mask1,
-               expected_mask1,
-      -        "Initial mask should allow 'a', '!\"', and '\"'"
-      +        "Initial mask should allow 'a' and '!a'"
-           );
-       
-           // 5. Commit "a" and get the next mask
-
-      ```
-    metadata:
-  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
-      applied now.
-    metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
-      index 888h888..deadbeef 100644
-      --- a/src/test_constraint_basic.rs
-      +++ b/src/test_constraint_basic.rs
-      @@ -1524,27 +1524,19 @@
-           let ebnf_grammar = indoc! {r#"
-               program ::= (expression ';')* EOF;
-               EOF ::= '<|EOF|>';
-      -        expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
-      -
-      -        STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
-      +        expression ::= '!'? IDENTIFIER ;
-      +
-               IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
-           "#};
-           let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
-           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
-       
-           // 2. Define the LLM vocabulary
-           let mut llm_token_map = LLMTokenMap::new();
-           let llm_a = LLMTokenID(0);
-      -    let llm_not_quote = LLMTokenID(1);
-      -    let llm_quote = LLMTokenID(2);
-      +    let llm_not_a = LLMTokenID(1);
-           llm_token_map.insert(b"a".to_vec(), llm_a);
-      -    llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
-      -    llm_token_map.insert(b"\"".to_vec(), llm_quote);
-      -    let max_original_llm_token_id = 2;
-      +    llm_token_map.insert(b"!a".to_vec(), llm_not_a);
-      +    let max_original_llm_token_id = 1;
-       
-           // 3. Create the GrammarConstraint
-           let constraint = GrammarConstraint::from_compiled_grammar(
-      @@ -1578,11 +1564,11 @@
-           // The grammar can start with an IDENTIFIER ("a"), a unary '!' ("!\""), or a STRING_LITERAL ("\"").
-           // It can also start with other things like 'let', 'if', 'while', '{', '(', 'true', 'false', a number, or a unary '-'.
-           // The LLM tokens provided match the start of IDENTIFIER, unary '!', and STRING_LITERAL.
-      -    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
-      +    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_a.0]);
-           assert_eq!(
-               mask1,
-               expected_mask1,
-      -        "Initial mask should allow 'a', '!\"', and '\"'"
-      +        "Initial mask should allow 'a' and '!a'"
-           );
-       
-           // 5. Commit "a" and get the next mask
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/test_constraint_basic.rs
-      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
-      Successfully applied patch and wrote to src/test_constraint_basic.rs.
-    metadata:
-  - user: "Changes committed with message: \"test: Collapse grammar in test_js_simplified_ebnf_string
-      to minimal failing structure with '!' and IDENTIFIER\""
     metadata:
 ...
