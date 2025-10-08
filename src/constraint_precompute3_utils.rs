@@ -243,6 +243,19 @@ pub fn optimize_trie3_size(
             });
         }
 
+        if config.merge_nodes_structural {
+            run_pass!("Merging nodes (structural)", {
+                merge_nodes_trie3_structural(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
+            });
+            // Structural merge can create parallel edges (same dest/pop/sids, diff tokens).
+            // Compress them immediately.
+            if config.compress_edges {
+                run_pass!("Compressing edges (post-structural)", {
+                    compress_trie3_edges(roots, &trie3_god, max_llm_token_id, max_state_id);
+                });
+            }
+        }
+
         if config.merge_nodes_exact.enabled {
             run_pass!("Merging nodes", {
                 merge_nodes_trie3(roots, &trie3_god, config.merge_nodes_exact.exact_max_iters);
