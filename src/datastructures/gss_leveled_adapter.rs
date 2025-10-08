@@ -689,6 +689,7 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
     _memo: &mut PruneAndTransformRecursiveMemo,
     stored_trie_god: &StoredTrieGodWrapper,
 ) {
+    let mut new_destinations = BTreeMap::new();
     transform_all(root_arc, |a| {
         let mut needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
         let mut keep: BTreeSet<StoredPrecomputeNodeIndex> = BTreeSet::new();
@@ -714,12 +715,17 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
             return Some(a.clone());
         }
 
-        // Create a brand new destination node for this Acc.
-        let new_dest = StoredPrecomputeNodeIndex::new(
-            stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                crate::constraint::PrecomputedNodeContents::internal(),
-            )),
-        );
+        // Look up or create a destination node for this set of sources.
+        let new_dest = new_destinations
+            .entry(needs_edge.clone())
+            .or_insert_with(|| {
+                StoredPrecomputeNodeIndex::new(
+                    stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                        crate::constraint::PrecomputedNodeContents::internal(),
+                    )),
+                )
+            })
+            .clone();
 
         // Insert edges from each source that needs it to the new destination.
         let edge_key = (0, allowed_tokens.clone());
