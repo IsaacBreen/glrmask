@@ -162,9 +162,9 @@ fn print_node_recursive(
 
 pub fn print_summary() {
     let options = PrintOptions {
-        show_own_per_hit: true,
-        show_percentage_own: true,
-        show_percentage_of_parent: true,
+        show_own_per_hit: false,
+        show_percentage_own: false,
+        show_percentage_of_parent: false,
     };
     _print_summary(&options);
 }
@@ -248,8 +248,8 @@ fn flatten_tree_recursive(
 
 pub fn print_summary_flat() {
     let options = PrintOptions {
-        show_own_per_hit: true,
-        show_percentage_own: true,
+        show_own_per_hit: false,
+        show_percentage_own: false,
         show_percentage_of_parent: false,
     };
     _print_summary_flat(&options);
