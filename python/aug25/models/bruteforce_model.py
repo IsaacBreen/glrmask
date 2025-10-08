@@ -220,7 +220,7 @@ class BruteForceModel(GraphProvider):
 
         if len(id_to_token) < 300:
             print("Vocab:")
-            for i, token in enumerate(id_to_token.values()):
+            for i, token in id_to_token.items():
                 print(f"{i}: {token}")
             print()
 
