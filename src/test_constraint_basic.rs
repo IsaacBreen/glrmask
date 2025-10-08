@@ -1559,6 +1559,7 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Commit "a" and get the next mask
     state.commit(llm_a);
+    state.print_gss();
     let mask2 = state.get_mask();
 
     // After committing "a", the only valid continuation from the LLM vocabulary is another "a"
