@@ -43,8 +43,8 @@ def _format_token_bytes(b: bytes) -> str:
             return f"'{s}'"
     except UnicodeDecodeError:
         pass
-    # Fallback to a hex representation for everything else.
-    return "0x" + b.hex()
+    # Fallback to the default repr() for bytes, which is b'...'.
+    return repr(b)
 
 def _print_vocab_summary(id_to_token: Dict[int, bytes]):
     """Prints a summarized, readable version of the vocabulary."""
@@ -107,42 +107,15 @@ def _print_vocab_summary(id_to_token: Dict[int, bytes]):
 def _format_ranges_as_tokens(ranges: Tuple[Tuple[int, int], ...], id_to_token: Dict[int, bytes]) -> str:
     """Converts token ID ranges to a summary string of token representations."""
     if not id_to_token:
-        return "[(vocab not loaded)]"
-
-    digits_bytes = {ord(c) for c in "0123456789"}
-    lower_bytes = {ord(c) for c in "abcdefghijklmnopqrstuvwxyz"}
-    upper_bytes = {ord(c) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
-
-    def get_range_type(start, end, id_to_token):
-        if start > end: return None
-        byte_set = set()
-        for i in range(start, end + 1):
-            tok = id_to_token.get(i)
-            if tok is None or len(tok) != 1:
-                return None
-            byte_set.add(tok[0])
-        
-        if byte_set.issubset(digits_bytes): return "digits"
-        if byte_set.issubset(lower_bytes): return "lowercase"
-        if byte_set.issubset(upper_bytes): return "uppercase"
-        return None
+        return "(vocab not loaded)"
 
     parts = []
     for start, end in ranges:
-        start_tok_str = _format_token_bytes(id_to_token.get(start, b''))
+        start_tok_str = _format_token_bytes(id_to_token.get(start, b'<??>'))
         if start == end:
             parts.append(start_tok_str)
-            continue
-
-        end_tok_str = _format_token_bytes(id_to_token.get(end, b''))
-        range_type = get_range_type(start, end, id_to_token)
-
-        if range_type:
-            parts.append(f"{start_tok_str}..{end_tok_str}")
-        elif end - start < 3:  # Expand small, non-grouped ranges
-            expanded = [_format_token_bytes(id_to_token.get(i, b'')) for i in range(start, end + 1)]
-            parts.extend(expanded)
-        else:  # Summarize large, non-grouped ranges
+        else:
+            end_tok_str = _format_token_bytes(id_to_token.get(end, b'<??>'))
             parts.append(f"{start_tok_str}..{end_tok_str}")
             
     return ", ".join(parts)
@@ -199,6 +172,7 @@ def _generate_and_print_summary(df: pd.DataFrame, title: str, equivalence_info: 
     }
 
     print(summary.to_string(float_format="%.4f", formatters=formatters))
+
 
 def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None, skip_plots: bool = False):
     """
