@@ -190,9 +190,15 @@ def _generate_and_print_summary(df: pd.DataFrame, title: str, equivalence_info: 
     numeric_cols = ['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']
     summary[numeric_cols] *= 1000  # convert to ms
     summary = summary.rename(columns=lambda c: c + ' (ms)' if c in numeric_cols else c)
+    
+    # Use a formatter to explicitly right-align the mismatch count column,
+    # ensuring it lines up perfectly between the two tables.
+    mismatch_header = 'mask_mismatch_count'
+    formatters = {
+        mismatch_header: lambda x: f"{x: >{len(mismatch_header)}}"
+    }
 
-    print(summary.to_string(float_format="%.4f"))
-
+    print(summary.to_string(float_format="%.4f", formatters=formatters))
 
 def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None, skip_plots: bool = False):
     """
