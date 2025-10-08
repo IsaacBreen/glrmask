@@ -856,7 +856,7 @@ struct WorkMapKey(usize, StateID);
 
 impl WorkMapKey {
     fn new(depth: usize, state_id: StateID) -> Self {
-        WorkMapKey(usize::MAX - depth, state_id)
+        WorkMapKey(depth, state_id)
     }
 }
 

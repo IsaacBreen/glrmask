@@ -1471,7 +1471,7 @@ impl GrammarConstraint {
                 // simplify_roots_in_place(&mut stack);
                 glr_s.active_state.stack = stack.into_iter().next().unwrap();
 
-                Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
 
                 });
                 print_summary();
