@@ -1514,6 +1514,62 @@ fn test_constraint_expression_cycle() {
 }
 
 #[test]
+fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Load and compile the grammar from the EBNF file
+    let ebnf_grammar = fs::read_to_string("src/js_simplified3.ebnf")?;
+    let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+
+    // 2. Define the LLM vocabulary
+    let mut llm_token_map = LLMTokenMap::new();
+    let llm_a = LLMTokenID(0);
+    let llm_not_quote = LLMTokenID(1);
+    let llm_quote = LLMTokenID(2);
+    llm_token_map.insert(b"a".to_vec(), llm_a);
+    llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
+    llm_token_map.insert(b"\"".to_vec(), llm_quote);
+    let max_original_llm_token_id = 2;
+
+    // 3. Create the GrammarConstraint
+    let constraint = GrammarConstraint::from_compiled_grammar(
+        compiled_grammar,
+        llm_token_map,
+        LLMTokenID(max_original_llm_token_id + 1), // dummy EOF
+        max_original_llm_token_id,
+    );
+
+    // 4. Initialize state and get the initial mask
+    let mut state = constraint.init();
+    let mask1 = state.get_mask();
+
+    // The grammar can start with an IDENTIFIER ("a"), a unary '!' ("!\""), or a STRING_LITERAL ("\"").
+    // It can also start with other things like 'let', 'if', 'while', '{', '(', 'true', 'false', a number, or a unary '-'.
+    // The LLM tokens provided match the start of IDENTIFIER, unary '!', and STRING_LITERAL.
+    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
+    assert_eq!(
+        mask1,
+        expected_mask1,
+        "Initial mask should allow 'a', '!\"', and '\"'"
+    );
+
+    // 5. Commit "a" and get the next mask
+    state.commit(llm_a);
+    let mask2 = state.get_mask();
+
+    // After committing "a", the only valid continuation from the LLM vocabulary is another "a"
+    // to form a longer identifier (e.g., "aa"). The path where "a" is a complete identifier
+    // would require an operator (+, *, ==) or a semicolon, none of which are available as tokens.
+    let expected_mask2 = HybridBitset::from_iter(vec![llm_a.0]);
+    assert_eq!(
+        mask2,
+        expected_mask2,
+        "After 'a', mask should only allow 'a' to continue the identifier"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar string
     let ebnf_grammar = indoc! {r#"
