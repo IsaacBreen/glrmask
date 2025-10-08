@@ -1518,8 +1518,7 @@ fn test_constraint_expression_cycle() {
 fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load and compile the grammar from the EBNF file
     let ebnf_grammar = indoc! {r#"
-        program ::= expression_semicolon* EOF;
-        expression_semicolon ::= expression ';' ;
+        program ::= (expression ';')* EOF;
         expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
         EOF ::= '$';
 
@@ -1559,7 +1558,7 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // The grammar can start with an IDENTIFIER ("a"), a unary '!' ("!\""), or a STRING_LITERAL ("\"").
     // It can also start with other things like 'let', 'if', 'while', '{', '(', 'true', 'false', a number, or a unary '-'.
     // The LLM tokens provided match the start of IDENTIFIER, unary '!', and STRING_LITERAL.
-    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_quote.0]);
+    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
     assert_eq!(
         mask1,
         expected_mask1,
