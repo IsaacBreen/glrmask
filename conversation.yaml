@@ -4026,18 +4026,7 @@ local_system:
 
               // --- Statements (Core Imperative Set) ---
               expression_statement ::= expression ';' ;
-              // --- Expressions (Completely Flattened) ---
-              expression ::= term ;
-
-              term ::= primary ; // Unary operators
-
-              primary ::=
-                  IDENTIFIER
-                | literal
-                ;
-
-              // --- Literals and Terminals (Minimal) ---
-              literal ::= STRING_LITERAL ;
+              expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
 
               STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
               IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
@@ -4048,10 +4037,12 @@ local_system:
           // 2. Define the LLM vocabulary
           let mut llm_token_map = LLMTokenMap::new();
           let llm_a = LLMTokenID(0);
-          let llm_quote = LLMTokenID(1);
+          let llm_not_quote = LLMTokenID(1);
+          let llm_quote = LLMTokenID(2);
           llm_token_map.insert(b"a".to_vec(), llm_a);
+          llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
           llm_token_map.insert(b"\"".to_vec(), llm_quote);
-          let max_original_llm_token_id = 1;
+          let max_original_llm_token_id = 2;
 
           // 3. Create the GrammarConstraint
           let constraint = GrammarConstraint::from_compiled_grammar(
@@ -4073,11 +4064,11 @@ local_system:
           // The grammar can start with an IDENTIFIER ("a"), a unary '!' ("!\""), or a STRING_LITERAL ("\"").
           // It can also start with other things like 'let', 'if', 'while', '{', '(', 'true', 'false', a number, or a unary '-'.
           // The LLM tokens provided match the start of IDENTIFIER, unary '!', and STRING_LITERAL.
-          let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_quote.0]);
+          let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
           assert_eq!(
               mask1,
               expected_mask1,
-              "Initial mask should allow 'a' and '\"'"
+              "Initial mask should allow 'a', '!\"', and '\"'"
           );
 
           // 5. Commit "a" and get the next mask
@@ -13209,5 +13200,170 @@ messages:
     metadata:
   - user: 'Changes committed with message: "test: Restore expression non-terminal
       chain without unary operator to isolate bug source"'
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_basic.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - assistant: |-
+      You are absolutely right. My apologies for taking a wrong turn. Your feedback is very helpful and has allowed us to isolate the critical component.
+
+      Let's review:
+      -   The bug appears when the grammar has `expression_statement*` and an optional `!'?` operator.
+      -   The bug disappears if we remove either the `*` (repetition) or the `?'` (optionality).
+
+      This strongly suggests the bug is in how the parser's lookahead or state-merging logic handles the combination of an optional token (`!`) at the beginning of a repeatable rule (`expression_statement`).
+
+      Let's construct what should be the minimal failing grammar. We will go back to the simplified expression rule but re-introduce the optional `!` operator and the corresponding `!"` token.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the test file**: `src/test_constraint_basic.rs`.
+      2.  **Locate the test**: Find the function `test_js_simplified_ebnf_string`.
+      3.  **Modify the EBNF grammar string**:
+          a.  Find the block of rules defining `expression`, `term`, `primary`, and `literal`.
+              ```ebnf
+              // --- Expressions (Completely Flattened) ---
+              expression ::= term ;
+
+              term ::= primary ; // Unary operators
+
+              primary ::=
+                  IDENTIFIER
+                | literal
+                ;
+
+              // --- Literals and Terminals (Minimal) ---
+              literal ::= STRING_LITERAL ;
+              ```
+          b.  Replace that entire block with a single `expression` rule that includes the optional `!` operator directly.
+              ```ebnf
+              expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
+              ```
+      4.  **Restore the LLM vocabulary and assertions**: We need to add the `!"` token back to the test setup to exercise the `!` in the grammar.
+
+          a.  Find the LLM token map initialization.
+          b.  Add the `llm_not_quote` token back, renumber `llm_quote` to `2`, and update `max_original_llm_token_id`.
+
+              Replace this block:
+              ```rust
+              let mut llm_token_map = LLMTokenMap::new();
+              let llm_a = LLMTokenID(0);
+              let llm_quote = LLMTokenID(1);
+              llm_token_map.insert(b"a".to_vec(), llm_a);
+              llm_token_map.insert(b"\"".to_vec(), llm_quote);
+              let max_original_llm_token_id = 1;
+              ```
+              With this version:
+              ```rust
+              let mut llm_token_map = LLMTokenMap::new();
+              let llm_a = LLMTokenID(0);
+              let llm_not_quote = LLMTokenID(1);
+              let llm_quote = LLMTokenID(2);
+              llm_token_map.insert(b"a".to_vec(), llm_a);
+              llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
+              llm_token_map.insert(b"\"".to_vec(), llm_quote);
+              let max_original_llm_token_id = 2;
+              ```
+          c.  Update the assertion for the initial mask to expect the `!"` token again.
+
+              Replace this:
+              ```rust
+              let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_quote.0]);
+              assert_eq!(
+                  mask1,
+                  expected_mask1,
+                  "Initial mask should allow 'a' and '\"'"
+              );
+              ```
+              With this:
+              ```rust
+              let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
+              assert_eq!(
+                  mask1,
+                  expected_mask1,
+                  "Initial mask should allow 'a', '!\"', and '\"'"
+              );
+              ```
+
+      This should restore the failing condition with a much simpler grammar.
+
+      ### Git Diff
+
+      Here is the git patch that applies the changes described above.
+
+      ```diff
+      diff --git a/src/test_constraint_basic.rs b/src/test_constraint_basic.rs
+      index 777g777..888h888 100644
+      --- a/src/test_constraint_basic.rs
+      +++ b/src/test_constraint_basic.rs
+      @@ -1529,39 +1529,25 @@
+       
+               // --- Statements (Core Imperative Set) ---
+               expression_statement ::= expression ';' ;
+      -        // --- Expressions (Completely Flattened) ---
+      -        expression ::= term ;
+      -
+      -        term ::= primary ; // Unary operators
+      -
+      -        primary ::=
+      -            IDENTIFIER
+      -          | literal
+      -          ;
+      -
+      -        // --- Literals and Terminals (Minimal) ---
+      -        literal ::= STRING_LITERAL ;
+      +        expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;
+       
+               STRING_LITERAL ::= '"' [^"]* '"' ; // No escape characters
+               IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+           "#};
+           let grammar_definition = GrammarDefinition::from_ebnf(&ebnf_grammar)?;
+           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+       
+           // 2. Define the LLM vocabulary
+           let mut llm_token_map = LLMTokenMap::new();
+           let llm_a = LLMTokenID(0);
+      -    let llm_quote = LLMTokenID(1);
+      +    let llm_not_quote = LLMTokenID(1);
+      +    let llm_quote = LLMTokenID(2);
+           llm_token_map.insert(b"a".to_vec(), llm_a);
+      +    llm_token_map.insert(b"!\"".to_vec(), llm_not_quote);
+           llm_token_map.insert(b"\"".to_vec(), llm_quote);
+      -    let max_original_llm_token_id = 1;
+      +    let max_original_llm_token_id = 2;
+       
+           // 3. Create the GrammarConstraint
+           let constraint = GrammarConstraint::from_compiled_grammar(
+      @@ -1580,11 +1566,11 @@
+           // The grammar can start with an IDENTIFIER ("a"), a unary '!' ("!\""), or a STRING_LITERAL ("\"").
+           // It can also start with other things like 'let', 'if', 'while', '{', '(', 'true', 'false', a number, or a unary '-'.
+           // The LLM tokens provided match the start of IDENTIFIER, unary '!', and STRING_LITERAL.
+      -    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_quote.0]);
+      +    let expected_mask1 = HybridBitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
+           assert_eq!(
+               mask1,
+               expected_mask1,
+      -        "Initial mask should allow 'a' and '\"'"
+      +        "Initial mask should allow 'a', '!\"', and '\"'"
+           );
+       
+           // 5. Commit "a" and get the next mask
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/test_constraint_basic.rs
+      Applying patch to 'src/test_constraint_basic.rs' using custom patcher...
+      Successfully applied patch and wrote to src/test_constraint_basic.rs.
+    metadata:
+  - user: 'Changes committed with message: "test: Re-introduce optional unary operator
+      to expression rule in simplified grammar"'
     metadata:
 ...
