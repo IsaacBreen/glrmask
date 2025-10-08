@@ -1,7 +1,7 @@
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 import sys
 import warnings
 
@@ -45,6 +45,34 @@ def _ranges_to_token_str(ranges: Tuple[Tuple[int, int], ...], id_to_token: Dict[
         token_str += f", ... ({len(tokens) - MAX_TOKENS_TO_SHOW} more)"
 
     return f"{ranges} -> [{token_str}]"
+
+def ranges_to_token_set(ranges: Tuple[Tuple[int, int], ...]) -> Set[int]:
+    """
+    Convert a tuple of (start, end) ranges (inclusive) into a set of token ints.
+    """
+    out: Set[int] = set()
+    for start, end in ranges:
+        out.update(range(start, end + 1))
+    return out
+
+def token_set_to_ranges(tokens: Set[int]) -> Tuple[Tuple[int, int], ...]:
+    """
+    Convert a set of token ints to a minimal sorted tuple of (start, end) ranges (inclusive).
+    """
+    if not tokens:
+        return tuple()
+    vals = sorted(list(tokens))
+    ranges: List[Tuple[int, int]] = []
+    rs = vals[0]
+    re_ = vals[0]
+    for v in vals[1:]:
+        if v == re_ + 1:
+            re_ = v
+        else:
+            ranges.append((rs, re_))
+            rs = re_ = v
+    ranges.append((rs, re_))
+    return tuple(ranges)
 
 
 def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None, skip_plots: bool = False):
@@ -243,8 +271,18 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
         for i in range(length):
             if baseline_masks[i] != masks[i]:
                 print(f"Mask mismatch at token index {i} for model {model_name}")
-                print(f"Baseline: {_ranges_to_token_str(baseline_masks[i], baseline_vocab)}")
-                print(f"Current:  {_ranges_to_token_str(masks[i], current_vocab)}")
+                baseline_set = ranges_to_token_set(baseline_masks[i])
+                current_set = ranges_to_token_set(masks[i])
+
+                missing_set = baseline_set - current_set
+                extra_set = current_set - baseline_set
+
+                if missing_set:
+                    missing_ranges = token_set_to_ranges(missing_set)
+                    print(f"  - Missing from Current: {_ranges_to_token_str(missing_ranges, baseline_vocab)}")
+                if extra_set:
+                    extra_ranges = token_set_to_ranges(extra_set)
+                    print(f"  - Extra in Current:     {_ranges_to_token_str(extra_ranges, current_vocab)}")
                 mismatches.append(i)
         # If lengths differ, count extra indices as mismatches (conservative)
         if len(baseline_masks) != len(masks):
