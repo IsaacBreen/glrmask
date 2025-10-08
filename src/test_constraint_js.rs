@@ -577,8 +577,9 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
             // "_",
             // "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
             // "\n", " ",
-            "\"", "a",
-            "!\"", "!!",
+            // "!\"", "!!",
+
+            "a", "!\"", "!!", "\""
         ].iter().map(|s| s.to_string()).collect();
 
 
