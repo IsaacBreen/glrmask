@@ -531,7 +531,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n--- Applying manual vocabulary modifications ---");
 
         // Filter 1: Keep only tokens with length <= x
-        let x = 2;
+        let x = 1;
         gpt2_raw_vocab.retain(|s| {
             let processed = s.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
             processed.as_bytes().len() <= x
@@ -543,7 +543,8 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // gpt2_raw_vocab.push("if(1){if(1){if(1){".to_string());
         // gpt2_raw_vocab.push("if(1){".to_string());
         // gpt2_raw_vocab.push("if(2){".to_string());
-        // gpt2_raw_vocab.push("!!".to_string());
+        gpt2_raw_vocab.push("!!".to_string());
+        gpt2_raw_vocab.push("!\"".to_string());
 
         //
         // // Filter 2: Keep only tokens where all alphabetic chars are 'a'
@@ -563,7 +564,7 @@ fn test_js_constraint_integration() -> Result<(), Box<dyn std::error::Error>> {
         // println!("  - After 'a'-only alphabetic filter: {} tokens remaining.", gpt2_raw_vocab.len());
 
         // Filter 3: Keep only tokens that contain at least one '-'
-        // gpt2_raw_vocab.retain(|s| { s.len() == 1 || s.contains('-') });
+        // gpt2_raw_vocab.retain(|s| { s.len() == 1 || s.contains('!') });
 
         // Option 3: Set to a few specific tokens
         // gpt2_raw_vocab = vec![
