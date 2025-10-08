@@ -1518,14 +1518,8 @@ fn test_constraint_expression_cycle() {
 fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load and compile the grammar from the EBNF file
     let ebnf_grammar = indoc! {r#"
-        // Instruct the parser to ignore Whitespace and single-line Comments.
-        #![ignore(IGNORE)]
-
-        program ::= expression_statement EOF;
+        program ::= expression_statement* EOF;
         EOF ::= '<|EOF|>';
-
-        // --- Lexical Grammar (Minimal) ---
-        IGNORE ::= ( ' ' | '\t' | '\n' | '\r' )+ | '//' [^\n\r]* ;
 
         // --- Statements (Core Imperative Set) ---
         expression_statement ::= expression ';' ;
