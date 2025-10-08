@@ -157,6 +157,40 @@ def _format_numeric_ranges(ranges: Tuple[Tuple[int, int], ...]) -> str:
             parts.append(f"{start}..{end}")
     return ", ".join(parts)
 
+def _generate_and_print_summary(df: pd.DataFrame, title: str, equivalence_info: Optional[Dict[str, bool]] = None, mismatch_counts: Optional[Dict[str, List[int]]] = None):
+    """Calculates, formats, and prints a summary statistics table for a given DataFrame."""
+    print(f"\n--- {title} ---")
+    if df.empty:
+        print("  (No data available)")
+        return
+
+    summary = df.groupby('model')['time_sec'].agg(
+        ['mean', 'std', 'min', 'median', 'max', 'count']
+    ).rename(columns={'median': 'p50'})
+
+    # Add percentiles
+    percentiles = df.groupby('model')['time_sec'].quantile([0.90, 0.99]).unstack(level=1)
+    percentiles.columns = [f'p{int(c*100)}' for c in percentiles.columns]
+    summary = summary.join(percentiles)
+
+    # Add equivalence info if provided (only for get_mask)
+    if equivalence_info and mismatch_counts:
+        eq_series = pd.Series({k: ('✅' if v else '❌') for k, v in equivalence_info.items()}, name='equivalent')
+        mm_series = pd.Series({k: len(v) for k, v in mismatch_counts.items()}, name='mask_mismatch_count')
+        summary = summary.join(eq_series).join(mm_series)
+        # Reorder columns for display
+        summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
+    else:
+        summary = summary[['count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
+
+
+    # Format for printing
+    summary[['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']] *= 1000  # convert to ms
+    summary = summary.rename(columns=lambda c: c + ' (ms)' if c not in ['equivalent', 'mask_mismatch_count', 'count'] else c)
+
+    print(summary.to_string(float_format="%.4f"))
+
+
 def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None, skip_plots: bool = False):
     """
     Loads benchmark results from JSON files, computes statistics, compares masks against a chosen baseline,
@@ -400,31 +434,19 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
 
     # --- Print Summary Statistics ---
     print("--- Benchmark Summary ---")
-    summary = df.groupby('model')['time_sec'].agg(
-        ['mean', 'std', 'min', 'median', 'max', 'count']
-    ).rename(columns={'median': 'p50'})
+    _generate_and_print_summary(
+        df,
+        "get_mask() Timings",
+        equivalence_info=equivalent_by_model,
+        mismatch_counts=mismatch_indices_by_model
+    )
 
-    # Add percentiles
-    percentiles = df.groupby('model')['time_sec'].quantile([0.90, 0.99]).unstack(level=1)
-    percentiles.columns = [f'p{int(c*100)}' for c in percentiles.columns]
-    summary = summary.join(percentiles)
+    _generate_and_print_summary(
+        df_commit,
+        "commit() Timings"
+    )
 
-    # Add equivalence info vs baseline
-    eq_series = pd.Series({k: ('✅' if v else '❌') for k, v in equivalent_by_model.items()}, name='equivalent')
-    # Add mismatch counts
-    mm_series = pd.Series({k: len(v) for k, v in mismatch_indices_by_model.items()}, name='mask_mismatch_count')
-
-    summary = summary.join(eq_series).join(mm_series)
-
-    # Reorder columns for display
-    summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
-
-    # Format for printing
-    summary[['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']] *= 1000  # convert to ms
-    summary = summary.rename(columns=lambda c: c + ' (ms)' if c not in ['equivalent', 'mask_mismatch_count', 'count'] else c)
-
-    print(summary.to_string(float_format="%.4f"))
-    print(f"\nBaseline: {baseline_name}")
+    print(f"\nBaseline for equivalence check: {baseline_name}")
     print("✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch")
     sys.stdout.flush()
 

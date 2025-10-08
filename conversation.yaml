@@ -6141,6 +6141,40 @@ local_system:
                   parts.append(f"{start}..{end}")
           return ", ".join(parts)
 
+      def _generate_and_print_summary(df: pd.DataFrame, title: str, equivalence_info: Optional[Dict[str, bool]] = None, mismatch_counts: Optional[Dict[str, List[int]]] = None):
+          """Calculates, formats, and prints a summary statistics table for a given DataFrame."""
+          print(f"\n--- {title} ---")
+          if df.empty:
+              print("  (No data available)")
+              return
+
+          summary = df.groupby('model')['time_sec'].agg(
+              ['mean', 'std', 'min', 'median', 'max', 'count']
+          ).rename(columns={'median': 'p50'})
+
+          # Add percentiles
+          percentiles = df.groupby('model')['time_sec'].quantile([0.90, 0.99]).unstack(level=1)
+          percentiles.columns = [f'p{int(c*100)}' for c in percentiles.columns]
+          summary = summary.join(percentiles)
+
+          # Add equivalence info if provided (only for get_mask)
+          if equivalence_info and mismatch_counts:
+              eq_series = pd.Series({k: ('✅' if v else '❌') for k, v in equivalence_info.items()}, name='equivalent')
+              mm_series = pd.Series({k: len(v) for k, v in mismatch_counts.items()}, name='mask_mismatch_count')
+              summary = summary.join(eq_series).join(mm_series)
+              # Reorder columns for display
+              summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
+          else:
+              summary = summary[['count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
+
+
+          # Format for printing
+          summary[['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']] *= 1000  # convert to ms
+          summary = summary.rename(columns=lambda c: c + ' (ms)' if c not in ['equivalent', 'mask_mismatch_count', 'count'] else c)
+
+          print(summary.to_string(float_format="%.4f"))
+
+
       def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None, skip_plots: bool = False):
           """
           Loads benchmark results from JSON files, computes statistics, compares masks against a chosen baseline,
@@ -6384,31 +6418,19 @@ local_system:
 
           # --- Print Summary Statistics ---
           print("--- Benchmark Summary ---")
-          summary = df.groupby('model')['time_sec'].agg(
-              ['mean', 'std', 'min', 'median', 'max', 'count']
-          ).rename(columns={'median': 'p50'})
+          _generate_and_print_summary(
+              df,
+              "get_mask() Timings",
+              equivalence_info=equivalent_by_model,
+              mismatch_counts=mismatch_indices_by_model
+          )
 
-          # Add percentiles
-          percentiles = df.groupby('model')['time_sec'].quantile([0.90, 0.99]).unstack(level=1)
-          percentiles.columns = [f'p{int(c*100)}' for c in percentiles.columns]
-          summary = summary.join(percentiles)
+          _generate_and_print_summary(
+              df_commit,
+              "commit() Timings"
+          )
 
-          # Add equivalence info vs baseline
-          eq_series = pd.Series({k: ('✅' if v else '❌') for k, v in equivalent_by_model.items()}, name='equivalent')
-          # Add mismatch counts
-          mm_series = pd.Series({k: len(v) for k, v in mismatch_indices_by_model.items()}, name='mask_mismatch_count')
-
-          summary = summary.join(eq_series).join(mm_series)
-
-          # Reorder columns for display
-          summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
-
-          # Format for printing
-          summary[['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']] *= 1000  # convert to ms
-          summary = summary.rename(columns=lambda c: c + ' (ms)' if c not in ['equivalent', 'mask_mismatch_count', 'count'] else c)
-
-          print(summary.to_string(float_format="%.4f"))
-          print(f"\nBaseline: {baseline_name}")
+          print(f"\nBaseline for equivalence check: {baseline_name}")
           print("✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch")
           sys.stdout.flush()
 
@@ -15786,5 +15808,231 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Enhance mask mismatch reporting to show
       token representations and print a summarized vocabulary reference"'
+    metadata:
+  - user: |-
+      Diff of python/aug25/models/precompute3_model_pure_python_opt3.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/__init__.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/benchmark_analyzer.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/benchmark_runner.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/common_interface.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/create_additional_benchmark_plots.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/equality.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/optimization_coordinator.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/optimizer_general.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/reduce_constraint.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/aug25/stats.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of python/run_benchmarks.sh since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      ```bash
+                                                                equivalent  mask_mismatch_count  count  mean (ms)  std (ms)  min (ms)  p50 (ms)  p90 (ms)  p99 (ms)  max (ms)
+      model                                                                                                                                                                  
+      bruteforce_model__js_grammar_constraint                            ✅                    0     12     7.4355    6.8896    0.3551    9.7249   13.2489   20.4819   21.3543
+      precompute3_model_pure_python_opt3__js_grammar_constraint          ❌                    5     12     2.0933    1.4786    0.3405    3.0318    3.5008    3.5845    3.5933
+      ```
+
+      It's not super clear from looking at this what it's measuring.
+      Let's make it so we measure `get_mask` times and `commit` times separately, and show stats for both separately.
+    metadata:
+  - assistant: |-
+      That's a great idea. Separating the statistics for `get_mask()` and `commit()` will make the performance characteristics of each model much clearer.
+
+      Here are the step-by-step instructions and the git diff to implement this change.
+
+      ### Step-by-step Instructions
+
+      All changes will be made in the file `python/aug25/benchmark_analyzer.py`.
+
+      1.  **Create a Summary Generation Helper Function**
+
+          To avoid duplicating code, we'll create a new helper function called `_generate_and_print_summary`. This function will take a pandas DataFrame and a title, and it will be responsible for calculating and printing the formatted statistics table. It will also conditionally include the "equivalent" and "mismatch_count" columns if that information is provided.
+
+          Place this new function definition after the `_format_numeric_ranges` function.
+
+      2.  **Replace the Existing Summary Logic**
+
+          In the `analyze_results` function, find the section that starts with the comment `# --- Print Summary Statistics ---`.
+
+          Delete the entire block of code that generates and prints the single, combined summary table.
+
+      3.  **Call the New Helper for Both `get_mask` and `commit`**
+
+          In place of the deleted block, add a new section that:
+          *   Prints the main `--- Benchmark Summary ---` header.
+          *   Calls `_generate_and_print_summary` for the `get_mask` timings, passing the `df` DataFrame and the equivalence/mismatch information.
+          *   Calls `_generate_and_print_summary` for the `commit` timings, passing the `df_commit` DataFrame.
+          *   Prints the final footer explaining the baseline and the meaning of the ✅/❌ symbols.
+
+      This will result in two separate, clearly labeled tables in the output.
+
+      ### Git Diff
+
+      Here is the git diff to apply these changes.
+
+      ```diff
+      diff --git a/python/aug25/benchmark_analyzer.py b/python/aug25/benchmark_analyzer.py
+      --- a/python/aug25/benchmark_analyzer.py
+      +++ b/python/aug25/benchmark_analyzer.py
+      @@ -146,6 +146,41 @@
+                   parts.append(f"{start}..{end}")
+           return ", ".join(parts)
+       
+      +def _generate_and_print_summary(df: pd.DataFrame, title: str, equivalence_info: Optional[Dict[str, bool]] = None, mismatch_counts: Optional[Dict[str, List[int]]] = None):
+      +    """Calculates, formats, and prints a summary statistics table for a given DataFrame."""
+      +    print(f"\n--- {title} ---")
+      +    if df.empty:
+      +        print("  (No data available)")
+      +        return
+      +
+      +    summary = df.groupby('model')['time_sec'].agg(
+      +        ['mean', 'std', 'min', 'median', 'max', 'count']
+      +    ).rename(columns={'median': 'p50'})
+      +
+      +    # Add percentiles
+      +    percentiles = df.groupby('model')['time_sec'].quantile([0.90, 0.99]).unstack(level=1)
+      +    percentiles.columns = [f'p{int(c*100)}' for c in percentiles.columns]
+      +    summary = summary.join(percentiles)
+      +
+      +    # Add equivalence info if provided (only for get_mask)
+      +    if equivalence_info and mismatch_counts:
+      +        eq_series = pd.Series({k: ('✅' if v else '❌') for k, v in equivalence_info.items()}, name='equivalent')
+      +        mm_series = pd.Series({k: len(v) for k, v in mismatch_counts.items()}, name='mask_mismatch_count')
+      +        summary = summary.join(eq_series).join(mm_series)
+      +        # Reorder columns for display
+      +        summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
+      +    else:
+      +        summary = summary[['count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
+      +
+      +
+      +    # Format for printing
+      +    summary[['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']] *= 1000  # convert to ms
+      +    summary = summary.rename(columns=lambda c: c + ' (ms)' if c not in ['equivalent', 'mask_mismatch_count', 'count'] else c)
+      +
+      +    print(summary.to_string(float_format="%.4f"))
+      +
+       
+       def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Optional[str] = None, agg_method: Optional[str] = None, skip_plots: bool = False):
+           """
+      @@ -270,36 +305,22 @@
+           df_commit = pd.DataFrame(all_commit_rows)
+       
+           # --- Print Summary Statistics ---
+           print("--- Benchmark Summary ---")
+      -    summary = df.groupby('model')['time_sec'].agg(
+      -        ['mean', 'std', 'min', 'median', 'max', 'count']
+      -    ).rename(columns={'median': 'p50'})
+      -
+      -    # Add percentiles
+      -    percentiles = df.groupby('model')['time_sec'].quantile([0.90, 0.99]).unstack(level=1)
+      -    percentiles.columns = [f'p{int(c*100)}' for c in percentiles.columns]
+      -    summary = summary.join(percentiles)
+      -
+      -    # Add equivalence info vs baseline
+      -    eq_series = pd.Series({k: ('✅' if v else '❌') for k, v in equivalent_by_model.items()}, name='equivalent')
+      -    # Add mismatch counts
+      -    mm_series = pd.Series({k: len(v) for k, v in mismatch_indices_by_model.items()}, name='mask_mismatch_count')
+      -
+      -    summary = summary.join(eq_series).join(mm_series)
+      -
+      -    # Reorder columns for display
+      -    summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
+      -
+      -    # Format for printing
+      -    summary[['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']] *= 1000  # convert to ms
+      -    summary = summary.rename(columns=lambda c: c + ' (ms)' if c not in ['equivalent', 'mask_mismatch_count', 'count'] else c)
+      -
+      -    print(summary.to_string(float_format="%.4f"))
+      -    print(f"\nBaseline: {baseline_name}")
+      +    _generate_and_print_summary(
+      +        df,
+      +        "get_mask() Timings",
+      +        equivalence_info=equivalent_by_model,
+      +        mismatch_counts=mismatch_indices_by_model
+      +    )
+      +
+      +    _generate_and_print_summary(
+      +        df_commit,
+      +        "commit() Timings"
+      +    )
+      +
+      +    print(f"\nBaseline for equivalence check: {baseline_name}")
+           print("✅ = Masks identical to baseline across all steps, ❌ = At least one mask mismatch")
+           sys.stdout.flush()
+       
+           if skip_plots:
+               print("\nSkipping plot generation as requested.")
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: python/aug25/benchmark_analyzer.py
+      Applying patch to 'python/aug25/benchmark_analyzer.py' using custom patcher...
+      Successfully applied patch and wrote to python/aug25/benchmark_analyzer.py.
+    metadata:
+  - user: 'Changes committed with message: "Refactor benchmark analyzer to separate
+      get_mask/commit stats and enhance mask mismatch reporting with token representations
+      and vocab summary"'
     metadata:
 ...
