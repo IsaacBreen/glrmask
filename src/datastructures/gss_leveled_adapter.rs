@@ -683,6 +683,7 @@ pub fn map_allowed_terminals_tokenizer_states(
     });
 }
 
+#[time_it]
 pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
     root_arc: &mut Arc<GSSNode>,
     allowed_tokens: &LLMTokenBV,
