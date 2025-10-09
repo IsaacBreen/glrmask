@@ -664,6 +664,9 @@ impl JSONConvertible for GrammarConstraint {
     }
 }
 
+type CycleReport0 = (Vec<(PrecomputeNode0Index, Option<Option<(GrammarTokenID, Option<TokenizerStateID>)>>)>, LLMTokenID);
+type CycleReport1 = (Vec<(PrecomputeNode1Index, Option<Option<GrammarTokenID>>)>, LLMTokenID);
+
 impl GrammarConstraint {
     /// Builds just the precompute0 cache, which is the most expensive initial step.
     /// This allows for faster iteration on subsequent precomputation stages.
@@ -1061,7 +1064,7 @@ impl GrammarConstraint {
                 precomputed3: BTreeMap::new(),
                 llm_vocab,
                 token_name_map,
-                possible_matches: computed_possible_matches,
+                possible_matches,
                 trie0_god: Trie0GodWrapper::new(),
                 trie1_god: Trie1GodWrapper::new(),
                 trie2_god: Trie2GodWrapper::new(),
@@ -1089,8 +1092,8 @@ impl GrammarConstraint {
         );
 
         // After Trie1 optimizations, the subsequent vocabs should be based on the (potentially modified) precompute_vocab.
-        precompute2_vocab = precompute_vocab.clone();
-        precompute3_vocab = precompute_vocab.clone();
+        let precompute2_vocab = precompute_vocab.clone();
+        let precompute3_vocab = precompute_vocab.clone();
 
         let (precomputed2, trie2_god) = Self::precompute2(
             &precomputed1,
