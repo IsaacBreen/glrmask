@@ -10811,9 +10811,25 @@ local_system:
 
       def main():
           """Main function."""
+          epilog = """
+      Examples:
+        # Compile the JS grammar using a downloaded GPT-2 vocabulary
+        python scripts/compile.py \\
+          --grammar src/js.ebnf \\
+          --output js_constraint.json.gz \\
+          --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+
+        # Compile using a local vocabulary and filter for short tokens
+        python scripts/compile.py \\
+          --grammar src/js.ebnf \\
+          --output js_constraint_filtered.json.gz \\
+          --vocab-path .cache/vocabs/gpt2_vocab.json \\
+          --max-token-len 10
+      """
           parser = argparse.ArgumentParser(
               description="A helper script to compile a grammar constraint file.",
-              formatter_class=argparse.ArgumentDefaultsHelpFormatter
+              formatter_class=argparse.RawDescriptionHelpFormatter,
+              epilog=epilog
           )
           parser.add_argument("-g", "--grammar", type=Path, required=True, help="Path to the EBNF grammar file.")
           parser.add_argument("-o", "--output", type=Path, required=True, help="Path for the output compressed constraint file (.json.gz).")
@@ -16788,5 +16804,145 @@ messages:
     metadata:
   - user: 'Changes committed with message: "fix(grammar-compiler): Convert PathBuf
       to &str for GrammarDefinition::from_ebnf_file"'
+    metadata:
+  - user: |-
+      Diff of Cargo.toml since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_js.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/bin/grammar_compiler.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of scripts/compile.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      python scripts/compile.py
+      usage: compile.py [-h] -g GRAMMAR -o OUTPUT (--vocab-url VOCAB_URL | --vocab-path VOCAB_PATH) [--cache-dir CACHE_DIR] [--compiler-path COMPILER_PATH] [--force-download] [--max-token-len MAX_TOKEN_LEN]
+      compile.py: error: the following arguments are required: -g/--grammar, -o/--output
+
+
+      Not too clear from this what to do. Maybe an example would be good.
+    metadata:
+  - assistant: |-
+      Of course. A command-line tool is much more useful with clear examples. Let's improve the help message of the Python script.
+
+      ### Step-by-step Instructions
+
+      We will add an `epilog` to the argument parser, which is a piece of text displayed at the end of the help message. This is the perfect place for examples.
+
+      1.  **Open the file:** `scripts/compile.py`.
+      2.  **Locate the `ArgumentParser` setup:** Find this block of code in the `main` function.
+          ```python
+          parser = argparse.ArgumentParser(
+              description="A helper script to compile a grammar constraint file.",
+              formatter_class=argparse.ArgumentDefaultsHelpFormatter
+          )
+          ```
+      3.  **Modify the `ArgumentParser`:**
+          *   Change `formatter_class` to `argparse.RawDescriptionHelpFormatter` to allow for multi-line examples with proper formatting.
+          *   Add an `epilog` argument containing example commands.
+
+          Replace the block from step 2 with the following:
+          ```python
+          epilog = """
+      Examples:
+        # Compile the JS grammar using a downloaded GPT-2 vocabulary
+        python scripts/compile.py \\
+          --grammar src/js.ebnf \\
+          --output js_constraint.json.gz \\
+          --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+
+        # Compile using a local vocabulary and filter for short tokens
+        python scripts/compile.py \\
+          --grammar src/js.ebnf \\
+          --output js_constraint_filtered.json.gz \\
+          --vocab-path .cache/vocabs/gpt2_vocab.json \\
+          --max-token-len 10
+      """
+          parser = argparse.ArgumentParser(
+              description="A helper script to compile a grammar constraint file.",
+              formatter_class=argparse.RawDescriptionHelpFormatter,
+              epilog=epilog
+          )
+          ```
+
+      Now, when you run `python scripts/compile.py --help`, the output will be much clearer and include these ready-to-use examples.
+
+      ### Git Diff
+
+      Here is the git diff for the change.
+
+      ```diff
+      diff --git a/scripts/compile.py b/scripts/compile.py
+      index 8008799..133015b 100644
+      --- a/scripts/compile.py
+      +++ b/scripts/compile.py
+      @@ -80,10 +80,27 @@
+       
+       def main():
+           """Main function."""
+      +    epilog = """
+      +Examples:
+      +  # Compile the JS grammar using a downloaded GPT-2 vocabulary
+      +  python scripts/compile.py \\
+      +    --grammar src/js.ebnf \\
+      +    --output js_constraint.json.gz \\
+      +    --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+      +
+      +  # Compile using a local vocabulary and filter for short tokens
+      +  python scripts/compile.py \\
+      +    --grammar src/js.ebnf \\
+      +    --output js_constraint_filtered.json.gz \\
+      +    --vocab-path .cache/vocabs/gpt2_vocab.json \\
+      +    --max-token-len 10
+      +"""
+           parser = argparse.ArgumentParser(
+               description="A helper script to compile a grammar constraint file.",
+      -        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+      +        formatter_class=argparse.RawDescriptionHelpFormatter,
+      +        epilog=epilog
+           )
+           parser.add_argument("-g", "--grammar", type=Path, required=True, help="Path to the EBNF grammar file.")
+           parser.add_argument("-o", "--output", type=Path, required=True, help="Path for the output compressed constraint file (.json.gz).")
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: scripts/compile.py
+      Applying patch to 'scripts/compile.py' using custom patcher...
+      Successfully applied patch and wrote to scripts/compile.py.
+    metadata:
+  - user: 'Changes committed with message: "docs(scripts/compile.py): Add usage examples
+      to argument parser epilog"'
     metadata:
 ...

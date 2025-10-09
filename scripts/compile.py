@@ -104,9 +104,25 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
 
 def main():
     """Main function."""
+    epilog = """
+Examples:
+  # Compile the JS grammar using a downloaded GPT-2 vocabulary
+  python scripts/compile.py \\
+    --grammar src/js.ebnf \\
+    --output js_constraint.json.gz \\
+    --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+
+  # Compile using a local vocabulary and filter for short tokens
+  python scripts/compile.py \\
+    --grammar src/js.ebnf \\
+    --output js_constraint_filtered.json.gz \\
+    --vocab-path .cache/vocabs/gpt2_vocab.json \\
+    --max-token-len 10
+"""
     parser = argparse.ArgumentParser(
         description="A helper script to compile a grammar constraint file.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=epilog
     )
     parser.add_argument("-g", "--grammar", type=Path, required=True, help="Path to the EBNF grammar file.")
     parser.add_argument("-o", "--output", type=Path, required=True, help="Path for the output compressed constraint file (.json.gz).")
