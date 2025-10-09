@@ -14,6 +14,7 @@ bitvec = "1.0.1"
 kdam = "0.6.0"
 keyed_priority_queue = "0.4.2"
 serde = { version = "1.0.219", features = ["derive"] }
+clap = { version = "4.5.4", features = ["derive"] }
 serde_json = "1.0.107"
 chrono = "0.4.41"
 indicatif = "0.17.11"
@@ -47,3 +48,7 @@ debug = true
 [features]
 no_pbar = []
 pbar = []
+
+[[bin]]
+name = "grammar-compiler"
+path = "src/bin/grammar_compiler.rs"
