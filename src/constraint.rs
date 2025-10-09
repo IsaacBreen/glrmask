@@ -391,6 +391,7 @@ impl PrecomputedNodeContents {
     }
 
     pub(crate) fn internal() -> Self {
+        timeit!("PrecomputedNodeContents::internal", {});
         Self { end: false, live_tokens: LLMTokenBV::zeros() }
     }
 
