@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -66,22 +67,20 @@ def filter_vocab(vocab: dict[str, int], max_len: int | None) -> dict[str, int]:
 
 def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool):
     """
-    Runs the Rust grammar-compiler CLI tool.
+    Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
     """
     if recompile:
         print("Building compiler with 'cargo build --release'...")
         try:
-            # Capture output to avoid spamming stdout, but print it on error.
+            # Run without capturing output to stream compilation progress.
             subprocess.run(
                 ["cargo", "build", "--release"],
                 check=True,
-                capture_output=True,
-                text=True
             )
             print("Build successful.")
-        except subprocess.CalledProcessError as e:
-            print("Cargo build failed:", file=sys.stderr)
-            print(e.stderr, file=sys.stderr)
+        except subprocess.CalledProcessError:
+            # Cargo will have already printed its error to the console.
+            print("Cargo build failed.", file=sys.stderr)
             sys.exit(1)
 
     if not compiler_path.exists():
@@ -99,9 +98,14 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
         "--output", str(output_path),
     ]
 
-    print(f"\nRunning compiler: {' '.join(command)}")
+    # Set environment variable to enable progress bars in the Rust code.
+    env = os.environ.copy()
+    env["ENABLE_PROGRESS_BAR"] = "1"
+
+    print(f"\nRunning compiler: ENABLE_PROGRESS_BAR=1 {' '.join(command)}")
     try:
-        subprocess.run(command, check=True)
+        # Run the compiler, passing through its output and the environment variable.
+        subprocess.run(command, check=True, env=env)
     except subprocess.CalledProcessError as e:
         print(f"Grammar compilation failed with exit code {e.returncode}", file=sys.stderr)
         sys.exit(1)

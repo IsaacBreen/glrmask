@@ -10707,6 +10707,7 @@ local_system:
     scripts/compile.py: |
       import argparse
       import json
+      import os
       import subprocess
       import sys
       import tempfile
@@ -10773,22 +10774,20 @@ local_system:
 
       def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool):
           """
-          Runs the Rust grammar-compiler CLI tool.
+          Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
           """
           if recompile:
               print("Building compiler with 'cargo build --release'...")
               try:
-                  # Capture output to avoid spamming stdout, but print it on error.
+                  # Run without capturing output to stream compilation progress.
                   subprocess.run(
                       ["cargo", "build", "--release"],
                       check=True,
-                      capture_output=True,
-                      text=True
                   )
                   print("Build successful.")
-              except subprocess.CalledProcessError as e:
-                  print("Cargo build failed:", file=sys.stderr)
-                  print(e.stderr, file=sys.stderr)
+              except subprocess.CalledProcessError:
+                  # Cargo will have already printed its error to the console.
+                  print("Cargo build failed.", file=sys.stderr)
                   sys.exit(1)
 
           if not compiler_path.exists():
@@ -10806,9 +10805,14 @@ local_system:
               "--output", str(output_path),
           ]
 
-          print(f"\nRunning compiler: {' '.join(command)}")
+          # Set environment variable to enable progress bars in the Rust code.
+          env = os.environ.copy()
+          env["ENABLE_PROGRESS_BAR"] = "1"
+
+          print(f"\nRunning compiler: ENABLE_PROGRESS_BAR=1 {' '.join(command)}")
           try:
-              subprocess.run(command, check=True)
+              # Run the compiler, passing through its output and the environment variable.
+              subprocess.run(command, check=True, env=env)
           except subprocess.CalledProcessError as e:
               print(f"Grammar compilation failed with exit code {e.returncode}", file=sys.stderr)
               sys.exit(1)
@@ -17224,5 +17228,209 @@ messages:
     metadata:
   - user: 'Changes committed with message: "feat(scripts): Default to recompiling
       grammar-compiler in compile.py and add --no-recompile flag"'
+    metadata:
+  - user: |-
+      Diff of Cargo.toml since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_js.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/bin/grammar_compiler.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of scripts/compile.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      The Rust code makes great use of progress bars. However, none of those are visible in the output from the Python tool. Fix it. It should kind of pass through the command output.
+    metadata:
+  - assistant: |-
+      Excellent point. The experience should be seamless, showing the same rich output as if you were running the Rust compiler directly. The current Python script is "capturing" the output instead of letting it stream through.
+
+      Here’s how to fix it, along with an important change to ensure the progress bars are enabled correctly.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file:** `scripts/compile.py`.
+
+      2.  **Import the `os` module:** Add `import os` to the top of the file. We'll need this to manage environment variables.
+
+      3.  **Modify the `run_compiler` function:** We need to make two key changes here:
+          *   Stop capturing the output of the `cargo build` command so you can see the compilation progress in real-time.
+          *   Pass an environment variable to the `grammar-compiler` executable to ensure it knows to display its progress bars.
+
+          Find the `run_compiler` function and replace its entire body with the following code:
+
+          ```python
+          def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool):
+              """
+              Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
+              """
+              if recompile:
+                  print("Building compiler with 'cargo build --release'...")
+                  try:
+                      # Run without capturing output to stream compilation progress.
+                      subprocess.run(
+                          ["cargo", "build", "--release"],
+                          check=True,
+                      )
+                      print("Build successful.")
+                  except subprocess.CalledProcessError:
+                      # Cargo will have already printed its error to the console.
+                      print("Cargo build failed.", file=sys.stderr)
+                      sys.exit(1)
+          
+              if not compiler_path.exists():
+                  print(f"Error: Compiler executable not found at '{compiler_path}'.", file=sys.stderr)
+                  if recompile:
+                       print("The build process completed but the executable is not in the expected location.", file=sys.stderr)
+                  else:
+                       print("Try running without '--no-recompile' to build it.", file=sys.stderr)
+                  sys.exit(1)
+          
+              command = [
+                  str(compiler_path),
+                  "--grammar", str(grammar_path),
+                  "--vocab", str(vocab_path),
+                  "--output", str(output_path),
+              ]
+          
+              # Set environment variable to enable progress bars in the Rust code.
+              env = os.environ.copy()
+              env["ENABLE_PROGRESS_BAR"] = "1"
+          
+              print(f"\nRunning compiler: ENABLE_PROGRESS_BAR=1 {' '.join(command)}")
+              try:
+                  # Run the compiler, passing through its output and the environment variable.
+                  subprocess.run(command, check=True, env=env)
+              except subprocess.CalledProcessError as e:
+                  print(f"Grammar compilation failed with exit code {e.returncode}", file=sys.stderr)
+                  sys.exit(1)
+              except FileNotFoundError:
+                  print(f"Error: Could not find the compiler executable at '{compiler_path}'", file=sys.stderr)
+                  sys.exit(1)
+          ```
+
+      These changes ensure that both the `cargo build` command and the `grammar-compiler` executable will print their output directly to your terminal, including all compilation messages and progress bars.
+
+      ### Git Diff
+
+      Here is the git diff for the changes.
+
+      ```diff
+      diff --git a/scripts/compile.py b/scripts/compile.py
+      index 8008799..133015b 100644
+      --- a/scripts/compile.py
+      +++ b/scripts/compile.py
+      @@ -1,5 +1,6 @@
+       import argparse
+       import json
+      +import os
+       import subprocess
+       import sys
+       import tempfile
+      @@ -47,40 +48,47 @@
+           return filtered
+       
+       
+      -def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool):
+      +def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool):
+           """
+      -    Runs the Rust grammar-compiler CLI tool.
+      +    Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
+           """
+           if recompile:
+               print("Building compiler with 'cargo build --release'...")
+               try:
+      -            # Capture output to avoid spamming stdout, but print it on error.
+      +            # Run without capturing output to stream compilation progress.
+                   subprocess.run(
+                       ["cargo", "build", "--release"],
+                       check=True,
+      -                capture_output=True,
+      -                text=True
+                   )
+                   print("Build successful.")
+      -        except subprocess.CalledProcessError as e:
+      -            print("Cargo build failed:", file=sys.stderr)
+      -            print(e.stderr, file=sys.stderr)
+      +        except subprocess.CalledProcessError:
+      +            # Cargo will have already printed its error to the console.
+      +            print("Cargo build failed.", file=sys.stderr)
+                   sys.exit(1)
+       
+      -    if not compiler_path.exists():
+      -        print(f"Error: Compiler executable not found at '{compiler_path}'.", file=sys.stderr)
+      -        if recompile:
+      -             print("The build process completed but the executable is not in the expected location.", file=sys.stderr)
+      -        else:
+      -             print("Try running without '--no-recompile' to build it.", file=sys.stderr)
+      -        sys.exit(1)
+      +    if not compiler_path.exists():
+      +        print(f"Error: Compiler executable not found at '{compiler_path}'.", file=sys.stderr)
+      +        if recompile:
+      +             print("The build process completed but the executable is not in the expected location.", file=sys.stderr)
+      +        else:
+      +             print("Try running without '--no-recompile' to build it.", file=sys.stderr)
+      +        sys.exit(1)
+       
+           command = [
+               str(compiler_path),
+               "--grammar", str(grammar_path),
+               "--vocab", str(vocab_path),
+               "--output", str(output_path),
+           ]
+       
+      -    print(f"\nRunning compiler: {' '.join(command)}")
+      +    # Set environment variable to enable progress bars in the Rust code.
+      +    env = os.environ.copy()
+      +    env["ENABLE_PROGRESS_BAR"] = "1"
+      +
+      +    print(f"\nRunning compiler: ENABLE_PROGRESS_BAR=1 {' '.join(command)}")
+           try:
+      -        subprocess.run(command, check=True)
+      +        # Run the compiler, passing through its output and the environment variable.
+      +        subprocess.run(command, check=True, env=env)
+           except subprocess.CalledProcessError as e:
+               print(f"Grammar compilation failed with exit code {e.returncode}", file=sys.stderr)
+               sys.exit(1)
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: scripts/compile.py
+      Applying patch to 'scripts/compile.py' using custom patcher...
+      Successfully applied patch and wrote to scripts/compile.py.
+    metadata:
+  - user: 'Changes committed with message: "fix(scripts): Stream output and enable
+      progress bars when running grammar-compiler"'
     metadata:
 ...
