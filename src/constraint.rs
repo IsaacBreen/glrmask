@@ -797,6 +797,79 @@ impl GrammarConstraint {
             }
         }
 
+        // Build LLM vocab and per-stage vocabularies early so we can short-circuit on precompute0-only.
+        let llm_vocab = Arc::new(LLMVocab {
+            llm_token_map,
+            max_original_llm_token_id,
+        });
+
+        let mut precompute0_vocab = StageVocab {
+            original_to_internal: original_to_internal_map.clone(),
+            internal_to_original: internal_to_original_map.clone(),
+            internal_max_llm_token,
+        };
+        let mut precompute_vocab = precompute0_vocab.clone();
+        let mut precompute2_vocab = precompute_vocab.clone();
+        let mut precompute3_vocab = precompute_vocab.clone();
+
+        // If we skip all precomputation, bail out immediately.
+        if config.skip_precomputation {
+            return Self {
+                tokenizer,
+                parser,
+                precomputed0: BTreeMap::new(),
+                precomputed1: BTreeMap::new(),
+                precomputed2: BTreeMap::new(),
+                precomputed3: BTreeMap::new(),
+                llm_vocab,
+                token_name_map,
+                possible_matches: BTreeMap::new(),
+                trie0_god: Trie0GodWrapper::new(),
+                trie1_god: Trie1GodWrapper::new(),
+                trie2_god: Trie2GodWrapper::new(),
+                trie3_god: Trie3GodWrapper::new(),
+                post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
+                state_map_by_llm: DedupValueMap::new(),
+                terminal_map_by_llm: DedupValueMap::new(),
+                precompute0_vocab,
+                precompute_vocab1: precompute_vocab,
+                precompute2_vocab,
+                precompute3_vocab,
+            };
+        }
+
+        // If we only need precompute0, compute just Trie0 and return now, avoiding all heavier work.
+        if config.precompute0_only {
+            let mut dummy_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = BTreeMap::new();
+            let empty_follow_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
+            let (precomputed0, trie0_god) = Self::precompute0(
+                &tokenizer, Some(&parser), Some(llm_vocab.clone()),
+                &internal_llm_token_map_for_precompute, &token_name_map,
+                precompute0_vocab.internal_max_llm_token, &empty_follow_map,
+                parser.ignore_terminal_id, &mut dummy_possible_matches, config
+            );
+            return Self {
+                tokenizer, parser,
+                precomputed0,
+                precomputed1: BTreeMap::new(),
+                precomputed2: BTreeMap::new(),
+                precomputed3: BTreeMap::new(),
+                llm_vocab, token_name_map,
+                possible_matches: BTreeMap::new(),
+                trie0_god,
+                trie1_god: Trie1GodWrapper::new(),
+                trie2_god: Trie2GodWrapper::new(),
+                trie3_god: Trie3GodWrapper::new(),
+                post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
+                state_map_by_llm: DedupValueMap::new(),
+                terminal_map_by_llm: DedupValueMap::new(),
+                precompute0_vocab,
+                precompute_vocab1: precompute_vocab,
+                precompute2_vocab,
+                precompute3_vocab,
+            };
+        }
+
         // Build VocabPrefixTree for internal LLM tokens (needed for possible_matches computation)
         let internal_tokens_for_vocab: Vec<(usize, Vec<u8>)> = internal_llm_token_map_for_precompute
             .iter()
@@ -837,9 +910,6 @@ impl GrammarConstraint {
         let grammar_productions = &parser.productions; // Assuming parser is the GLRParser instance
         let grammar_term_map = &parser.terminal_map;
 
-        // These might be computed elsewhere or need to be computed here.
-        // Assuming compute_first_sets is available from grammar module.
-
         crate::debug!(2, "Computing terminal follow sets");
         let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions);
         crate::debug!(5, "terminal_follow_sets_named:");
@@ -862,46 +932,6 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map.len());
 
-        let llm_vocab = Arc::new(LLMVocab {
-            llm_token_map,
-            max_original_llm_token_id,
-        });
-
-        // Initialize per-stage vocabularies (start identical to global)
-        let mut precompute0_vocab = StageVocab {
-            original_to_internal: original_to_internal_map.clone(),
-            internal_to_original: internal_to_original_map.clone(),
-            internal_max_llm_token,
-        };
-        let mut precompute_vocab = precompute0_vocab.clone();
-        let mut precompute2_vocab = precompute_vocab.clone();
-        let mut precompute3_vocab = precompute_vocab.clone();
-
-        if config.skip_precomputation {
-            return Self {
-                tokenizer,
-                parser,
-                precomputed0: BTreeMap::new(),
-                precomputed1: BTreeMap::new(),
-                precomputed2: BTreeMap::new(),
-                precomputed3: BTreeMap::new(),
-                llm_vocab,
-                token_name_map,
-                possible_matches: computed_possible_matches,
-                trie0_god: Trie0GodWrapper::new(),
-                trie1_god: Trie1GodWrapper::new(),
-                trie2_god: Trie2GodWrapper::new(),
-                trie3_god: Trie3GodWrapper::new(),
-                post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
-                state_map_by_llm,
-                terminal_map_by_llm,
-                precompute0_vocab,
-                precompute_vocab1: precompute_vocab,
-                precompute2_vocab,
-                precompute3_vocab,
-            };
-        }
-
         let (precomputed0, trie0_god) = Self::precompute0(
             &tokenizer,
             Some(&parser),
@@ -915,30 +945,7 @@ impl GrammarConstraint {
             config
         );
 
-        if config.precompute0_only {
-            return Self {
-                tokenizer,
-                parser,
-                precomputed0,
-                precomputed1: BTreeMap::new(),
-                precomputed2: BTreeMap::new(),
-                precomputed3: BTreeMap::new(),
-                llm_vocab,
-                token_name_map,
-                possible_matches: computed_possible_matches,
-                trie0_god,
-                trie1_god: Trie1GodWrapper::new(),
-                trie2_god: Trie2GodWrapper::new(),
-                trie3_god: Trie3GodWrapper::new(),
-                post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
-                state_map_by_llm,
-                terminal_map_by_llm,
-                precompute0_vocab,
-                precompute_vocab1: precompute_vocab,
-                precompute2_vocab,
-                precompute3_vocab,
-            };
-        }
+        // At this point we know we are not in precompute0-only mode.
 
         let (precomputed1, trie1_god) = Self::precompute1(
             &precomputed0,
@@ -1053,6 +1060,100 @@ impl GrammarConstraint {
             }
         }
 
+        // Build LLM vocab and per-stage vocabularies early so we can short-circuit.
+        let llm_vocab = Arc::new(LLMVocab {
+            llm_token_map: llm_token_map.clone(),
+            max_original_llm_token_id,
+        });
+
+        let mut precompute0_vocab = StageVocab {
+            original_to_internal: original_to_internal_map.clone(),
+            internal_to_original: internal_to_original_map.clone(),
+            internal_max_llm_token: internal_max_llm_token,
+        };
+        let mut precompute_vocab = precompute0_vocab.clone();
+        let mut precompute2_vocab = precompute_vocab.clone();
+        let mut precompute3_vocab = precompute_vocab.clone();
+
+        // Skip-all mode: bail out with empty precomputations.
+        if config.skip_precomputation {
+            return Self {
+                tokenizer,
+                parser,
+                precomputed0: BTreeMap::new(),
+                precomputed1: BTreeMap::new(),
+                precomputed2: BTreeMap::new(),
+                precomputed3: BTreeMap::new(),
+                llm_vocab,
+                token_name_map,
+                possible_matches: BTreeMap::new(),
+                trie0_god: Trie0GodWrapper::new(),
+                trie1_god: Trie1GodWrapper::new(),
+                trie2_god: Trie2GodWrapper::new(),
+                trie3_god: Trie3GodWrapper::new(),
+                post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
+                state_map_by_llm: DedupValueMap::new(),
+                terminal_map_by_llm: DedupValueMap::new(),
+                precompute0_vocab,
+                precompute_vocab1: precompute_vocab,
+                precompute2_vocab,
+                precompute3_vocab,
+            };
+        }
+
+        // Precompute0-only: use cache if compatible; otherwise compute Trie0 and return now.
+        if config.precompute0_only {
+            let (precomputed0, trie0_god, precompute0_vocab_final) = if let Some(cache) = precompute0_cache {
+                if cache.is_compatible(&tokenizer, &llm_token_map, max_original_llm_token_id, &original_to_internal_map) {
+                    crate::debug!(2, "Using cached precompute0");
+                    (cache.precomputed0, cache.trie0_god, cache.precompute0_vocab)
+                } else {
+                    crate::debug!(2, "Ignoring cached precompute0 (mismatch with tokenizer/vocab/mapping).");
+                    let mut dummy_pm = BTreeMap::new();
+                    let empty_follow_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
+                    let (pc0, god) = Self::precompute0(
+                        &tokenizer, Some(&parser), Some(llm_vocab.clone()),
+                        &internal_llm_token_map_for_precompute, &token_name_map,
+                        precompute0_vocab.internal_max_llm_token, &empty_follow_map,
+                        parser.ignore_terminal_id, &mut dummy_pm, config
+                    );
+                    (pc0, god, precompute0_vocab.clone())
+                }
+            } else {
+                let mut dummy_pm = BTreeMap::new();
+                let empty_follow_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
+                Self::precompute0(
+                    &tokenizer, Some(&parser), Some(llm_vocab.clone()),
+                    &internal_llm_token_map_for_precompute, &token_name_map,
+                    precompute0_vocab.internal_max_llm_token, &empty_follow_map,
+                    parser.ignore_terminal_id, &mut dummy_pm, config
+                ).pipe(|(pc0, god)| (pc0, god, precompute0_vocab.clone()))
+            };
+
+            return Self {
+                tokenizer,
+                parser,
+                precomputed0,
+                precomputed1: BTreeMap::new(),
+                precomputed2: BTreeMap::new(),
+                precomputed3: BTreeMap::new(),
+                llm_vocab,
+                token_name_map,
+                possible_matches: BTreeMap::new(),
+                trie0_god,
+                trie1_god: Trie1GodWrapper::new(),
+                trie2_god: Trie2GodWrapper::new(),
+                trie3_god: Trie3GodWrapper::new(),
+                post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
+                state_map_by_llm: DedupValueMap::new(),
+                terminal_map_by_llm: DedupValueMap::new(),
+                precompute0_vocab: precompute0_vocab_final,
+                precompute_vocab1: precompute_vocab,
+                precompute2_vocab,
+                precompute3_vocab,
+            };
+        }
+
         // Build VocabPrefixTree for internal LLM tokens (needed for possible_matches computation)
         let internal_tokens_for_vocab: Vec<(usize, Vec<u8>)> = internal_llm_token_map_for_precompute
             .iter()
@@ -1109,45 +1210,9 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map.len());
 
-        let llm_vocab = Arc::new(LLMVocab {
-            llm_token_map: llm_token_map.clone(),
-            max_original_llm_token_id,
-        });
+        // precompute vocabularies were initialized earlier; no change needed here.
 
-        // Initialize per-stage vocabularies (start identical to global)
-        let mut precompute0_vocab = StageVocab {
-            original_to_internal: original_to_internal_map.clone(),
-            internal_to_original: internal_to_original_map.clone(),
-            internal_max_llm_token: internal_max_llm_token,
-        };
-        let mut precompute_vocab = precompute0_vocab.clone();
-        let mut precompute2_vocab = precompute_vocab.clone();
-        let mut precompute3_vocab = precompute_vocab.clone();
-
-        if config.skip_precomputation {
-            return Self {
-                tokenizer,
-                parser,
-                precomputed0: BTreeMap::new(),
-                precomputed1: BTreeMap::new(),
-                precomputed2: BTreeMap::new(),
-                precomputed3: BTreeMap::new(),
-                llm_vocab,
-                token_name_map,
-                possible_matches: computed_possible_matches,
-                trie0_god: Trie0GodWrapper::new(),
-                trie1_god: Trie1GodWrapper::new(),
-                trie2_god: Trie2GodWrapper::new(),
-                trie3_god: Trie3GodWrapper::new(),
-                post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
-                state_map_by_llm,
-                terminal_map_by_llm,
-                precompute0_vocab,
-                precompute_vocab1: precompute_vocab,
-                precompute2_vocab,
-                precompute3_vocab,
-            };
-        }
+        // We've already handled skip_precomputation and precompute0_only earlier.
 
         // Maybe reuse precompute0 from cache
         let mut precomputed0_opt: Option<(Precomputed0, Trie0GodWrapper)> = None;
