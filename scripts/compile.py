@@ -65,7 +65,7 @@ def filter_vocab(vocab: dict[str, int], max_len: int | None) -> dict[str, int]:
     return filtered
 
 
-def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path | None, recompile: bool, dump_pc0_path: Path | None, load_pc0_path: Path | None):
+def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool):
     """
     Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
     """
@@ -97,22 +97,16 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
              print("Try running without '--no-recompile' to build it.", file=sys.stderr)
         sys.exit(1)
 
-    command = [str(compiler_path)]
-    command.extend(["--grammar", str(grammar_path)])
-    command.extend(["--vocab", str(vocab_path)])
-    if output_path:
-        command.extend(["--output", str(output_path)])
-    if dump_pc0_path:
-        command.extend(["--dump-precompute0", str(dump_pc0_path)])
-    if load_pc0_path:
-        command.extend(["--load-precompute0", str(load_pc0_path)])
+    command = [
+        str(compiler_path),
+        "--grammar", str(grammar_path),
+        "--vocab", str(vocab_path),
+        "--output", str(output_path),
+    ]
 
-    # Use shlex.join for robust command string representation
-    import shlex
-    print(f"\nRunning compiler: ENABLE_PROGRESS_BAR=1 {shlex.join(command)}")
+    print(f"\nRunning compiler: ENABLE_PROGRESS_BAR=1 {' '.join(command)}")
     try:
         # Run the compiler, passing through its output and the environment variable.
-        # Set CWD to project root to ensure cargo finds the right project
         subprocess.run(command, check=True, env=env)
     except subprocess.CalledProcessError as e:
         print(f"Grammar compilation failed with exit code {e.returncode}", file=sys.stderr)
@@ -156,10 +150,6 @@ Examples:
     parser.add_argument("--no-recompile", action="store_true", help="Skip recompiling the Rust grammar-compiler executable and use the existing one.")
     parser.add_argument("--force-download", action="store_true", help="Force re-downloading the vocabulary even if it exists in the cache.")
     
-    # Caching options
-    parser.add_argument("--pc0-cache-path", type=Path, help="Path to a precompute0 cache file. If it doesn't exist, it will be created and used for the final build.")
-    parser.add_argument("--force-pc0-rebuild", action="store_true", help="Force regeneration of the precompute0 cache file.")
-
     # Filtering options
     parser.add_argument("--max-token-len", type=int, help="Filter vocabulary to only include tokens with a byte length less than or equal to this value.")
 
@@ -178,36 +168,9 @@ Examples:
 
     print(f"Temporary vocabulary saved to: {tmp_vocab_path}")
 
-    # 4. Handle precompute0 caching and run the Rust compiler
+    # 4. Run the Rust compiler
     try:
-        # Determine if we need to build the cache
-        if args.pc0_cache_path:
-            cache_exists = args.pc0_cache_path.exists()
-            if not cache_exists or args.force_pc0_rebuild:
-                action = "Rebuilding" if cache_exists else "Building"
-                print(f"\n{action} precompute0 cache at '{args.pc0_cache_path}'...")
-                run_compiler(
-                    compiler_path=args.compiler_path,
-                    grammar_path=args.grammar,
-                    vocab_path=tmp_vocab_path,
-                    output_path=None, # Don't build final output yet
-                    recompile=not args.no_recompile,
-                    dump_pc0_path=args.pc0_cache_path,
-                    load_pc0_path=None,
-                )
-                # Prevent recompiling again in this run
-                args.no_recompile = True
-            else:
-                print(f"\nUsing existing precompute0 cache from '{args.pc0_cache_path}'")
-
-        # Build the final output if an output path was provided
-        if args.output:
-            print(f"\nBuilding final constraint file at '{args.output}'...")
-            run_compiler(
-                compiler_path=args.compiler_path, grammar_path=args.grammar, vocab_path=tmp_vocab_path,
-                output_path=args.output, recompile=not args.no_recompile,
-                dump_pc0_path=None, load_pc0_path=args.pc0_cache_path
-            )
+        run_compiler(args.compiler_path, args.grammar, tmp_vocab_path, args.output, recompile=not args.no_recompile)
     finally:
         # 5. Clean up the temporary file
         tmp_vocab_path.unlink()
