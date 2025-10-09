@@ -38,7 +38,7 @@ struct Args {
     save_precompute0: Option<PathBuf>,
 
     /// If specified, only compute and save the precompute0 cache, then exit.
-    #[arg(long, requires = "save_precompute0")]
+    #[arg(long, requires = "save_precompute0", conflicts_with = "output")]
     precompute0_only: bool,
 }
 
