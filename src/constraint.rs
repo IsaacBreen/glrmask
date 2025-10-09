@@ -1695,8 +1695,9 @@ impl GrammarConstraint {
             let parser = parser.unwrap();
             let terminal = TerminalID(tid);
 
+            let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
             let mut acc = Acc::new_fresh();
-            // acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
+            acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
             let gss_leaf = Arc::new(GSSNode::new(acc));
 
             let gss_stack = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id }));
