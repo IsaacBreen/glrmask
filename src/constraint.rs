@@ -161,6 +161,67 @@ impl JSONConvertible for StageVocab {
         }
     }
 }
+#[derive(Debug, Clone)]
+pub struct Precompute0Cache {
+    pub tokenizer: Regex,
+    pub llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
+    pub max_original_llm_token_id: usize,
+    pub precompute0_vocab: StageVocab,
+    pub precomputed0: Precomputed0,
+    pub trie0_god: Trie0GodWrapper,
+}
+
+impl Precompute0Cache {
+    pub fn is_compatible(
+        &self,
+        tokenizer: &Regex,
+        llm_token_map: &LLMTokenMap,
+        max_original_llm_token_id: usize,
+        expected_original_to_internal: &BTreeMap<usize, usize>,
+    ) -> bool {
+        if &self.tokenizer != tokenizer {
+            return false;
+        }
+        if &self.llm_token_map != llm_token_map {
+            return false;
+        }
+        if self.max_original_llm_token_id != max_original_llm_token_id {
+            return false;
+        }
+        if &self.precompute0_vocab.original_to_internal != expected_original_to_internal {
+            return false;
+        }
+        true
+    }
+}
+
+impl JSONConvertible for Precompute0Cache {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = StdMap::new();
+        obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
+        obj.insert("llm_token_map".to_string(), self.llm_token_map.to_json());
+        obj.insert("max_original_llm_token_id".to_string(), self.max_original_llm_token_id.to_json());
+        obj.insert("precompute0_vocab".to_string(), self.precompute0_vocab.to_json());
+        obj.insert("precomputed0".to_string(), self.precomputed0.to_json());
+        obj.insert("trie0_god".to_string(), self.trie0_god.to_json());
+        JSONNode::Object(obj)
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(mut obj) => {
+                let tokenizer = obj.remove("tokenizer").ok_or("Precompute0Cache: missing tokenizer".to_string()).and_then(Regex::from_json)?;
+                let llm_token_map = obj.remove("llm_token_map").ok_or("Precompute0Cache: missing llm_token_map".to_string()).and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
+                let max_original_llm_token_id = obj.remove("max_original_llm_token_id").ok_or("Precompute0Cache: missing max_original_llm_token_id".to_string()).and_then(usize::from_json)?;
+                let precompute0_vocab = obj.remove("precompute0_vocab").ok_or("Precompute0Cache: missing precompute0_vocab".to_string()).and_then(StageVocab::from_json)?;
+                let precomputed0 = obj.remove("precomputed0").ok_or("Precompute0Cache: missing precomputed0".to_string()).and_then(Precomputed0::from_json)?;
+                let trie0_god = obj.remove("trie0_god").ok_or("Precompute0Cache: missing trie0_god".to_string()).and_then(Trie0GodWrapper::from_json)?;
+                Ok(Precompute0Cache { tokenizer, llm_token_map, max_original_llm_token_id, precompute0_vocab, precomputed0, trie0_god })
+            }
+            _ => Err("Precompute0Cache: expected object".to_string()),
+        }
+    }
+}
 
 /// A memory-sharing map: many keys can reference the same (large) value via an internal ID.
 /// Externally, this behaves like a BTreeMap<K, V> for common operations: insert, get, iter, len.
@@ -935,6 +996,239 @@ impl GrammarConstraint {
         };
 
         gc
+    }
+    pub fn new_with_config_and_precompute0_cache(
+        tokenizer:        Regex,
+        parser:           GLRParser,
+        llm_token_map:    LLMTokenMap,
+        token_name_map:   BiBTreeMap<Terminal, usize>,
+        max_original_llm_token_id: usize,
+        config: &GrammarConstraintConfig,
+        precompute0_cache: Option<Precompute0Cache>,
+    ) -> Self {
+        let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
+        let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
+        assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
+        let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map);
+
+        let internal_max_llm_token = original_to_internal_map.values().copied().max().unwrap_or(0);
+        // Build reverse mapping for global vocab
+        let mut internal_to_original_map: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+        for (orig, int_id) in &original_to_internal_map {
+            internal_to_original_map.entry(*int_id).or_default().insert(*orig);
+        }
+
+        let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
+        for (bytes, original_id) in llm_token_map.iter() {
+            if let Some(internal_id_val) = original_to_internal_map.get(&original_id.0) {
+                internal_llm_token_map_for_precompute.insert(bytes.clone(), LLMTokenID(*internal_id_val));
+            }
+        }
+
+        // Build VocabPrefixTree for internal LLM tokens (needed for possible_matches computation)
+        let internal_tokens_for_vocab: Vec<(usize, Vec<u8>)> = internal_llm_token_map_for_precompute
+            .iter()
+            .map(|(bytes, id)| (id.0 as usize, bytes.clone()))
+            .collect();
+        crate::debug!(2, "Building vocab prefix tree for possible_matches computation");
+        let vocab_for_possible_matches = VocabPrefixTree::build(&internal_tokens_for_vocab);
+        crate::debug!(2, "Done building vocab prefix tree for possible_matches computation");
+
+        let mut computed_possible_matches = BTreeMap::new();
+        // Cache for the possible_matches computation
+        let mut pm_cache: HashMap<(*const VocabPrefixTreeNode, TokenizerStateID), BTreeMap<GrammarTokenID, LLMTokenBV>> = HashMap::new();
+
+        crate::debug!(2, "Computing possible_matches for all {} tokenizer states", tokenizer.iter_states().count());
+        for sid in tokenizer.iter_states() {
+            let matches_for_sid = Self::compute_possible_matches_for_vocab_node(
+                &tokenizer,
+                &vocab_for_possible_matches.root,
+                sid,
+                &mut pm_cache,
+            );
+            computed_possible_matches.insert(sid, matches_for_sid);
+        }
+        crate::debug!(2, "Finished computing possible_matches");
+
+        // Build precomputed per-token (internal) maps.
+        crate::debug!(2, "Building state_map_by_llm and terminal_map_by_llm");
+        let state_map_by_llm = Self::build_state_map_by_llm(&tokenizer, &vocab_for_possible_matches.root);
+        crate::debug!(2, "Built state_map_by_llm with {} entries", state_map_by_llm.len());
+        let terminal_map_by_llm = Self::rearrange_possible_matches(&computed_possible_matches);
+
+        let grammar_productions = &parser.productions;
+        let grammar_term_map = &parser.terminal_map;
+
+        crate::debug!(2, "Computing terminal follow sets");
+        let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions);
+        crate::debug!(5, "terminal_follow_sets_named:");
+        for (terminal, following_terminals) in &terminal_follow_sets_named {
+            crate::debug!(4, "{} -> {}", terminal, following_terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
+        }
+
+        let mut terminal_follow_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
+        for (terminal1, following_terminals) in terminal_follow_sets_named {
+            let t1_id = *grammar_term_map.get_by_left(&terminal1).expect_else(|| format!("Terminal {:?} from follow sets not found in grammar_term_map {:?}", terminal1, grammar_term_map));
+            let mut following_ids = BTreeSet::new();
+            for t2 in following_terminals {
+                let t2_id = *grammar_term_map.get_by_left(&t2).unwrap();
+                following_ids.insert(t2_id);
+            }
+            if !following_ids.is_empty() {
+                terminal_follow_map.insert(t1_id, following_ids);
+            }
+        }
+
+        crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map.len());
+
+        let llm_vocab = Arc::new(LLMVocab {
+            llm_token_map: llm_token_map.clone(),
+            max_original_llm_token_id,
+        });
+
+        // Initialize per-stage vocabularies (start identical to global)
+        let mut precompute0_vocab = StageVocab {
+            original_to_internal: original_to_internal_map.clone(),
+            internal_to_original: internal_to_original_map.clone(),
+            internal_max_llm_token: internal_max_llm_token,
+        };
+        let mut precompute_vocab = precompute0_vocab.clone();
+        let mut precompute2_vocab = precompute_vocab.clone();
+        let mut precompute3_vocab = precompute_vocab.clone();
+
+        if config.skip_precomputation {
+            return Self {
+                tokenizer,
+                parser,
+                precomputed0: BTreeMap::new(),
+                precomputed1: BTreeMap::new(),
+                precomputed2: BTreeMap::new(),
+                precomputed3: BTreeMap::new(),
+                llm_vocab,
+                token_name_map,
+                possible_matches: computed_possible_matches,
+                trie0_god: Trie0GodWrapper::new(),
+                trie1_god: Trie1GodWrapper::new(),
+                trie2_god: Trie2GodWrapper::new(),
+                trie3_god: Trie3GodWrapper::new(),
+                post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
+                state_map_by_llm,
+                terminal_map_by_llm,
+                precompute0_vocab,
+                precompute_vocab1: precompute_vocab,
+                precompute2_vocab,
+                precompute3_vocab,
+            };
+        }
+
+        // Maybe reuse precompute0 from cache
+        let mut precomputed0_opt: Option<(Precomputed0, Trie0GodWrapper)> = None;
+        if let Some(cache) = precompute0_cache {
+            if cache.is_compatible(&tokenizer, &llm_token_map, max_original_llm_token_id, &original_to_internal_map) {
+                crate::debug!(2, "Using cached precompute0");
+                precompute0_vocab = cache.precompute0_vocab.clone();
+                precompute_vocab = precompute0_vocab.clone();
+                precompute2_vocab = precompute_vocab.clone();
+                precompute3_vocab = precompute_vocab.clone();
+                precomputed0_opt = Some((cache.precomputed0, cache.trie0_god));
+            } else {
+                crate::debug!(2, "Ignoring cached precompute0 (mismatch with tokenizer/vocab/mapping).");
+            }
+        }
+
+        let (precomputed0, trie0_god) = if let Some(tuple) = precomputed0_opt {
+            tuple
+        } else {
+            Self::precompute0(
+                &tokenizer,
+                Some(&parser),
+                Some(llm_vocab.clone()),
+                &internal_llm_token_map_for_precompute,
+                &token_name_map,
+                precompute0_vocab.internal_max_llm_token,
+                &terminal_follow_map,
+                parser.ignore_terminal_id,
+                &mut computed_possible_matches,
+                config
+            )
+        };
+
+        let (precomputed1, trie1_god) = Self::precompute1(
+            &precomputed0,
+            &trie0_god,
+            &tokenizer,
+            Some(&parser),
+            &terminal_follow_map,
+            &mut precompute_vocab,
+            &config.trie1,
+            &token_name_map,
+        );
+
+        precompute2_vocab = precompute_vocab.clone();
+        precompute3_vocab = precompute_vocab.clone();
+
+        let (precomputed2, trie2_god) = Self::precompute2(
+            &precomputed1,
+            &trie1_god,
+            &tokenizer,
+            Some(&parser),
+            Some(llm_vocab.clone()),
+            &internal_llm_token_map_for_precompute,
+            &token_name_map,
+            precompute2_vocab.internal_max_llm_token,
+            &terminal_follow_map,
+            parser.ignore_terminal_id,
+            &mut computed_possible_matches,
+            &config.trie2,
+        );
+
+        let (precomputed3, trie3_god) = Self::precompute3(
+            &precomputed1,
+            &trie1_god,
+            &tokenizer, Some(&parser), Some(llm_vocab.clone()), &internal_llm_token_map_for_precompute, &token_name_map, internal_max_llm_token, &terminal_follow_map, parser.ignore_terminal_id, &mut computed_possible_matches,
+            &config.trie3,
+            &mut precompute3_vocab,
+        );
+
+        let mut stats3 = PrecomputeStats::default();
+        crate::constraint_extra::calculate_final_stats3(&precomputed3, &mut stats3, &trie3_god);
+        crate::constraint_extra::print_precompute_stats3(&stats3, &trie3_god);
+
+        let mut gc = Self {
+            tokenizer,
+            parser,
+            precomputed0,
+            precomputed1,
+            precomputed2,
+            precomputed3,
+            llm_vocab,
+            token_name_map,
+            possible_matches: computed_possible_matches,
+            trie0_god,
+            trie1_god,
+            trie2_god,
+            trie3_god,
+            post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
+            state_map_by_llm,
+            terminal_map_by_llm,
+            precompute0_vocab,
+            precompute_vocab1: precompute_vocab,
+            precompute2_vocab,
+            precompute3_vocab,
+        };
+
+        gc
+    }
+
+    pub fn export_precompute0_cache(&self) -> Precompute0Cache {
+        Precompute0Cache {
+            tokenizer: self.tokenizer.clone(),
+            llm_token_map: self.llm_vocab.llm_token_map.clone(),
+            max_original_llm_token_id: self.llm_vocab.max_original_llm_token_id,
+            precompute0_vocab: self.precompute0_vocab.clone(),
+            precomputed0: self.precomputed0.clone(),
+            trie0_god: self.trie0_god.clone(),
+        }
     }
 
     pub fn precompute0(

@@ -8,7 +8,6 @@ from pathlib import Path
 import requests
 
 # --- Helper Functions ---
-
 def get_vocab(url: str | None, path: Path | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
     """
     Loads a vocabulary from a local path or downloads it from a URL, using a cache.
@@ -63,9 +62,7 @@ def filter_vocab(vocab: dict[str, int], max_len: int | None) -> dict[str, int]:
             
     print(f"  -> Filtered vocabulary from {len(vocab)} to {len(filtered)} tokens.")
     return filtered
-
-
-def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool):
+def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool, pc0_cache: Path | None = None, refresh_pc0_cache: bool = False):
     """
     Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
     """
@@ -103,6 +100,19 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
         "--vocab", str(vocab_path),
         "--output", str(output_path),
     ]
+    # Precompute0 cache handling
+    if pc0_cache is not None:
+        cache_parent = pc0_cache.parent
+        cache_parent.mkdir(parents=True, exist_ok=True)
+        if pc0_cache.exists() and not refresh_pc0_cache:
+            print(f"Reusing precompute0 cache: {pc0_cache}")
+            command.extend(["--load-precompute0", str(pc0_cache)])
+        else:
+            if refresh_pc0_cache and pc0_cache.exists():
+                print(f"Refreshing precompute0 cache: {pc0_cache}")
+            else:
+                print(f"Creating precompute0 cache: {pc0_cache}")
+            command.extend(["--save-precompute0", str(pc0_cache)])
 
     print(f"\nRunning compiler: ENABLE_PROGRESS_BAR=1 {' '.join(command)}")
     try:
@@ -149,7 +159,10 @@ Examples:
     parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the grammar-compiler executable.")
     parser.add_argument("--no-recompile", action="store_true", help="Skip recompiling the Rust grammar-compiler executable and use the existing one.")
     parser.add_argument("--force-download", action="store_true", help="Force re-downloading the vocabulary even if it exists in the cache.")
-    
+    # precompute0 cache options
+    parser.add_argument("--pc0-cache", type=Path, help="Path to save or reuse a precompute0 cache (.json.gz).")
+    parser.add_argument("--refresh-pc0-cache", action="store_true", help="Force rebuilding the precompute0 cache before compiling the final constraint.")
+
     # Filtering options
     parser.add_argument("--max-token-len", type=int, help="Filter vocabulary to only include tokens with a byte length less than or equal to this value.")
 
@@ -167,14 +180,20 @@ Examples:
         tmp_vocab_path = Path(tmp_vocab_file.name)
 
     print(f"Temporary vocabulary saved to: {tmp_vocab_path}")
-
     # 4. Run the Rust compiler
     try:
-        run_compiler(args.compiler_path, args.grammar, tmp_vocab_path, args.output, recompile=not args.no_recompile)
+        run_compiler(
+            args.compiler_path,
+            args.grammar,
+            tmp_vocab_path,
+            args.output,
+            recompile=not args.no_recompile,
+            pc0_cache=args.pc0_cache,
+            refresh_pc0_cache=args.refresh_pc0_cache
+        )
     finally:
         # 5. Clean up the temporary file
         tmp_vocab_path.unlink()
         print(f"Cleaned up temporary vocabulary file.")
-
 if __name__ == "__main__":
     main()
