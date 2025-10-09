@@ -5985,48 +5985,47 @@ local_system:
 
               let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing");
 
-              let mut new_acc: Option<Acc> = None;
-              let mut dest: Option<StoredPrecomputeNodeIndex> = None;
+              let mut merged_acc_opt: Option<Acc> = None;
+              // Lazily create the destination only if we actually have sources to point to it.
+              let mut dest: Option<PrecomputeNode3Index> = None;
+              for (k, acc) in below {
+                  // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
+                  let tokens_all = LLMTokenBV::max_ones();
+                  let key = (k, tokens_all.clone());
+                  let all_states = StateIDBV::max_ones();
 
-              for (k, mut acc) in below {
-                  let source_nodes = std::mem::take(acc.stored_trie_nodes_mut());
-                  if !source_nodes.is_empty() {
-                      let dest_node = dest.get_or_insert_with(|| {
+                  // Iterate without consuming; only create a destination when needed.
+                  for node in acc.stored_trie_nodes().iter().cloned() {
+                      let source_arc = node.as_arc().clone();
+
+                      let inserter = EdgeInserter::new(
+                          god,
+                          source_arc,
+                          key.clone(),
+                          all_states.clone(),
+                          |e, n| *e |= n,
+                          |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
+                          |_, _| {}, // Unconditional insertion
+                      );
+                      // Create the destination lazily on first use.
+                      let d = dest.get_or_insert_with(|| {
                           PrecomputeNode3Index::new(
-                              god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())),
+                              god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
                           )
-                      });
-
-                      // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
-                      let tokens_all = LLMTokenBV::max_ones();
-                      let key = (k, tokens_all.clone());
-                      let all_states = StateIDBV::max_ones();
-
-                      for node in source_nodes {
-                          let source_arc = node.as_arc().clone();
-                          let inserter = EdgeInserter::new(
-                              god,
-                              source_arc,
-                              key.clone(),
-                              all_states.clone(),
-                              |e, n| *e |= n,
-                              |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
-                              |_, _| true, // Unconditional insertion
-                          );
-                          inserter.try_destination(dest_node.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
-                      }
+                      }).clone();
+                      inserter.try_destination(d).expect("Cycle detected when adding precompute trie edges for below-bottom");
                   }
 
-                  if new_acc.is_none() {
-                      new_acc = Some(acc);
-                  } else {
-                      new_acc = Some(Acc::merge(new_acc.as_ref().unwrap(), &acc));
-                  }
+                  merged_acc_opt = Some(match merged_acc_opt {
+                      None => acc,
+                      Some(existing) => Acc::merge(&existing, &acc),
+                  });
               }
 
-              let mut new_acc = new_acc.expect("No Acc built for below-bottom handling");
-              new_acc.stored_trie_nodes_mut().clear();
+              let mut new_acc = merged_acc_opt.expect("No Acc built for below-bottom handling");
+              // Only rewrite stored_trie_nodes if we actually created a destination
               if let Some(d) = dest {
+                  new_acc.stored_trie_nodes_mut().clear();
                   new_acc.stored_trie_nodes_mut().insert(d);
               }
 
@@ -6173,24 +6172,22 @@ local_system:
                               // Apply the optional state filter (for hallucinated transitions) before consuming the GOTO.
                               let mut parent_after_filter = isolated_parent.clone();
                               if let (Some(god), Some(bv)) = (god_opt, maybe_filter.as_ref()) {
-                                  if !parent_after_filter.is_empty() && !parent_after_filter.stored_trie_nodes().is_empty() {
-                                      // Reuse a single destination per unique state filter BV and memoize the transformation.
-                                      let (dest, memo) = filter_ctxs.entry(bv.clone()).or_insert_with(|| {
-                                          let new_dest = PrecomputeNode3Index::new(
-                                              god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-                                          );
-                                          (new_dest, PruneAndTransformRecursiveMemo::default())
-                                      });
-                                      deep_add_precompute_trie_edges(
-                                          &mut parent_after_filter,
-                                          god,
-                                          &edge_key_all_tokens_zero_k,
-                                          bv,
-                                          &tokens_all,
-                                          &mut || dest.clone(),
-                                          memo,
+                                  // Reuse a single destination per unique state filter BV and memoize the transformation.
+                                  let (dest, memo) = filter_ctxs.entry(bv.clone()).or_insert_with(|| {
+                                      let new_dest = PrecomputeNode3Index::new(
+                                          god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
                                       );
-                                  }
+                                      (new_dest, PruneAndTransformRecursiveMemo::default())
+                                  });
+                                  deep_add_precompute_trie_edges(
+                                      &mut parent_after_filter,
+                                      god,
+                                      &edge_key_all_tokens_zero_k,
+                                      bv,
+                                      &tokens_all,
+                                      &mut || dest.clone(),
+                                      memo,
+                                  );
                               }
 
                               // Accept contribution (store isolated parent)
@@ -6268,58 +6265,67 @@ local_system:
                   for gss_arc in out {
                       timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", { // SLOW POINT, ~20k calls
                       if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
-                          let cache_key = BelowBottomCacheKey {
-                              nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
-                              source_state_id: StateID(usize::MAX),      // Dummy value
-                              goto_state_id: state_id,
-                              k: usize::MAX,                             // Dummy value
-                          };
-
-                          let (cached_dest, add_to_out) = timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS::CacheLookup", {
-                              let entry = self.below_bottom_cache.entry(cache_key);
-                              match entry {
-                                  std::collections::hash_map::Entry::Occupied(mut occupied) => {
-                                      let (dest, cached_tokens) = occupied.get_mut();
-                                      (dest.clone(), false)
-                                  }
-                                  std::collections::hash_map::Entry::Vacant(vacant) => {
-                                      let new_dest = PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
-                                      vacant.insert((new_dest.clone(), LLMTokenBV::max_ones()));
-                                      (new_dest, true)
-                                  }
-                              }
-                          });
-
-
                           // Link all stored nodes from the simple GSS to the canonical cached destination and replace them.
                           let mut new_gss_arc = gss_arc;
-                          let edge_key = (0, tokens_all.clone());
-                          let edge_value = StateIDBV::max_ones();
-                          let tokens_for_update = tokens_all.clone();
+                          // Only attempt to cache if there are actually stored trie nodes to unify.
+                          let has_sources = !acc.stored_trie_nodes().is_empty();
+                          if has_sources {
+                              let cache_key = BelowBottomCacheKey {
+                                  nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
+                                  source_state_id: StateID(usize::MAX),      // Dummy value
+                                  goto_state_id: state_id,
+                                  k: usize::MAX,                             // Dummy value
+                              };
 
-                          // Memoize deep_add for this particular cached destination to avoid re-walking identical subgraphs.
-                          let memo_for_dest = cached_dest_memos.entry(cached_dest.clone())
-                              .or_insert_with(PruneAndTransformRecursiveMemo::default);
+                              let (cached_dest, add_to_out) = timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS::CacheLookup", {
+                                  let entry = self.below_bottom_cache.entry(cache_key);
+                                  match entry {
+                                      std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                                          let (dest, _cached_tokens) = occupied.get_mut();
+                                          (dest.clone(), false)
+                                      }
+                                      std::collections::hash_map::Entry::Vacant(vacant) => {
+                                          let new_dest = PrecomputeNode3Index::new(
+                                              god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+                                          );
+                                          vacant.insert((new_dest.clone(), LLMTokenBV::max_ones()));
+                                          (new_dest, true)
+                                      }
+                                  }
+                              });
 
-                          deep_add_precompute_trie_edges(
-                              &mut new_gss_arc,
-                              god,
-                              &edge_key,
-                              &edge_value,
-                              &tokens_for_update,
-                              &mut || cached_dest.clone(),
-                              memo_for_dest,
-                          );
+                              let edge_key = (0, tokens_all.clone());
+                              let edge_value = StateIDBV::max_ones();
+                              let tokens_for_update = tokens_all.clone();
 
-                          if add_to_out {
-                              // On a cache miss, or if we expanded the token set, this is the first time we see this simple GSS structure.
-                              // We add the modified GSS to the output to serve as the canonical representation.
-                              crate::debug!(5, "Cache miss or expanded token set for simple GSS to state {}, adding to output.", state_id.0);
-                              hit!("GLRParserState::reduce_and_goto::CacheMissOrExpand");
-                              final_out.push(new_gss_arc);
+                              // Memoize deep_add for this particular cached destination to avoid re-walking identical subgraphs.
+                              let memo_for_dest = cached_dest_memos.entry(cached_dest.clone())
+                                  .or_insert_with(PruneAndTransformRecursiveMemo::default);
+
+                              deep_add_precompute_trie_edges(
+                                  &mut new_gss_arc,
+                                  god,
+                                  &edge_key,
+                                  &edge_value,
+                                  &tokens_for_update,
+                                  &mut || cached_dest.clone(),
+                                  memo_for_dest,
+                              );
+
+                              if add_to_out {
+                                  // On a cache miss, or if we expanded the token set, this is the first time we see this simple GSS structure.
+                                  // We add the modified GSS to the output to serve as the canonical representation.
+                                  crate::debug!(5, "Cache miss or expanded token set for simple GSS to state {}, adding to output.", state_id.0);
+                                  hit!("GLRParserState::reduce_and_goto::CacheMissOrExpand");
+                                  final_out.push(new_gss_arc);
+                              } else {
+                                  crate::debug!(5, "Cache hit for simple GSS to state {}, skipping addition to output.", state_id.0);
+                                  hit!("GLRParserState::reduce_and_goto::CacheHit");
+                              }
                           } else {
-                              crate::debug!(5, "Cache hit for simple GSS to state {}, skipping addition to output.", state_id.0);
-                              hit!("GLRParserState::reduce_and_goto::CacheHit");
+                              // No stored trie nodes to unify; skip creating or caching a destination and keep as-is.
+                              crate::debug!(5, "Simple GSS to state {} has no stored_trie_nodes; skipping cached dest creation.", state_id.0);
+                              final_out.push(new_gss_arc);
                           }
                           // On a cache hit where tokens are a subset, the GSS is redundant. We've added the trie links, so we can discard it.
                       } else {
@@ -7102,7 +7108,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - gpt-5
   code_completion_model:
     - cp
   commit_message_model:
@@ -10679,10 +10685,9 @@ messages:
       ```
     metadata:
       filename: src/glr/parser.rs
-  - user: Often, we'll create trie3 nodes to a new common destination and update the
-      acc's stored trie nodes to this common dest. However, when the stored trie nodes
-      are empty, we shouldn't be creating a new one. Fix this. Anywhere where we have
-      `PrecomputedNodeContents::internal()` is suspect here.
+  - user: |-
+      Often, we'll create trie3 nodes to a new common destination and update the acc's stored trie nodes to this common dest. However, when the stored trie nodes are empty, we shouldn't be creating a new one. Fix this. Anywhere where we have `PrecomputedNodeContents::internal()` is suspect here.
+      No point creating a dest node if there's nothing pointing to it.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -10701,31 +10706,50 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. I can help with that. Creating trie nodes when there are no source nodes is inefficient. Here are the step-by-step instructions and the corresponding git diff to fix this issue.
+      Below are step-by-step edits to prevent creating PrecomputeNode3 destination nodes when nothing will point to them, focusing on places that were eagerly allocating nodes with PrecomputedNodeContents::internal() even if stored_trie_nodes were empty.
 
-      ### Step-by-step Instructions
+      Step-by-step instructions
 
-      I'll make corrections in two functions within `src/glr/parser.rs` to avoid creating unnecessary trie nodes.
+      1) File: src/glr/parser.rs
+      - Function: handle_below_bottom
+        - Problem: It eagerly creates a new destination node (dest) even when none of the Accs have any stored_trie_nodes to connect. It also consumes each Acc’s stored_trie_nodes via std::mem::take, which forces replacing them with the new dest later.
+        - Fix:
+          - Create the destination lazily only when you encounter the first source node that needs an edge.
+          - Do not consume acc.stored_trie_nodes; iterate over them without clearing, ensuring we keep the union intact when we don’t create a dest at all.
+          - Only clear-and-replace merged Acc’s stored_trie_nodes with the new dest if we actually created one.
 
-      1.  **File: `src/glr/parser.rs`**
-          -   In the function `GLRParserState::handle_below_bottom`, I will modify the logic to prevent the creation of a destination trie node (`dest`) if there are no `stored_trie_nodes` to connect from. The destination node will now be created lazily only when it's first needed.
-          -   I will also correct a small typo in a closure passed to `EdgeInserter::new`, changing `|_, _| _ = true` to `|_, _| true` to make it a valid boolean expression for unconditional insertion.
+        Concrete edits:
+        - Replace the eager dest creation with an Option<PrecomputeNode3Index>.
+        - Iterate over acc.stored_trie_nodes().iter().cloned() instead of std::mem::take.
+        - After merging Accs, only write back the single-destination set if dest is Some.
 
-      2.  **File: `src/glr/parser.rs`**
-          -   In the function `GLRParserState::reduce_and_goto`, I will add a guard condition. Before applying a state filter (which involves creating a new trie node as a destination), I'll add a check to ensure the GSS node (`parent_after_filter`) is not empty and has `stored_trie_nodes`. This prevents the creation of a destination node that would have no incoming edges.
+      2) File: src/glr/parser.rs
+      - Function: GLRParserState::reduce_and_goto, in the "NEW CACHING LOGIC" block
+        - Problem: The caching code allocated a cached destination node as soon as it detects a simple GSS form, even if the Acc’s stored_trie_nodes is empty (in which case deep_add_precompute_trie_edges would do nothing).
+        - Fix:
+          - Before touching the cache, check whether the simple GSS Acc has non-empty stored_trie_nodes.
+          - If empty, skip creating a cached destination and skip deep_add_precompute_trie_edges. Just push the GSS as-is to the output.
+          - If non-empty, proceed as before (create/get cached destination and apply deep_add_precompute_trie_edges).
 
-      These changes will ensure that `PrecomputeNode3` nodes with `PrecomputedNodeContents::internal()` are only created when they will actually be used.
+        Concrete edits:
+        - Add a has_sources check: let has_sources = !acc.stored_trie_nodes().is_empty();
+        - Guard the cache creation and deep_add_precompute_trie_edges with has_sources; otherwise, simply push the GSS.
 
-      ### Git Diffs
+      These two changes remove unnecessary node allocations while preserving behavior. Other uses of PrecomputedNodeContents::internal() remain intentional, because they only trigger when there are sources to connect (e.g., deep_add_precompute_trie_edges already guards against empty stored_trie_nodes, and the pairwise macro creation in allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc is computed from non-empty “needs edge” sets).
 
-      Here is the git diff for the changes.
+      Git patches
 
       ```diff
       diff --git a/src/glr/parser.rs b/src/glr/parser.rs
-      index 4556488..2b64790 100644
+      index 9bb3d28..5c05da9 100644
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -1475,42 +1475,46 @@
+      @@ -1057,49 +1057,59 @@ impl<'a> GLRParserState<'a> { // No longer generic
+               let hallucinate_sid = self.parser.hallucinated_state_id;
+       
+               if below.is_empty() {
+                   return Vec::new();
+               }
        
                let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing");
        
@@ -10733,115 +10757,200 @@ messages:
       -        let mut dest = PrecomputeNode3Index::new(
       -            god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
       -        );
-      +        let mut new_acc: Option<Acc> = None;
-      +        let mut dest: Option<StoredPrecomputeNodeIndex> = None;
-      +
-               for (k, mut acc) in below {
-      -            // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
-      -            let tokens_all = LLMTokenBV::max_ones();
-      -            let key = (k, tokens_all.clone());
-      -            let all_states = StateIDBV::max_ones();
-      -
+      -        for (k, mut acc) in below {
+      +        let mut merged_acc_opt: Option<Acc> = None;
+      +        // Lazily create the destination only if we actually have sources to point to it.
+      +        let mut dest: Option<PrecomputeNode3Index> = None;
+      +        for (k, acc) in below {
+                   // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
+                   let tokens_all = LLMTokenBV::max_ones();
+                   let key = (k, tokens_all.clone());
+                   let all_states = StateIDBV::max_ones();
+       
       -            for node in std::mem::take(acc.stored_trie_nodes_mut()) {
       -                let source_arc = node.as_arc().clone();
-      -                let inserter = EdgeInserter::new(
-      -                    god,
-      -                    source_arc,
-      -                    key.clone(),
-      -                    all_states.clone(),
-      -                    |e, n| *e |= n,
-      -                    |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
+      +            // Iterate without consuming; only create a destination when needed.
+      +            for node in acc.stored_trie_nodes().iter().cloned() {
+      +                let source_arc = node.as_arc().clone();
+       
+                       let inserter = EdgeInserter::new(
+                           god,
+                           source_arc,
+                           key.clone(),
+                           all_states.clone(),
+                           |e, n| *e |= n,
+                           |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
       -                    |_, _| _ = true, // Unconditional insertion
-      -                );
+      +                    |_, _| {}, // Unconditional insertion
+                       );
       -                inserter.try_destination(dest.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
-      +            let source_nodes = std::mem::take(acc.stored_trie_nodes_mut());
-      +            if !source_nodes.is_empty() {
-      +                let dest_node = dest.get_or_insert_with(|| {
+      +                // Create the destination lazily on first use.
+      +                let d = dest.get_or_insert_with(|| {
       +                    PrecomputeNode3Index::new(
-      +                        god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())),
+      +                        god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
       +                    )
-      +                });
-      +
-      +                // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
-      +                let tokens_all = LLMTokenBV::max_ones();
-      +                let key = (k, tokens_all.clone());
-      +                let all_states = StateIDBV::max_ones();
-      +
-      +                for node in source_nodes {
-      +                    let source_arc = node.as_arc().clone();
-      +                    let inserter = EdgeInserter::new(
-      +                        god,
-      +                        source_arc,
-      +                        key.clone(),
-      +                        all_states.clone(),
-      +                        |e, n| *e |= n,
-      +                        |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
-      +                        |_, _| true, // Unconditional insertion
-      +                    );
-      +                    inserter.try_destination(dest_node.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
-      +                }
+      +                }).clone();
+      +                inserter.try_destination(d).expect("Cycle detected when adding precompute trie edges for below-bottom");
                    }
        
-                   if new_acc.is_none() {
-                       new_acc = Some(acc);
-                   } else {
+      -            if new_acc.is_none() {
+      -                new_acc = Some(acc);
+      -            } else {
       -                new_acc = Some(Acc::merge(&new_acc.unwrap(), &acc));
-      +                new_acc = Some(Acc::merge(new_acc.as_ref().unwrap(), &acc));
-                   }
+      -            }
+      +            merged_acc_opt = Some(match merged_acc_opt {
+      +                None => acc,
+      +                Some(existing) => Acc::merge(&existing, &acc),
+      +            });
                }
        
-               let mut new_acc = new_acc.expect("No Acc built for below-bottom handling");
-               new_acc.stored_trie_nodes_mut().clear();
+      -        let mut new_acc = new_acc.expect("No Acc built for below-bottom handling");
+      -        new_acc.stored_trie_nodes_mut().clear();
       -        new_acc.stored_trie_nodes_mut().insert(dest);
+      +        let mut new_acc = merged_acc_opt.expect("No Acc built for below-bottom handling");
+      +        // Only rewrite stored_trie_nodes if we actually created a destination
       +        if let Some(d) = dest {
+      +            new_acc.stored_trie_nodes_mut().clear();
       +            new_acc.stored_trie_nodes_mut().insert(d);
       +        }
        
                let new_leaf = Arc::new(GSSNode::new(new_acc));
                let new_gss = Arc::new(new_leaf.push(ParseStateEdgeContent { state_id: hallucinate_sid }));
-      @@ -1590,24 +1594,26 @@
-                               }
-                               // Apply the optional state filter (for hallucinated transitions) before consuming the GOTO.
-                               let mut parent_after_filter = isolated_parent.clone();
-                               if let (Some(god), Some(bv)) = (god_opt, maybe_filter.as_ref()) {
-      -                            // Reuse a single destination per unique state filter BV and memoize the transformation.
-      -                            let (dest, memo) = filter_ctxs.entry(bv.clone()).or_insert_with(|| {
-      -                                let new_dest = PrecomputeNode3Index::new(
-      -                                    god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-      -                                );
-      -                                (new_dest, PruneAndTransformRecursiveMemo::default())
-      -                            });
-      -                            deep_add_precompute_trie_edges(
-      -                                &mut parent_after_filter,
-      -                                god,
-      -                                &edge_key_all_tokens_zero_k,
-      -                                bv,
-      -                                &tokens_all,
-      -                                &mut || dest.clone(),
-      -                                memo,
-      -                            );
-      +                            if !parent_after_filter.is_empty() && !parent_after_filter.stored_trie_nodes().is_empty() {
-      +                                // Reuse a single destination per unique state filter BV and memoize the transformation.
-      +                                let (dest, memo) = filter_ctxs.entry(bv.clone()).or_insert_with(|| {
+               let new_todo_items = vec![(hallucinate_sid, new_gss)];
+       
+               new_todo_items
+           }
+      @@ -1269,53 +1279,70 @@ impl<'a> GLRParserState<'a> { // No longer generic
+               let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
+               if let Some(god) = self.active_state.trie2_god.as_ref() {
+                   timeit!("GLRParserState::reduce_and_goto::Caching", { // ~500 calls
+                   for gss_arc in out {
+                       timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", { // SLOW POINT, ~20k calls
+                       if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
+      -                    let cache_key = BelowBottomCacheKey {
+      -                        nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
+      -                        source_state_id: StateID(usize::MAX),      // Dummy value
+      -                        goto_state_id: state_id,
+      -                        k: usize::MAX,                             // Dummy value
+      -                    };
+      -
+      -                    let (cached_dest, add_to_out) = timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS::CacheLookup", {
+      -                        let entry = self.below_bottom_cache.entry(cache_key);
+      -                        match entry {
+      -                            std::collections::hash_map::Entry::Occupied(mut occupied) => {
+      -                                let (dest, cached_tokens) = occupied.get_mut();
+      -                                (dest.clone(), false)
+      -                            }
+      -                            std::collections::hash_map::Entry::Vacant(vacant) => {
+      -                                let new_dest = PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
+      -                                vacant.insert((new_dest.clone(), LLMTokenBV::max_ones()));
+      -                                (new_dest, true)
+      -                            }
+      -                        }
+      -                    });
+      -
+                           // Link all stored nodes from the simple GSS to the canonical cached destination and replace them.
+                           let mut new_gss_arc = gss_arc;
+      -                    let edge_key = (0, tokens_all.clone());
+      -                    let edge_value = StateIDBV::max_ones();
+      -                    let tokens_for_update = tokens_all.clone();
+      -
+      -                    // Memoize deep_add for this particular cached destination to avoid re-walking identical subgraphs.
+      -                    let memo_for_dest = cached_dest_memos.entry(cached_dest.clone())
+      -                        .or_insert_with(PruneAndTransformRecursiveMemo::default);
+      -
+      -                    deep_add_precompute_trie_edges(
+      -                        &mut new_gss_arc,
+      -                        god,
+      -                        &edge_key,
+      -                        &edge_value,
+      -                        &tokens_for_update,
+      -                        &mut || cached_dest.clone(),
+      -                        memo_for_dest,
+      -                    );
+      -
+      -                    if add_to_out {
+      -                        // On a cache miss, or if we expanded the token set, this is the first time we see this simple GSS structure.
+      -                        // We add the modified GSS to the output to serve as the canonical representation.
+      -                        crate::debug!(5, "Cache miss or expanded token set for simple GSS to state {}, adding to output.", state_id.0);
+      -                        hit!("GLRParserState::reduce_and_goto::CacheMissOrExpand");
+      -                        final_out.push(new_gss_arc);
+      +                    // Only attempt to cache if there are actually stored trie nodes to unify.
+      +                    let has_sources = !acc.stored_trie_nodes().is_empty();
+      +                    if has_sources {
+      +                        let cache_key = BelowBottomCacheKey {
+      +                            nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
+      +                            source_state_id: StateID(usize::MAX),      // Dummy value
+      +                            goto_state_id: state_id,
+      +                            k: usize::MAX,                             // Dummy value
+      +                        };
+      +
+      +                        let (cached_dest, add_to_out) = timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS::CacheLookup", {
+      +                            let entry = self.below_bottom_cache.entry(cache_key);
+      +                            match entry {
+      +                                std::collections::hash_map::Entry::Occupied(mut occupied) => {
+      +                                    let (dest, _cached_tokens) = occupied.get_mut();
+      +                                    (dest.clone(), false)
+      +                                }
+      +                                std::collections::hash_map::Entry::Vacant(vacant) => {
       +                                    let new_dest = PrecomputeNode3Index::new(
       +                                        god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
       +                                    );
-      +                                    (new_dest, PruneAndTransformRecursiveMemo::default())
-      +                                });
-      +                                deep_add_precompute_trie_edges(
-      +                                    &mut parent_after_filter,
-      +                                    god,
-      +                                    &edge_key_all_tokens_zero_k,
-      +                                    bv,
-      +                                    &tokens_all,
-      +                                    &mut || dest.clone(),
-      +                                    memo,
-      +                                );
+      +                                    vacant.insert((new_dest.clone(), LLMTokenBV::max_ones()));
+      +                                    (new_dest, true)
+      +                                }
       +                            }
-                               }
-       
-                               // Accept contribution (store isolated parent)
-
+      +                        });
+      +
+      +                        let edge_key = (0, tokens_all.clone());
+      +                        let edge_value = StateIDBV::max_ones();
+      +                        let tokens_for_update = tokens_all.clone();
+      +
+      +                        // Memoize deep_add for this particular cached destination to avoid re-walking identical subgraphs.
+      +                        let memo_for_dest = cached_dest_memos.entry(cached_dest.clone())
+      +                            .or_insert_with(PruneAndTransformRecursiveMemo::default);
+      +
+      +                        deep_add_precompute_trie_edges(
+      +                            &mut new_gss_arc,
+      +                            god,
+      +                            &edge_key,
+      +                            &edge_value,
+      +                            &tokens_for_update,
+      +                            &mut || cached_dest.clone(),
+      +                            memo_for_dest,
+      +                        );
+      +
+      +                        if add_to_out {
+      +                            // On a cache miss, or if we expanded the token set, this is the first time we see this simple GSS structure.
+      +                            // We add the modified GSS to the output to serve as the canonical representation.
+      +                            crate::debug!(5, "Cache miss or expanded token set for simple GSS to state {}, adding to output.", state_id.0);
+      +                            hit!("GLRParserState::reduce_and_goto::CacheMissOrExpand");
+      +                            final_out.push(new_gss_arc);
+      +                        } else {
+      +                            crate::debug!(5, "Cache hit for simple GSS to state {}, skipping addition to output.", state_id.0);
+      +                            hit!("GLRParserState::reduce_and_goto::CacheHit");
+      +                        }
+                           } else {
+      -                        crate::debug!(5, "Cache hit for simple GSS to state {}, skipping addition to output.", state_id.0);
+      -                        hit!("GLRParserState::reduce_and_goto::CacheHit");
+      +                        // No stored trie nodes to unify; skip creating or caching a destination and keep as-is.
+      +                        crate::debug!(5, "Simple GSS to state {} has no stored_trie_nodes; skipping cached dest creation.", state_id.0);
+      +                        final_out.push(new_gss_arc);
+                           }
+                           // On a cache hit where tokens are a subset, the GSS is redundant. We've added the trie links, so we can discard it.
+                       } else {
+                           // Not a simple GSS, keep it for merging.
+                           crate::debug!(5, "Non-simple GSS encountered, keeping as-is.");
+                           hit!("GLRParserState::reduce_and_goto::NonSimpleGSS");
+                           final_out.push(gss_arc);
+                       }
+                       });
+                   }
+                   });
+               } else {
+                   // No trie god, so no caching is possible.
+                   final_out = out;
+               }
       ```
     metadata:
   - user: |
@@ -10853,7 +10962,7 @@ messages:
       Applying patch to 'src/glr/parser.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
-  - user: 'Changes committed with message: "Avoid creating unnecessary internal precompute
-      trie nodes in GSS merging and state filtering"'
+  - user: 'Changes committed with message: "Refactor: Avoid eager PrecomputeNode3
+      allocation when stored trie nodes are empty in simple GSS handling and caching."'
     metadata:
 ...
