@@ -5985,24 +5985,21 @@ local_system:
 
               let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing");
 
-              let mut new_acc: Option<Acc> = None;
-              let mut dest: Option<StoredPrecomputeNodeIndex> = None;
-
+              let mut new_acc = None;
+              let mut dest = PrecomputeNode3Index::new(
+                  god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+              );
+              let mut had_any_nodes = false;
               for (k, mut acc) in below {
-                  let source_nodes = std::mem::take(acc.stored_trie_nodes_mut());
-                  if !source_nodes.is_empty() {
-                      let dest_node = dest.get_or_insert_with(|| {
-                          PrecomputeNode3Index::new(
-                              god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())),
-                          )
-                      });
+                  // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
+                  let tokens_all = LLMTokenBV::max_ones();
+                  let key = (k, tokens_all.clone());
+                  let all_states = StateIDBV::max_ones();
 
-                      // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
-                      let tokens_all = LLMTokenBV::max_ones();
-                      let key = (k, tokens_all.clone());
-                      let all_states = StateIDBV::max_ones();
-
-                      for node in source_nodes {
+                  let nodes = std::mem::take(acc.stored_trie_nodes_mut());
+                  if !nodes.is_empty() {
+                      had_any_nodes = true;
+                      for node in nodes {
                           let source_arc = node.as_arc().clone();
                           let inserter = EdgeInserter::new(
                               god,
@@ -6011,23 +6008,23 @@ local_system:
                               all_states.clone(),
                               |e, n| *e |= n,
                               |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
-                              |_, _| true, // Unconditional insertion
+                              |_, _| _ = true, // Unconditional insertion
                           );
-                          inserter.try_destination(dest_node.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
+                          inserter.try_destination(dest.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
                       }
                   }
 
                   if new_acc.is_none() {
                       new_acc = Some(acc);
                   } else {
-                      new_acc = Some(Acc::merge(new_acc.as_ref().unwrap(), &acc));
+                      new_acc = Some(Acc::merge(&new_acc.unwrap(), &acc));
                   }
               }
 
               let mut new_acc = new_acc.expect("No Acc built for below-bottom handling");
               new_acc.stored_trie_nodes_mut().clear();
-              if let Some(d) = dest {
-                  new_acc.stored_trie_nodes_mut().insert(d);
+              if had_any_nodes {
+                  new_acc.stored_trie_nodes_mut().insert(dest);
               }
 
               let new_leaf = Arc::new(GSSNode::new(new_acc));
@@ -6173,24 +6170,22 @@ local_system:
                               // Apply the optional state filter (for hallucinated transitions) before consuming the GOTO.
                               let mut parent_after_filter = isolated_parent.clone();
                               if let (Some(god), Some(bv)) = (god_opt, maybe_filter.as_ref()) {
-                                  if !parent_after_filter.is_empty() && !parent_after_filter.stored_trie_nodes().is_empty() {
-                                      // Reuse a single destination per unique state filter BV and memoize the transformation.
-                                      let (dest, memo) = filter_ctxs.entry(bv.clone()).or_insert_with(|| {
-                                          let new_dest = PrecomputeNode3Index::new(
-                                              god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-                                          );
-                                          (new_dest, PruneAndTransformRecursiveMemo::default())
-                                      });
-                                      deep_add_precompute_trie_edges(
-                                          &mut parent_after_filter,
-                                          god,
-                                          &edge_key_all_tokens_zero_k,
-                                          bv,
-                                          &tokens_all,
-                                          &mut || dest.clone(),
-                                          memo,
+                                  // Reuse a single destination per unique state filter BV and memoize the transformation.
+                                  let (dest, memo) = filter_ctxs.entry(bv.clone()).or_insert_with(|| {
+                                      let new_dest = PrecomputeNode3Index::new(
+                                          god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
                                       );
-                                  }
+                                      (new_dest, PruneAndTransformRecursiveMemo::default())
+                                  });
+                                  deep_add_precompute_trie_edges(
+                                      &mut parent_after_filter,
+                                      god,
+                                      &edge_key_all_tokens_zero_k,
+                                      bv,
+                                      &tokens_all,
+                                      &mut || dest.clone(),
+                                      memo,
+                                  );
                               }
 
                               // Accept contribution (store isolated parent)
@@ -10679,10 +10674,12 @@ messages:
       ```
     metadata:
       filename: src/glr/parser.rs
-  - user: Often, we'll create trie3 nodes to a new common destination and update the
-      acc's stored trie nodes to this common dest. However, when the stored trie nodes
-      are empty, we shouldn't be creating a new one. Fix this. Anywhere where we have
-      `PrecomputedNodeContents::internal()` is suspect here.
+  - user: |-
+      Often, we'll create trie3 nodes to a new common destination and update the acc's stored trie nodes to this common dest. However, when the stored trie nodes are empty, we shouldn't be creating a new one. Fix this. Anywhere where we have `PrecomputedNodeContents::internal()` is suspect here.
+      No point creating a dest node if there's nothing pointing to it.
+      Note that we still need the caching behaviour to work so we can avoid infinite loops.
+
+      So actually let's still *create* the dest nodes like we do now, but let's only put the dest node into `stored_trie_nodes` if there was a node in `stored_trie_nodes` already. Otherwise, it just goes into the cache.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -10701,47 +10698,94 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. I can help with that. Creating trie nodes when there are no source nodes is inefficient. Here are the step-by-step instructions and the corresponding git diff to fix this issue.
+      Here are the step-by-step instructions to apply the fix, followed by the git diff.
 
       ### Step-by-step Instructions
 
-      I'll make corrections in two functions within `src/glr/parser.rs` to avoid creating unnecessary trie nodes.
+      I will modify the `handle_below_bottom` function in `src/glr/parser.rs` to ensure we only add a new destination trie node to the `stored_trie_nodes` set if there were source nodes to begin with.
 
-      1.  **File: `src/glr/parser.rs`**
-          -   In the function `GLRParserState::handle_below_bottom`, I will modify the logic to prevent the creation of a destination trie node (`dest`) if there are no `stored_trie_nodes` to connect from. The destination node will now be created lazily only when it's first needed.
-          -   I will also correct a small typo in a closure passed to `EdgeInserter::new`, changing `|_, _| _ = true` to `|_, _| true` to make it a valid boolean expression for unconditional insertion.
+      **File: `src/glr/parser.rs`**
 
-      2.  **File: `src/glr/parser.rs`**
-          -   In the function `GLRParserState::reduce_and_goto`, I will add a guard condition. Before applying a state filter (which involves creating a new trie node as a destination), I'll add a check to ensure the GSS node (`parent_after_filter`) is not empty and has `stored_trie_nodes`. This prevents the creation of a destination node that would have no incoming edges.
+      1.  Navigate to the `handle_below_bottom` function within the `impl<'a> GLRParserState<'a>` block.
 
-      These changes will ensure that `PrecomputeNode3` nodes with `PrecomputedNodeContents::internal()` are only created when they will actually be used.
+      2.  Just after the line `let mut dest = PrecomputeNode3Index::new(...)`, add a new mutable boolean flag to track whether we've seen any trie nodes:
+          ```rust
+          let mut had_any_nodes = false;
+          ```
+
+      3.  Inside the `for (k, mut acc) in below` loop, replace the existing `for` loop that iterates over `std::mem::take(acc.stored_trie_nodes_mut())` with the following logic:
+          -   First, take the `stored_trie_nodes` into a new variable.
+          -   Check if this new collection is not empty. If it isn't, set `had_any_nodes` to `true`.
+          -   Iterate over the collection to create the trie edges as before, but inside the conditional block.
+
+          The original code block:
+          ```rust
+                  for node in std::mem::take(acc.stored_trie_nodes_mut()) {
+                      let source_arc = node.as_arc().clone();
+                      let inserter = EdgeInserter::new(
+                          god,
+                          source_arc,
+                          key.clone(),
+                          all_states.clone(),
+                          |e, n| *e |= n,
+                          |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
+                          |_, _| _ = true, // Unconditional insertion
+                      );
+                      inserter.try_destination(dest.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
+                  }
+          ```
+          Should be replaced with:
+          ```rust
+                  let nodes = std::mem::take(acc.stored_trie_nodes_mut());
+                  if !nodes.is_empty() {
+                      had_any_nodes = true;
+                      for node in nodes {
+                          let source_arc = node.as_arc().clone();
+                          let inserter = EdgeInserter::new(
+                              god,
+                              source_arc,
+                              key.clone(),
+                              all_states.clone(),
+                              |e, n| *e |= n,
+                              |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
+                              |_, _| _ = true, // Unconditional insertion
+                          );
+                          inserter.try_destination(dest.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
+                      }
+                  }
+          ```
+
+      4.  Finally, at the end of the function, replace the unconditional insertion of `dest`:
+          ```rust
+          new_acc.stored_trie_nodes_mut().insert(dest);
+          ```
+          with a conditional insertion based on the flag:
+          ```rust
+          if had_any_nodes {
+              new_acc.stored_trie_nodes_mut().insert(dest);
+          }
+          ```
 
       ### Git Diffs
 
-      Here is the git diff for the changes.
+      Here is the git patch that applies the changes described above.
 
       ```diff
       diff --git a/src/glr/parser.rs b/src/glr/parser.rs
-      index 4556488..2b64790 100644
+      index 455476a..7d42571 100644
       --- a/src/glr/parser.rs
       +++ b/src/glr/parser.rs
-      @@ -1475,42 +1475,46 @@
-       
-               let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing");
-       
-      -        let mut new_acc = None;
-      -        let mut dest = PrecomputeNode3Index::new(
-      -            god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-      -        );
-      +        let mut new_acc: Option<Acc> = None;
-      +        let mut dest: Option<StoredPrecomputeNodeIndex> = None;
-      +
+      @@ -1491,33 +1491,37 @@
+               let mut dest = PrecomputeNode3Index::new(
+                   god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+               );
+      +        let mut had_any_nodes = false;
                for (k, mut acc) in below {
-      -            // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
-      -            let tokens_all = LLMTokenBV::max_ones();
-      -            let key = (k, tokens_all.clone());
-      -            let all_states = StateIDBV::max_ones();
-      -
+                   // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
+                   let tokens_all = LLMTokenBV::max_ones();
+                   let key = (k, tokens_all.clone());
+                   let all_states = StateIDBV::max_ones();
+       
       -            for node in std::mem::take(acc.stored_trie_nodes_mut()) {
       -                let source_arc = node.as_arc().clone();
       -                let inserter = EdgeInserter::new(
@@ -10754,20 +10798,10 @@ messages:
       -                    |_, _| _ = true, // Unconditional insertion
       -                );
       -                inserter.try_destination(dest.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
-      +            let source_nodes = std::mem::take(acc.stored_trie_nodes_mut());
-      +            if !source_nodes.is_empty() {
-      +                let dest_node = dest.get_or_insert_with(|| {
-      +                    PrecomputeNode3Index::new(
-      +                        god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())),
-      +                    )
-      +                });
-      +
-      +                // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
-      +                let tokens_all = LLMTokenBV::max_ones();
-      +                let key = (k, tokens_all.clone());
-      +                let all_states = StateIDBV::max_ones();
-      +
-      +                for node in source_nodes {
+      +            let nodes = std::mem::take(acc.stored_trie_nodes_mut());
+      +            if !nodes.is_empty() {
+      +                had_any_nodes = true;
+      +                for node in nodes {
       +                    let source_arc = node.as_arc().clone();
       +                    let inserter = EdgeInserter::new(
       +                        god,
@@ -10776,71 +10810,28 @@ messages:
       +                        all_states.clone(),
       +                        |e, n| *e |= n,
       +                        |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
-      +                        |_, _| true, // Unconditional insertion
+      +                        |_, _| _ = true, // Unconditional insertion
       +                    );
-      +                    inserter.try_destination(dest_node.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
+      +                    inserter.try_destination(dest.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
       +                }
                    }
        
                    if new_acc.is_none() {
                        new_acc = Some(acc);
                    } else {
-      -                new_acc = Some(Acc::merge(&new_acc.unwrap(), &acc));
-      +                new_acc = Some(Acc::merge(new_acc.as_ref().unwrap(), &acc));
+                       new_acc = Some(Acc::merge(&new_acc.unwrap(), &acc));
                    }
                }
        
                let mut new_acc = new_acc.expect("No Acc built for below-bottom handling");
                new_acc.stored_trie_nodes_mut().clear();
       -        new_acc.stored_trie_nodes_mut().insert(dest);
-      +        if let Some(d) = dest {
-      +            new_acc.stored_trie_nodes_mut().insert(d);
+      +        if had_any_nodes {
+      +            new_acc.stored_trie_nodes_mut().insert(dest);
       +        }
        
                let new_leaf = Arc::new(GSSNode::new(new_acc));
                let new_gss = Arc::new(new_leaf.push(ParseStateEdgeContent { state_id: hallucinate_sid }));
-      @@ -1590,24 +1594,26 @@
-                               }
-                               // Apply the optional state filter (for hallucinated transitions) before consuming the GOTO.
-                               let mut parent_after_filter = isolated_parent.clone();
-                               if let (Some(god), Some(bv)) = (god_opt, maybe_filter.as_ref()) {
-      -                            // Reuse a single destination per unique state filter BV and memoize the transformation.
-      -                            let (dest, memo) = filter_ctxs.entry(bv.clone()).or_insert_with(|| {
-      -                                let new_dest = PrecomputeNode3Index::new(
-      -                                    god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-      -                                );
-      -                                (new_dest, PruneAndTransformRecursiveMemo::default())
-      -                            });
-      -                            deep_add_precompute_trie_edges(
-      -                                &mut parent_after_filter,
-      -                                god,
-      -                                &edge_key_all_tokens_zero_k,
-      -                                bv,
-      -                                &tokens_all,
-      -                                &mut || dest.clone(),
-      -                                memo,
-      -                            );
-      +                            if !parent_after_filter.is_empty() && !parent_after_filter.stored_trie_nodes().is_empty() {
-      +                                // Reuse a single destination per unique state filter BV and memoize the transformation.
-      +                                let (dest, memo) = filter_ctxs.entry(bv.clone()).or_insert_with(|| {
-      +                                    let new_dest = PrecomputeNode3Index::new(
-      +                                        god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-      +                                    );
-      +                                    (new_dest, PruneAndTransformRecursiveMemo::default())
-      +                                });
-      +                                deep_add_precompute_trie_edges(
-      +                                    &mut parent_after_filter,
-      +                                    god,
-      +                                    &edge_key_all_tokens_zero_k,
-      +                                    bv,
-      +                                    &tokens_all,
-      +                                    &mut || dest.clone(),
-      +                                    memo,
-      +                                );
-      +                            }
-                               }
-       
-                               // Accept contribution (store isolated parent)
 
       ```
     metadata:
@@ -10853,7 +10844,7 @@ messages:
       Applying patch to 'src/glr/parser.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
-  - user: 'Changes committed with message: "Avoid creating unnecessary internal precompute
-      trie nodes in GSS merging and state filtering"'
+  - user: 'Changes committed with message: "Fix: Only add new destination trie node
+      to Acc for below-bottom if source nodes existed"'
     metadata:
 ...
