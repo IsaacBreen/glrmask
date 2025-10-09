@@ -1074,6 +1074,7 @@ impl GrammarConstraint {
         token_name_map:   BiBTreeMap<Terminal, usize>,
         config: &GrammarConstraintConfig,
         precompute0_cache: Precompute0Cache,
+        precompute0_only: bool,
     ) -> Self {
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
         let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
@@ -1152,12 +1153,12 @@ impl GrammarConstraint {
         crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map.len());
 
         let llm_vocab = Arc::new(LLMVocab {
-            llm_token_map,
+            llm_token_map: llm_token_map.clone(),
             max_original_llm_token_id,
         });
 
         // Initialize per-stage vocabularies (start identical to global)
-        let precompute0_vocab = StageVocab {
+        let mut precompute0_vocab = StageVocab {
             original_to_internal: original_to_internal_map.clone(),
             internal_to_original: internal_to_original_map.clone(),
             internal_max_llm_token: internal_max_llm_token,
@@ -1193,17 +1194,15 @@ impl GrammarConstraint {
 
         // Maybe reuse precompute0 from cache
         let mut precomputed0_opt: Option<(Precomputed0, Trie0GodWrapper)> = None;
-        if let Some(cache) = precompute0_cache {
-            if cache.is_compatible(&tokenizer, &llm_token_map, max_original_llm_token_id, &original_to_internal_map) {
-                crate::debug!(2, "Using cached precompute0");
-                precompute0_vocab = cache.precompute0_vocab.clone();
-                precompute_vocab = precompute0_vocab.clone();
-                precompute2_vocab = precompute_vocab.clone();
-                precompute3_vocab = precompute_vocab.clone();
-                precomputed0_opt = Some((cache.precomputed0, cache.trie0_god));
-            } else {
-                crate::debug!(2, "Ignoring cached precompute0 (mismatch with tokenizer/vocab/mapping).");
-            }
+        if precompute0_cache.is_compatible(&tokenizer, &llm_token_map, max_original_llm_token_id, &original_to_internal_map) {
+            crate::debug!(2, "Using cached precompute0");
+            precompute0_vocab = precompute0_cache.precompute0_vocab.clone();
+            precompute_vocab = precompute0_vocab.clone();
+            precompute2_vocab = precompute_vocab.clone();
+            precompute3_vocab = precompute_vocab.clone();
+            precomputed0_opt = Some((precompute0_cache.precomputed0, precompute0_cache.trie0_god));
+        } else {
+            crate::debug!(2, "Ignoring cached precompute0 (mismatch with tokenizer/vocab/mapping).");
         }
 
         let (precomputed0, trie0_god) = if let Some(tuple) = precomputed0_opt {
@@ -1223,7 +1222,7 @@ impl GrammarConstraint {
             )
         };
 
-        if config.precompute0_only {
+        if precompute0_only {
             return Self {
                 tokenizer,
                 parser,

@@ -143,6 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         compiled_grammar.definition.terminal_to_group_id().clone(),
         &GrammarConstraintConfig::default(),
         pc0_cache,
+        args.precompute0_only,
     );
     println!("GrammarConstraint constructed successfully.");
 
