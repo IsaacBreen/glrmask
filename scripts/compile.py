@@ -62,7 +62,9 @@ def filter_vocab(vocab: dict[str, int], max_len: int | None) -> dict[str, int]:
             
     print(f"  -> Filtered vocabulary from {len(vocab)} to {len(filtered)} tokens.")
     return filtered
-def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool, pc0_cache: Path | None = None, refresh_pc0_cache: bool = False):
+
+
+def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path | None, recompile: bool, save_pc0: Path | None = None, from_pc0: Path | None = None, pc0_only: bool = False):
     """
     Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
     """
@@ -98,21 +100,22 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
         str(compiler_path),
         "--grammar", str(grammar_path),
         "--vocab", str(vocab_path),
-        "--output", str(output_path),
     ]
-    # Precompute0 cache handling
-    if pc0_cache is not None:
-        cache_parent = pc0_cache.parent
-        cache_parent.mkdir(parents=True, exist_ok=True)
-        if pc0_cache.exists() and not refresh_pc0_cache:
-            print(f"Reusing precompute0 cache: {pc0_cache}")
-            command.extend(["--load-precompute0", str(pc0_cache)])
-        else:
-            if refresh_pc0_cache and pc0_cache.exists():
-                print(f"Refreshing precompute0 cache: {pc0_cache}")
-            else:
-                print(f"Creating precompute0 cache: {pc0_cache}")
-            command.extend(["--save-precompute0", str(pc0_cache)])
+
+    if pc0_only:
+        command.extend(["--save-precompute0", str(save_pc0)])
+        command.append("--precompute0-only")
+    else:
+        if output_path:
+            command.extend(["--output", str(output_path)])
+        if from_pc0:
+            print(f"Loading from precompute0 cache: {from_pc0}")
+            command.extend(["--load-precompute0", str(from_pc0)])
+        if save_pc0:
+            # Ensure parent directory exists
+            save_pc0.parent.mkdir(parents=True, exist_ok=True)
+            print(f"Will save precompute0 cache to: {save_pc0}")
+            command.extend(["--save-precompute0", str(save_pc0)])
 
     print(f"\nRunning compiler: ENABLE_PROGRESS_BAR=1 {' '.join(command)}")
     try:
@@ -130,18 +133,22 @@ def main():
     """Main function."""
     epilog = """
 Examples:
-  # Compile the JS grammar using a downloaded GPT-2 vocabulary
+  # 1. Generate only the precompute0 cache
   python scripts/compile.py \\
     --grammar src/js.ebnf \\
-    --output .cache/test_vocabs/js_constraint.json.gz \\
-    --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+    --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \\
+    --save-precompute0 .cache/pc0/js_gpt2.json.gz \\
+    --precompute0-only
 
-  # Compile using a local vocabulary and filter for short tokens
+  # 2. Generate the final constraint using the pre-built cache
   python scripts/compile.py \\
     --grammar src/js.ebnf \\
-    --output .cache/test_vocabs/js_constraint_filtered.json.gz \\
-    --vocab-path .cache/test_vocabs/gpt2_vocab.json \\
-    --max-token-len 10
+    --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \\
+    --from-precompute0 .cache/pc0/js_gpt2.json.gz \\
+    --output .cache/constraints/js_gpt2.json.gz
+
+  # 3. Do everything in one step (from scratch)
+  python scripts/compile.py -g src/js.ebnf -o .cache/constraints/js_gpt2.json.gz --vocab-url <URL>
 """
     parser = argparse.ArgumentParser(
         description="A helper script to compile a grammar constraint file.",
@@ -149,7 +156,7 @@ Examples:
         epilog=epilog
     )
     parser.add_argument("-g", "--grammar", type=Path, required=True, help="Path to the EBNF grammar file.")
-    parser.add_argument("-o", "--output", type=Path, required=True, help="Path for the output compressed constraint file (.json.gz).")
+    parser.add_argument("-o", "--output", type=Path, help="Path for the output compressed constraint file (.json.gz).")
     
     vocab_group = parser.add_mutually_exclusive_group(required=True)
     vocab_group.add_argument("--vocab-url", type=str, help="URL of the JSON vocabulary file to download.")
@@ -159,14 +166,26 @@ Examples:
     parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the grammar-compiler executable.")
     parser.add_argument("--no-recompile", action="store_true", help="Skip recompiling the Rust grammar-compiler executable and use the existing one.")
     parser.add_argument("--force-download", action="store_true", help="Force re-downloading the vocabulary even if it exists in the cache.")
-    # precompute0 cache options
-    parser.add_argument("--pc0-cache", type=Path, help="Path to save or reuse a precompute0 cache (.json.gz).")
-    parser.add_argument("--refresh-pc0-cache", action="store_true", help="Force rebuilding the precompute0 cache before compiling the final constraint.")
+    
+    # Compilation mode options
+    parser.add_argument("--save-precompute0", type=Path, help="Path to save a precompute0 cache (.json.gz).")
+    parser.add_argument("--from-precompute0", type=Path, help="Path to load a precompute0 cache and continue compilation from it.")
+    parser.add_argument("--precompute0-only", action="store_true", help="Only generate the precompute0 cache. Requires --save-precompute0.")
 
     # Filtering options
     parser.add_argument("--max-token-len", type=int, help="Filter vocabulary to only include tokens with a byte length less than or equal to this value.")
 
     args = parser.parse_args()
+
+    # --- Argument Validation ---
+    if args.precompute0_only and not args.save_precompute0:
+        parser.error("--precompute0-only requires --save-precompute0")
+    if args.precompute0_only and args.output:
+        parser.error("--precompute0-only cannot be used with --output")
+    if not args.precompute0_only and not args.output:
+        parser.error("--output is required unless --precompute0-only is specified")
+    if args.from_precompute0 and not args.from_precompute0.exists():
+        parser.error(f"The path specified for --from-precompute0 does not exist: {args.from_precompute0}")
 
     # 1. Get the vocabulary
     vocab = get_vocab(args.vocab_url, args.vocab_path, args.cache_dir, args.force_download)
@@ -180,6 +199,7 @@ Examples:
         tmp_vocab_path = Path(tmp_vocab_file.name)
 
     print(f"Temporary vocabulary saved to: {tmp_vocab_path}")
+
     # 4. Run the Rust compiler
     try:
         run_compiler(
@@ -188,8 +208,9 @@ Examples:
             tmp_vocab_path,
             args.output,
             recompile=not args.no_recompile,
-            pc0_cache=args.pc0_cache,
-            refresh_pc0_cache=args.refresh_pc0_cache
+            save_pc0=args.save_precompute0,
+            from_pc0=args.from_precompute0,
+            pc0_only=args.precompute0_only,
         )
     finally:
         # 5. Clean up the temporary file

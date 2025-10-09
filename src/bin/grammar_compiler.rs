@@ -27,7 +27,7 @@ struct Args {
 
     /// Path for the output compressed JSON file (.json.gz).
     #[arg(short, long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
 
     /// Optional: load a precompute0 cache from this file to skip rebuilding Trie0.
     #[arg(long, value_name = "FILE")]
@@ -36,9 +36,18 @@ struct Args {
     /// Optional: save the precompute0 stage to this file for reuse.
     #[arg(long, value_name = "FILE")]
     save_precompute0: Option<PathBuf>,
+
+    /// If specified, only compute and save the precompute0 cache, then exit.
+    #[arg(long, requires = "save_precompute0")]
+    precompute0_only: bool,
 }
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+
+    if !args.precompute0_only && args.output.is_none() {
+        return Err("Error: --output is required unless --precompute0-only is specified.".into());
+    }
 
     // 1. Load and compile the grammar.
     println!("Loading grammar from: {:?}", args.grammar);
@@ -109,14 +118,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         encoder.finish()?;
     }
 
+    if args.precompute0_only {
+        println!("--precompute0-only specified. Exiting after saving cache.");
+        return Ok(());
+    }
+
     // 4. Save the GrammarConstraint to a compressed file.
-    println!("Saving GrammarConstraint to: {:?}", args.output);
-    let output_file = File::create(&args.output)?;
-    let writer = BufWriter::new(output_file);
-    let mut encoder = GzEncoder::new(writer, Compression::default());
-    grammar_constraint.to_writer(&mut encoder)?;
-    encoder.finish()?;
-    println!("Successfully saved constraint to {:?}", args.output);
+    if let Some(output_path) = args.output {
+        println!("Saving GrammarConstraint to: {:?}", output_path);
+        let output_file = File::create(&output_path)?;
+        let writer = BufWriter::new(output_file);
+        let mut encoder = GzEncoder::new(writer, Compression::default());
+        grammar_constraint.to_writer(&mut encoder)?;
+        encoder.finish()?;
+        println!("Successfully saved constraint to {:?}", output_path);
+    }
 
     Ok(())
 }
