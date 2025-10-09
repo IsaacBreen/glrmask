@@ -219,23 +219,23 @@ impl Debug for GSSNode {
 
 impl PartialEq for GSSNode {
     fn eq(&self, other: &Self) -> bool {
-        self.inner == other.inner
+        todo!()
     }
 }
 impl Eq for GSSNode {}
 impl PartialOrd for GSSNode {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.inner.partial_cmp(&other.inner)
+        todo!()
     }
 }
 impl Ord for GSSNode {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.inner.cmp(&other.inner)
+        todo!()
     }
 }
 impl Hash for GSSNode {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.inner.hash(state);
+        todo!()
     }
 }
 
