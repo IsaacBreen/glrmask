@@ -854,6 +854,12 @@ impl Display for GLRParserState<'_> {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 struct WorkMapKey(usize, StateID);
 
+impl WorkMapKey {
+    fn new(depth: usize, state_id: StateID) -> Self {
+        WorkMapKey(depth, state_id)
+    }
+}
+
 impl PartialOrd for WorkMapKey {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -900,7 +906,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             let depth = isolated_state.stack.max_depth();
             let state_id = peek.edge_value().state_id;
             work_map
-                .entry(WorkMapKey(depth, state_id))
+                .entry(WorkMapKey::new(depth, state_id))
                 .and_modify(|(s, existing_fuel)| {
                     s.merge(isolated_state.clone());
                     *existing_fuel = std::cmp::max(*existing_fuel, fuel);
@@ -1239,6 +1245,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             .shifts_and_reduces
                             .get(&token_id)
                             .map(|v| {
+                                panic!();
                                 v.iter()
                                     .map(|(a, bv)| (Action::Normal(a), Some(bv.clone())))
                                     .collect::<Vec<_>>()
@@ -1397,8 +1404,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
         timeit!({
             let stats = gather_gss_stats(&[peek.isolated_parent().as_ref()]);
             let num_nodes = stats.unique_nodes;
-            format!("GLRParserState::reduce_and_goto::PoppedGSSStats: {} unique nodes, {} edges. len {}", stats.unique_nodes, stats.total_edges, len)
+            // format!("GLRParserState::reduce_and_goto::PoppedGSSStats: {} unique nodes, {} edges. len {}", stats.unique_nodes, stats.total_edges, len)
+            "GLRParserState::reduce_and_goto"
         }, {
+        hit!(&format!("GLRParserState::reduce_and_goto popped nt '{}', len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len));
         // 1) Pop len
         let popper: GSSPopper = timeit!(peek.popn(len));
         crate::debug!(4, "Reducing with NT '{}' and len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len);
@@ -1423,47 +1432,51 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut todo_map: BTreeMap<StateID, BTreeMap<*const GSSNode, Arc<GSSNode>>> = BTreeMap::new();
 
         // Handle "below bottom" (substring parsing continuation) first, adding to the todo list.
-        if !popper.below_bottom().is_empty() {
-            match config.below_bottom_mode {
-                BelowBottomReductionMode::Fail => {
-                    crate::debug!(5, "Popped below bottom, failing these parse paths.");
-                }
-                BelowBottomReductionMode::Panic => {
-                    panic!("A reduction popped below the bottom of the stack, and BelowBottomReductionMode was set to Panic.");
-                }
-                _ => {
-                    let below_accs = self.build_below_bottom_accs(&popper);
-                    let below_todo = self.handle_below_bottom(nt, below_accs, config);
-                    crate::debug!(5, "Popped below bottom, hallucinating {} new parse paths.", below_todo.len());
-                    for (predecessor_state_id, isolated_parent) in below_todo {
-                        let pred_ptr = Arc::as_ptr(&isolated_parent);
-                        todo_map.entry(predecessor_state_id)
-                            .or_default()
-                            .entry(pred_ptr)
-                            .or_insert(isolated_parent);
+        timeit!("GLRParserState::reduce_and_goto::HandleBelowBottom", {
+            if !popper.below_bottom().is_empty() {
+                match config.below_bottom_mode {
+                    BelowBottomReductionMode::Fail => {
+                        crate::debug!(5, "Popped below bottom, failing these parse paths.");
+                    }
+                    BelowBottomReductionMode::Panic => {
+                        panic!("A reduction popped below the bottom of the stack, and BelowBottomReductionMode was set to Panic.");
+                    }
+                    _ => {
+                        let below_accs = self.build_below_bottom_accs(&popper);
+                        let below_todo = self.handle_below_bottom(nt, below_accs, config);
+                        crate::debug!(5, "Popped below bottom, hallucinating {} new parse paths.", below_todo.len());
+                        for (predecessor_state_id, isolated_parent) in below_todo {
+                            let pred_ptr = Arc::as_ptr(&isolated_parent);
+                            todo_map.entry(predecessor_state_id)
+                                .or_default()
+                                .entry(pred_ptr)
+                                .or_insert(isolated_parent);
+                        }
                     }
                 }
             }
-        }
+        });
 
         // Standard reductions along in-graph paths
-        for popper_item in popper.iter() {
-            for peek2 in popper_item.peek_iter() {
-                let predecessor_state_id = peek2.edge_value().state_id;
-                let isolated_parent = peek2.isolated_parent();
-                let pred_ptr = Arc::as_ptr(&isolated_parent);
-                todo_map.entry(predecessor_state_id)
-                    .or_default()
-                    .entry(pred_ptr)
-                    .or_insert(isolated_parent);
+        timeit!("GLRParserState::reduce_and_goto::BuildTodoMap", {
+            for popper_item in popper.iter() {
+                for peek2 in popper_item.peek_iter() {
+                    let predecessor_state_id = peek2.edge_value().state_id;
+                    let isolated_parent = peek2.isolated_parent();
+                    let pred_ptr = Arc::as_ptr(&isolated_parent);
+                    todo_map.entry(predecessor_state_id)
+                        .or_default()
+                        .entry(pred_ptr)
+                        .or_insert(isolated_parent);
+                }
             }
-        }
+        });
 
         crate::debug!(4, "Total unique predecessor states to process for GOTO: {}", todo_map.len());
         for (predecessor_state_id, parents_map) in todo_map {
             crate::debug!(9, "Processing predecessor state {} with {} isolated parents", predecessor_state_id.0, parents_map.len());
             for (_pred_ptr, isolated_parent) in parents_map {
-                timeit!("GLRParserState::reduce_and_goto::HandleGotos", {
+                timeit!("GLRParserState::reduce_and_goto::HandleGotos", { // ~500 calls
                 let mut seen_nts: HashSet<NonTerminalID> = HashSet::new();
                 let mut seen_gotos = HashSet::new();
                 let mut nt_queue = VecDeque::new();
@@ -1502,7 +1515,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     //     crate::debug!(9, "  GOTO to state {:?}, accept: {}, filter: {:?}", goto.state_id, goto.accept, maybe_filter);
                     // }
 
-                    timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto", {
+                    timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto", { // SLOW POINT, ~5k calls
                     for (goto, maybe_filter) in gotos_with_filters {
                         if !seen_gotos.insert(goto) {
                             continue;
@@ -1599,9 +1612,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // --- NEW CACHING LOGIC ---
         let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
         if let Some(god) = self.active_state.trie2_god.as_ref() {
-            timeit!("GLRParserState::reduce_and_goto::Caching", {
+            timeit!("GLRParserState::reduce_and_goto::Caching", { // ~500 calls
             for gss_arc in out {
-                timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", {
+                timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", { // SLOW POINT, ~20k calls
                 if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.hallucinated_state_id) {
                     let cache_key = BelowBottomCacheKey {
                         nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
@@ -1615,18 +1628,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         match entry {
                             std::collections::hash_map::Entry::Occupied(mut occupied) => {
                                 let (dest, cached_tokens) = occupied.get_mut();
-                                let current_tokens = &acc.llm_tokens_union;
-                                if current_tokens.is_subset(cached_tokens) {
-                                    (dest.clone(), false)
-                                } else {
-                                    *cached_tokens |= current_tokens;
-                                    (dest.clone(), true)
-                                }
+                                (dest.clone(), false)
                             }
                             std::collections::hash_map::Entry::Vacant(vacant) => {
                                 let new_dest = PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
-                                let new_tokens = acc.llm_tokens_union.clone();
-                                vacant.insert((new_dest.clone(), new_tokens));
+                                vacant.insert((new_dest.clone(), LLMTokenBV::max_ones()));
                                 (new_dest, true)
                             }
                         }
@@ -1679,8 +1685,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         // Merge results and return
-        let new_active = GSSNode::merge_many_with_depth(usize::MAX, final_out);
-        let new_accepted = GSSNode::merge_many_with_depth(usize::MAX, accepted_out);
+        let new_active = timeit!("GLRParserState::reduce_and_goto::MergeActive", GSSNode::merge_many_with_depth(usize::MAX, final_out));
+        let new_accepted = timeit!("GLRParserState::reduce_and_goto::MergeAccepted", GSSNode::merge_many_with_depth(usize::MAX, accepted_out));
         (new_active, new_accepted)
         })
     }
@@ -1724,12 +1730,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
             prev_accepted_state: self.active_state.prev_accepted_state.clone(),
             trie2_god: self.active_state.trie2_god.clone(),
         };
+        timeit!("GLRParserState::process_token_advanced::MergeShiftedStates", {
         for state in shifted_states_todo {
             next_active.merge(state);
         }
         for state in accepted_states_todo {
             next_active.merge(state);
         }
+        });
         self.active_state = next_active;
 
         // Move current accepted state to previous, and reset current.
@@ -2137,7 +2145,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     pub fn _log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
-        // crate::debug!(3, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
+        // crate::debug!(2, "{} - token {} ({:?}) - nodes", phase, token.0, self.parser.terminal_map.get_by_right(&token).map(|t| &t.0));
         const MAX: usize = 100;
         const PANIC_THRESHOLD: usize = 1_000_000;
 
@@ -2158,7 +2166,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let accepted_now = self.active_state.accepted_state.is_some();
         let accepted_prev = !self.active_state.prev_accepted_state.is_empty();
-        crate::debug!(3, "{} ({:?}) - accepted: now={}, prev={} - token '{}' ({}) - {}",
+        crate::debug!(2, "{} ({:?}) - accepted: now={}, prev={} - token '{}' ({}) - {}",
                       phase, self.phase, accepted_now, accepted_prev, self.parser.terminal_map.get_by_right(&token).expect_else(|| format!("Token {} not found in terminal map: {:?}", token.0, self.parser.terminal_map)), token.0, stats_breakdown);
 
         let mut gss_strings = vec![];
@@ -2214,7 +2222,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             panic!("GSS too big ({} nodes). {}", total_nodes, final_string);
         }
 
-        debug!(3, "{}", final_string);
+        debug!(2, "{}", final_string);
 
         if generate_dot {
             let dot_string = self.gss_to_dot();
