@@ -1442,7 +1442,7 @@ impl GrammarConstraint {
                 let keep_going;
                 timeit!("precompute3 process node", {
 
-                Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
 
                 crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
                     &mut glr_s.active_state.stack,
