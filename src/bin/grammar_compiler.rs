@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.precompute0_only {
         println!("Running in --precompute0-only mode.");
         let llm_token_map = load_vocab(&args.vocab)?;
-        let max_original_llm_token_id = llm_token_map.values().map(|v| v.0).max().unwrap_or(0);
+        let max_original_llm_token_id = llm_token_map.right_values().map(|v| v.0).max().unwrap_or(0);
 
         let cache = GrammarConstraint::build_precompute0_cache(
             compiled_grammar.tokenizer,
