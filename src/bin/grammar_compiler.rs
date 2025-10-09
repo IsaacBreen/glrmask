@@ -75,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Vocabulary loaded ({} tokens, max ID: {}).", llm_token_map.len(), max_original_llm_token_id);
 
     // 3. Construct the GrammarConstraint.
-    let dummy_eof_token_id = LLMTokenID(max_original_llm_token_id + 1);
+    let _dummy_eof_token_id = LLMTokenID(max_original_llm_token_id + 1);
     println!("\nConstructing GrammarConstraint...");
     let mut loaded_pc0: Option<Precompute0Cache> = None;
     if let Some(path) = args.load_precompute0.as_ref() {
