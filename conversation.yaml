@@ -10776,6 +10776,11 @@ local_system:
           """
           Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
           """
+          # Set environment variable to enable progress bars in the Rust code.
+          # This will be passed to both cargo and the final executable.
+          env = os.environ.copy()
+          env["ENABLE_PROGRESS_BAR"] = "1"
+
           if recompile:
               print("Building compiler with 'cargo build --release'...")
               try:
@@ -10783,6 +10788,7 @@ local_system:
                   subprocess.run(
                       ["cargo", "build", "--release"],
                       check=True,
+                      env=env
                   )
                   print("Build successful.")
               except subprocess.CalledProcessError:
@@ -10805,10 +10811,6 @@ local_system:
               "--output", str(output_path),
           ]
 
-          # Set environment variable to enable progress bars in the Rust code.
-          env = os.environ.copy()
-          env["ENABLE_PROGRESS_BAR"] = "1"
-
           print(f"\nRunning compiler: ENABLE_PROGRESS_BAR=1 {' '.join(command)}")
           try:
               # Run the compiler, passing through its output and the environment variable.
@@ -10828,14 +10830,14 @@ local_system:
         # Compile the JS grammar using a downloaded GPT-2 vocabulary
         python scripts/compile.py \\
           --grammar src/js.ebnf \\
-          --output js_constraint.json.gz \\
+          --output .cache/test_vocabs/js_constraint.json.gz \\
           --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
 
         # Compile using a local vocabulary and filter for short tokens
         python scripts/compile.py \\
           --grammar src/js.ebnf \\
-          --output js_constraint_filtered.json.gz \\
-          --vocab-path .cache/vocabs/gpt2_vocab.json \\
+          --output .cache/test_vocabs/js_constraint_filtered.json.gz \\
+          --vocab-path .cache/test_vocabs/gpt2_vocab.json \\
           --max-token-len 10
       """
           parser = argparse.ArgumentParser(
@@ -17432,5 +17434,195 @@ messages:
     metadata:
   - user: 'Changes committed with message: "fix(scripts): Stream output and enable
       progress bars when running grammar-compiler"'
+    metadata:
+  - user: |-
+      Diff of Cargo.toml since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_js.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/bin/grammar_compiler.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of scripts/compile.py since previous turn:
+      ```diff
+      --- original version of scripts/compile.py
+      +++ current version of scripts/compile.py
+      @@ -121,14 +121,14 @@
+         # Compile the JS grammar using a downloaded GPT-2 vocabulary
+         python scripts/compile.py \\
+           --grammar src/js.ebnf \\
+      -    --output js_constraint.json.gz \\
+      +    --output .cache/test_vocabs/js_constraint.json.gz \\
+           --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+       
+         # Compile using a local vocabulary and filter for short tokens
+         python scripts/compile.py \\
+           --grammar src/js.ebnf \\
+      -    --output js_constraint_filtered.json.gz \\
+      -    --vocab-path .cache/vocabs/gpt2_vocab.json \\
+      +    --output .cache/test_vocabs/js_constraint_filtered.json.gz \\
+      +    --vocab-path .cache/test_vocabs/gpt2_vocab.json \\
+           --max-token-len 10
+       """
+           parser = argparse.ArgumentParser(
+
+      ```
+    metadata:
+  - user: The compiler `run_compiler` needs to be run with ENABLE_PROGRESS_BAR=1 as
+      well.
+    metadata:
+  - assistant: |-
+      Ah, my apologies for misunderstanding. You are absolutely right. The `cargo build` process itself should also inherit the environment variable, just in case any part of the build process (like procedural macros) could benefit from it, and to maintain consistency.
+
+      Let's correct that.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file:** `scripts/compile.py`.
+      2.  **Locate the `run_compiler` function.**
+      3.  **Move the environment variable setup:** We'll create the `env` dictionary *before* both `subprocess.run` calls so it can be used by both.
+      4.  **Apply the environment to the `cargo build` call:** Add the `env=env` argument to the `subprocess.run` call for `cargo build`.
+
+      Replace the current `run_compiler` function with this updated version:
+
+      ```python
+      def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool):
+          """
+          Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
+          """
+          # Set environment variable to enable progress bars in the Rust code.
+          # This will be passed to both cargo and the final executable.
+          env = os.environ.copy()
+          env["ENABLE_PROGRESS_BAR"] = "1"
+
+          if recompile:
+              print("Building compiler with 'cargo build --release'...")
+              try:
+                  # Run without capturing output to stream compilation progress.
+                  subprocess.run(
+                      ["cargo", "build", "--release"],
+                      check=True,
+                      env=env
+                  )
+                  print("Build successful.")
+              except subprocess.CalledProcessError:
+                  # Cargo will have already printed its error to the console.
+                  print("Cargo build failed.", file=sys.stderr)
+                  sys.exit(1)
+
+          if not compiler_path.exists():
+              print(f"Error: Compiler executable not found at '{compiler_path}'.", file=sys.stderr)
+              if recompile:
+                   print("The build process completed but the executable is not in the expected location.", file=sys.stderr)
+              else:
+                   print("Try running without '--no-recompile' to build it.", file=sys.stderr)
+              sys.exit(1)
+
+          command = [
+              str(compiler_path),
+              "--grammar", str(grammar_path),
+              "--vocab", str(vocab_path),
+              "--output", str(output_path),
+          ]
+
+          print(f"\nRunning compiler: ENABLE_PROGRESS_BAR=1 {' '.join(command)}")
+          try:
+              # Run the compiler, passing through its output and the environment variable.
+              subprocess.run(command, check=True, env=env)
+          except subprocess.CalledProcessError as e:
+              print(f"Grammar compilation failed with exit code {e.returncode}", file=sys.stderr)
+              sys.exit(1)
+          except FileNotFoundError:
+              print(f"Error: Could not find the compiler executable at '{compiler_path}'", file=sys.stderr)
+              sys.exit(1)
+      ```
+
+      This version correctly creates the environment with `ENABLE_PROGRESS_BAR=1` once and applies it to both the `cargo build` command and the final `grammar-compiler` execution.
+
+      ### Git Diff
+
+      Here is the git diff for the correction.
+
+      ```diff
+      diff --git a/scripts/compile.py b/scripts/compile.py
+      index 133015b..8008799 100644
+      --- a/scripts/compile.py
+      +++ b/scripts/compile.py
+      @@ -48,15 +48,21 @@
+       def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool):
+           """
+           Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
+           """
+      +    # Set environment variable to enable progress bars in the Rust code.
+      +    # This will be passed to both cargo and the final executable.
+      +    env = os.environ.copy()
+      +    env["ENABLE_PROGRESS_BAR"] = "1"
+      +
+           if recompile:
+               print("Building compiler with 'cargo build --release'...")
+               try:
+                   # Run without capturing output to stream compilation progress.
+                   subprocess.run(
+                       ["cargo", "build", "--release"],
+                       check=True,
+      +                env=env
+                   )
+                   print("Build successful.")
+               except subprocess.CalledProcessError:
+                   # Cargo will have already printed its error to the console.
+                   print("Cargo build failed.", file=sys.stderr)
+                   sys.exit(1)
+       
+      @@ -75,13 +81,9 @@
+               "--output", str(output_path),
+           ]
+       
+      -    # Set environment variable to enable progress bars in the Rust code.
+      -    env = os.environ.copy()
+      -    env["ENABLE_PROGRESS_BAR"] = "1"
+      -
+           print(f"\nRunning compiler: ENABLE_PROGRESS_BAR=1 {' '.join(command)}")
+           try:
+               # Run the compiler, passing through its output and the environment variable.
+               subprocess.run(command, check=True, env=env)
+           except subprocess.CalledProcessError as e:
+               print(f"Grammar compilation failed with exit code {e.returncode}", file=sys.stderr)
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: scripts/compile.py
+      Applying patch to 'scripts/compile.py' using custom patcher...
+      Successfully applied patch and wrote to scripts/compile.py.
+    metadata:
+  - user: 'Changes committed with message: "fix(scripts): Pass ENABLE_PROGRESS_BAR
+      env var to cargo build in compile.py"'
     metadata:
 ...

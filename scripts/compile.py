@@ -69,6 +69,11 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
     """
     Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
     """
+    # Set environment variable to enable progress bars in the Rust code.
+    # This will be passed to both cargo and the final executable.
+    env = os.environ.copy()
+    env["ENABLE_PROGRESS_BAR"] = "1"
+
     if recompile:
         print("Building compiler with 'cargo build --release'...")
         try:
@@ -76,6 +81,7 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
             subprocess.run(
                 ["cargo", "build", "--release"],
                 check=True,
+                env=env
             )
             print("Build successful.")
         except subprocess.CalledProcessError:
@@ -97,10 +103,6 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
         "--vocab", str(vocab_path),
         "--output", str(output_path),
     ]
-
-    # Set environment variable to enable progress bars in the Rust code.
-    env = os.environ.copy()
-    env["ENABLE_PROGRESS_BAR"] = "1"
 
     print(f"\nRunning compiler: ENABLE_PROGRESS_BAR=1 {' '.join(command)}")
     try:
