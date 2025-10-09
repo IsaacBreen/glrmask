@@ -954,27 +954,29 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // across the entire state's GSS before processing the action.
         // This produces a constrained copy of the state.
         let constrained_state_opt = if let Some(bv) = filter {
-            let mut constrained = state.clone();
-            if let Some(god) = constrained.trie2_god.as_ref() {
-                let tokens_all = LLMTokenBV::max_ones();
-                let key = (0, tokens_all.clone());
-                let mut memo = PruneAndTransformRecursiveMemo::default();
-                let mut dest_provider = || {
-                    PrecomputeNode3Index::new(
-                        god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
-                    )
-                };
-                deep_add_precompute_trie_edges(
-                    &mut constrained.stack,
-                    god,
-                    &key,
-                    bv,
-                    &tokens_all,
-                    &mut dest_provider,
-                    &mut memo,
-                );
-            }
-            Some(constrained)
+            timeit!("GLRParserState::handle_action::apply_filter", {
+                let mut constrained = state.clone();
+                if let Some(god) = constrained.trie2_god.as_ref() {
+                    let tokens_all = LLMTokenBV::max_ones();
+                    let key = (0, tokens_all.clone());
+                    let mut memo = PruneAndTransformRecursiveMemo::default();
+                    let mut dest_provider = || {
+                        PrecomputeNode3Index::new(
+                            god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+                        )
+                    };
+                    deep_add_precompute_trie_edges(
+                        &mut constrained.stack,
+                        god,
+                        &key,
+                        bv,
+                        &tokens_all,
+                        &mut dest_provider,
+                        &mut memo,
+                    );
+                }
+                Some(constrained)
+            })
         } else {
             None
         };
@@ -1109,7 +1111,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         for (state, per_state_fuel) in work_map.values() {
             assert!(per_state_fuel.is_none(), "Per-state fuel is not supported in process_action_queue yet");
         }
-        while let Some(entry) = work_map.pop_first() {
+        while let Some(entry) = timeit!("GLRParserState::process_action_queue::pop_first", work_map.pop_first()) {
             hit!("GLRParserState::process_action_queue::WhileLet");
             let (key, (state, per_state_fuel)) = entry;
             if let Some(f) = fuel {
@@ -1121,30 +1123,32 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 *f -= 1;
             }
             let WorkMapKey(_depth, state_id) = key;
-            let actions = action_selector(state_id);
-            if !actions.is_empty() {
-                for (action, filter_opt) in actions {
-                    let (new_found_shift, early_exit) = self.handle_action(
-                        &action,
-                        filter_opt.as_ref(),
-                        state_id,
-                        &state,
-                        &per_state_fuel,
-                        work_map,
-                        &mut reduce_map,
-                        shifted_states_todo,
-                        accepted_states_todo,
-                        &action_selector,
-                        config,
-                        early_exit_on_shift,
-                    );
-                    found_shift |= new_found_shift;
-                    if early_exit {
-                        return found_shift;
-                    }
-                }
-            } else {
+            let actions = timeit!("GLRParserState::process_action_queue::action_selector", action_selector(state_id));
+            if actions.is_empty() {
                 crate::debug!(5, "No action found in state {}", state_id.0);
+            } else {
+                timeit!("GLRParserState::process_action_queue::handle_actions_loop", {
+                    for (action, filter_opt) in actions {
+                        let (new_found_shift, early_exit) = self.handle_action(
+                            &action,
+                            filter_opt.as_ref(),
+                            state_id,
+                            &state,
+                            &per_state_fuel,
+                            work_map,
+                            &mut reduce_map,
+                            shifted_states_todo,
+                            accepted_states_todo,
+                            &action_selector,
+                            config,
+                            early_exit_on_shift,
+                        );
+                        found_shift |= new_found_shift;
+                        if early_exit {
+                            return found_shift;
+                        }
+                    }
+                });
             }
         }
         return found_shift;
