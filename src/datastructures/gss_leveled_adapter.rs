@@ -934,6 +934,7 @@ pub(crate) fn merge_stored_trie_nodes(
     });
 }
 
+#[time_it]
 pub(crate) fn is_simple_gss(
     node: &Arc<GSSNode>,
     hallucinated_state_id: StateID,
