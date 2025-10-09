@@ -479,6 +479,7 @@ impl Into<PrecomputedNodeContents> for PrecomputedNodeContents0 {
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintConfig {
     pub skip_precomputation: bool,
+    pub precompute0_only: bool,
     pub trie0: Trie0Config,
     pub trie1: Trie1Config,
     pub trie2: Trie2Config,
@@ -489,6 +490,7 @@ impl Default for GrammarConstraintConfig {
     fn default() -> Self {
         Self {
             skip_precomputation: false,
+            precompute0_only: false,
             trie0: Trie0Config::off(),
             trie1: Trie1Config::off(),
             trie2: Trie2Config::off(),
@@ -501,6 +503,7 @@ impl GrammarConstraintConfig {
     pub fn off() -> Self {
         Self {
             skip_precomputation: false,
+            precompute0_only: false,
             trie0: Trie0Config::off(),
             trie1: Trie1Config::off(),
             trie2: Trie2Config::off(),
@@ -1152,6 +1155,31 @@ impl GrammarConstraint {
                 config
             )
         };
+
+        if config.precompute0_only {
+            return Self {
+                tokenizer,
+                parser,
+                precomputed0,
+                precomputed1: BTreeMap::new(),
+                precomputed2: BTreeMap::new(),
+                precomputed3: BTreeMap::new(),
+                llm_vocab,
+                token_name_map,
+                possible_matches: computed_possible_matches,
+                trie0_god,
+                trie1_god: Trie1GodWrapper::new(),
+                trie2_god: Trie2GodWrapper::new(),
+                trie3_god: Trie3GodWrapper::new(),
+                post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
+                state_map_by_llm,
+                terminal_map_by_llm,
+                precompute0_vocab,
+                precompute_vocab1: precompute_vocab,
+                precompute2_vocab,
+                precompute3_vocab,
+            };
+        }
 
         let (precomputed1, trie1_god) = Self::precompute1(
             &precomputed0,

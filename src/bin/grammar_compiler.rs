@@ -99,13 +99,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let mut config = GrammarConstraintConfig::default();
+    config.precompute0_only = args.precompute0_only;
+
     let grammar_constraint = GrammarConstraint::new_with_config_and_precompute0_cache(
         compiled_grammar.tokenizer,
         compiled_grammar.glr_parser,
         llm_token_map,
         compiled_grammar.definition.terminal_to_group_id().clone(),
         max_original_llm_token_id,
-        &GrammarConstraintConfig::default(),
+        &config,
         loaded_pc0,
     );
     println!("GrammarConstraint constructed successfully.");

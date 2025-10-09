@@ -3965,7 +3965,7 @@ local_system:
     src/constraint.rs: |-
       // src/constraint.rs
       #![allow(clippy::too_many_arguments)]
-      use crate::tokenizer::LLMTokenMap;
+
       use crate::datastructures::ordered_hash_map::Retain;
       use std::cell::RefCell;
       use std::cmp::Ordering;
@@ -4444,6 +4444,7 @@ local_system:
       #[derive(Debug, Clone)]
       pub struct GrammarConstraintConfig {
           pub skip_precomputation: bool,
+          pub precompute0_only: bool,
           pub trie0: Trie0Config,
           pub trie1: Trie1Config,
           pub trie2: Trie2Config,
@@ -4454,6 +4455,7 @@ local_system:
           fn default() -> Self {
               Self {
                   skip_precomputation: false,
+                  precompute0_only: false,
                   trie0: Trie0Config::off(),
                   trie1: Trie1Config::off(),
                   trie2: Trie2Config::off(),
@@ -4466,6 +4468,7 @@ local_system:
           pub fn off() -> Self {
               Self {
                   skip_precomputation: false,
+                  precompute0_only: false,
                   trie0: Trie0Config::off(),
                   trie1: Trie1Config::off(),
                   trie2: Trie2Config::off(),
@@ -5117,6 +5120,31 @@ local_system:
                       config
                   )
               };
+
+              if config.precompute0_only {
+                  return Self {
+                      tokenizer,
+                      parser,
+                      precomputed0,
+                      precomputed1: BTreeMap::new(),
+                      precomputed2: BTreeMap::new(),
+                      precomputed3: BTreeMap::new(),
+                      llm_vocab,
+                      token_name_map,
+                      possible_matches: computed_possible_matches,
+                      trie0_god,
+                      trie1_god: Trie1GodWrapper::new(),
+                      trie2_god: Trie2GodWrapper::new(),
+                      trie3_god: Trie3GodWrapper::new(),
+                      post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
+                      state_map_by_llm,
+                      terminal_map_by_llm,
+                      precompute0_vocab,
+                      precompute_vocab1: precompute_vocab,
+                      precompute2_vocab,
+                      precompute3_vocab,
+                  };
+              }
 
               let (precomputed1, trie1_god) = Self::precompute1(
                   &precomputed0,
@@ -7890,13 +7918,16 @@ local_system:
               }
           }
 
+          let mut config = GrammarConstraintConfig::default();
+          config.precompute0_only = args.precompute0_only;
+
           let grammar_constraint = GrammarConstraint::new_with_config_and_precompute0_cache(
               compiled_grammar.tokenizer,
               compiled_grammar.glr_parser,
               llm_token_map,
               compiled_grammar.definition.terminal_to_group_id().clone(),
               max_original_llm_token_id,
-              &GrammarConstraintConfig::default(),
+              &config,
               loaded_pc0,
           );
           println!("GrammarConstraint constructed successfully.");
@@ -12980,5 +13011,205 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Feature: Split compilation to cache and
       reuse precompute0 tree via CLI flags"'
+    metadata:
+  - user: |-
+      Diff of Cargo.toml since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+      --- original version of src/constraint.rs
+      +++ current version of src/constraint.rs
+      @@ -1,6 +1,6 @@
+       // src/constraint.rs
+       #![allow(clippy::too_many_arguments)]
+      -use crate::tokenizer::LLMTokenMap;
+      +
+       use crate::datastructures::ordered_hash_map::Retain;
+       use std::cell::RefCell;
+       use std::cmp::Ordering;
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/bin/grammar_compiler.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of scripts/compile.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      ```bash
+      python scripts/compile.py \
+          --grammar src/js.ebnf \
+          --output .cache/test_vocabs/js_constraint.json.gz \
+          --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+          --save-precompute0 .cache/pc0/js_gpt2.json.gz \
+          --precompute0-only
+      Loading vocabulary from cache: .cache/vocabs/vocab.json
+      Temporary vocabulary saved to: /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmpit15nwyc.json
+      Building compiler with 'cargo build --release'...
+      ...
+      Processing may-be-null terminals: {}
+      Compiling grammar...
+      [DEBUG] 2] src/interface/interface.rs:1080: Building tokenizer from definition
+      [DEBUG] 2] src/interface/interface.rs:1085: Building GLR parser from definition
+      ...
+      Vocabulary loaded (50256 tokens, max ID: 50256).
+
+      Constructing GrammarConstraint...
+      ...
+      [DEBUG] 2] src/constraint.rs:2228: Starting precompute DFS
+      ⠁ [00:01:30] [███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████░] 50243/50257 (100%, 0s)[DEBUG] 2] src/constraint.rs:2234: Finished precompute DFS
+        [00:01:30] [████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████] 50257/50257 (100%, 0s)[DEBUG] 2] src/constraint.rs:2236: Precomputation complete
+      [DEBUG] 2] src/constraint_extra.rs:962: Calculating final precompute1 statistics...
+      ...
+      [DEBUG] 2] src/constraint.rs:1629: Precomputing Trie 3...
+      Precomputing Trie 3: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 402/402 [00:00<00:00, 361470.16it/s][DEBUG] 2] src/constraint.rs:1664: Running special_map_grouped for Trie 3 precomputation
+      Traversing edges:  27%|████████████████████████████████████████▉                                                                                                              | 2260/8369 [00:22<01:01, 98.97it/s]^C^CCleaned up temporary vocabulary file.
+      ```
+
+      Why does it start doing precompute3? Fix it.
+    metadata:
+  - assistant: |-
+      You've correctly identified the issue. The `--precompute0-only` flag was being checked too late in the `grammar-compiler` binary, after all the expensive precomputation steps had already been triggered by the `GrammarConstraint` constructor.
+
+      The fix is to pass the `--precompute0-only` intention into the constructor via the config, allowing it to short-circuit the process after `precompute0` is complete. The Python script logic is already correct and requires no changes.
+
+      Here are the step-by-step instructions and git diffs to resolve this.
+
+      ### Step-by-step instructions
+
+      1.  **Update `GrammarConstraintConfig` in `src/constraint.rs`**
+          *   Add a new boolean field `precompute0_only` to the `GrammarConstraintConfig` struct.
+          *   Initialize this field to `false` in the `default()` and `off()` implementations for the struct.
+          *   In the `GrammarConstraint::new_with_config_and_precompute0_cache` function, right after `precompute0` is either loaded from cache or computed, check for `config.precompute0_only`. If it's `true`, immediately return a partially-built `GrammarConstraint` containing the `precompute0` results but with empty fields for the subsequent stages. This will prevent `precompute1`, `precompute2`, and `precompute3` from running.
+
+      2.  **Update the `grammar-compiler` binary in `src/bin/grammar_compiler.rs`**
+          *   In the `main` function, create a mutable `GrammarConstraintConfig` instance.
+          *   Set its `precompute0_only` field based on the `args.precompute0_only` command-line flag.
+          *   Pass a reference to this new `config` object to the `GrammarConstraint::new_with_config_and_precompute0_cache` function, instead of the temporary `&GrammarConstraintConfig::default()`.
+
+      ### Git Diffs
+
+      ```diff
+      diff --git a/src/bin/grammar_compiler.rs b/src/bin/grammar_compiler.rs
+      index 411111b..112233c 100644
+      --- a/src/bin/grammar_compiler.rs
+      +++ b/src/bin/grammar_compiler.rs
+      @@ -96,12 +96,15 @@
+               }
+           }
+       
+      +    let mut config = GrammarConstraintConfig::default();
+      +    config.precompute0_only = args.precompute0_only;
+      +
+           let grammar_constraint = GrammarConstraint::new_with_config_and_precompute0_cache(
+               compiled_grammar.tokenizer,
+               compiled_grammar.glr_parser,
+               llm_token_map,
+               compiled_grammar.definition.terminal_to_group_id().clone(),
+               max_original_llm_token_id,
+      -        &GrammarConstraintConfig::default(),
+      +        &config,
+               loaded_pc0,
+           );
+           println!("GrammarConstraint constructed successfully.");
+
+      ```
+      ```diff
+      diff --git a/src/constraint.rs b/src/constraint.rs
+      index e49a2c3..1a2b3d4 100644
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -431,6 +431,7 @@
+       #[derive(Debug, Clone)]
+       pub struct GrammarConstraintConfig {
+           pub skip_precomputation: bool,
+      +    pub precompute0_only: bool,
+           pub trie0: Trie0Config,
+           pub trie1: Trie1Config,
+           pub trie2: Trie2Config,
+      @@ -441,6 +442,7 @@
+           fn default() -> Self {
+               Self {
+                   skip_precomputation: false,
+      +            precompute0_only: false,
+                   trie0: Trie0Config::off(),
+                   trie1: Trie1Config::off(),
+                   trie2: Trie2Config::off(),
+      @@ -453,6 +455,7 @@
+           pub fn off() -> Self {
+               Self {
+                   skip_precomputation: false,
+      +            precompute0_only: false,
+                   trie0: Trie0Config::off(),
+                   trie1: Trie1Config::off(),
+                   trie2: Trie2Config::off(),
+      @@ -758,6 +761,34 @@
+                   )
+               };
+       
+      +        if config.precompute0_only {
+      +            return Self {
+      +                tokenizer,
+      +                parser,
+      +                precomputed0,
+      +                precomputed1: BTreeMap::new(),
+      +                precomputed2: BTreeMap::new(),
+      +                precomputed3: BTreeMap::new(),
+      +                llm_vocab,
+      +                token_name_map,
+      +                possible_matches: computed_possible_matches,
+      +                trie0_god,
+      +                trie1_god: Trie1GodWrapper::new(),
+      +                trie2_god: Trie2GodWrapper::new(),
+      +                trie3_god: Trie3GodWrapper::new(),
+      +                post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
+      +                state_map_by_llm,
+      +                terminal_map_by_llm,
+      +                precompute0_vocab,
+      +                precompute_vocab1: precompute_vocab,
+      +                precompute2_vocab,
+      +                precompute3_vocab,
+      +            };
+      +        }
+      +
+               let (precomputed1, trie1_god) = Self::precompute1(
+                   &precomputed0,
+                   &trie0_god,
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 2 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/bin/grammar_compiler.rs
+      Applying patch to 'src/bin/grammar_compiler.rs' using custom patcher...
+      Successfully applied patch and wrote to src/bin/grammar_compiler.rs.
+
+      --- Processing Diff Block 2 ---
+      Identified target file: src/constraint.rs
+      Applying patch to 'src/constraint.rs' using custom patcher...
+      Successfully applied patch and wrote to src/constraint.rs.
+    metadata:
+  - user: 'Changes committed with message: "Feature: Implement precompute0-only mode
+      to allow caching the initial trie construction"'
     metadata:
 ...
