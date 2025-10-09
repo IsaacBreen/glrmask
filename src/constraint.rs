@@ -1702,7 +1702,7 @@ impl GrammarConstraint {
             precomputed3.insert(*tokenizer_state_id, trie3_root.clone());
 
             let mut acc = Acc::new_fresh();
-            acc.stored_trie_nodes_mut().insert(trie3_root);
+            // acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
             let gss_leaf = Arc::new(GSSNode::new(acc));
 
             let gss_stack = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id }));
