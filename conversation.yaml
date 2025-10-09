@@ -10771,14 +10771,14 @@ local_system:
           return filtered
 
 
-      def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path):
+      def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool):
           """
           Runs the Rust grammar-compiler CLI tool.
           """
-          if not compiler_path.exists():
-              print(f"Compiler executable not found at '{compiler_path}'.")
-              print("Attempting to build it with 'cargo build --release'...")
+          if recompile:
+              print("Building compiler with 'cargo build --release'...")
               try:
+                  # Capture output to avoid spamming stdout, but print it on error.
                   subprocess.run(
                       ["cargo", "build", "--release"],
                       check=True,
@@ -10790,6 +10790,14 @@ local_system:
                   print("Cargo build failed:", file=sys.stderr)
                   print(e.stderr, file=sys.stderr)
                   sys.exit(1)
+
+          if not compiler_path.exists():
+              print(f"Error: Compiler executable not found at '{compiler_path}'.", file=sys.stderr)
+              if recompile:
+                   print("The build process completed but the executable is not in the expected location.", file=sys.stderr)
+              else:
+                   print("Try running without '--no-recompile' to build it.", file=sys.stderr)
+              sys.exit(1)
 
           command = [
               str(compiler_path),
@@ -10839,7 +10847,8 @@ local_system:
           vocab_group.add_argument("--vocab-path", type=Path, help="Path to a local JSON vocabulary file.")
 
           parser.add_argument("--cache-dir", type=Path, default=Path(".cache/vocabs"), help="Directory to cache downloaded vocabularies.")
-          parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the compiled grammar-compiler executable.")
+          parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the grammar-compiler executable.")
+          parser.add_argument("--no-recompile", action="store_true", help="Skip recompiling the Rust grammar-compiler executable and use the existing one.")
           parser.add_argument("--force-download", action="store_true", help="Force re-downloading the vocabulary even if it exists in the cache.")
           
           # Filtering options
@@ -10862,7 +10871,7 @@ local_system:
 
           # 4. Run the Rust compiler
           try:
-              run_compiler(args.compiler_path, args.grammar, tmp_vocab_path, args.output)
+              run_compiler(args.compiler_path, args.grammar, tmp_vocab_path, args.output, recompile=not args.no_recompile)
           finally:
               # 5. Clean up the temporary file
               tmp_vocab_path.unlink()
@@ -16944,5 +16953,276 @@ messages:
     metadata:
   - user: 'Changes committed with message: "docs(scripts/compile.py): Add usage examples
       to argument parser epilog"'
+    metadata:
+  - user: |-
+      Diff of Cargo.toml since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_js.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/bin/grammar_compiler.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of scripts/compile.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: chatllm send --paste -- "I can't see any output until all of it comes at
+      once. Bad. It should be 'passed through'."
+    metadata:
+  - user: I can't see any output until all of it comes at once. Bad. It should be
+      'passed through'.
+    metadata:
+  - user: |-
+      Diff of Cargo.toml since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_js.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/bin/grammar_compiler.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of scripts/compile.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: It should recompile by default. Finding and using existing executable should
+      be optional behaviour.
+    metadata:
+  - assistant: |-
+      You're right, that's a much safer and more intuitive default. The script should ensure it's using the latest version of the compiler unless explicitly told not to.
+
+      Here are the step-by-step instructions to make recompilation the default behavior, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file:** `scripts/compile.py`.
+
+      2.  **Update the `run_compiler` function:** We'll modify this function to accept a `recompile` flag. It will now build the Rust project by default.
+
+          *   Find the `run_compiler` function definition.
+          *   Add a new parameter `recompile: bool` to the function signature.
+          *   Change the logic inside to run `cargo build --release` if `recompile` is `True`. The check for the executable's existence will now happen *after* the potential build step.
+
+          Replace the existing `run_compiler` function with this new version:
+          ```python
+          def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool):
+              """
+              Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
+              """
+              if recompile:
+                  print("Building compiler with 'cargo build --release'...")
+                  try:
+                      # Capture output to avoid spamming stdout, but print it on error.
+                      subprocess.run(
+                          ["cargo", "build", "--release"],
+                          check=True,
+                          capture_output=True,
+                          text=True
+                      )
+                      print("Build successful.")
+                  except subprocess.CalledProcessError as e:
+                      print("Cargo build failed:", file=sys.stderr)
+                      print(e.stderr, file=sys.stderr)
+                      sys.exit(1)
+
+              if not compiler_path.exists():
+                  print(f"Error: Compiler executable not found at '{compiler_path}'.", file=sys.stderr)
+                  if recompile:
+                       print("The build process completed but the executable is not in the expected location.", file=sys.stderr)
+                  else:
+                       print("Try running without '--no-recompile' to build it.", file=sys.stderr)
+                  sys.exit(1)
+
+              command = [
+                  str(compiler_path),
+                  "--grammar", str(grammar_path),
+                  "--vocab", str(vocab_path),
+                  "--output", str(output_path),
+              ]
+
+              print(f"\nRunning compiler: {' '.join(command)}")
+              try:
+                  subprocess.run(command, check=True)
+              except subprocess.CalledProcessError as e:
+                  print(f"Grammar compilation failed with exit code {e.returncode}", file=sys.stderr)
+                  sys.exit(1)
+              except FileNotFoundError:
+                  print(f"Error: Could not find the compiler executable at '{compiler_path}'", file=sys.stderr)
+                  sys.exit(1)
+          ```
+
+      3.  **Update the `main` function and arguments:** We need to add a `--no-recompile` flag and pass its value to the `run_compiler` function.
+
+          *   Find the argument definitions inside the `main` function.
+          *   Add a new argument for `--no-recompile`.
+          *   Update the help text for `--compiler-path`.
+          *   Modify the call to `run_compiler` to pass the new flag.
+
+          In the `main` function, find these lines:
+          ```python
+          parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the compiled grammar-compiler executable.")
+          parser.add_argument("--force-download", action="store_true", help="Force re-downloading the vocabulary even if it exists in the cache.")
+          ```
+          And add the new `--no-recompile` argument after them, while also slightly changing the help text for `--compiler-path`:
+          ```python
+          parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the grammar-compiler executable.")
+          parser.add_argument("--no-recompile", action="store_true", help="Skip recompiling the Rust grammar-compiler executable and use the existing one.")
+          parser.add_argument("--force-download", action="store_true", help="Force re-downloading the vocabulary even if it exists in the cache.")
+          ```
+
+          Finally, find the `run_compiler` call at the end of the `main` function:
+          ```python
+          run_compiler(args.compiler_path, args.grammar, tmp_vocab_path, args.output)
+          ```
+          And change it to:
+          ```python
+          run_compiler(args.compiler_path, args.grammar, tmp_vocab_path, args.output, recompile=not args.no_recompile)
+          ```
+
+      This makes recompiling the default, and you can opt-out by adding the `--no-recompile` flag to your command.
+
+      ### Git Diff
+
+      Here is the git diff for the changes.
+
+      ```diff
+      diff --git a/scripts/compile.py b/scripts/compile.py
+      index 133015b..8008799 100644
+      --- a/scripts/compile.py
+      +++ b/scripts/compile.py
+      @@ -47,40 +47,47 @@
+           return filtered
+       
+       
+      -def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path):
+      +def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool):
+           """
+           Runs the Rust grammar-compiler CLI tool.
+           """
+      -    if not compiler_path.exists():
+      -        print(f"Compiler executable not found at '{compiler_path}'.")
+      -        print("Attempting to build it with 'cargo build --release'...")
+      +    if recompile:
+      +        print("Building compiler with 'cargo build --release'...")
+               try:
+      +            # Capture output to avoid spamming stdout, but print it on error.
+                   subprocess.run(
+                       ["cargo", "build", "--release"],
+                       check=True,
+                       capture_output=True,
+                       text=True
+                   )
+                   print("Build successful.")
+               except subprocess.CalledProcessError as e:
+                   print("Cargo build failed:", file=sys.stderr)
+                   print(e.stderr, file=sys.stderr)
+                   sys.exit(1)
+       
+      +    if not compiler_path.exists():
+      +        print(f"Error: Compiler executable not found at '{compiler_path}'.", file=sys.stderr)
+      +        if recompile:
+      +             print("The build process completed but the executable is not in the expected location.", file=sys.stderr)
+      +        else:
+      +             print("Try running without '--no-recompile' to build it.", file=sys.stderr)
+      +        sys.exit(1)
+      +
+           command = [
+               str(compiler_path),
+               "--grammar", str(grammar_path),
+               "--vocab", str(vocab_path),
+               "--output", str(output_path),
+           ]
+       
+           print(f"\nRunning compiler: {' '.join(command)}")
+           try:
+               subprocess.run(command, check=True)
+           except subprocess.CalledProcessError as e:
+               print(f"Grammar compilation failed with exit code {e.returncode}", file=sys.stderr)
+               sys.exit(1)
+           except FileNotFoundError:
+               print(f"Error: Could not find the compiler executable at '{compiler_path}'", file=sys.stderr)
+               sys.exit(1)
+       
+       
+      @@ -109,7 +116,8 @@
+           vocab_group.add_argument("--vocab-path", type=Path, help="Path to a local JSON vocabulary file.")
+       
+           parser.add_argument("--cache-dir", type=Path, default=Path(".cache/vocabs"), help="Directory to cache downloaded vocabularies.")
+      -    parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the compiled grammar-compiler executable.")
+      +    parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the grammar-compiler executable.")
+      +    parser.add_argument("--no-recompile", action="store_true", help="Skip recompiling the Rust grammar-compiler executable and use the existing one.")
+           parser.add_argument("--force-download", action="store_true", help="Force re-downloading the vocabulary even if it exists in the cache.")
+           
+           # Filtering options
+      @@ -128,7 +136,7 @@
+       
+           # 4. Run the Rust compiler
+           try:
+      -        run_compiler(args.compiler_path, args.grammar, tmp_vocab_path, args.output)
+      +        run_compiler(args.compiler_path, args.grammar, tmp_vocab_path, args.output, recompile=not args.no_recompile)
+           finally:
+               # 5. Clean up the temporary file
+               tmp_vocab_path.unlink()
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: scripts/compile.py
+      Applying patch to 'scripts/compile.py' using custom patcher...
+      Successfully applied patch and wrote to scripts/compile.py.
+    metadata:
+  - user: 'Changes committed with message: "feat(scripts): Default to recompiling
+      grammar-compiler in compile.py and add --no-recompile flag"'
     metadata:
 ...

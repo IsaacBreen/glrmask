@@ -64,14 +64,14 @@ def filter_vocab(vocab: dict[str, int], max_len: int | None) -> dict[str, int]:
     return filtered
 
 
-def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path):
+def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path, recompile: bool):
     """
     Runs the Rust grammar-compiler CLI tool.
     """
-    if not compiler_path.exists():
-        print(f"Compiler executable not found at '{compiler_path}'.")
-        print("Attempting to build it with 'cargo build --release'...")
+    if recompile:
+        print("Building compiler with 'cargo build --release'...")
         try:
+            # Capture output to avoid spamming stdout, but print it on error.
             subprocess.run(
                 ["cargo", "build", "--release"],
                 check=True,
@@ -83,6 +83,14 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
             print("Cargo build failed:", file=sys.stderr)
             print(e.stderr, file=sys.stderr)
             sys.exit(1)
+
+    if not compiler_path.exists():
+        print(f"Error: Compiler executable not found at '{compiler_path}'.", file=sys.stderr)
+        if recompile:
+             print("The build process completed but the executable is not in the expected location.", file=sys.stderr)
+        else:
+             print("Try running without '--no-recompile' to build it.", file=sys.stderr)
+        sys.exit(1)
 
     command = [
         str(compiler_path),
@@ -132,7 +140,8 @@ Examples:
     vocab_group.add_argument("--vocab-path", type=Path, help="Path to a local JSON vocabulary file.")
 
     parser.add_argument("--cache-dir", type=Path, default=Path(".cache/vocabs"), help="Directory to cache downloaded vocabularies.")
-    parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the compiled grammar-compiler executable.")
+    parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the grammar-compiler executable.")
+    parser.add_argument("--no-recompile", action="store_true", help="Skip recompiling the Rust grammar-compiler executable and use the existing one.")
     parser.add_argument("--force-download", action="store_true", help="Force re-downloading the vocabulary even if it exists in the cache.")
     
     # Filtering options
@@ -155,7 +164,7 @@ Examples:
 
     # 4. Run the Rust compiler
     try:
-        run_compiler(args.compiler_path, args.grammar, tmp_vocab_path, args.output)
+        run_compiler(args.compiler_path, args.grammar, tmp_vocab_path, args.output, recompile=not args.no_recompile)
     finally:
         # 5. Clean up the temporary file
         tmp_vocab_path.unlink()
