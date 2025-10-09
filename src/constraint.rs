@@ -1799,6 +1799,7 @@ impl GrammarConstraint {
                 keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
                     let stored_trie_nodes = glr_s.active_state.stack.stored_trie_nodes();
+                    timeit!("insert edges to end", {
                     for src_wr in stored_trie_nodes {
                         let src_arc = src_wr.as_arc().clone();
                         let edge_key = (0, LLMTokenBV::ones(internal_max_llm_token + 1)); // edge key is unused in trie3
@@ -1815,6 +1816,7 @@ impl GrammarConstraint {
                         );
                         inserter.try_destination(trie3_end.clone()).expect("Failed to insert end edge");
                     }
+                    });
                 }
 
                 const PROCESS_DEFAULT_REDUCTIONS: bool = false;
