@@ -479,7 +479,6 @@ impl Into<PrecomputedNodeContents> for PrecomputedNodeContents0 {
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintConfig {
     pub skip_precomputation: bool,
-    pub precompute0_only: bool,
     pub trie0: Trie0Config,
     pub trie1: Trie1Config,
     pub trie2: Trie2Config,
@@ -490,7 +489,6 @@ impl Default for GrammarConstraintConfig {
     fn default() -> Self {
         Self {
             skip_precomputation: false,
-            precompute0_only: false,
             trie0: Trie0Config::off(),
             trie1: Trie1Config::off(),
             trie2: Trie2Config::off(),
@@ -503,7 +501,6 @@ impl GrammarConstraintConfig {
     pub fn off() -> Self {
         Self {
             skip_precomputation: false,
-            precompute0_only: false,
             trie0: Trie0Config::off(),
             trie1: Trie1Config::off(),
             trie2: Trie2Config::off(),
@@ -1000,14 +997,83 @@ impl GrammarConstraint {
 
         gc
     }
-    pub fn new_with_config_and_precompute0_cache(
+
+    pub fn build_precompute0_cache(
         tokenizer:        Regex,
         parser:           GLRParser,
         llm_token_map:    LLMTokenMap,
         token_name_map:   BiBTreeMap<Terminal, usize>,
         max_original_llm_token_id: usize,
         config: &GrammarConstraintConfig,
-        precompute0_cache: Option<Precompute0Cache>,
+    ) -> Precompute0Cache {
+        let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map);
+        let internal_max_llm_token = original_to_internal_map.values().copied().max().unwrap_or(0);
+        let mut internal_to_original_map: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+        for (orig, int_id) in &original_to_internal_map {
+            internal_to_original_map.entry(*int_id).or_default().insert(*orig);
+        }
+        let mut internal_llm_token_map_for_precompute = BiBTreeMap::new();
+        for (bytes, original_id) in llm_token_map.iter() {
+            if let Some(internal_id_val) = original_to_internal_map.get(&original_id.0) {
+                internal_llm_token_map_for_precompute.insert(bytes.clone(), LLMTokenID(*internal_id_val));
+            }
+        }
+        let llm_vocab = Arc::new(LLMVocab {
+            llm_token_map: llm_token_map.clone(),
+            max_original_llm_token_id,
+        });
+        let precompute0_vocab = StageVocab {
+            original_to_internal: original_to_internal_map.clone(),
+            internal_to_original: internal_to_original_map.clone(),
+            internal_max_llm_token,
+        };
+
+        let grammar_productions = &parser.productions;
+        let grammar_term_map = &parser.terminal_map;
+        let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions);
+        let mut terminal_follow_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> = BTreeMap::new();
+        for (terminal1, following_terminals) in terminal_follow_sets_named {
+            let t1_id = *grammar_term_map.get_by_left(&terminal1).unwrap();
+            let mut following_ids = BTreeSet::new();
+            for t2 in following_terminals {
+                let t2_id = *grammar_term_map.get_by_left(&t2).unwrap();
+                following_ids.insert(t2_id);
+            }
+            if !following_ids.is_empty() {
+                terminal_follow_map.insert(t1_id, following_ids);
+            }
+        }
+
+        let (precomputed0, trie0_god) = Self::precompute0(
+            &tokenizer,
+            Some(&parser),
+            Some(llm_vocab.clone()),
+            &internal_llm_token_map_for_precompute,
+            &token_name_map,
+            precompute0_vocab.internal_max_llm_token,
+            &terminal_follow_map,
+            parser.ignore_terminal_id,
+            &mut BTreeMap::new(), // possible_matches is computed inside precompute0
+            config,
+        );
+
+        Precompute0Cache {
+            tokenizer,
+            llm_token_map,
+            max_original_llm_token_id,
+            precompute0_vocab,
+            precomputed0,
+            trie0_god,
+        }
+    }
+
+    pub fn new_with_config_and_precompute0_cache(
+        tokenizer:        Regex,
+        parser:           GLRParser,
+        llm_token_map:    LLMTokenMap,
+        token_name_map:   BiBTreeMap<Terminal, usize>,
+        config: &GrammarConstraintConfig,
+        precompute0_cache: Precompute0Cache,
     ) -> Self {
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
         let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
@@ -1015,6 +1081,7 @@ impl GrammarConstraint {
         let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map);
 
         let internal_max_llm_token = original_to_internal_map.values().copied().max().unwrap_or(0);
+        let max_original_llm_token_id = precompute0_cache.max_original_llm_token_id;
         // Build reverse mapping for global vocab
         let mut internal_to_original_map: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
         for (orig, int_id) in &original_to_internal_map {
@@ -1085,12 +1152,12 @@ impl GrammarConstraint {
         crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map.len());
 
         let llm_vocab = Arc::new(LLMVocab {
-            llm_token_map: llm_token_map.clone(),
+            llm_token_map,
             max_original_llm_token_id,
         });
 
         // Initialize per-stage vocabularies (start identical to global)
-        let mut precompute0_vocab = StageVocab {
+        let precompute0_vocab = StageVocab {
             original_to_internal: original_to_internal_map.clone(),
             internal_to_original: internal_to_original_map.clone(),
             internal_max_llm_token: internal_max_llm_token,

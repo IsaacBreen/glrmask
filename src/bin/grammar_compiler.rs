@@ -6,7 +6,7 @@ use std::sync::Arc;
 use flate2::read::GzDecoder;
 use clap::Parser;
 use flate2::write::GzEncoder;
-use flate2::Compression;
+use flate2::{Compression};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintConfig, Precompute0Cache};
 use sep1::interface::{CompiledGrammar, GrammarDefinition};
 use sep1::json_serialization::JSONConvertible;
@@ -55,6 +55,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path_str)?;
     println!("Compiling grammar...");
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+
+    if args.precompute0_only {
+        println!("Running in --precompute0-only mode.");
+        let llm_token_map = load_vocab(&args.vocab)?;
+        let max_original_llm_token_id = llm_token_map.values().map(|v| v.0).max().unwrap_or(0);
+
+        let cache = GrammarConstraint::build_precompute0_cache(
+            compiled_grammar.tokenizer,
+            compiled_grammar.glr_parser,
+            llm_token_map,
+            compiled_grammar.definition.terminal_to_group_id().clone(),
+            max_original_llm_token_id,
+            &GrammarConstraintConfig::default(),
+        );
+        println!("Precompute0 cache constructed successfully.");
+        save_pc0_cache(&cache, args.save_precompute0.as_ref().unwrap())?;
+        return Ok(());
+    }
+
     println!("Grammar compiled successfully.");
 
     // 2. Load the vocabulary.
@@ -99,26 +118,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let mut config = GrammarConstraintConfig::default();
-    config.precompute0_only = args.precompute0_only;
+    let pc0_cache = match loaded_pc0 {
+        Some(cache) => {
+            println!("Using provided precompute0 cache.");
+            cache
+        }
+        None => {
+            println!("No precompute0 cache provided, building it now...");
+            GrammarConstraint::build_precompute0_cache(
+                compiled_grammar.tokenizer.clone(),
+                compiled_grammar.glr_parser.clone(),
+                llm_token_map.clone(),
+                compiled_grammar.definition.terminal_to_group_id().clone(),
+                max_original_llm_token_id,
+                &GrammarConstraintConfig::default(),
+            )
+        }
+    };
 
     let grammar_constraint = GrammarConstraint::new_with_config_and_precompute0_cache(
         compiled_grammar.tokenizer,
         compiled_grammar.glr_parser,
         llm_token_map,
         compiled_grammar.definition.terminal_to_group_id().clone(),
-        max_original_llm_token_id,
-        &config,
-        loaded_pc0,
+        &GrammarConstraintConfig::default(),
+        pc0_cache,
     );
     println!("GrammarConstraint constructed successfully.");
+
     if let Some(path) = args.save_precompute0.as_ref() {
-        println!("Saving precompute0 cache to: {:?}", path);
-        let output_file = File::create(path)?;
-        let writer = BufWriter::new(output_file);
-        let mut encoder = GzEncoder::new(writer, Compression::default());
-        grammar_constraint.export_precompute0_cache().to_writer(&mut encoder)?;
-        encoder.finish()?;
+        // In a full run, the cache is derived from the final object to ensure consistency.
+        save_pc0_cache(&grammar_constraint.export_precompute0_cache(), path)?;
     }
 
     if args.precompute0_only {
@@ -137,5 +167,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Successfully saved constraint to {:?}", output_path);
     }
 
+    Ok(())
+}
+
+fn load_vocab(path: &PathBuf) -> Result<LLMTokenMap, Box<dyn std::error::Error>> {
+    let vocab_file = File::open(path)?;
+    let reader = BufReader::new(vocab_file);
+    let vocab: BTreeMap<String, usize> = serde_json::from_reader(reader)?;
+
+    let mut llm_token_map = LLMTokenMap::new();
+    for (token_str, token_id) in vocab {
+        let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+        let token_bytes = processed_token_str.as_bytes().to_vec();
+        llm_token_map.insert(token_bytes, LLMTokenID(token_id));
+    }
+    Ok(llm_token_map)
+}
+
+fn save_pc0_cache(cache: &Precompute0Cache, path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Saving precompute0 cache to: {:?}", path);
+    let output_file = File::create(path)?;
+    let writer = BufWriter::new(output_file);
+    let mut encoder = GzEncoder::new(writer, Compression::default());
+    cache.to_writer(&mut encoder)?;
     Ok(())
 }
