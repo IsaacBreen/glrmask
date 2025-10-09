@@ -121,14 +121,14 @@ Examples:
   # Compile the JS grammar using a downloaded GPT-2 vocabulary
   python scripts/compile.py \\
     --grammar src/js.ebnf \\
-    --output js_constraint.json.gz \\
+    --output .cache/test_vocabs/js_constraint.json.gz \\
     --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
 
   # Compile using a local vocabulary and filter for short tokens
   python scripts/compile.py \\
     --grammar src/js.ebnf \\
-    --output js_constraint_filtered.json.gz \\
-    --vocab-path .cache/vocabs/gpt2_vocab.json \\
+    --output .cache/test_vocabs/js_constraint_filtered.json.gz \\
+    --vocab-path .cache/test_vocabs/gpt2_vocab.json \\
     --max-token-len 10
 """
     parser = argparse.ArgumentParser(
