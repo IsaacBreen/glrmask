@@ -1374,6 +1374,59 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.inner.children_keys().into_iter().collect()
     }
 
+    /// Visit each unique accumulator present anywhere in the structure exactly once.
+    ///
+    /// This traverses the DAG of `Upper` nodes, deduplicating both shared subgraphs
+    /// (by pointer) and accumulators (by value). The visitor is invoked at most once
+    /// for each distinct accumulator value `A` that appears as:
+    /// - `Interface.acc`
+    /// - `Interface.empty` (when present)
+    /// - `Upper::Branch.empty` (when present)
+    ///
+    /// The visit order is not specified.
+    pub fn visit_accs<F>(&self, mut f: F)
+    where
+        F: FnMut(&A),
+    {
+        // Deduplicate by accumulator value so the visitor sees each A once.
+        let mut seen: HashSet<A> = HashSet::new();
+        // Deduplicate by node pointer to avoid revisiting shared subgraphs.
+        let mut visited: HashSet<usize> = HashSet::new();
+        let mut queue: VecDeque<Arc<Upper<T, A>>> = VecDeque::new();
+
+        queue.push_back(self.inner.clone());
+        while let Some(node) = queue.pop_front() {
+            let ptr = Arc::as_ptr(&node) as usize;
+            if !visited.insert(ptr) {
+                continue;
+            }
+            match &*node {
+                Upper::Branch(b) => {
+                    if let Some(acc) = &b.empty {
+                        if seen.insert(acc.clone()) {
+                            f(acc);
+                        }
+                    }
+                    for kids in b.children.values() {
+                        for child in kids.values() {
+                            queue.push_back(child.clone());
+                        }
+                    }
+                }
+                Upper::Interface(i) => {
+                    if seen.insert(i.acc.clone()) {
+                        f(&i.acc);
+                    }
+                    if let Some(acc) = &i.empty {
+                        if seen.insert(acc.clone()) {
+                            f(acc);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn reduce_acc(&self) -> Option<A> {
         // Collect unique accumulators, then merge them all
         let mut unique: HashSet<A> = HashSet::new();
