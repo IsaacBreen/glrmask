@@ -16,7 +16,7 @@
 //! All logic here is pure Rust and contains no Python bindings.
 
 use im::{HashMap as IHashMap, OrdMap};
-use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap as StdHashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -74,6 +74,29 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
 // --------------------
 // Small, reusable helpers
 // --------------------
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GSSPathsInfo {
+    pub num_paths: usize,
+    pub total_depth: usize,
+}
+
+impl std::ops::Add for GSSPathsInfo {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self {
+            num_paths: self.num_paths + rhs.num_paths,
+            total_depth: self.total_depth + rhs.total_depth,
+        }
+    }
+}
+
+impl std::ops::AddAssign for GSSPathsInfo {
+    fn add_assign(&mut self, rhs: Self) {
+        self.num_paths += rhs.num_paths;
+        self.total_depth += rhs.total_depth;
+    }
+}
 
 fn merge_optional_acc<A: Merge + Clone>(a: &Option<A>, b: &Option<A>) -> Option<A> {
     match (a, b) {
