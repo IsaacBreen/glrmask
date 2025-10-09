@@ -37,13 +37,13 @@ impl Default for Trie1Config {
     fn default() -> Self {
         Self {
             enabled: true,
-            early_flatten_epsilon: true,
-            minimize_by_signature: true,
+            early_flatten_epsilon: false,
+            minimize_by_signature: false,
             merge_equivalent_llm_tokens: true,
             reorder_llm_tokens: true,
-            prune_on_no_terminal_follow: true,
-            prune_nodes_not_reaching_end: true,
-            prune_dead_paths: true,
+            prune_on_no_terminal_follow: false,
+            prune_nodes_not_reaching_end: false,
+            prune_dead_paths: false,
             gc: true,
         }
     }
