@@ -219,7 +219,8 @@ impl Debug for GSSNode {
 
 impl PartialEq for GSSNode {
     fn eq(&self, other: &Self) -> bool {
-        todo!()
+        println!("Warning: GSSNode PartialEq compares full stacks, which may be expensive.");
+        self.inner.to_stacks() == other.inner.to_stacks()
     }
 }
 impl Eq for GSSNode {}
