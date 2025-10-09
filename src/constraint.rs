@@ -1775,11 +1775,11 @@ impl GrammarConstraint {
                     // println!("    {}: {:?}", i, p);
                 // }
                 });
-                crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
-                    &mut glr_s1.active_state.stack,
-                    &mut HashMap::new(),
-                    glr_s1.active_state.trie2_god.as_ref().unwrap(),
-                );
+                // crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
+                //     &mut glr_s1.active_state.stack,
+                //     &mut HashMap::new(),
+                //     glr_s1.active_state.trie2_god.as_ref().unwrap(),
+                // );
 
                 print_summary();
                 reset();
