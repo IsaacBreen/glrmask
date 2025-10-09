@@ -691,7 +691,8 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
     stored_trie_god: &StoredTrieGodWrapper,
 ) {
     // --- Global Analysis: Find common subsets (macros) ---
-    let all_accs: Vec<Acc> = root_arc.inner.to_stacks().into_iter().map(|(_, acc)| acc).collect();
+    let mut all_accs = Vec::new();
+    root_arc.inner.visit_accs(|acc| all_accs.push(acc.clone()));
     let mut all_needs_edge_sets = Vec::new();
     for acc in &all_accs {
         let needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = acc
