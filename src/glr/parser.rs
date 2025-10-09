@@ -1349,29 +1349,24 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut dest = PrecomputeNode3Index::new(
             god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
         );
-        let mut had_any_nodes = false;
         for (k, mut acc) in below {
             // Add the "k" edge info for popped-below-bottom to precompute trie across this GSS
             let tokens_all = LLMTokenBV::max_ones();
             let key = (k, tokens_all.clone());
             let all_states = StateIDBV::max_ones();
 
-            let nodes = std::mem::take(acc.stored_trie_nodes_mut());
-            if !nodes.is_empty() {
-                had_any_nodes = true;
-                for node in nodes {
-                    let source_arc = node.as_arc().clone();
-                    let inserter = EdgeInserter::new(
-                        god,
-                        source_arc,
-                        key.clone(),
-                        all_states.clone(),
-                        |e, n| *e |= n,
-                        |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
-                        |_, _| _ = true, // Unconditional insertion
-                    );
-                    inserter.try_destination(dest.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
-                }
+            for node in std::mem::take(acc.stored_trie_nodes_mut()) {
+                let source_arc = node.as_arc().clone();
+                let inserter = EdgeInserter::new(
+                    god,
+                    source_arc,
+                    key.clone(),
+                    all_states.clone(),
+                    |e, n| *e |= n,
+                    |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
+                    |_, _| _ = true, // Unconditional insertion
+                );
+                inserter.try_destination(dest.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
             }
 
             if new_acc.is_none() {
@@ -1383,9 +1378,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let mut new_acc = new_acc.expect("No Acc built for below-bottom handling");
         new_acc.stored_trie_nodes_mut().clear();
-        if had_any_nodes {
-            new_acc.stored_trie_nodes_mut().insert(dest);
-        }
+        new_acc.stored_trie_nodes_mut().insert(dest);
 
         let new_leaf = Arc::new(GSSNode::new(new_acc));
         let new_gss = Arc::new(new_leaf.push(ParseStateEdgeContent { state_id: hallucinate_sid }));
