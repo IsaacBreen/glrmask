@@ -1003,16 +1003,22 @@ pub fn prune_dead_paths_trie3(roots: &mut BTreeMap<TokenizerStateID, PrecomputeN
         }
     }
 
-    let pb = ProgressBar::new(all_nodes.len() as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [Trie3 Prune] [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
-            .unwrap(),
-    );
-    if !PROGRESS_BAR_ENABLED {
-        pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
-    }
-    pb.set_position(0);
+    #[cfg(not(rustrover))]
+    let pb = {
+        let pb = ProgressBar::new(all_nodes.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [Trie3 Prune] [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})")
+                .unwrap(),
+        );
+        if !PROGRESS_BAR_ENABLED {
+            pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+        }
+        pb.set_position(0);
+        pb
+    };
+    #[cfg(rustrover)]
+    let pb = ProgressBar::hidden();
 
     // 2. Propagate liveness until a fixed point is reached.
     while let Some(node_ptr) = worklist.pop_front() {
@@ -1251,7 +1257,10 @@ fn merge_nodes_trie3_structural(roots: &mut BTreeMap<TokenizerStateID, Precomput
         let mut next_id = 0;
         let mut changes = 0;
 
+        #[cfg(not(rustrover))]
         let its = tqdm!(0..n, desc = format!("Trie3 Merge Structural Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
+        #[cfg(rustrover)]
+        let its = 0..n;
         for u in its {
             let mut aggr: BTreeMap<(usize, usize), StateIDBV> = BTreeMap::new();
             for (p, _bv_key, v_dense, sids) in &raw_edges[u] {
