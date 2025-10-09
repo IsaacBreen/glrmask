@@ -38,7 +38,7 @@ struct Args {
     save_precompute0: Option<PathBuf>,
 
     /// If specified, only compute and save the precompute0 cache, then exit.
-    #[arg(long, requires = "save_precompute0", conflicts_with = "output")]
+    #[arg(long, requires = "save_precompute0")]
     precompute0_only: bool,
 }
 
@@ -99,18 +99,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let mut config = GrammarConstraintConfig::default();
-    if args.precompute0_only {
-        config.precompute0_only = true;
-    }
-
     let grammar_constraint = GrammarConstraint::new_with_config_and_precompute0_cache(
         compiled_grammar.tokenizer,
         compiled_grammar.glr_parser,
         llm_token_map,
         compiled_grammar.definition.terminal_to_group_id().clone(),
         max_original_llm_token_id,
-        &config,
+        &GrammarConstraintConfig::default(),
         loaded_pc0,
     );
     println!("GrammarConstraint constructed successfully.");
