@@ -354,6 +354,10 @@ Cargo.lock
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
+# Python
+scripts/__pycache__/
+.venv/
+
 # End of https://www.toptal.com/developers/gitignore/api/rust,jetbrains,macos,python
 
 .aider*
