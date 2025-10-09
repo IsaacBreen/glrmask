@@ -223,21 +223,6 @@ impl PartialEq for GSSNode {
     }
 }
 impl Eq for GSSNode {}
-impl PartialOrd for GSSNode {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        todo!()
-    }
-}
-impl Ord for GSSNode {
-    fn cmp(&self, other: &Self) -> Ordering {
-        todo!()
-    }
-}
-impl Hash for GSSNode {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        todo!()
-    }
-}
 
 impl GSSNode {
     pub fn new(acc: Acc) -> Self {

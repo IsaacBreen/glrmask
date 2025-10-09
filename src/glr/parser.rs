@@ -133,7 +133,7 @@ impl JSONConvertible for ParseStateEdgeContent {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseState {
     pub stack: Arc<GSSNode>,
     pub accepted_state: Option<Arc<GSSNode>>,
