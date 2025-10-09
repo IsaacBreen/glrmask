@@ -2244,7 +2244,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             panic!("GSS too big ({} nodes). {}", total_nodes, final_string);
         }
 
-        debug!(2, "{}", final_string);
+        debug!(3, "{}", final_string);
 
         if generate_dot {
             let dot_string = self.gss_to_dot();
