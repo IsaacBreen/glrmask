@@ -947,10 +947,8 @@ pub(crate) fn is_simple_gss(
             // The edge into the leaf must be the hallucinated one.
             if edge_to_leaf.state_id == hallucinated_state_id {
                 let state_id_x = edge_to_middle.state_id;
-                // The leaf must have stored_trie_nodes.
-                if !acc.stored_trie_nodes().is_empty() {
-                    return Some((state_id_x, Arc::new(acc)));
-                }
+                // The structure is what matters for caching, not the contents.
+                return Some((state_id_x, Arc::new(acc)));
             }
         }
     }

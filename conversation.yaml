@@ -4493,10 +4493,8 @@ local_system:
                   // The edge into the leaf must be the hallucinated one.
                   if edge_to_leaf.state_id == hallucinated_state_id {
                       let state_id_x = edge_to_middle.state_id;
-                      // The leaf must have stored_trie_nodes.
-                      if !acc.stored_trie_nodes().is_empty() {
-                          return Some((state_id_x, Arc::new(acc)));
-                      }
+                      // The structure is what matters for caching, not the contents.
+                      return Some((state_id_x, Arc::new(acc)));
                   }
               }
           }
@@ -11221,5 +11219,72 @@ messages:
   - user: 'Changes committed with message: "Refactor: Ensure cache entry for simple
       GSS always exists, but only link trie edges and update stored nodes if sources
       are present."'
+    metadata:
+  - user: |-
+      Diff of src/datastructures/gss_leveled_adapter.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: We're still getting infinte loops - never finishing - where we didn't before.
+      Why? I'd have thought ensuring our cache works would kind of fix this (since
+      caching is how we avoid inf loops).
+    metadata:
+  - assistant: |-
+      You are right to be suspicious; an infinite loop when the cache is supposed to prevent it points to a flaw in what's being cached or when.
+
+      The investigation reveals that the problem lies in the helper function `is_simple_gss`. This function was designed to identify a specific GSS structure that is prone to looping, but it included a condition that the GSS's accumulator must have non-empty `stored_trie_nodes`.
+
+      This condition is the source of the infinite loop. When a "simple GSS" is created from a reduction that has no associated trie nodes, `is_simple_gss` returns `None`. This causes the GSS to bypass the caching logic entirely and be treated as a regular, non-looping structure, allowing the cycle to repeat.
+
+      The fix is to remove this condition from `is_simple_gss`. The function should identify the GSS based on its *structure* alone. The caching logic in `reduce_and_goto` is already correctly designed to handle cases with and without `stored_trie_nodes`.
+
+      ### Step-by-step Instructions
+
+      1.  **File: `src/datastructures/gss_leveled_adapter.rs`**
+          *   Navigate to the function `is_simple_gss`.
+          *   Locate the `if !acc.stored_trie_nodes().is_empty()` condition.
+          *   Remove this `if` statement, allowing the function to return `Some(...)` regardless of whether `stored_trie_nodes` is empty.
+
+      ### Git Diff
+
+      ```diff
+      diff --git a/src/datastructures/gss_leveled_adapter.rs b/src/datastructures/gss_leveled_adapter.rs
+      index 124316a..5843c0d 100644
+      --- a/src/datastructures/gss_leveled_adapter.rs
+      +++ b/src/datastructures/gss_leveled_adapter.rs
+      @@ -1016,11 +1016,8 @@
+                   // The edge into the leaf must be the hallucinated one.
+                   if edge_to_leaf.state_id == hallucinated_state_id {
+                       let state_id_x = edge_to_middle.state_id;
+      -                // The leaf must have stored_trie_nodes.
+      -                if !acc.stored_trie_nodes().is_empty() {
+      -                    return Some((state_id_x, Arc::new(acc)));
+      -                }
+      +                // The structure is what matters for caching, not the contents.
+      +                return Some((state_id_x, Arc::new(acc)));
+                   }
+               }
+           }
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/gss_leveled_adapter.rs
+      Applying patch to 'src/datastructures/gss_leveled_adapter.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/gss_leveled_adapter.rs.
+    metadata:
+  - user: 'Changes committed with message: "Fix: Allow GSS without stored_trie_nodes
+      to be identified as simple for caching in is_simple_gss"'
     metadata:
 ...
