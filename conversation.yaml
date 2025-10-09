@@ -10294,7 +10294,8 @@ local_system:
 
           // 1. Load and compile the grammar.
           println!("Loading grammar from: {:?}", args.grammar);
-          let grammar_definition = GrammarDefinition::from_ebnf_file(&args.grammar)?;
+          let grammar_path_str = args.grammar.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", args.grammar))?;
+          let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path_str)?;
           println!("Compiling grammar...");
           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
           println!("Grammar compiled successfully.");
@@ -16662,5 +16663,130 @@ messages:
     metadata:
   - user: "Changes committed with message: \"feat: Add 'scripts/compile.py' helper
       for grammar constraint compilation and update .gitignore\""
+    metadata:
+  - user: |-
+      Diff of Cargo.toml since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/lib.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/test_constraint_js.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/bin/grammar_compiler.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of scripts/compile.py since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      cargo run --bin grammar-compiler -- --grammar src/js.ebnf --vocab .cache/test_vocabs/gpt2_vocab.json --output js_constraint.json.gz
+         Compiling utf8parse v0.2.2
+         Compiling anstyle-query v1.1.3
+         Compiling anstyle v1.0.13
+         Compiling colorchoice v1.0.4
+         Compiling is_terminal_polyfill v1.70.1
+         Compiling strsim v0.11.1
+         Compiling clap_lex v0.7.5
+         Compiling anstyle-parse v0.2.7
+         Compiling anstream v0.6.21
+         Compiling clap_builder v4.5.48
+         Compiling clap v4.5.48
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error[E0308]: mismatched types
+          --> src/bin/grammar_compiler.rs:38:64
+           |
+        38 |     let grammar_definition = GrammarDefinition::from_ebnf_file(&args.grammar)?;
+           |                              --------------------------------- ^^^^^^^^^^^^^ expected `&str`, found `&PathBuf`
+           |                              |
+           |                              arguments to this function are incorrect
+           |
+           = note: expected reference `&str`
+                      found reference `&PathBuf`
+      note: associated function defined here
+          --> /Users/isaacbreen/Projects2/grammars2024/src/interface/interface.rs:1004:12
+           |
+      1004 |     pub fn from_ebnf_file(path: &str) -> Result<Self, String> {
+           |            ^^^^^^^^^^^^^^
+
+      For more information about this error, try `rustc --explain E0308`.
+      error: could not compile `sep1` (bin "grammar-compiler") due to 1 previous error
+    metadata:
+  - assistant: |-
+      You've run into a classic Rust type mismatch. The `GrammarDefinition::from_ebnf_file` function expects a `&str` for the file path, but the `clap` argument parser provides a `PathBuf`.
+
+      Here are the step-by-step instructions to fix the compile error, followed by the git diff.
+
+      ### Step-by-step Instructions
+
+      1.  **Open the file:** `src/bin/grammar_compiler.rs`.
+      2.  **Locate the error:** Find the line where you call `GrammarDefinition::from_ebnf_file`.
+          ```rust
+          let grammar_definition = GrammarDefinition::from_ebnf_file(&args.grammar)?;
+          ```
+      3.  **Correct the type:** You need to convert `args.grammar` (which is a `PathBuf`) into a `&str` before passing it to the function. The `.to_str()` method on paths does this, but it returns an `Option` because a path might not be valid UTF-8. We'll handle this case by returning an error.
+
+          Replace the single erroneous line with these two lines:
+          ```rust
+          let grammar_path_str = args.grammar.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", args.grammar))?;
+          let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path_str)?;
+          ```
+
+      This change correctly converts the path to the expected type and provides a clean error message if the path is invalid.
+
+      ### Git Diff
+
+      Here is the corresponding git diff for the fix.
+
+      ```diff
+      diff --git a/src/bin/grammar_compiler.rs b/src/bin/grammar_compiler.rs
+      index 133015b..185115b 100644
+      --- a/src/bin/grammar_compiler.rs
+      +++ b/src/bin/grammar_compiler.rs
+      @@ -35,7 +35,8 @@
+       
+           // 1. Load and compile the grammar.
+           println!("Loading grammar from: {:?}", args.grammar);
+      -    let grammar_definition = GrammarDefinition::from_ebnf_file(&args.grammar)?;
+      +    let grammar_path_str = args.grammar.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", args.grammar))?;
+      +    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path_str)?;
+           println!("Compiling grammar...");
+           let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+           println!("Grammar compiled successfully.");
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/bin/grammar_compiler.rs
+      Applying patch to 'src/bin/grammar_compiler.rs' using custom patcher...
+      Successfully applied patch and wrote to src/bin/grammar_compiler.rs.
+    metadata:
+  - user: 'Changes committed with message: "fix(grammar-compiler): Convert PathBuf
+      to &str for GrammarDefinition::from_ebnf_file"'
     metadata:
 ...

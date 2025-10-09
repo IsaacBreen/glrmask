@@ -35,7 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Load and compile the grammar.
     println!("Loading grammar from: {:?}", args.grammar);
-    let grammar_definition = GrammarDefinition::from_ebnf_file(&args.grammar)?;
+    let grammar_path_str = args.grammar.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", args.grammar))?;
+    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path_str)?;
     println!("Compiling grammar...");
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
     println!("Grammar compiled successfully.");
