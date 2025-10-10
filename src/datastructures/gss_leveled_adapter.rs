@@ -442,46 +442,30 @@ impl GSSPopper {
         self.inner.peek().len()
     }
     pub fn popn(&mut self, n: usize) {
-        if n == 0 {
-            return;
+        for _ in 0..n {
+            self.pop();
         }
-
-        // 1. Shift existing below_bottom
-        let mut belows = std::mem::take(&mut self.below_bottom)
-            .into_iter()
-            .map(|(k, v)| (k + n, v))
-            .collect::<BTreeMap<_, _>>();
-
-        // 2. Extract and process top n levels that will be removed
-        for d in 1..=n {
-            let slice_at_d = self.inner.filter_by_length(Some(d as isize), Some(d as isize));
-            if !slice_at_d.is_empty() {
-                let mut map_at_d = BTreeMap::new();
-                for edge in slice_at_d.peek() {
-                    let isolated = slice_at_d.isolate(Some(edge.clone()));
-                    if let Some(acc) = isolated.reduce_acc() {
-                        map_at_d
-                            .entry(edge)
-                            .and_modify(|a: &mut Acc| *a = a.merge(&acc))
-                            .or_insert(acc);
-                    }
-                }
-                if !map_at_d.is_empty() {
-                    belows.insert(d, map_at_d);
-                }
-            }
-        }
-
-        // 3. Update inner by popping n levels and removing any resulting 0-length paths
-        let mut new_inner = self.inner.popn(n as isize);
-        new_inner = new_inner.filter_by_length(Some(1), None);
-        self.inner = new_inner;
-
-        // 4. Update below_bottom
-        self.below_bottom = belows;
     }
     pub fn pop(&mut self) {
-        self.popn(1);
+        let mut inner = self.inner.clone();
+        let mut belows: BTreeMap<_, _> = self.below_bottom.iter().map(|(k, v)| (*k + 1, v.clone())).collect();
+        let new_below_slice = inner.filter_by_length(Some(1), Some(1));
+        if !new_below_slice.is_empty() {
+            let mut new_below_map = BTreeMap::new();
+            for edge in new_below_slice.peek() {
+                let isolated = new_below_slice.isolate(Some(edge.clone()));
+                if let Some(acc) = isolated.reduce_acc() {
+                    new_below_map.insert(edge, acc);
+                }
+            }
+            if !new_below_map.is_empty() {
+                belows.insert(1, new_below_map);
+            }
+        }
+        self.below_bottom = belows;
+        inner = inner.pop();
+        inner = inner.filter_by_length(Some(1), None);
+        self.inner = inner;
     }
 }
 
