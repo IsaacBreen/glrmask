@@ -361,14 +361,48 @@ impl GrammarConstraint { // This is in constraint_extra.rs
 
     /// Dumps the structure of the precomputed Trie 2 map for visualization.
     pub fn dump_precomputed2(&self) {
-        println!("--- Precomputation 2 is a clone of Precomputation 1 ---");
-        GrammarConstraint::_dump_precomputed(
+        GrammarConstraint::_dump_precomputed2(
             &self.precomputed2,
             &self.precompute2_vocab.internal_to_original,
-            &self.token_name_map,
             &self.llm_vocab.llm_token_map,
             &self.trie2_god,
         );
+    }
+
+    pub fn _dump_precomputed2(precomputed2: &BTreeMap<TokenizerStateID, PrecomputeNode2Index>, internal_to_original_map: &BTreeMap<usize, LLMTokenBV>, llm_token_map: &BiBTreeMap<Vec<u8>, LLMTokenID>, trie2_god: &Trie2GodWrapper) {
+        println!("Dumping Precomputed Trie 2 Structure (showing original LLM Token IDs):");
+        println!("===================================");
+
+        let mut visited: HashSet<PrecomputeNode2Index> = HashSet::new();
+        for (tokenizer_state_id, root_node_trie) in precomputed2 {
+            println!("\n--- Tokenizer State ID: {} ---", tokenizer_state_id.0);
+
+            let root_ptr;
+            let root_info;
+            {
+                let root_node = root_node_trie.read(trie2_god).unwrap();
+                root_ptr = root_node_trie;
+                let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(internal_to_original_map), Some(llm_token_map), 5);
+                root_info = format!("Root Node {} (MaxDepth: {}){} [Live: {}]", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" }, live_tokens_str);
+            }
+            println!("{}", root_info);
+
+            if visited.contains(&root_ptr) {
+                println!("  (Root already visited)");
+            } else {
+                visited.insert(*root_ptr);
+                dump_precompute_trie2_recursive(
+                    root_node_trie,
+                    "".to_string(),
+                    &mut visited,
+                    Some(internal_to_original_map),
+                    Some(llm_token_map),
+                    trie2_god,
+                );
+            }
+        }
+        println!("\n===================================");
+        println!("Dump Complete.");
     }
 
     /// Dumps the structure of the precomputed Trie 3 map for visualization.
@@ -425,6 +459,51 @@ impl GrammarConstraint { // This is in constraint_extra.rs
         }
         println!("\n===================================");
         println!("Dump Complete.");
+    }
+}
+
+pub fn dump_precompute_trie2_recursive(
+    node_arc: &Trie2Index,
+    prefix: String,
+    visited: &mut HashSet<PrecomputeNode2Index>,
+    internal_to_original_map: Option<&BTreeMap<usize, LLMTokenBV>>,
+    llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+    trie2_god: &Trie2GodWrapper,
+) {
+    let children_to_visit = {
+        let node = node_arc.read(trie2_god).expect("RwLock poisoned during dump");
+        node.children().iter().flat_map(|(edge_key, dest_map)| {
+            dest_map.iter().map(move |(child_wrapper, edge_val)| {
+                (
+                    edge_key.clone(),
+                    edge_val.clone(),
+                    child_wrapper.as_arc().clone(),
+                )
+            })
+        }).collect::<Vec<_>>()
+    };
+
+    for (i, (edge_key, edge_val_bv, child_arc)) in children_to_visit.iter().enumerate() {
+        let is_last = i == children_to_visit.len() - 1;
+        let connector = if is_last { "└──" } else { "├──" };
+        let (pop_len, state_id_opt) = edge_key; let edge_key_display = format!("(pop: {}, state: {})", pop_len, state_id_opt.map_or("None".to_string(), |sid| sid.0.to_string())); let tokens_display = format_bv_with_tokens(edge_val_bv, internal_to_original_map, llm_token_map, 5);
+        let (child_ptr, child_info, is_visited, is_end_node) = {
+            let child_node = child_arc.read(trie2_god).unwrap();
+            let ptr = child_arc;
+            let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, internal_to_original_map, llm_token_map, 5);
+            (ptr, format!("Node {} (MaxDepth: {}){} [Live: {}]", ptr, child_node.max_depth, if child_node.value.end { " [END]" } else { "" }, live_tokens_str), visited.contains(&ptr), child_node.value.end)
+        };
+
+        if is_visited && !is_end_node {
+            println!("{}{} Edge {}: {} -> Ref to {}", prefix, connector, edge_key_display, tokens_display, child_info);
+        } else {
+            println!("{}{} Edge {}: {} -> {}", prefix, connector, edge_key_display, tokens_display, child_info);
+            if !is_visited {
+                visited.insert(*child_ptr);
+                let child_prefix = if is_last { format!("{}   ", prefix) } else { format!("{}│  ", prefix) };
+                dump_precompute_trie2_recursive(child_arc, child_prefix, visited, internal_to_original_map, llm_token_map, trie2_god);
+            }
+        }
     }
 }
 
@@ -496,7 +575,79 @@ pub fn calculate_final_stats2(
     stats: &mut PrecomputeStats,
     trie2_god: &Trie2GodWrapper,
 ) {
-    calculate_final_stats1(precomputed_roots, stats, trie2_god)
+    crate::debug!(2, "Calculating final precompute2 statistics...");
+
+    let mut all_reachable_nodes: BTreeMap<PrecomputeNode2Index, PrecomputeNode2Index> = BTreeMap::new();
+    let mut queue: VecDeque<PrecomputeNode2Index> = precomputed_roots.values().cloned().collect();
+    let mut visited_data_ptrs: HashSet<PrecomputeNode2Index> = HashSet::new();
+
+    while let Some(node_arc) = queue.pop_front() {
+        let (children_to_queue, node_ptr) = {
+            let node_guard = node_arc.read(trie2_god).unwrap();
+            let ptr = node_arc;
+            let children = node_guard.children()
+                .values()
+                .flat_map(|dest_map| {
+                    dest_map.keys().map(|wrapper| {
+                        wrapper.as_arc().clone()
+                    })
+                })
+                .collect::<Vec<_>>();
+            (children, ptr)
+        };
+
+        if visited_data_ptrs.insert(node_ptr) {
+            all_reachable_nodes.insert(node_ptr, node_arc.clone());
+            for child_arc in children_to_queue {
+                queue.push_back(child_arc);
+            }
+        }
+    }
+
+    *stats = PrecomputeStats::default();
+    stats.final_unique_nodes_count = all_reachable_nodes.len();
+
+    let root_node_pointers: HashSet<PrecomputeNode2Index> = precomputed_roots
+        .values()
+        .map(|arc| {
+            let guard = arc.read(trie2_god).unwrap();
+            arc.clone()
+        })
+        .collect();
+    stats.final_root_nodes_count = root_node_pointers.len();
+
+    for (node_ptr, node_arc) in &all_reachable_nodes {
+        let node_guard = node_arc.read(trie2_god).expect("RwLock poisoned during final stats calculation");
+
+        if !root_node_pointers.contains(node_ptr) {
+            if node_guard.children().is_empty() {
+                stats.final_leaf_nodes_count += 1;
+            } else {
+                stats.final_non_root_internal_nodes_count += 1;
+            }
+        }
+
+        for (_edge_key, dest_map) in node_guard.children() {
+            let num_edges_for_this_key = dest_map.len();
+            stats.final_edges_count += num_edges_for_this_key;
+            
+            // For PrecomputeNode2, all keys are "some" keys in a sense.
+            stats.final_edges_with_some_key += num_edges_for_this_key;
+            if num_edges_for_this_key > 0 {
+                stats.final_total_occupancy_sum_for_some_keys += num_edges_for_this_key;
+                stats.final_num_occupied_some_edge_keys += 1;
+            }
+
+            for llm_token_bv_on_edge in dest_map.values() {
+                stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
+            }
+        }
+
+        if node_guard.value.end {
+            stats.final_nodes_with_clean_end += 1;
+        }
+    }
+    crate::debug!(2, "Finished calculating final precompute2 statistics.");
 }
 
 pub fn calculate_final_stats3(
@@ -1139,7 +1290,7 @@ pub fn print_precompute_stats1(
 
 pub fn print_precompute_stats2(
     stats: &PrecomputeStats,
-    _trie2_god: &Trie2GodWrapper,
+    trie2_god: &Trie2GodWrapper,
 ) {
     let avg_fanout = if stats.final_num_occupied_some_edge_keys > 0 {
         stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
