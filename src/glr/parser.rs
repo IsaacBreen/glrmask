@@ -933,6 +933,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         new_content: ParseStateEdgeContent,
     ) -> ParseState {
         crate::debug!(4, "Pushing new state with content: {:?}", new_content);
+        timeit!("GLRParserState::push_state::push_on_parent GSS PUSH", {});
         let new_gss_node_instance = peek.push_on_parent(new_content);
         ParseState {
             stack: Arc::new(new_gss_node_instance),
@@ -1573,7 +1574,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             accepted_out.push(parent_after_filter.clone());
                         }
 
-                        timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto::ProcessGoto", {});
+                        // timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto::ProcessGoto", {});
                         if let Some(goto_state_id) = goto.state_id {
                             let actions = action_selector(goto_state_id);
                             if actions.len() == 1 {
@@ -1596,6 +1597,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                                 .as_ref()
                                                 .map_or(false, |r| r.0.len != 1)
                                         {
+                                            timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto::DefaultNonUnit GSS PUSH", {});
                                             out.push(Arc::new(parent_after_filter.push(
                                                 ParseStateEdgeContent {
                                                     state_id: goto_state_id,
@@ -1614,6 +1616,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     }
                                     _ => {
                                         // Not a unit reduction path anymore -> emit a single push to goto_state
+                                        timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto::NonUnit GSS PUSH", {});
                                         out.push(Arc::new(parent_after_filter.push(
                                             ParseStateEdgeContent {
                                                 state_id: goto_state_id,
@@ -1623,6 +1626,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 }
                             } else {
                                 // Not a unit reduction path anymore -> emit a single push to goto_state
+                                timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto::MultiAction GSS PUSH", {});
                                 out.push(Arc::new(parent_after_filter.push(ParseStateEdgeContent {
                                     state_id: goto_state_id,
                                 })));
