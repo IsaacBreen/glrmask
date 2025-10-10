@@ -12,6 +12,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use profiler_macro::time_it;
 use std::sync::Arc;
+use crate::glr::parser::ActionFn;
 use crate::interface::display_productions;
 // Added for derive macro pattern
 
@@ -1089,6 +1090,11 @@ fn merge_compatible_states(
     (new_table, new_item_set_map, new_start_state_id)
 }
 
+pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
+    generate_glr_parser_with_maps_internal(productions, terminal_map, non_terminal_map, actions, ignore_terminal_id)
+}
+
+
 #[time_it]
 fn generate_glr_parser_with_maps_internal(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
     assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
@@ -1178,10 +1184,18 @@ fn generate_glr_parser_with_maps_internal(productions: &[Production], terminal_m
     print_summary();
     print_summary_flat();
 
-    crate::glr::parser::GLRParser::new(final_table, productions.to_vec(), terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos, reduce_goto_map, hallucinated_row, hallucinated_state_id, productions.to_vec(), BTreeMap::new().into(), BTreeMap::new())
+    crate::glr::parser::GLRParser::new(final_table, productions.to_vec(), terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos, reduce_goto_map, hallucinated_row, hallucinated_state_id, productions.to_vec(), BiBTreeMap::new(), BTreeMap::new())
 }
 
 pub fn generate_glr_parser(
+    productions: &[Production],
+    ignore_terminal_name: Option<&str>,
+) -> crate::glr::parser::GLRParser {
+    generate_glr_parser_internal(productions, &[], ignore_terminal_name)
+}
+
+
+pub fn generate_glr_parser_internal(
     productions: &[Production],
     synthetic_configs: &[SyntheticTerminalConfig],
     ignore_terminal_name: Option<&str>,
@@ -1274,13 +1288,13 @@ pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerm
 }
 
 pub fn generate_glr_parser_simple(productions: &[Production], ignore_terminal_name: Option<&str>) -> crate::glr::parser::GLRParser {
-    generate_glr_parser(productions, &[], ignore_terminal_name)
+    generate_glr_parser_internal(productions, &[], ignore_terminal_name)
 }
 
 pub fn generate_glr_parser_with_terminal_map(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
     let ignore_name = ignore_terminal_id.map(|id| terminal_map.get_by_right(&id).unwrap().to_string());
-    generate_glr_parser(productions, &[], ignore_name.as_deref())
+    generate_glr_parser_internal(productions, &[], ignore_name.as_deref())
 }
-use crate::glr::parser::{GLRParser, ActionFn, ExpectElse};
+use crate::glr::parser::{GLRParser, ExpectElse};
 use crate::profiler::{print_summary, print_summary_flat};
 
