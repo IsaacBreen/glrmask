@@ -181,7 +181,7 @@ impl ParseState {
     pub fn merge(&mut self, mut other: ParseState) {
         timeit!("ParseState::merge::merge main stacks", {
         Arc::make_mut(&mut self.stack).merge_with_depth(MAX_MERGE_DEPTH, &other.stack);
-        Arc::make_mut(&mut self.stack).inner = self.stack.inner.normalize();
+        // Arc::make_mut(&mut self.stack).inner = self.stack.inner.normalize();
         });
         timeit!("ParseState::merge::merge accepted states", {
         if let Some(other_accepted) = other.accepted_state {
@@ -1727,7 +1727,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // Merge results and return
         let mut new_active = timeit!("GLRParserState::reduce_and_goto::MergeActive", GSSNode::merge_many_with_depth(MAX_MERGE_DEPTH, final_out));
-        Arc::make_mut(&mut new_active).inner = new_active.inner.normalize();
+        // Arc::make_mut(&mut new_active).inner = new_active.inner.normalize();
         let new_accepted = timeit!("GLRParserState::reduce_and_goto::MergeAccepted", GSSNode::merge_many_with_depth(MAX_MERGE_DEPTH, accepted_out));
         (new_active, new_accepted)
         })
