@@ -54,7 +54,7 @@ pub fn analyze_for_synthetic_terminal(
     }
 
     // 3. Find the best pair to synthesize.
-    if let Some((&(t1, t2), &count)) = pair_counts.iter().max_by_key(|(_, &count)| *count) {
+    if let Some((&(t1, t2), &count)) = pair_counts.iter().max_by_key(|(_, &count)| count) {
         if count < 2 {
             return None;
         } // Heuristic: don't bother for pairs that only co-occur once.

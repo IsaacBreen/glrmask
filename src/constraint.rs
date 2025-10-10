@@ -1623,7 +1623,7 @@ impl GrammarConstraint {
         // --- NEW: Handle synthetic terminals ---
         if let Some(p) = parser {
             if !p.synthetic_terminal_map.is_empty() {
-                let all_nodes: Vec<_> = trie1_god.iter_arc().collect(); // snapshot of all nodes
+                let all_nodes: Vec<_> = Trie::all_nodes(&trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
                 for node_idx in all_nodes {
                     let mut modifications_by_synth_tid = BTreeMap::new();
                     let children = node_idx.read(&trie1_god).unwrap().children().clone();
