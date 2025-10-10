@@ -269,6 +269,7 @@ pub struct GLRParser {
     pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
     pub hallucinated_row: HallucinatedRow,
     pub hallucinated_state_id: StateID,
+    pub synthetic_terminals: BTreeMap<TerminalID, BTreeSet<TerminalID>>,
 }
 
 impl JSONConvertible for GLRParser {
@@ -285,6 +286,7 @@ impl JSONConvertible for GLRParser {
         obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
         // Do not serialize precomputed substring gotos; they will be re-derived from the table.
         // Do not serialize self.actions
+        obj.insert("synthetic_terminals".to_string(), self.synthetic_terminals.to_json());
         // Do not serialize reduce_goto_map
         JSONNode::Object(obj)
     }
@@ -311,6 +313,10 @@ impl JSONConvertible for GLRParser {
                 let ignore_terminal_id = obj.remove("ignore_terminal_id")
                     .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
+                let synthetic_terminals = obj.remove("synthetic_terminals")
+                    .map(|n| BTreeMap::<TerminalID, BTreeSet<TerminalID>>::from_json(n))
+                    .transpose()?
+                    .unwrap_or_default();
 
                 let substring_gotos = stage_9(&table, &non_terminal_map);
                 let reduce_goto_map = crate::glr::table::stage_10(&table);
@@ -330,6 +336,7 @@ impl JSONConvertible for GLRParser {
                     reduce_goto_map,
                     hallucinated_row,
                     hallucinated_state_id,
+                    synthetic_terminals,
                 })
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -351,6 +358,7 @@ impl Debug for GLRParser {
             .field("substring_gotos_size", &self.substring_gotos.len())
             .field("reduce_goto_map_size", &self.reduce_goto_map.len())
             .field("hallucinated_state_id", &self.hallucinated_state_id)
+            .field("synthetic_terminals", &self.synthetic_terminals)
             .finish()
     }
 }
@@ -368,7 +376,8 @@ impl PartialEq for GLRParser {
         self.substring_gotos == other.substring_gotos &&
         self.reduce_goto_map == other.reduce_goto_map &&
         self.hallucinated_row == other.hallucinated_row &&
-        self.hallucinated_state_id == other.hallucinated_state_id
+        self.hallucinated_state_id == other.hallucinated_state_id &&
+        self.synthetic_terminals == other.synthetic_terminals
     }
 }
 
@@ -389,6 +398,7 @@ impl GLRParser {
         reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
         hallucinated_row: HallucinatedRow,
         hallucinated_state_id: StateID,
+        synthetic_terminals: BTreeMap<TerminalID, BTreeSet<TerminalID>>,
     ) -> Self {
         let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
             .into_iter()
@@ -412,6 +422,7 @@ impl GLRParser {
             reduce_goto_map,
             hallucinated_row,
             hallucinated_state_id,
+            synthetic_terminals,
         }
     }
 
