@@ -1621,18 +1621,28 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
             use std::hash::{Hash as _, Hasher};
             fn sig_hash<T: Clone + Eq + Hash>(sig: &NodeSig<T>) -> u64 {
-                // Order-independent combination of (label, child_id) pairs plus terminal flag.
-                let mut acc: u64 = if sig.term { 0x9e37_79b9_7f4a_7c15 } else { 0x243f_6a88_85a3_08d3 };
-                acc ^= (sig.edges.len() as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
+                // Order-independent hash of the node signature: terminal flag + multiset of (label, child_id).
+                // We only use commutative/associative ops over per-edge hashes so iteration order does not matter.
+                let mut seed: u64 = if sig.term { 0x9e37_79b9_7f4a_7c15 } else { 0x243f_6a88_85a3_08d3 };
+                // Mix edge count to separate small vs large degree nodes
+                seed ^= (sig.edges.len() as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
+
+                // Accumulate per-edge hashes
+                let mut xor_acc: u64 = 0;
+                let mut sum_acc: u64 = 0;
+                let mut prod_acc: u64 = 0x9e37_79b9_7f4a_7c15 ^ (sig.edges.len() as u64);
+
                 for (k, v) in &sig.edges {
                     let mut h = std::collections::hash_map::DefaultHasher::new();
                     k.hash(&mut h);
                     v.hash(&mut h);
                     let pair = h.finish();
-                    // Mix in a rotation and a large odd multiplier
-                    acc = acc.rotate_left(1) ^ pair.wrapping_mul(0x517c_c1b7_2722_0a95);
+                    xor_acc ^= pair;
+                    sum_acc = sum_acc.wrapping_add(pair);
+                    prod_acc = prod_acc.wrapping_mul(pair.wrapping_add(0x517c_c1b7_2722_0a95));
                 }
-                acc
+
+                seed ^ xor_acc ^ sum_acc ^ prod_acc
             }
 
             fn intern<T: Clone + Eq + Hash>(
