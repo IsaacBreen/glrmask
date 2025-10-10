@@ -30,6 +30,12 @@ use crate::datastructures::trie::{God, GodWrapper};
 use crate::datastructures::gss_leveled_adapter::{is_simple_gss, PruneAndTransformRecursiveMemo};
 use crate::datastructures::leveled_gss::Merge;
 
+
+// const MAX_MERGE_DEPTH: usize = usize::MAX;
+// const MAX_MERGE_DEPTH: usize = 1;
+const MAX_MERGE_DEPTH: usize = 0;
+
+
 // A single combined action for a given (state,row) and token:
 // - Normal(...) is a concrete per-token action from the row's action map
 // - Default(...) is the row's default reduction (token-independent)
@@ -172,15 +178,15 @@ impl ParseState {
 
     #[time_it]
     pub fn merge(&mut self, mut other: ParseState) {
-        Arc::make_mut(&mut self.stack).merge_with_depth(usize::MAX, &other.stack);
+        Arc::make_mut(&mut self.stack).merge_with_depth(MAX_MERGE_DEPTH, &other.stack);
         if let Some(other_accepted) = other.accepted_state {
             if let Some(self_accepted) = self.accepted_state.as_mut() {
-                Arc::make_mut(self_accepted).merge_with_depth(usize::MAX, &other_accepted);
+                Arc::make_mut(self_accepted).merge_with_depth(MAX_MERGE_DEPTH, &other_accepted);
             } else {
                 self.accepted_state = Some(other_accepted);
             }
         }
-        Arc::make_mut(&mut self.prev_accepted_state).merge_with_depth(usize::MAX, &other.prev_accepted_state);
+        Arc::make_mut(&mut self.prev_accepted_state).merge_with_depth(MAX_MERGE_DEPTH, &other.prev_accepted_state);
         // assert_eq!(self.trie2_god.is_none(), other.trie2_god.is_none());
         if self.trie2_god.is_some() && other.trie2_god.is_some() {
             assert_eq!(self.trie2_god.as_ref().unwrap(), other.trie2_god.as_ref().unwrap());
@@ -1707,8 +1713,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         // Merge results and return
-        let new_active = timeit!("GLRParserState::reduce_and_goto::MergeActive", GSSNode::merge_many_with_depth(usize::MAX, final_out));
-        let new_accepted = timeit!("GLRParserState::reduce_and_goto::MergeAccepted", GSSNode::merge_many_with_depth(usize::MAX, accepted_out));
+        let new_active = timeit!("GLRParserState::reduce_and_goto::MergeActive", GSSNode::merge_many_with_depth(MAX_MERGE_DEPTH, final_out));
+        let new_accepted = timeit!("GLRParserState::reduce_and_goto::MergeAccepted", GSSNode::merge_many_with_depth(MAX_MERGE_DEPTH, accepted_out));
         (new_active, new_accepted)
         })
     }
