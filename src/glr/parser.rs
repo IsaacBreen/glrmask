@@ -300,21 +300,21 @@ impl JSONConvertible for GLRParser {
         match node {
             JSONNode::Object(mut obj) => {
                 let table = obj.remove("stage_7_table").ok_or_else(|| "Missing field stage_7_table".to_string())
-                                 .and_then(Table::from_json)?;
+                    .and_then(Table::from_json)?;
                 let productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
-                                     .and_then(Vec::<Production>::from_json)?;
+                    .and_then(Vec::<Production>::from_json)?;
                 // For backwards compatibility, we can read and ignore it.
                 let _start_production_id = obj.remove("start_production_id").and_then(|n| usize::from_json(n).ok());
                 let terminal_map = obj.remove("terminal_map").ok_or_else(|| "Missing field terminal_map".to_string())
-                                      .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
+                    .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
                 let non_terminal_map = obj.remove("non_terminal_map").ok_or_else(|| "Missing field non_terminal_map".to_string())
-                                          .and_then(|n| BiBTreeMap::<NonTerminal, NonTerminalID>::from_json(n))?;
+                    .and_then(|n| BiBTreeMap::<NonTerminal, NonTerminalID>::from_json(n))?;
                 let item_set_map = obj.remove("item_set_map").ok_or_else(|| "Missing field item_set_map".to_string())
-                                      .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
+                    .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
                 let start_state_id = obj.remove("start_state_id").ok_or_else(|| "Missing field start_state_id".to_string())
-                                        .and_then(StateID::from_json)?;
+                    .and_then(StateID::from_json)?;
                 let everything_state_id = obj.remove("everything_state_id").ok_or_else(|| "Missing field everything_state_id".to_string())
-                                        .and_then(StateID::from_json)?;
+                    .and_then(StateID::from_json)?;
                 let ignore_terminal_id = obj.remove("ignore_terminal_id")
                     .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
@@ -338,10 +338,12 @@ impl JSONConvertible for GLRParser {
                     everything_state_id,
                     ignore_terminal_id,
                     substring_gotos,
-            reduce_goto_map,
-            hallucinated_row,
-            hallucinated_state_id,
-            synthetic_terminal_map,
+                    reduce_goto_map,
+                    hallucinated_row,
+                    hallucinated_state_id,
+                    synthetic_terminal_map,
+                })
+            }
         }
     }
 }
