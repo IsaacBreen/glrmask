@@ -1620,6 +1620,58 @@ impl GrammarConstraint {
             }
         }
 
+        // --- NEW: Handle synthetic terminals ---
+        if let Some(p) = parser {
+            if !p.synthetic_terminal_map.is_empty() {
+                let all_nodes: Vec<_> = trie1_god.iter_arc().collect(); // snapshot of all nodes
+                for node_idx in all_nodes {
+                    let mut modifications_by_synth_tid = BTreeMap::new();
+                    let children = node_idx.read(&trie1_god).unwrap().children().clone();
+
+                    for (synth_tid, original_tids) in &p.synthetic_terminal_map {
+                        let mut edges_to_modify = BTreeMap::new();
+                        for &original_tid in original_tids {
+                            if let Some(dest_map) = children.get(&Some(original_tid)) {
+                                edges_to_modify.insert(original_tid, dest_map.clone());
+                            }
+                        }
+
+                        if !edges_to_modify.is_empty() {
+                            modifications_by_synth_tid.insert(*synth_tid, edges_to_modify);
+                        }
+                    }
+
+                    if !modifications_by_synth_tid.is_empty() {
+                        let mut node_guard = node_idx.write(&trie1_god).unwrap();
+                        for (synth_tid, edges) in modifications_by_synth_tid {
+                            // Create one shared intermediate node M for this synthetic terminal from this source node A.
+                            let intermediate_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
+
+                            // Add edge A --(S)--> M
+                            let synth_edge_key = Some(synth_tid);
+                            let dest_map_s = node_guard.children_mut().entry(synth_edge_key).or_default();
+                            
+                            let mut union_bv = LLMTokenBV::zeros();
+                            for dest_map in edges.values() {
+                                for bv in dest_map.values() {
+                                    union_bv |= bv;
+                                }
+                            }
+                            dest_map_s.insert(intermediate_node.clone(), union_bv);
+
+                            // For each original edge A --(X)--> B, remove it and add M --(X)--> B
+                            let mut intermediate_guard = intermediate_node.write(&trie1_god).unwrap();
+                            for (original_tid, dest_map) in edges {
+                                node_guard.children_mut().remove(&Some(original_tid));
+                                let dest_map_x = intermediate_guard.children_mut().entry(Some(original_tid)).or_default();
+                                *dest_map_x = dest_map;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Check for LLM-compatible cycles.
         let roots: Vec<_> = precomputed1.values().cloned().collect();
         Self::has_llm_compatible_cycle(&trie1_god, &roots, internal_max_llm_token);
