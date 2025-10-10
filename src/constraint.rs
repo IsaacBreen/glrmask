@@ -863,30 +863,6 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map.len());
 
-        let mut final_parser = parser.clone();
-        let mut synthetic_terminal_maps = BTreeMap::new();
-        const MAX_SYNTH_ITERATIONS: usize = 1;
-        for _ in 0..MAX_SYNTH_ITERATIONS {
-            if let Some(analysis) = crate::glr::synthetic::analyze_for_synthetic_terminal(&final_parser.table, &final_parser.terminal_map) {
-                crate::debug!(2, "Applying synthetic terminal optimization: {:?}", analysis);
-                let mut new_productions = final_parser.productions.clone();
-                let mut new_terminal_map = final_parser.terminal_map.clone();
-                let (synth_tid, original_tids) = crate::glr::synthetic::apply_synthetic_terminal(&mut new_productions, &mut new_terminal_map, &analysis);
-                synthetic_terminal_maps.insert(synth_tid, original_tids);
-                let new_non_terminal_map = crate::glr::table::assign_non_terminal_ids(&new_productions);
-                final_parser = crate::glr::table::generate_glr_parser_with_maps(
-                    &new_productions,
-                    new_terminal_map,
-                    new_non_terminal_map,
-                    BTreeMap::new(),
-                    final_parser.ignore_terminal_id,
-                );
-                final_parser.synthetic_terminal_map = synthetic_terminal_maps.clone();
-            } else {
-                break;
-            }
-        }
-        let parser = final_parser;
         let llm_vocab = Arc::new(LLMVocab {
             llm_token_map,
             max_original_llm_token_id,
@@ -1134,30 +1110,6 @@ impl GrammarConstraint {
 
         crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map.len());
 
-        let mut final_parser = parser.clone();
-        let mut synthetic_terminal_maps = BTreeMap::new();
-        const MAX_SYNTH_ITERATIONS: usize = 1;
-        for _ in 0..MAX_SYNTH_ITERATIONS {
-            if let Some(analysis) = crate::glr::synthetic::analyze_for_synthetic_terminal(&final_parser.table, &final_parser.terminal_map) {
-                crate::debug!(2, "Applying synthetic terminal optimization: {:?}", analysis);
-                let mut new_productions = final_parser.productions.clone();
-                let mut new_terminal_map = final_parser.terminal_map.clone();
-                let (synth_tid, original_tids) = crate::glr::synthetic::apply_synthetic_terminal(&mut new_productions, &mut new_terminal_map, &analysis);
-                synthetic_terminal_maps.insert(synth_tid, original_tids);
-                let new_non_terminal_map = crate::glr::table::assign_non_terminal_ids(&new_productions);
-                final_parser = crate::glr::table::generate_glr_parser_with_maps(
-                    &new_productions,
-                    new_terminal_map,
-                    new_non_terminal_map,
-                    BTreeMap::new(),
-                    final_parser.ignore_terminal_id,
-                );
-                final_parser.synthetic_terminal_map = synthetic_terminal_maps.clone();
-            } else {
-                break;
-            }
-        }
-        let parser = final_parser;
         let llm_vocab = Arc::new(LLMVocab {
             llm_token_map: llm_token_map.clone(),
             max_original_llm_token_id,
@@ -1668,71 +1620,17 @@ impl GrammarConstraint {
             }
         }
 
-        // --- NEW: Handle synthetic terminals ---
-        if let Some(p) = parser {
-            if !p.synthetic_terminal_map.is_empty() {
-                let all_nodes: Vec<_> = Trie::all_nodes(&trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
-                for node_idx in all_nodes {
-                    let mut modifications_by_synth_tid = BTreeMap::new();
-                    let children = node_idx.read(&trie1_god).unwrap().children().clone();
-
-                    for (synth_tid, original_tids) in &p.synthetic_terminal_map {
-                        let mut edges_to_modify = BTreeMap::new();
-                        for &original_tid in original_tids {
-                            if let Some(dest_map) = children.get(&Some(original_tid)) {
-                                edges_to_modify.insert(original_tid, dest_map.clone());
-                            }
-                        }
-
-                        if !edges_to_modify.is_empty() {
-                            modifications_by_synth_tid.insert(*synth_tid, edges_to_modify);
-                        }
-                    }
-
-                    if !modifications_by_synth_tid.is_empty() {
-                        let mut node_guard = node_idx.write(&trie1_god).unwrap();
-                        for (synth_tid, edges) in modifications_by_synth_tid {
-                            // Create one shared intermediate node M for this synthetic terminal from this source node A.
-                            let intermediate_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
-
-                            // Add edge A --(S)--> M
-                            let synth_edge_key = Some(synth_tid);
-                            let dest_map_s = node_guard.children_mut().entry(synth_edge_key).or_default();
-                            
-                            let mut union_bv = LLMTokenBV::zeros();
-                            for dest_map in edges.values() {
-                                for bv in dest_map.values() {
-                                    union_bv |= bv;
-                                }
-                            }
-                            dest_map_s.insert(intermediate_node.clone(), union_bv);
-
-                            // For each original edge A --(X)--> B, remove it and add M --(X)--> B
-                            let mut intermediate_guard = intermediate_node.write(&trie1_god).unwrap();
-                            for (original_tid, dest_map) in edges {
-                                node_guard.children_mut().remove(&Some(original_tid));
-                                let dest_map_x = intermediate_guard.children_mut().entry(Some(original_tid)).or_default();
-                                *dest_map_x = dest_map;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         // Check for LLM-compatible cycles.
         let roots: Vec<_> = precomputed1.values().cloned().collect();
         Self::has_llm_compatible_cycle(&trie1_god, &roots, internal_max_llm_token);
 
         // Optimizations, similar to precompute0
-        let p = parser.unwrap();
-        let ignore_terminal_id = p.ignore_terminal_id;
+        let ignore_terminal_id = parser.and_then(|p| p.ignore_terminal_id);
 
         let mut stats = PrecomputeStats::default();
         crate::constraint_extra::calculate_final_stats1(&precomputed1, &mut stats, &trie1_god);
         crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, &trie1_god);
 
-        // 1. First optimization pass with original follow sets.
         constraint_precompute1_utils::optimize_trie1_size(
             &mut precomputed1,
             &trie1_god,
@@ -1740,67 +1638,11 @@ impl GrammarConstraint {
             &node0_to_node1_map,
             ignore_terminal_id,
             internal_max_llm_token,
-            terminal_follow_map, // Use original follow map
-            config, // Use original config
+            terminal_follow_map,
+            config,
             stage_vocab,
             token_name_map,
         );
-
-        // 2. Apply synthetic terminal transformation to the trie.
-        if !p.synthetic_terminal_map.is_empty() {
-            crate::debug!(2, "Applying synthetic terminal transformations to Trie1");
-            let all_nodes: Vec<_> = trie1_god.iter_arc().collect(); // snapshot of all nodes
-            for node_idx in all_nodes {
-                let mut modifications_by_synth_tid = BTreeMap::new();
-                let children = node_idx.read(&trie1_god).unwrap().children().clone();
-
-                for (synth_tid, original_tids) in &p.synthetic_terminal_map {
-                    let mut edges_to_modify = BTreeMap::new();
-                    for &original_tid in original_tids {
-                        if let Some(dest_map) = children.get(&Some(original_tid)) {
-                            edges_to_modify.insert(original_tid, dest_map.clone());
-                        }
-                    }
-
-                    if !edges_to_modify.is_empty() {
-                        modifications_by_synth_tid.insert(*synth_tid, edges_to_modify);
-                    }
-                }
-
-                if !modifications_by_synth_tid.is_empty() {
-                    let mut node_guard = node_idx.write(&trie1_god).unwrap();
-                    for (synth_tid, edges) in modifications_by_synth_tid {
-                        // Create one shared intermediate node M for this synthetic terminal from this source node A.
-                        let intermediate_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
-
-                        // Add edge A --(S)--> M
-                        let synth_edge_key = Some(synth_tid);
-                        let dest_map_s = node_guard.children_mut().entry(synth_edge_key).or_default();
-                        
-                        let mut union_bv = LLMTokenBV::zeros();
-                        for dest_map in edges.values() {
-                            for bv in dest_map.values() {
-                                union_bv |= bv;
-                            }
-                        }
-                        dest_map_s.insert(intermediate_node.clone(), union_bv);
-
-                        // For each original edge A --(X)--> B, remove it and add M --(X)--> B
-                        let mut intermediate_guard = intermediate_node.write(&trie1_god).unwrap();
-                        for (original_tid, dest_map) in edges {
-                            node_guard.children_mut().remove(&Some(original_tid));
-                            let dest_map_x = intermediate_guard.children_mut().entry(Some(original_tid)).or_default();
-                            *dest_map_x = dest_map;
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Second optimization pass without follow set pruning.
-        let mut config_no_follow_prune = config.clone();
-        config_no_follow_prune.prune_on_no_terminal_follow = false;
-        constraint_precompute1_utils::optimize_trie1_size(&mut precomputed1, &trie1_god, trie0_god, &node0_to_node1_map, ignore_terminal_id, internal_max_llm_token, &BTreeMap::new(), &config_no_follow_prune, stage_vocab, token_name_map);
 
         (precomputed1, trie1_god)
     }

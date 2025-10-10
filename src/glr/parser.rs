@@ -118,13 +118,8 @@ impl JSONConvertible for ParseStateEdgeContent {
         obj.insert("state_id".to_string(), self.state_id.to_json());
         // Handle user_data serialization:
         // Option 1: Panic if not default.
-        // Do not serialize precomputed substring gotos; they will be re-derived from the table.
-        // Do not serialize self.actions
-        // Do not serialize reduce_goto_map
-        obj.insert("synthetic_terminal_map".to_string(), self.synthetic_terminal_map.to_json());
         JSONNode::Object(obj)
     }
-
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
@@ -274,7 +269,6 @@ pub struct GLRParser {
     pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
     pub hallucinated_row: HallucinatedRow,
     pub hallucinated_state_id: StateID,
-    pub synthetic_terminal_map: BTreeMap<TerminalID, BTreeSet<TerminalID>>,
 }
 
 impl JSONConvertible for GLRParser {
@@ -292,7 +286,6 @@ impl JSONConvertible for GLRParser {
         // Do not serialize precomputed substring gotos; they will be re-derived from the table.
         // Do not serialize self.actions
         // Do not serialize reduce_goto_map
-        obj.insert("synthetic_terminal_map".to_string(), self.synthetic_terminal_map.to_json());
         JSONNode::Object(obj)
     }
 
@@ -300,21 +293,21 @@ impl JSONConvertible for GLRParser {
         match node {
             JSONNode::Object(mut obj) => {
                 let table = obj.remove("stage_7_table").ok_or_else(|| "Missing field stage_7_table".to_string())
-                    .and_then(Table::from_json)?;
+                                 .and_then(Table::from_json)?;
                 let productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
-                    .and_then(Vec::<Production>::from_json)?;
+                                     .and_then(Vec::<Production>::from_json)?;
                 // For backwards compatibility, we can read and ignore it.
                 let _start_production_id = obj.remove("start_production_id").and_then(|n| usize::from_json(n).ok());
                 let terminal_map = obj.remove("terminal_map").ok_or_else(|| "Missing field terminal_map".to_string())
-                    .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
+                                      .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
                 let non_terminal_map = obj.remove("non_terminal_map").ok_or_else(|| "Missing field non_terminal_map".to_string())
-                    .and_then(|n| BiBTreeMap::<NonTerminal, NonTerminalID>::from_json(n))?;
+                                          .and_then(|n| BiBTreeMap::<NonTerminal, NonTerminalID>::from_json(n))?;
                 let item_set_map = obj.remove("item_set_map").ok_or_else(|| "Missing field item_set_map".to_string())
-                    .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
+                                      .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
                 let start_state_id = obj.remove("start_state_id").ok_or_else(|| "Missing field start_state_id".to_string())
-                    .and_then(StateID::from_json)?;
+                                        .and_then(StateID::from_json)?;
                 let everything_state_id = obj.remove("everything_state_id").ok_or_else(|| "Missing field everything_state_id".to_string())
-                    .and_then(StateID::from_json)?;
+                                        .and_then(StateID::from_json)?;
                 let ignore_terminal_id = obj.remove("ignore_terminal_id")
                     .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
@@ -323,10 +316,6 @@ impl JSONConvertible for GLRParser {
                 let reduce_goto_map = crate::glr::table::stage_10(&table);
                 let hallucinated_row = crate::glr::table::stage_11_create_hallucinated_row(&table);
                 let hallucinated_state_id = StateID(usize::MAX);
-                let synthetic_terminal_map = obj.remove("synthetic_terminal_map")
-                    .and_then(|n| BTreeMap::from_json(n).ok())
-                    .unwrap_or_default();
-
 
                 Ok(GLRParser {
                     table,
@@ -341,9 +330,9 @@ impl JSONConvertible for GLRParser {
                     reduce_goto_map,
                     hallucinated_row,
                     hallucinated_state_id,
-                    synthetic_terminal_map,
                 })
             }
+            _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
         }
     }
 }
@@ -362,7 +351,6 @@ impl Debug for GLRParser {
             .field("substring_gotos_size", &self.substring_gotos.len())
             .field("reduce_goto_map_size", &self.reduce_goto_map.len())
             .field("hallucinated_state_id", &self.hallucinated_state_id)
-            .field("synthetic_terminal_map", &self.synthetic_terminal_map)
             .finish()
     }
 }
@@ -380,8 +368,7 @@ impl PartialEq for GLRParser {
         self.substring_gotos == other.substring_gotos &&
         self.reduce_goto_map == other.reduce_goto_map &&
         self.hallucinated_row == other.hallucinated_row &&
-        self.hallucinated_state_id == other.hallucinated_state_id &&
-        self.synthetic_terminal_map == other.synthetic_terminal_map
+        self.hallucinated_state_id == other.hallucinated_state_id
     }
 }
 
@@ -402,7 +389,6 @@ impl GLRParser {
         reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
         hallucinated_row: HallucinatedRow,
         hallucinated_state_id: StateID,
-        synthetic_terminal_map: BTreeMap<TerminalID, BTreeSet<TerminalID>>,
     ) -> Self {
         let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
             .into_iter()
@@ -426,7 +412,6 @@ impl GLRParser {
             reduce_goto_map,
             hallucinated_row,
             hallucinated_state_id,
-            synthetic_terminal_map,
         }
     }
 
