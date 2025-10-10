@@ -64,14 +64,15 @@ def filter_vocab(vocab: dict[str, int], max_len: int | None) -> dict[str, int]:
     return filtered
 
 
-def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path | None, recompile: bool, save_pc0: Path | None = None, from_pc0: Path | None = None, pc0_only: bool = False):
+def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path | None, recompile: bool, disable_progress_bar: bool, save_pc0: Path | None = None, from_pc0: Path | None = None, pc0_only: bool = False):
     """
     Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
     """
     # Set environment variable to enable progress bars in the Rust code.
     # This will be passed to both cargo and the final executable.
     env = os.environ.copy()
-    env["ENABLE_PROGRESS_BAR"] = "1"
+    if not disable_progress_bar:
+        env["ENABLE_PROGRESS_BAR"] = "1"
 
     if recompile:
         print("Building compiler with 'cargo build --release'...")
@@ -117,7 +118,11 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
             print(f"Will save precompute0 cache to: {save_pc0}")
             command.extend(["--save-precompute0", str(save_pc0)])
 
-    print(f"\nRunning compiler: ENABLE_PROGRESS_BAR=1 {' '.join(command)}")
+    env_str = ""
+    if not disable_progress_bar:
+        env_str = "ENABLE_PROGRESS_BAR=1 "
+
+    print(f"\nRunning compiler: {env_str}{' '.join(command)}")
     try:
         # Run the compiler, passing through its output and the environment variable.
         subprocess.run(command, check=True, env=env)
@@ -166,6 +171,7 @@ Examples:
     parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the grammar-compiler executable.")
     parser.add_argument("--no-recompile", action="store_true", help="Skip recompiling the Rust grammar-compiler executable and use the existing one.")
     parser.add_argument("--force-download", action="store_true", help="Force re-downloading the vocabulary even if it exists in the cache.")
+    parser.add_argument("--no-progress-bar", action="store_true", help="Disable the progress bar output during compilation.")
     
     # Compilation mode options
     parser.add_argument("--save-precompute0", type=Path, help="Path to save a precompute0 cache (.json.gz).")
@@ -208,6 +214,7 @@ Examples:
             tmp_vocab_path,
             args.output,
             recompile=not args.no_recompile,
+            disable_progress_bar=args.no_progress_bar,
             save_pc0=args.save_precompute0,
             from_pc0=args.from_precompute0,
             pc0_only=args.precompute0_only,
