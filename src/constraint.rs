@@ -1762,9 +1762,11 @@ impl GrammarConstraint {
 
                     let stats2 = glr_s.stats();
                     println!("After normalization, number of GSS nodes: {}, edges: {}", stats2.unique_nodes(), stats2.total_edges());
-                    print_summary_flat();
-                    print_summary();
-                    assert!(stats.unique_nodes() < 10000);
+                    if (!(stats.unique_nodes() < 10000)) {
+                        print_summary_flat();
+                        print_summary();
+                        assert!(stats.unique_nodes() < 10000);
+                    }
                 }
 
                 out = Vec::new();
