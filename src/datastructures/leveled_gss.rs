@@ -500,7 +500,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct LeveledGSSStats<T: Clone + Eq + Hash, A: Clone + Eq + Hash> {
     pub top_values: HashSet<T>,
     pub num_upperbranch_nodes: usize,
@@ -531,6 +531,44 @@ pub struct LeveledGSSStats<T: Clone + Eq + Hash, A: Clone + Eq + Hash> {
     pub max_in_degree: usize,
     pub structural_sharing_factor: f64,
     pub promotable_upper_nodes: usize,
+}
+
+impl<T: Clone + Eq + Hash + std::fmt::Debug, A: Clone + Eq + Hash + std::fmt::Debug> std::fmt::Debug
+    for LeveledGSSStats<T, A>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeveledGSSStats")
+            // top_values intentionally omitted from Debug output
+            .field("num_upperbranch_nodes", &self.num_upperbranch_nodes)
+            .field("num_interface_nodes", &self.num_interface_nodes)
+            .field("num_lower_nodes", &self.num_lower_nodes)
+            .field("total_unique_nodes", &self.total_unique_nodes)
+            .field("num_structurally_unique_nodes", &self.num_structurally_unique_nodes)
+            .field("upper_edges", &self.upper_edges)
+            .field("interface_to_lower_edges", &self.interface_to_lower_edges)
+            .field("lower_edges", &self.lower_edges)
+            .field("total_edges", &self.total_edges)
+            .field("max_upper_depth", &self.max_upper_depth)
+            .field("max_lower_depth", &self.max_lower_depth)
+            .field("distinct_values_count", &self.distinct_values_count)
+            .field("distinct_values", &self.distinct_values)
+            .field("unique_accumulators_count", &self.unique_accumulators_count)
+            .field("unique_accumulators", &self.unique_accumulators)
+            .field("total_accumulator_instances", &self.total_accumulator_instances)
+            .field("num_upper_with_empty", &self.num_upper_with_empty)
+            .field("num_interfaces_with_empty", &self.num_interfaces_with_empty)
+            .field("num_lower_terminal_nodes", &self.num_lower_terminal_nodes)
+            .field("num_interface_implicit_terminals", &self.num_interface_implicit_terminals)
+            .field("num_multi_depth_slots_upper", &self.num_multi_depth_slots_upper)
+            .field("num_multi_depth_slots_lower", &self.num_multi_depth_slots_lower)
+            .field("max_multiplicity_per_value_upper", &self.max_multiplicity_per_value_upper)
+            .field("max_multiplicity_per_value_lower", &self.max_multiplicity_per_value_lower)
+            .field("average_in_degree", &self.average_in_degree)
+            .field("max_in_degree", &self.max_in_degree)
+            .field("structural_sharing_factor", &self.structural_sharing_factor)
+            .field("promotable_upper_nodes", &self.promotable_upper_nodes)
+            .finish()
+    }
 }
 
 fn is_promotable<T, A>(node: &Arc<UpperBranch<T, A>>) -> bool
