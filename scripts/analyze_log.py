@@ -4,7 +4,6 @@ import argparse
 import sys
 from collections import Counter, defaultdict
 
-# ... (The analyze_log_file function is unchanged) ...
 def analyze_log_file(filepath):
     """
     Parses a log file to find transitions of (start_state, token, end_state)
@@ -58,7 +57,6 @@ def analyze_log_file(filepath):
 
     return transition_counts
 
-
 def print_token_summary(transition_counts, sort_by='occurrences', limit=None):
     """Groups transitions by token and prints an aggregate summary."""
     if not transition_counts:
@@ -94,7 +92,7 @@ def print_token_summary(transition_counts, sort_by='occurrences', limit=None):
     processed.sort(key=sort_key, reverse=True)
     if limit: processed = processed[:limit]
 
-    # --- NEW: Adjusted widths and headers for better alignment ---
+    # Adjusted widths and headers for better alignment
     w = {'tok': 14, 'id': 3, 'occ': 11, 'fail': 8, 'rate': 10,
          'tsn': 11, 'tse': 11, 'ten': 11, 'tee': 11} # tsn = Top Start Nodes, etc.
 
@@ -120,7 +118,6 @@ def print_token_summary(transition_counts, sort_by='occurrences', limit=None):
                f"{'->':^2} | {item['top_end_nodes']:>{w['ten']}} | {item['top_end_edges']:>{w['tee']}}")
         print(row)
 
-# ... (The rest of the script: print_start_state_summary, print_detailed_stats, main are unchanged) ...
 def print_start_state_summary(transition_counts, sort_by='occurrences', limit=None):
     """Groups transitions by start state and prints an aggregate summary."""
     if not transition_counts:
@@ -176,7 +173,7 @@ def print_detailed_stats(transition_counts, limit=None):
     sorted_transitions = sorted(transition_counts.items(), key=lambda item: item[1], reverse=True)
     if limit: sorted_transitions = sorted_transitions[:limit]
 
-    w = {'cnt': 5, 'tok': 5, 'id': 3, 's_nodes': 11, 's_edges': 11, 'e_nodes': 9, 'e_edges': 9, 'stat': 7}
+    w = {'cnt': 5, 'tok': 14, 'id': 3, 's_nodes': 11, 's_edges': 11, 'e_nodes': 9, 'e_edges': 9, 'stat': 7}
     header = (f"{'Count':>{w['cnt']}} | {'Token':<{w['tok']}} | {'ID':>{w['id']}} | {'Start Nodes':>{w['s_nodes']}} | "
               f"{'Start Edges':>{w['s_edges']}} | {'End Nodes':>{w['e_nodes']}} | {'End Edges':>{w['e_edges']}} | {'Status':<{w['stat']}}")
     print(header)
