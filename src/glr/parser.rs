@@ -2,7 +2,7 @@ use crate::constraint::{LLMTokenBV, LLMVocab, PrecomputeNode3, PrecomputeNode3In
 use crate::datastructures::gss_leveled_adapter::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
 use crate::datastructures::gss_leveled_adapter::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
 use crate::datastructures::ArcPtrWrapper;
-use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+use crate::glr::grammar::{NonTerminal, Production, Symbol, SyntheticTerminal, Terminal};
 use crate::glr::table::{Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
 use crate::tokenizer::LLMTokenID;
 use std::any::Any;
@@ -269,6 +269,7 @@ pub struct GLRParser {
     pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
     pub hallucinated_row: HallucinatedRow,
     pub hallucinated_state_id: StateID,
+    pub synthetic_terminals: Vec<SyntheticTerminal>,
 }
 
 impl JSONConvertible for GLRParser {
@@ -285,6 +286,7 @@ impl JSONConvertible for GLRParser {
         obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
         // Do not serialize precomputed substring gotos; they will be re-derived from the table.
         // Do not serialize self.actions
+        obj.insert("synthetic_terminals".to_string(), self.synthetic_terminals.to_json());
         // Do not serialize reduce_goto_map
         JSONNode::Object(obj)
     }
@@ -317,6 +319,10 @@ impl JSONConvertible for GLRParser {
                 let hallucinated_row = crate::glr::table::stage_11_create_hallucinated_row(&table);
                 let hallucinated_state_id = StateID(usize::MAX);
 
+                let synthetic_terminals = obj.remove("synthetic_terminals")
+                    .map_or(Ok(Vec::new()), |n| Vec::<SyntheticTerminal>::from_json(n))?;
+
+
                 Ok(GLRParser {
                     table,
                     productions,
@@ -330,6 +336,7 @@ impl JSONConvertible for GLRParser {
                     reduce_goto_map,
                     hallucinated_row,
                     hallucinated_state_id,
+                    synthetic_terminals,
                 })
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -351,6 +358,7 @@ impl Debug for GLRParser {
             .field("substring_gotos_size", &self.substring_gotos.len())
             .field("reduce_goto_map_size", &self.reduce_goto_map.len())
             .field("hallucinated_state_id", &self.hallucinated_state_id)
+            .field("synthetic_terminals", &self.synthetic_terminals)
             .finish()
     }
 }
@@ -368,7 +376,8 @@ impl PartialEq for GLRParser {
         self.substring_gotos == other.substring_gotos &&
         self.reduce_goto_map == other.reduce_goto_map &&
         self.hallucinated_row == other.hallucinated_row &&
-        self.hallucinated_state_id == other.hallucinated_state_id
+        self.hallucinated_state_id == other.hallucinated_state_id &&
+        self.synthetic_terminals == other.synthetic_terminals
     }
 }
 
@@ -378,6 +387,7 @@ impl GLRParser {
     pub fn new(
         table: Table,
         productions: Vec<Production>,
+        synthetic_terminals: Vec<SyntheticTerminal>,
         terminal_map: BiBTreeMap<Terminal, TerminalID>,
         non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
         item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -412,6 +422,7 @@ impl GLRParser {
             reduce_goto_map,
             hallucinated_row,
             hallucinated_state_id,
+            synthetic_terminals,
         }
     }
 
@@ -425,6 +436,7 @@ impl GLRParser {
             active_state: stack,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            last_processed_terminal: None,
         }
     }
 
@@ -434,6 +446,7 @@ impl GLRParser {
             active_state: ParseState::new(),
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            last_processed_terminal: None,
         }
     }
 
@@ -444,6 +457,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            last_processed_terminal: None,
         };
         parser_state
     }
@@ -454,6 +468,7 @@ impl GLRParser {
             active_state: parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            last_processed_terminal: None,
         };
         parser_state
     }
@@ -476,6 +491,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            last_processed_terminal: None,
         }
     }
 
@@ -502,6 +518,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            last_processed_terminal: None,
         }
     }
 
@@ -829,6 +846,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub active_state: ParseState,
     phase: ParserPhase,
     below_bottom_cache: HashMap<BelowBottomCacheKey, (PrecomputeNode3Index, LLMTokenBV)>,
+    last_processed_terminal: Option<TerminalID>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1720,6 +1738,26 @@ impl<'a> GLRParserState<'a> { // No longer generic
     #[time_it("GLRParserState::process_token_advanced")]
     pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
         self.below_bottom_cache.clear();
+
+        // --- Synthetic Terminal Check ---
+        let terminal = self.parser.terminal_map.get_by_right(&token_id).unwrap();
+        let mut required_predecessor: Option<&Terminal> = None;
+        for synth_info in &self.parser.synthetic_terminals {
+            if synth_info.members.contains(terminal) {
+                required_predecessor = Some(&synth_info.representative);
+                break;
+            }
+        }
+
+        if let Some(required_synth) = required_predecessor {
+            let required_synth_id = self.parser.terminal_map.get_by_left(required_synth).unwrap();
+            if self.last_processed_terminal != Some(*required_synth_id) {
+                panic!("Grammar rule violation: Terminal '{}' must be preceded by synthetic terminal '{}', but last processed terminal was {:?}.",
+                       terminal, required_synth, self.last_processed_terminal.map(|t| self.parser.terminal_map.get_by_right(&t).unwrap()));
+            }
+        }
+
+        self.last_processed_terminal = Some(token_id);
 
         if Some(token_id) == self.parser.ignore_terminal_id {
             crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
