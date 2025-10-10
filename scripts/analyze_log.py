@@ -4,6 +4,7 @@ import argparse
 import sys
 from collections import Counter, defaultdict
 
+# ... (The analyze_log_file function is unchanged) ...
 def analyze_log_file(filepath):
     """
     Parses a log file to find transitions of (start_state, token, end_state)
@@ -57,6 +58,7 @@ def analyze_log_file(filepath):
 
     return transition_counts
 
+
 def print_token_summary(transition_counts, sort_by='occurrences', limit=None):
     """Groups transitions by token and prints an aggregate summary."""
     if not transition_counts:
@@ -76,30 +78,49 @@ def print_token_summary(transition_counts, sort_by='occurrences', limit=None):
     processed = []
     for token, data in summary_data.items():
         failure_rate = (data['failures'] / data['occurrences']) * 100
-        top_trans = data['transitions'].most_common(1)[0][0]
-        top_trans_str = f"({top_trans[0][0]}, {top_trans[0][1]}) -> ({top_trans[1][0]}, {top_trans[1][1]})"
+
+        # Get the most common transition and unpack its details
+        top_trans_tuple = data['transitions'].most_common(1)[0][0]
+        start_state, end_state = top_trans_tuple
+
         processed.append({
             'token': token, 'occurrences': data['occurrences'], 'failures': data['failures'],
-            'failure_rate': failure_rate, 'top_trans_str': top_trans_str
+            'failure_rate': failure_rate,
+            'top_start_nodes': start_state[0], 'top_start_edges': start_state[1],
+            'top_end_nodes': end_state[0], 'top_end_edges': end_state[1]
         })
 
     sort_key = lambda x: x[sort_by]
     processed.sort(key=sort_key, reverse=True)
     if limit: processed = processed[:limit]
 
-    w = {'tok': 5, 'id': 3, 'occ': 11, 'fail': 8, 'rate': 10, 'top': 20}
-    header = (f"{'Token':<{w['tok']}} | {'ID':>{w['id']}} | {'Occurrences':>{w['occ']}} | "
-              f"{'Failures':>{w['fail']}} | {'Failure %':>{w['rate']}} | {'Most Common Transition (Nodes, Edges)':<{w['top']}}")
-    print(header)
-    print("-" * len(header))
+    # --- NEW: Adjusted widths and headers for better alignment ---
+    w = {'tok': 14, 'id': 3, 'occ': 11, 'fail': 8, 'rate': 10,
+         'tsn': 11, 'tse': 11, 'ten': 11, 'tee': 11} # tsn = Top Start Nodes, etc.
+
+    header_top = (f"{'Token':<{w['tok']}} | {'ID':>{w['id']}} | {'Occurrences':>{w['occ']}} | "
+                  f"{'Failures':>{w['fail']}} | {'Failure %':>{w['rate']}} | "
+                  f"{'Most Common Transition'.center(w['tsn'] + w['tse'] + w['ten'] + w['tee'] + 9)}")
+
+    header_bottom = (f"{'':<{w['tok']}} | {'':>{w['id']}} | {'':>{w['occ']}} | "
+                     f"{'':>{w['fail']}} | {'':>{w['rate']}} | "
+                     f"{'Start Nodes':>{w['tsn']}} | {'Start Edges':>{w['tse']}} | "
+                     f"{'->':^2} | {'End Nodes':>{w['ten']}} | {'End Edges':>{w['tee']}}")
+
+    print(header_top)
+    print(header_bottom)
+    print("-" * len(header_bottom))
 
     for item in processed:
         token_char, token_id = item['token']
         rate_str = f"{item['failure_rate']:.1f}%"
         row = (f"{token_char:<{w['tok']}} | {token_id:>{w['id']}} | {item['occurrences']:>{w['occ']}} | "
-               f"{item['failures']:>{w['fail']}} | {rate_str:>{w['rate']}} | {item['top_trans_str']:<{w['top']}}")
+               f"{item['failures']:>{w['fail']}} | {rate_str:>{w['rate']}} | "
+               f"{item['top_start_nodes']:>{w['tsn']}} | {item['top_start_edges']:>{w['tse']}} | "
+               f"{'->':^2} | {item['top_end_nodes']:>{w['ten']}} | {item['top_end_edges']:>{w['tee']}}")
         print(row)
 
+# ... (The rest of the script: print_start_state_summary, print_detailed_stats, main are unchanged) ...
 def print_start_state_summary(transition_counts, sort_by='occurrences', limit=None):
     """Groups transitions by start state and prints an aggregate summary."""
     if not transition_counts:
