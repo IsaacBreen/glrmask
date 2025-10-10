@@ -5,7 +5,7 @@ from ..interface import GSS, T, Acc, NewAcc
 
 try:
     # The native module is built and placed in the python/ directory or installed in the venv
-    from leveled_gss_rs import LeveledGSS as _LeveledRSGSS
+    from leveled_gss_rs import LeveledGSS as _LeveledRSGSS, LeveledGSSStats
 except ImportError as e:
     raise ImportError(
         "Could not import the Rust-based LeveledGSS implementation. "
@@ -99,6 +99,9 @@ class LeveledRSGSS(GSS[T, Acc], Generic[T, Acc]):
 
     def reduce_acc(self) -> Optional[Acc]:
         return self._inner.reduce_acc()
+
+    def stats(self) -> LeveledGSSStats:
+        return self._inner.stats()
 
     def to_reference_impl(self) -> GSS[T, Acc]:
         return self._inner.to_reference_impl()
