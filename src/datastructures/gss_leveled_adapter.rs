@@ -74,6 +74,8 @@ impl LGMerge for Acc {
     }
 }
 
+pub type GSSStats = LeveledGSSStats<ParseStateEdgeContent, Acc>;
+
 #[time_it]
 pub fn gather_gss_stats(roots: &[&GSSNode]) -> LeveledGSSStats<ParseStateEdgeContent, Acc> {
     let active_roots: Vec<_> = roots.iter().copied().filter(|r| !r.is_empty()).collect();
