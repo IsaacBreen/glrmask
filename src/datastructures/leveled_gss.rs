@@ -1475,6 +1475,113 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
+    /// Simplifies the GSS structure by expanding the "lower" level into the "upper"
+    /// level, and then applying fusion to the resulting uniform structure. This is
+    /// particularly effective for GSS instances that have grown a large, complex
+    /// lower level under a small number of interfaces, as it allows for more
+    /// holistic simplification and sharing.
+    pub fn normalize(&self) -> Self {
+        let mut memo_upper: StdHashMap<usize, Arc<Upper<T, A>>> = StdHashMap::new();
+        let mut memo_lower: StdHashMap<(usize, A), Arc<Upper<T, A>>> = StdHashMap::new();
+
+        // Step 1: Expand all Interface nodes into UpperBranch nodes, eliminating the Lower layer.
+        let expanded_inner =
+            Self::expand_upper_recursive(&self.inner, &mut memo_upper, &mut memo_lower);
+        let expanded_gss = if Arc::ptr_eq(&self.inner, &expanded_inner) {
+            self.clone()
+        } else {
+            LeveledGSS {
+                inner: expanded_inner,
+            }
+        };
+
+        // Step 2: Fuse the resulting all-Upper GSS to merge nodes.
+        expanded_gss.fuse(None)
+    }
+
+    fn expand_upper_recursive(
+        node: &Arc<Upper<T, A>>,
+        memo_upper: &mut StdHashMap<usize, Arc<Upper<T, A>>>,
+        memo_lower: &mut StdHashMap<(usize, A), Arc<Upper<T, A>>>,
+    ) -> Arc<Upper<T, A>> {
+        let ptr = Arc::as_ptr(node) as usize;
+        if let Some(cached) = memo_upper.get(&ptr) {
+            return cached.clone();
+        }
+
+        let res = match &**node {
+            Upper::Branch(b) => {
+                let mut children_changed = false;
+                let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                for (v, kids) in b.children.iter() {
+                    let mut new_kids = OrdMap::new();
+                    for child in kids.values() {
+                        let new_child = Self::expand_upper_recursive(child, memo_upper, memo_lower);
+                        if !Arc::ptr_eq(child, &new_child) {
+                            children_changed = true;
+                        }
+                        new_kids.insert(new_child.max_depth(), new_child);
+                    }
+                    new_children.insert(v.clone(), new_kids);
+                }
+
+                if children_changed {
+                    new_branch(new_children, b.empty.clone())
+                } else {
+                    node.clone()
+                }
+            }
+            Upper::Interface(i) => {
+                let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                for (v, kids) in i.children.iter() {
+                    let mut new_kids = OrdMap::new();
+                    for child in kids.values() {
+                        let new_child = Self::expand_lower_recursive(child, &i.acc, memo_lower);
+                        new_kids.insert(new_child.max_depth(), new_child);
+                    }
+                    new_children.insert(v.clone(), new_kids);
+                }
+
+                let mut new_empty = i.empty.clone();
+                if i.children.is_empty() && new_empty.is_none() {
+                    new_empty = Some(i.acc.clone());
+                }
+
+                new_branch(new_children, new_empty)
+            }
+        };
+
+        memo_upper.insert(ptr, res.clone());
+        res
+    }
+
+    fn expand_lower_recursive(
+        node: &Arc<Lower<T>>,
+        acc: &A,
+        memo_lower: &mut StdHashMap<(usize, A), Arc<Upper<T, A>>>,
+    ) -> Arc<Upper<T, A>> {
+        let key = (Arc::as_ptr(node) as usize, acc.clone());
+        if let Some(cached) = memo_lower.get(&key) {
+            return cached.clone();
+        }
+
+        let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+        for (v, kids) in node.children.iter() {
+            let mut new_kids = OrdMap::new();
+            for child in kids.values() {
+                let new_child = Self::expand_lower_recursive(child, acc, memo_lower);
+                new_kids.insert(new_child.max_depth(), new_child);
+            }
+            new_children.insert(v.clone(), new_kids);
+        }
+
+        let empty = if node.empty { Some(acc.clone()) } else { None };
+        let new_node = new_branch(new_children, empty);
+
+        memo_lower.insert(key, new_node.clone());
+        new_node
+    }
+
     pub fn peek(&self) -> HashSet<T> {
         self.inner.children_keys().into_iter().collect()
     }
