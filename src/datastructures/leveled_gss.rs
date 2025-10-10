@@ -538,7 +538,7 @@ impl<T: Clone + Eq + Hash + std::fmt::Debug, A: Clone + Eq + Hash + std::fmt::De
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LeveledGSSStats")
-            // top_values intentionally omitted from Debug output
+            // .field("top_values", &self.top_values)
             .field("num_upperbranch_nodes", &self.num_upperbranch_nodes)
             .field("num_interface_nodes", &self.num_interface_nodes)
             .field("num_lower_nodes", &self.num_lower_nodes)
@@ -551,9 +551,9 @@ impl<T: Clone + Eq + Hash + std::fmt::Debug, A: Clone + Eq + Hash + std::fmt::De
             .field("max_upper_depth", &self.max_upper_depth)
             .field("max_lower_depth", &self.max_lower_depth)
             .field("distinct_values_count", &self.distinct_values_count)
-            .field("distinct_values", &self.distinct_values)
+            // .field("distinct_values", &self.distinct_values)
             .field("unique_accumulators_count", &self.unique_accumulators_count)
-            .field("unique_accumulators", &self.unique_accumulators)
+            // .field("unique_accumulators", &self.unique_accumulators)
             .field("total_accumulator_instances", &self.total_accumulator_instances)
             .field("num_upper_with_empty", &self.num_upper_with_empty)
             .field("num_interfaces_with_empty", &self.num_interfaces_with_empty)
