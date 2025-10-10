@@ -1691,7 +1691,7 @@ impl GrammarConstraint {
         let mut precomputed3 = BTreeMap::new();
         let trie3_god = Trie3GodWrapper::new();
 
-        if false {
+        if true {
             for tid in tqdm!(0..=tokenizer.num_groups() as usize, desc = "Trie 3 temp", disable = !PROGRESS_BAR_ENABLED, leave=false) {
                 let parser = parser.unwrap();
                 let terminal = TerminalID(tid);
