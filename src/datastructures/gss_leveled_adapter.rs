@@ -118,30 +118,37 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
             stats.num_root_predecessors as f64 / stats.num_roots as f64;
     }
 
-    // --- Graph-level stats (from merged GSS to handle sharing correctly) ---
-    let mut merged_gss = LeveledGSS::empty();
-    for r in &active_roots {
-        merged_gss = merged_gss.merge(&r.inner);
-    }
-
-    let l_stats = merged_gss.stats();
-    stats.total_edges = l_stats.total_edges;
-    stats.unique_nodes = l_stats.total_unique_nodes;
-    stats.num_leaves =
-        l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
-    stats.structurally_unique_nodes = l_stats.total_unique_nodes;
-    stats.merge_points =
-        l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
-
-    if stats.unique_nodes > 1 {
-        stats.structural_redundancy = stats.total_edges as f64 / (stats.unique_nodes - 1) as f64;
-    } else if stats.unique_nodes == 1 {
-        stats.structural_redundancy = stats.total_edges as f64;
-    }
-
-    stats
+     // --- Graph-level stats (from merged GSS to handle sharing correctly) ---
+     let mut merged_gss = LeveledGSS::empty();
+     for r in &active_roots {
+         merged_gss = merged_gss.merge(&r.inner);
+     }
+ 
+     let l_stats = merged_gss.stats();
+     let paths_info = merged_gss.paths_info();
+ 
+     stats.total_edges = l_stats.total_edges;
+     stats.unique_nodes = l_stats.total_unique_nodes;
+     stats.num_leaves =
+         l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
+     stats.structurally_unique_nodes = l_stats.num_structurally_unique_nodes;
+     stats.num_redundant_nodes = stats.unique_nodes - stats.structurally_unique_nodes;
+     stats.merge_points =
+         l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
+     stats.max_predecessors_with_values = l_stats.max_in_degree;
+ 
+     if stats.unique_nodes > 0 {
+         stats.structural_redundancy = stats.num_redundant_nodes as f64 / stats.unique_nodes as f64;
+     } else {
+         stats.structural_redundancy = 0.0;
+     }
+ 
+     if paths_info.num_paths > 0 {
+         stats.average_depth = paths_info.total_depth as f64 / paths_info.num_paths as f64;
+     }
+ 
+     stats
 }
-
 // --- GSS printer config & helpers ---
 pub struct GSSPrintConfig<'a> {
     pub(crate) labels: Option<&'a [String]>,
