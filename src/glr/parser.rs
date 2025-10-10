@@ -279,9 +279,9 @@ pub struct GLRParser {
 impl JSONConvertible for GLRParser {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert("stage_7_table".to_string(), self.table.to_json());
-        obj.insert("productions".to_string(), self.original_productions.to_json());
+        obj.insert("productions".to_string(), self.productions.to_json());
         obj.insert("internal_productions".to_string(), self.internal_productions.to_json());
+        obj.insert("table".to_string(), self.table.to_json());
         // obj.insert("start_production_id".to_string(), self.start_production_id.to_json()); // Implicitly 0
         obj.insert("terminal_map".to_string(), self.terminal_map.to_json());
         obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
@@ -354,7 +354,7 @@ impl Debug for GLRParser {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GLRParser")
             .field("table", &self.table)
-            .field("productions", &self.original_productions)
+            .field("productions", &self.productions)
             .field("internal_productions", &self.internal_productions)
             .field("terminal_map", &self.terminal_map)
             .field("non_terminal_map", &self.non_terminal_map)
@@ -365,8 +365,8 @@ impl Debug for GLRParser {
             .field("substring_gotos_size", &self.substring_gotos.len())
             .field("reduce_goto_map_size", &self.reduce_goto_map.len())
             .field("hallucinated_state_id", &self.hallucinated_state_id)
-            .finish()
             .field("real_to_synthetic_map", &self.real_to_synthetic_map)
+            .finish()
     }
 }
 
