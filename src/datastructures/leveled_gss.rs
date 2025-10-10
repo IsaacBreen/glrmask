@@ -19,6 +19,7 @@ use im::{HashMap as IHashMap, OrdMap};
 use std::collections::{BTreeMap, HashMap as StdHashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
+use profiler_macro::time_it;
 
 /// Trait for accumulator types that can be merged.
 pub trait Merge: Clone {
@@ -1903,6 +1904,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
+    #[time_it]
     pub fn normalize(&self) -> Self {
         // 1) Fuse all levels to collapse per-value multiplicity across depths.
         //    This dramatically reduces branching in most real-world cases.
