@@ -1620,66 +1620,6 @@ impl GrammarConstraint {
             }
         }
 
-        // --- NEW: Apply synthetic terminal transformations ---
-        if let Some(parser) = parser {
-            if !parser.synthetic_terminals.is_empty() {
-                crate::debug!(2, "Applying {} synthetic terminal transformations to Trie1.", parser.synthetic_terminals.len());
-                let all_llm_tokens = LLMTokenBV::ones(internal_max_llm_token + 1);
-
-                for synth_info in &parser.synthetic_terminals {
-                    let synth_tid = *parser.terminal_map.get_by_left(&synth_info.representative).unwrap();
-                    let member_tids: BTreeSet<_> = synth_info.members.iter()
-                        .map(|t| *parser.terminal_map.get_by_left(t).unwrap())
-                        .collect();
-
-                    // A BFS/DFS traversal is needed to visit all nodes.
-                    let mut q: VecDeque<PrecomputeNode1Index> = precomputed1.values().cloned().collect();
-                    let mut visited: HashSet<PrecomputeNode1Index> = q.iter().cloned().collect();
-                    let mut all_nodes_in_order = Vec::new();
-
-                    while let Some(node_idx) = q.pop_front() {
-                        all_nodes_in_order.push(node_idx.clone());
-                        let children = node_idx.read(&trie1_god).unwrap().children().clone();
-                        for dest_map in children.values() {
-                            for child_idx in dest_map.keys() {
-                                if visited.insert(child_idx.clone()) {
-                                    q.push_back(child_idx.clone());
-                                }
-                            }
-                        }
-                    }
-
-                    let mut intermediate_nodes: HashMap<PrecomputeNode1Index, PrecomputeNode1Index> = HashMap::new();
-
-                    for node_idx in all_nodes_in_order {
-                        let children_to_rewire: Vec<_> = {
-                            let node_guard = node_idx.read(&trie1_god).unwrap();
-                            node_guard.children().iter().filter_map(|(key, dest_map)| {
-                                key.filter(|tid| member_tids.contains(tid)).map(|tid| (tid, dest_map.clone()))
-                            }).collect()
-                        };
-
-                        if children_to_rewire.is_empty() {
-                            continue;
-                        }
-
-                        let intermediate_node_idx = intermediate_nodes.entry(node_idx.clone()).or_insert_with(|| {
-                            PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())))
-                        });
-
-                        let mut node_guard = node_idx.write(&trie1_god).unwrap();
-                        node_guard.children_mut().entry(Some(synth_tid)).or_default().insert(intermediate_node_idx.clone(), all_llm_tokens.clone());
-
-                        let mut intermediate_node_guard = intermediate_node_idx.write(&trie1_god).unwrap();
-                        for (tid, dest_map) in children_to_rewire {
-                            node_guard.children_mut().remove(&Some(tid));
-                            intermediate_node_guard.children_mut().insert(Some(tid), dest_map);
-                        }
-                    }
-                }
-            }
-        }
-
         // Check for LLM-compatible cycles.
         let roots: Vec<_> = precomputed1.values().cloned().collect();
         Self::has_llm_compatible_cycle(&trie1_god, &roots, internal_max_llm_token);

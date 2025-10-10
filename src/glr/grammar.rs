@@ -104,7 +104,7 @@ impl Terminal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Symbol {
     Terminal(Terminal),
     NonTerminal(NonTerminal),
@@ -143,7 +143,7 @@ impl JSONConvertible for Symbol {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Production {
     pub lhs: NonTerminal,
     pub rhs: Vec<Symbol>,
@@ -196,33 +196,5 @@ pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
     Production {
         lhs: NonTerminal(name.to_string()),
         rhs,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SyntheticTerminal {
-    pub representative: Terminal,
-    pub members: BTreeSet<Terminal>,
-}
-
-impl JSONConvertible for SyntheticTerminal {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("representative".to_string(), self.representative.to_json());
-        obj.insert("members".to_string(), self.members.to_json());
-        JSONNode::Object(obj)
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let representative = obj.remove("representative").ok_or("Missing 'representative' for SyntheticTerminal")
-                    .and_then(Terminal::from_json)?;
-                let members = obj.remove("members").ok_or("Missing 'members' for SyntheticTerminal")
-                    .and_then(|n| BTreeSet::<Terminal>::from_json(n))?;
-                Ok(SyntheticTerminal { representative, members })
-            }
-            _ => Err("Expected JSONNode::Object for SyntheticTerminal".to_string()),
-        }
     }
 }

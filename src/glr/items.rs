@@ -2,7 +2,6 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use std::fmt::{Display, Formatter};
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 // Added for derive macro pattern
 
@@ -32,13 +31,6 @@ impl JSONConvertible for Item {
             }
             _ => Err("Expected JSONNode::Object for Item".to_string()),
         }
-    }
-}
-
-impl Hash for Item {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.production.hash(state);
-        self.dot_position.hash(state);
     }
 }
 

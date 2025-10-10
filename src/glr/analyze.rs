@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use bimap::BiBTreeMap;
 use kdam::{tqdm, BarExt};
-use crate::glr::grammar::SyntheticTerminal;
 use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nonterminal_nullability, compute_null_nonterminals, compute_nullable_nonterminals, Nullability};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, NonTerminalID, Row, Stage7ShiftsAndReducesLookaheadValue, Table, StateID, TerminalID};
+use crate::glr::table::{Goto, NonTerminalID, Table, StateID};
 
 
 /// Checks for non-terminals used in rule RHS but never defined in LHS.
@@ -755,106 +754,6 @@ pub fn resolve_direct_right_recursion(
     // 4. Replace the original productions with the new set.
     productions.clear();
     productions.extend(new_productions);
-}
-
-#[derive(Debug, Clone)]
-pub struct SyntheticTerminalAnalysis {
-    pub candidate_set: BTreeSet<TerminalID>,
-    pub score: f64,
-    pub new_terminal_name: String,
-}
-
-pub fn analyze_for_synthetic_terminals(
-    table: &Table,
-    productions: &[Production],
-    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-) -> Option<SyntheticTerminalAnalysis> {
-    let mut reduce_to_terminals: BTreeMap<(usize, NonTerminalID), BTreeSet<TerminalID>> = BTreeMap::new();
-
-    for row in table.values() {
-        for (&tid, action) in &row.shifts_and_reduces_full {
-            let mut process_reduces = |reduces: &BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<_>>>| {
-                for (&len, nts) in reduces {
-                    for (&nt_id, _) in nts {
-                        reduce_to_terminals.entry((len, nt_id)).or_default().insert(tid);
-                    }
-                }
-            };
-            match action {
-                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
-                    reduce_to_terminals.entry((*len, *nonterminal_id)).or_default().insert(tid);
-                }
-                Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
-                    process_reduces(reduces);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let mut terminals_to_reduces: BTreeMap<BTreeSet<TerminalID>, Vec<(usize, NonTerminalID)>> = BTreeMap::new();
-    for (reduce, terminals) in reduce_to_terminals {
-        if terminals.len() > 1 {
-            terminals_to_reduces.entry(terminals).or_default().push(reduce);
-        }
-    }
-
-    let best_candidate = terminals_to_reduces.iter()
-        .map(|(terminals, reduces)| {
-            let score = (terminals.len() as f64 - 1.0) * reduces.len() as f64;
-            (terminals, score)
-        })
-        .filter(|(_, score)| *score > 0.0)
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    if let Some((terminals, score)) = best_candidate {
-        let mut name_parts: Vec<String> = terminals.iter()
-            .map(|tid| terminal_map.get_by_right(tid).unwrap().to_string())
-            .collect();
-        name_parts.sort();
-        let new_terminal_name = format!("SYNTH_{}", name_parts.join("_").replace("'", ""));
-
-        Some(SyntheticTerminalAnalysis {
-            candidate_set: terminals.clone(),
-            score,
-            new_terminal_name,
-        })
-    } else {
-        None
-    }
-}
-
-pub fn apply_synthetic_terminal(
-    productions: &[Production],
-    analysis: &SyntheticTerminalAnalysis,
-    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-) -> (Vec<Production>, SyntheticTerminal) {
-    let member_terminals: BTreeSet<Terminal> = analysis.candidate_set.iter()
-        .map(|tid| terminal_map.get_by_right(tid).unwrap().clone())
-        .collect();
-
-    let synthetic_terminal = Terminal::RegexName(analysis.new_terminal_name.clone());
-    let synthetic_symbol = Symbol::Terminal(synthetic_terminal.clone());
-
-    let new_productions = productions.iter().map(|prod| {
-        let mut new_rhs = Vec::new();
-        for symbol in &prod.rhs {
-            if let Symbol::Terminal(t) = symbol {
-                if member_terminals.contains(t) {
-                    new_rhs.push(synthetic_symbol.clone());
-                }
-            }
-            new_rhs.push(symbol.clone());
-        }
-        Production { lhs: prod.lhs.clone(), rhs: new_rhs }
-    }).collect();
-
-    let info = SyntheticTerminal {
-        representative: synthetic_terminal,
-        members: member_terminals,
-    };
-
-    (new_productions, info)
 }
 
 pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
