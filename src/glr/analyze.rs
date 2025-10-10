@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use bimap::BiBTreeMap;
 use kdam::{tqdm, BarExt};
-use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nonterminal_nullability, compute_null_nonterminals, compute_nullable_nonterminals, Nullability};
+use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nonterminal_nullability, compute_null_nonterminals, compute_nullable_nonterminals, Nullability, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_nullable_nonterminals};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, NonTerminalID, Table, StateID};
 
@@ -820,4 +820,74 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
 pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
     todo!()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SyntheticTerminalCandidate {
+    pub terminals: BTreeSet<Terminal>,
+    pub score: usize,
+    pub non_terminals_affected: BTreeSet<NonTerminal>,
+}
+
+pub fn find_synthetic_terminal_candidates(productions: &[Production]) -> Vec<SyntheticTerminalCandidate> {
+    let first_sets = compute_first_sets_for_nonterminals(productions);
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+
+    let mut terminal_to_nts: BTreeMap<Terminal, BTreeSet<NonTerminal>> = BTreeMap::new();
+    for (nt, follows) in &follow_sets {
+        for t_opt in follows {
+            if let Some(t) = t_opt {
+                terminal_to_nts.entry(t.clone()).or_default().insert(nt.clone());
+            }
+        }
+    }
+
+    let terminals: Vec<_> = terminal_to_nts.keys().cloned().collect();
+    let mut co_occurrences: BTreeMap<BTreeSet<Terminal>, BTreeSet<NonTerminal>> = BTreeMap::new();
+
+    for i in 0..terminals.len() {
+        for j in i + 1..terminals.len() {
+            let t1 = &terminals[i];
+            let t2 = &terminals[j];
+            let nts1 = terminal_to_nts.get(t1).unwrap();
+            let nts2 = terminal_to_nts.get(t2).unwrap();
+            let intersection: BTreeSet<_> = nts1.intersection(nts2).cloned().collect();
+            if intersection.len() > 1 { // Only consider pairs that co-occur in more than one NT's follow set
+                co_occurrences.insert(BTreeSet::from([t1.clone(), t2.clone()]), intersection);
+            }
+        }
+    }
+
+    let mut candidates: Vec<SyntheticTerminalCandidate> = co_occurrences
+        .into_iter()
+        .map(|(terminals, non_terminals_affected)| SyntheticTerminalCandidate {
+            score: non_terminals_affected.len(),
+            terminals,
+            non_terminals_affected,
+        })
+        .collect();
+
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.score));
+    candidates
+}
+
+pub fn apply_synthetic_terminal(
+    productions: &mut Vec<Production>,
+    terminals_to_wrap: &BTreeSet<Terminal>,
+    synthetic_terminal: &Terminal,
+) {
+    for prod in productions.iter_mut() {
+        let mut new_rhs = Vec::with_capacity(prod.rhs.len() * 2);
+        for symbol in &prod.rhs {
+            if let Symbol::Terminal(t) = symbol {
+                if terminals_to_wrap.contains(t) {
+                    new_rhs.push(Symbol::Terminal(synthetic_terminal.clone()));
+                }
+            }
+            new_rhs.push(symbol.clone());
+        }
+        prod.rhs = new_rhs;
+    }
+}
+
 
