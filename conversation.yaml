@@ -9,7 +9,7 @@ local_system:
     - src/glr/parser.rs
     - src/glr/table.rs
     - src/glr/synthetic.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/constraint.rs: |-
@@ -9986,6 +9986,30 @@ local_system:
 
               crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map.len());
 
+              let mut final_parser = parser.clone();
+              let mut synthetic_terminal_maps = BTreeMap::new();
+              const MAX_SYNTH_ITERATIONS: usize = 1;
+              for _ in 0..MAX_SYNTH_ITERATIONS {
+                  if let Some(analysis) = crate::glr::synthetic::analyze_for_synthetic_terminal(&final_parser.table, &final_parser.terminal_map) {
+                      crate::debug!(2, "Applying synthetic terminal optimization: {:?}", analysis);
+                      let mut new_productions = final_parser.productions.clone();
+                      let mut new_terminal_map = final_parser.terminal_map.clone();
+                      let (synth_tid, original_tids) = crate::glr::synthetic::apply_synthetic_terminal(&mut new_productions, &mut new_terminal_map, &analysis);
+                      synthetic_terminal_maps.insert(synth_tid, original_tids);
+                      let new_non_terminal_map = crate::glr::table::assign_non_terminal_ids(&new_productions);
+                      final_parser = crate::glr::table::generate_glr_parser_with_maps(
+                          &new_productions,
+                          new_terminal_map,
+                          new_non_terminal_map,
+                          BTreeMap::new(),
+                          final_parser.ignore_terminal_id,
+                      );
+                      final_parser.synthetic_terminal_map = synthetic_terminal_maps.clone();
+                  } else {
+                      break;
+                  }
+              }
+              let parser = final_parser;
               let llm_vocab = Arc::new(LLMVocab {
                   llm_token_map,
                   max_original_llm_token_id,
@@ -10233,6 +10257,30 @@ local_system:
 
               crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map.len());
 
+              let mut final_parser = parser.clone();
+              let mut synthetic_terminal_maps = BTreeMap::new();
+              const MAX_SYNTH_ITERATIONS: usize = 1;
+              for _ in 0..MAX_SYNTH_ITERATIONS {
+                  if let Some(analysis) = crate::glr::synthetic::analyze_for_synthetic_terminal(&final_parser.table, &final_parser.terminal_map) {
+                      crate::debug!(2, "Applying synthetic terminal optimization: {:?}", analysis);
+                      let mut new_productions = final_parser.productions.clone();
+                      let mut new_terminal_map = final_parser.terminal_map.clone();
+                      let (synth_tid, original_tids) = crate::glr::synthetic::apply_synthetic_terminal(&mut new_productions, &mut new_terminal_map, &analysis);
+                      synthetic_terminal_maps.insert(synth_tid, original_tids);
+                      let new_non_terminal_map = crate::glr::table::assign_non_terminal_ids(&new_productions);
+                      final_parser = crate::glr::table::generate_glr_parser_with_maps(
+                          &new_productions,
+                          new_terminal_map,
+                          new_non_terminal_map,
+                          BTreeMap::new(),
+                          final_parser.ignore_terminal_id,
+                      );
+                      final_parser.synthetic_terminal_map = synthetic_terminal_maps.clone();
+                  } else {
+                      break;
+                  }
+              }
+              let parser = final_parser;
               let llm_vocab = Arc::new(LLMVocab {
                   llm_token_map: llm_token_map.clone(),
                   max_original_llm_token_id,
@@ -10746,7 +10794,7 @@ local_system:
               // --- NEW: Handle synthetic terminals ---
               if let Some(p) = parser {
                   if !p.synthetic_terminal_map.is_empty() {
-                      let all_nodes: Vec<_> = trie1_god.iter_arc().collect(); // snapshot of all nodes
+                      let all_nodes: Vec<_> = Trie::all_nodes(&trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
                       for node_idx in all_nodes {
                           let mut modifications_by_synth_tid = BTreeMap::new();
                           let children = node_idx.read(&trie1_god).unwrap().children().clone();
@@ -10800,12 +10848,14 @@ local_system:
               Self::has_llm_compatible_cycle(&trie1_god, &roots, internal_max_llm_token);
 
               // Optimizations, similar to precompute0
-              let ignore_terminal_id = parser.and_then(|p| p.ignore_terminal_id);
+              let p = parser.unwrap();
+              let ignore_terminal_id = p.ignore_terminal_id;
 
               let mut stats = PrecomputeStats::default();
               crate::constraint_extra::calculate_final_stats1(&precomputed1, &mut stats, &trie1_god);
               crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, &trie1_god);
 
+              // 1. First optimization pass with original follow sets.
               constraint_precompute1_utils::optimize_trie1_size(
                   &mut precomputed1,
                   &trie1_god,
@@ -10813,11 +10863,67 @@ local_system:
                   &node0_to_node1_map,
                   ignore_terminal_id,
                   internal_max_llm_token,
-                  terminal_follow_map,
-                  config,
+                  terminal_follow_map, // Use original follow map
+                  config, // Use original config
                   stage_vocab,
                   token_name_map,
               );
+
+              // 2. Apply synthetic terminal transformation to the trie.
+              if !p.synthetic_terminal_map.is_empty() {
+                  crate::debug!(2, "Applying synthetic terminal transformations to Trie1");
+                  let all_nodes: Vec<_> = trie1_god.iter_arc().collect(); // snapshot of all nodes
+                  for node_idx in all_nodes {
+                      let mut modifications_by_synth_tid = BTreeMap::new();
+                      let children = node_idx.read(&trie1_god).unwrap().children().clone();
+
+                      for (synth_tid, original_tids) in &p.synthetic_terminal_map {
+                          let mut edges_to_modify = BTreeMap::new();
+                          for &original_tid in original_tids {
+                              if let Some(dest_map) = children.get(&Some(original_tid)) {
+                                  edges_to_modify.insert(original_tid, dest_map.clone());
+                              }
+                          }
+
+                          if !edges_to_modify.is_empty() {
+                              modifications_by_synth_tid.insert(*synth_tid, edges_to_modify);
+                          }
+                      }
+
+                      if !modifications_by_synth_tid.is_empty() {
+                          let mut node_guard = node_idx.write(&trie1_god).unwrap();
+                          for (synth_tid, edges) in modifications_by_synth_tid {
+                              // Create one shared intermediate node M for this synthetic terminal from this source node A.
+                              let intermediate_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
+
+                              // Add edge A --(S)--> M
+                              let synth_edge_key = Some(synth_tid);
+                              let dest_map_s = node_guard.children_mut().entry(synth_edge_key).or_default();
+                              
+                              let mut union_bv = LLMTokenBV::zeros();
+                              for dest_map in edges.values() {
+                                  for bv in dest_map.values() {
+                                      union_bv |= bv;
+                                  }
+                              }
+                              dest_map_s.insert(intermediate_node.clone(), union_bv);
+
+                              // For each original edge A --(X)--> B, remove it and add M --(X)--> B
+                              let mut intermediate_guard = intermediate_node.write(&trie1_god).unwrap();
+                              for (original_tid, dest_map) in edges {
+                                  node_guard.children_mut().remove(&Some(original_tid));
+                                  let dest_map_x = intermediate_guard.children_mut().entry(Some(original_tid)).or_default();
+                                  *dest_map_x = dest_map;
+                              }
+                          }
+                      }
+                  }
+              }
+
+              // 3. Second optimization pass without follow set pruning.
+              let mut config_no_follow_prune = config.clone();
+              config_no_follow_prune.prune_on_no_terminal_follow = false;
+              constraint_precompute1_utils::optimize_trie1_size(&mut precomputed1, &trie1_god, trie0_god, &node0_to_node1_map, ignore_terminal_id, internal_max_llm_token, &BTreeMap::new(), &config_no_follow_prune, stage_vocab, token_name_map);
 
               (precomputed1, trie1_god)
           }
@@ -14482,6 +14588,7 @@ local_system:
       pub mod automaton;
       pub mod minimizer;
       pub mod synthetic;
+      pub mod synthetic;
     src/glr/parser.rs: |+
       use crate::constraint::{LLMTokenBV, LLMVocab, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, Trie3GodWrapper};
       use crate::datastructures::gss_leveled_adapter::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
@@ -14603,8 +14710,13 @@ local_system:
               obj.insert("state_id".to_string(), self.state_id.to_json());
               // Handle user_data serialization:
               // Option 1: Panic if not default.
+              // Do not serialize precomputed substring gotos; they will be re-derived from the table.
+              // Do not serialize self.actions
+              // Do not serialize reduce_goto_map
+              obj.insert("synthetic_terminal_map".to_string(), self.synthetic_terminal_map.to_json());
               JSONNode::Object(obj)
           }
+
           fn from_json(node: JSONNode) -> Result<Self, String> {
               match node {
                   JSONNode::Object(mut obj) => {
@@ -14818,14 +14930,13 @@ local_system:
                           everything_state_id,
                           ignore_terminal_id,
                           substring_gotos,
-                          reduce_goto_map,
-                          hallucinated_row,
-                          hallucinated_state_id,
-                          synthetic_terminal_map,
-                      })
-                  }
-                  _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
+                  reduce_goto_map,
+                  hallucinated_row,
+                  hallucinated_state_id,
+                  synthetic_terminal_map,
               }
+          }
+
           }
       }
 
@@ -18240,6 +18351,114 @@ local_system:
 
           // 3. Find the best pair to synthesize.
           if let Some((&(t1, t2), &count)) = pair_counts.iter().max_by_key(|(_, &count)| *count) {
+              if count < 2 {
+                  return None;
+              } // Heuristic: don't bother for pairs that only co-occur once.
+
+              let co_occurring_terminals = BTreeSet::from([t1, t2]);
+              let t1_name = terminal_map.get_by_right(&t1).unwrap().to_string().replace(|c: char| !c.is_alphanumeric(), "");
+              let t2_name = terminal_map.get_by_right(&t2).unwrap().to_string().replace(|c: char| !c.is_alphanumeric(), "");
+              let synthetic_terminal_name = format!("__synth_{}_{}", t1_name, t2_name);
+
+              // Gain is just the count for now.
+              let estimated_gain = count as f64;
+
+              return Some(SyntheticTerminalAnalysis {
+                  co_occurring_terminals,
+                  synthetic_terminal_name,
+                  estimated_gain,
+              });
+          }
+
+          None
+      }
+
+      pub fn apply_synthetic_terminal(
+          productions: &mut Vec<Production>,
+          terminal_map: &mut BiBTreeMap<Terminal, TerminalID>,
+          analysis: &SyntheticTerminalAnalysis,
+      ) -> (TerminalID, BTreeSet<TerminalID>) {
+          let synth_terminal = Terminal::RegexName(analysis.synthetic_terminal_name.clone());
+          let synth_symbol = Symbol::Terminal(synth_terminal.clone());
+
+          // Add to terminal_map
+          let new_tid = TerminalID(terminal_map.len());
+          terminal_map.insert(synth_terminal, new_tid);
+
+          for prod in productions.iter_mut() {
+              let mut new_rhs = Vec::new();
+              for symbol in &prod.rhs {
+                  if let Symbol::Terminal(t) = symbol {
+                      if let Some(tid) = terminal_map.get_by_left(t) {
+                          if analysis.co_occurring_terminals.contains(tid) {
+                              new_rhs.push(synth_symbol.clone());
+                          }
+                      }
+                  }
+                  new_rhs.push(symbol.clone());
+              }
+              prod.rhs = new_rhs;
+          }
+
+          (new_tid, analysis.co_occurring_terminals.clone())
+      }
+      use crate::glr::grammar::{Production, Symbol, Terminal};
+      use crate::glr::table::{Stage7ShiftsAndReducesLookaheadValue, Table, TerminalID, NonTerminalID, ProductionID};
+      use bimap::BiBTreeMap;
+      use std::collections::{BTreeMap, BTreeSet};
+
+      #[derive(Debug, Clone)]
+      pub struct SyntheticTerminalAnalysis {
+          pub co_occurring_terminals: BTreeSet<TerminalID>,
+          pub synthetic_terminal_name: String,
+          pub estimated_gain: f64, // Some metric of how good this is
+      }
+
+      pub fn analyze_for_synthetic_terminal(
+          table: &Table,
+          terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+      ) -> Option<SyntheticTerminalAnalysis> {
+          // 1. For each distinct reduction action, find its set of lookahead terminals.
+          let mut reduce_lookaheads: BTreeMap<(usize, NonTerminalID), BTreeSet<TerminalID>> = BTreeMap::new();
+
+          for row in table.values() {
+              for (&tid, action) in &row.shifts_and_reduces_full {
+                  let mut process_reduces = |reduces: &BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>| {
+                      for (&len, nts) in reduces {
+                          for (&nt_id, _) in nts {
+                              reduce_lookaheads.entry((len, nt_id)).or_default().insert(tid);
+                          }
+                      }
+                  };
+                  match action {
+                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+                          reduce_lookaheads.entry((*len, *nonterminal_id)).or_default().insert(tid);
+                      }
+                      Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => process_reduces(reduces),
+                      _ => {}
+                  }
+              }
+          }
+
+          // 2. Find co-occurrence counts for pairs of terminals across all lookahead sets.
+          let mut pair_counts: BTreeMap<(TerminalID, TerminalID), usize> = BTreeMap::new();
+          for lookaheads in reduce_lookaheads.values() {
+              if lookaheads.len() < 2 {
+                  continue;
+              }
+              let terminals: Vec<_> = lookaheads.iter().copied().collect();
+              for i in 0..terminals.len() {
+                  for j in (i + 1)..terminals.len() {
+                      let t1 = terminals[i];
+                      let t2 = terminals[j];
+                      let pair = if t1 < t2 { (t1, t2) } else { (t2, t1) };
+                      *pair_counts.entry(pair).or_default() += 1;
+                  }
+              }
+          }
+
+          // 3. Find the best pair to synthesize.
+          if let Some((&(t1, t2), &count)) = pair_counts.iter().max_by_key(|(_, &count)| count) {
               if count < 2 {
                   return None;
               } // Heuristic: don't bother for pairs that only co-occur once.
@@ -27882,5 +28101,703 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Feat: Introduce synthetic terminal analysis
       and application logic"'
+    metadata:
+  - user: |-
+      Diff of src/constraint.rs since previous turn:
+      ```diff
+      --- original version of src/constraint.rs
+      +++ current version of src/constraint.rs
+      @@ -1623,7 +1623,7 @@
+               // --- NEW: Handle synthetic terminals ---
+               if let Some(p) = parser {
+                   if !p.synthetic_terminal_map.is_empty() {
+      -                let all_nodes: Vec<_> = trie1_god.iter_arc().collect(); // snapshot of all nodes
+      +                let all_nodes: Vec<_> = Trie::all_nodes(&trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
+                       for node_idx in all_nodes {
+                           let mut modifications_by_synth_tid = BTreeMap::new();
+                           let children = node_idx.read(&trie1_god).unwrap().children().clone();
+      @@ -1774,7 +1774,7 @@
+                   precomputed3.insert(*tokenizer_state_id, trie3_root.clone());
+       
+                   let mut acc = Acc::new_fresh();
+      -            // acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
+      +            acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
+                   let gss_leaf = Arc::new(GSSNode::new(acc));
+       
+                   let gss_stack = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id }));
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/automaton.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+      --- original version of src/glr/table.rs
+      +++ current version of src/glr/table.rs
+      @@ -1172,7 +1172,7 @@
+           print_summary();
+           print_summary_flat();
+       
+      -    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos, reduce_goto_map, hallucinated_row, hallucinated_state_id)
+      +    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos, reduce_goto_map, hallucinated_row, hallucinated_state_id, BTreeMap::new())
+       }
+       
+       pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/synthetic.rs since previous turn:
+      ```diff
+      --- original version of src/glr/synthetic.rs
+      +++ current version of src/glr/synthetic.rs
+      @@ -54,7 +54,7 @@
+           }
+       
+           // 3. Find the best pair to synthesize.
+      -    if let Some((&(t1, t2), &count)) = pair_counts.iter().max_by_key(|(_, &count)| *count) {
+      +    if let Some((&(t1, t2), &count)) = pair_counts.iter().max_by_key(|(_, &count)| count) {
+               if count < 2 {
+                   return None;
+               } // Heuristic: don't bother for pairs that only co-occur once.
+
+      ```
+    metadata:
+  - user: |-
+      The user will NOT add synthetic terminals before constructing the grammar constraint. The user shouldn't have to be aware of this when using the grammar constraint.
+      In fact, some parts of the tree1 optimization rely on elements of the grammar before synthetic terminals, such as follow terminal simplification.
+      So, what we'll have to do is apply it ourselves when constructing the grammar constraint. Then, the parser stored in the constraint will be the one with the synthetic terminals applied.
+      But the parser we use to do follow terminal simplification, ie the one we do `compute_terminal_follow_sets` with, will be the parser before synthetic terminals.
+      And `optimize_trie1_size` will need to be done before synthetic terminals are applied to the precompute1 tree, as well as *after* they're applied. So twice.
+      But the second time, in `Trie1Config`, we'll need to set the `prune_on_no_terminal_follow` field to `false`, and pass an empty map instead of `terminal_follow_map`.
+    metadata:
+  - assistant: |-
+      Of course. Here are the step-by-step instructions to implement the synthetic terminal optimization, followed by the corresponding git diffs.
+
+      ### Step-by-step Instructions
+
+      1.  **Create a New File for Synthetic Terminal Logic**
+          Create a new file named `src/glr/synthetic.rs`. This file will contain the logic for analyzing the parse table to find candidate terminals for synthesis and for applying the grammar transformation.
+
+      2.  **Populate `src/glr/synthetic.rs`**
+          Copy the following code into the newly created `src/glr/synthetic.rs`:
+
+          ```rust
+          use crate::glr::grammar::{Production, Symbol, Terminal};
+          use crate::glr::table::{Stage7ShiftsAndReducesLookaheadValue, Table, TerminalID, NonTerminalID, ProductionID};
+          use bimap::BiBTreeMap;
+          use std::collections::{BTreeMap, BTreeSet};
+
+          #[derive(Debug, Clone)]
+          pub struct SyntheticTerminalAnalysis {
+              pub co_occurring_terminals: BTreeSet<TerminalID>,
+              pub synthetic_terminal_name: String,
+              pub estimated_gain: f64, // Some metric of how good this is
+          }
+
+          pub fn analyze_for_synthetic_terminal(
+              table: &Table,
+              terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+          ) -> Option<SyntheticTerminalAnalysis> {
+              // 1. For each distinct reduction action, find its set of lookahead terminals.
+              let mut reduce_lookaheads: BTreeMap<(usize, NonTerminalID), BTreeSet<TerminalID>> = BTreeMap::new();
+
+              for row in table.values() {
+                  for (&tid, action) in &row.shifts_and_reduces_full {
+                      let mut process_reduces = |reduces: &BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>| {
+                          for (&len, nts) in reduces {
+                              for (&nt_id, _) in nts {
+                                  reduce_lookaheads.entry((len, nt_id)).or_default().insert(tid);
+                              }
+                          }
+                      };
+                      match action {
+                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+                              reduce_lookaheads.entry((*len, *nonterminal_id)).or_default().insert(tid);
+                          }
+                          Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => process_reduces(reduces),
+                          _ => {}
+                      }
+                  }
+              }
+
+              // 2. Find co-occurrence counts for pairs of terminals across all lookahead sets.
+              let mut pair_counts: BTreeMap<(TerminalID, TerminalID), usize> = BTreeMap::new();
+              for lookaheads in reduce_lookaheads.values() {
+                  if lookaheads.len() < 2 {
+                      continue;
+                  }
+                  let terminals: Vec<_> = lookaheads.iter().copied().collect();
+                  for i in 0..terminals.len() {
+                      for j in (i + 1)..terminals.len() {
+                          let t1 = terminals[i];
+                          let t2 = terminals[j];
+                          let pair = if t1 < t2 { (t1, t2) } else { (t2, t1) };
+                          *pair_counts.entry(pair).or_default() += 1;
+                      }
+                  }
+              }
+
+              // 3. Find the best pair to synthesize.
+              if let Some((&(t1, t2), &count)) = pair_counts.iter().max_by_key(|(_, &count)| *count) {
+                  if count < 2 {
+                      return None;
+                  } // Heuristic: don't bother for pairs that only co-occur once.
+
+                  let co_occurring_terminals = BTreeSet::from([t1, t2]);
+                  let t1_name = terminal_map.get_by_right(&t1).unwrap().to_string().replace(|c: char| !c.is_alphanumeric(), "");
+                  let t2_name = terminal_map.get_by_right(&t2).unwrap().to_string().replace(|c: char| !c.is_alphanumeric(), "");
+                  let synthetic_terminal_name = format!("__synth_{}_{}", t1_name, t2_name);
+
+                  // Gain is just the count for now.
+                  let estimated_gain = count as f64;
+
+                  return Some(SyntheticTerminalAnalysis {
+                      co_occurring_terminals,
+                      synthetic_terminal_name,
+                      estimated_gain,
+                  });
+              }
+
+              None
+          }
+
+          pub fn apply_synthetic_terminal(
+              productions: &mut Vec<Production>,
+              terminal_map: &mut BiBTreeMap<Terminal, TerminalID>,
+              analysis: &SyntheticTerminalAnalysis,
+          ) -> (TerminalID, BTreeSet<TerminalID>) {
+              let synth_terminal = Terminal::RegexName(analysis.synthetic_terminal_name.clone());
+              let synth_symbol = Symbol::Terminal(synth_terminal.clone());
+
+              // Add to terminal_map
+              let new_tid = TerminalID(terminal_map.len());
+              terminal_map.insert(synth_terminal, new_tid);
+
+              for prod in productions.iter_mut() {
+                  let mut new_rhs = Vec::new();
+                  for symbol in &prod.rhs {
+                      if let Symbol::Terminal(t) = symbol {
+                          if let Some(tid) = terminal_map.get_by_left(t) {
+                              if analysis.co_occurring_terminals.contains(tid) {
+                                  new_rhs.push(synth_symbol.clone());
+                              }
+                          }
+                      }
+                      new_rhs.push(symbol.clone());
+                  }
+                  prod.rhs = new_rhs;
+              }
+
+              (new_tid, analysis.co_occurring_terminals.clone())
+          }
+          ```
+
+      3.  **Register the New Module**
+          In `src/glr/mod.rs`, add `pub mod synthetic;` to make the new module public.
+
+      4.  **Update `GLRParser` to Track Synthetic Terminals**
+          In `src/glr/parser.rs`, modify the `GLRParser` struct and its associated methods to handle a map of synthetic terminals.
+          *   Add the `synthetic_terminal_map` field to the `GLRParser` struct.
+          *   Update the `new`, `to_json`, `from_json`, `Debug`, and `PartialEq` implementations to include this new field.
+
+      5.  **Integrate Synthetic Terminal Generation into `GrammarConstraint`**
+          In `src/constraint.rs`, modify the `new_with_config` and `new_with_config_and_precompute0_cache` methods to automatically perform synthetic terminal analysis and apply the results.
+          *   After computing the `terminal_follow_map` from the original grammar, insert new logic to analyze the parser's table.
+          *   If a good candidate for a synthetic terminal is found, transform the grammar and regenerate the `GLRParser`. The `GrammarConstraint` will then be built using this new, optimized parser.
+
+      6.  **Update `precompute1` to Handle Synthetic Terminals**
+          In `src/constraint.rs`, modify the `precompute1` function to perform a multi-stage optimization:
+          1.  Run the existing `optimize_trie1_size` pass using the follow sets from the *original* grammar.
+          2.  Transform the `Trie1` graph by inserting new nodes and edges corresponding to the synthetic terminals.
+          3.  Run `optimize_trie1_size` a second time, but with follow-set pruning disabled, to clean up the transformed graph.
+
+      ### Git Diffs
+
+      Here are the git diffs corresponding to the steps above.
+
+      ```diff
+      diff --git a/src/constraint.rs b/src/constraint.rs
+      --- a/src/constraint.rs
+      +++ b/src/constraint.rs
+      @@ -1000,6 +1000,29 @@
+       
+               crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map.len());
+       
+      +        let mut final_parser = parser.clone();
+      +        let mut synthetic_terminal_maps = BTreeMap::new();
+      +        const MAX_SYNTH_ITERATIONS: usize = 1;
+      +        for _ in 0..MAX_SYNTH_ITERATIONS {
+      +            if let Some(analysis) = crate::glr::synthetic::analyze_for_synthetic_terminal(&final_parser.table, &final_parser.terminal_map) {
+      +                crate::debug!(2, "Applying synthetic terminal optimization: {:?}", analysis);
+      +                let mut new_productions = final_parser.productions.clone();
+      +                let mut new_terminal_map = final_parser.terminal_map.clone();
+      +                let (synth_tid, original_tids) = crate::glr::synthetic::apply_synthetic_terminal(&mut new_productions, &mut new_terminal_map, &analysis);
+      +                synthetic_terminal_maps.insert(synth_tid, original_tids);
+      +                let new_non_terminal_map = crate::glr::table::assign_non_terminal_ids(&new_productions);
+      +                final_parser = crate::glr::table::generate_glr_parser_with_maps(
+      +                    &new_productions,
+      +                    new_terminal_map,
+      +                    new_non_terminal_map,
+      +                    BTreeMap::new(),
+      +                    final_parser.ignore_terminal_id,
+      +                );
+      +                final_parser.synthetic_terminal_map = synthetic_terminal_maps.clone();
+      +            } else {
+      +                break;
+      +            }
+      +        }
+      +        let parser = final_parser;
+               let llm_vocab = Arc::new(LLMVocab {
+                   llm_token_map,
+                   max_original_llm_token_id,
+      @@ -1318,6 +1341,29 @@
+       
+               crate::debug!(2, "Computed terminal_follow_map_ids with {} entries.", terminal_follow_map.len());
+       
+      +        let mut final_parser = parser.clone();
+      +        let mut synthetic_terminal_maps = BTreeMap::new();
+      +        const MAX_SYNTH_ITERATIONS: usize = 1;
+      +        for _ in 0..MAX_SYNTH_ITERATIONS {
+      +            if let Some(analysis) = crate::glr::synthetic::analyze_for_synthetic_terminal(&final_parser.table, &final_parser.terminal_map) {
+      +                crate::debug!(2, "Applying synthetic terminal optimization: {:?}", analysis);
+      +                let mut new_productions = final_parser.productions.clone();
+      +                let mut new_terminal_map = final_parser.terminal_map.clone();
+      +                let (synth_tid, original_tids) = crate::glr::synthetic::apply_synthetic_terminal(&mut new_productions, &mut new_terminal_map, &analysis);
+      +                synthetic_terminal_maps.insert(synth_tid, original_tids);
+      +                let new_non_terminal_map = crate::glr::table::assign_non_terminal_ids(&new_productions);
+      +                final_parser = crate::glr::table::generate_glr_parser_with_maps(
+      +                    &new_productions,
+      +                    new_terminal_map,
+      +                    new_non_terminal_map,
+      +                    BTreeMap::new(),
+      +                    final_parser.ignore_terminal_id,
+      +                );
+      +                final_parser.synthetic_terminal_map = synthetic_terminal_maps.clone();
+      +            } else {
+      +                break;
+      +            }
+      +        }
+      +        let parser = final_parser;
+               let llm_vocab = Arc::new(LLMVocab {
+                   llm_token_map: llm_token_map.clone(),
+                   max_original_llm_token_id,
+      @@ -1577,24 +1623,81 @@
+               Self::has_llm_compatible_cycle(&trie1_god, &roots, internal_max_llm_token);
+       
+               // Optimizations, similar to precompute0
+      -        let ignore_terminal_id = parser.and_then(|p| p.ignore_terminal_id);
+      +        let p = parser.unwrap();
+      +        let ignore_terminal_id = p.ignore_terminal_id;
+       
+               let mut stats = PrecomputeStats::default();
+               crate::constraint_extra::calculate_final_stats1(&precomputed1, &mut stats, &trie1_god);
+               crate::constraint_extra::print_precompute_stats1(&stats, token_name_map, &trie1_god);
+       
+      +        // 1. First optimization pass with original follow sets.
+               constraint_precompute1_utils::optimize_trie1_size(
+                   &mut precomputed1,
+                   &trie1_god,
+                   trie0_god,
+                   &node0_to_node1_map,
+                   ignore_terminal_id,
+                   internal_max_llm_token,
+      -            terminal_follow_map,
+      -            config,
+      +            terminal_follow_map, // Use original follow map
+      +            config, // Use original config
+                   stage_vocab,
+                   token_name_map,
+               );
+       
+      +        // 2. Apply synthetic terminal transformation to the trie.
+      +        if !p.synthetic_terminal_map.is_empty() {
+      +            crate::debug!(2, "Applying synthetic terminal transformations to Trie1");
+      +            let all_nodes: Vec<_> = trie1_god.iter_arc().collect(); // snapshot of all nodes
+      +            for node_idx in all_nodes {
+      +                let mut modifications_by_synth_tid = BTreeMap::new();
+      +                let children = node_idx.read(&trie1_god).unwrap().children().clone();
+      +
+      +                for (synth_tid, original_tids) in &p.synthetic_terminal_map {
+      +                    let mut edges_to_modify = BTreeMap::new();
+      +                    for &original_tid in original_tids {
+      +                        if let Some(dest_map) = children.get(&Some(original_tid)) {
+      +                            edges_to_modify.insert(original_tid, dest_map.clone());
+      +                        }
+      +                    }
+      +
+      +                    if !edges_to_modify.is_empty() {
+      +                        modifications_by_synth_tid.insert(*synth_tid, edges_to_modify);
+      +                    }
+      +                }
+      +
+      +                if !modifications_by_synth_tid.is_empty() {
+      +                    let mut node_guard = node_idx.write(&trie1_god).unwrap();
+      +                    for (synth_tid, edges) in modifications_by_synth_tid {
+      +                        // Create one shared intermediate node M for this synthetic terminal from this source node A.
+      +                        let intermediate_node = PrecomputeNode1Index::new(trie1_god.insert(PrecomputeNode1::new(PrecomputedNodeContents::internal())));
+      +
+      +                        // Add edge A --(S)--> M
+      +                        let synth_edge_key = Some(synth_tid);
+      +                        let dest_map_s = node_guard.children_mut().entry(synth_edge_key).or_default();
+      +                        
+      +                        let mut union_bv = LLMTokenBV::zeros();
+      +                        for dest_map in edges.values() {
+      +                            for bv in dest_map.values() {
+      +                                union_bv |= bv;
+      +                            }
+      +                        }
+      +                        dest_map_s.insert(intermediate_node.clone(), union_bv);
+      +
+      +                        // For each original edge A --(X)--> B, remove it and add M --(X)--> B
+      +                        let mut intermediate_guard = intermediate_node.write(&trie1_god).unwrap();
+      +                        for (original_tid, dest_map) in edges {
+      +                            node_guard.children_mut().remove(&Some(original_tid));
+      +                            let dest_map_x = intermediate_guard.children_mut().entry(Some(original_tid)).or_default();
+      +                            *dest_map_x = dest_map;
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+      +
+      +        // 3. Second optimization pass without follow set pruning.
+      +        let mut config_no_follow_prune = config.clone();
+      +        config_no_follow_prune.prune_on_no_terminal_follow = false;
+      +        constraint_precompute1_utils::optimize_trie1_size(&mut precomputed1, &trie1_god, trie0_god, &node0_to_node1_map, ignore_terminal_id, internal_max_llm_token, &BTreeMap::new(), &config_no_follow_prune, stage_vocab, token_name_map);
+      +
+               (precomputed1, trie1_god)
+           }
+       
+
+      ```
+      ```diff
+      diff --git a/src/glr/mod.rs b/src/glr/mod.rs
+      --- a/src/glr/mod.rs
+      +++ b/src/glr/mod.rs
+      @@ -5,3 +5,4 @@
+       pub mod analyze;
+       pub mod automaton;
+       pub mod minimizer;
+      +pub mod synthetic;
+
+      ```
+      ```diff
+      diff --git a/src/glr/parser.rs b/src/glr/parser.rs
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -211,6 +211,7 @@
+           pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+           pub hallucinated_row: HallucinatedRow,
+           pub hallucinated_state_id: StateID,
+      +    pub synthetic_terminal_map: BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+       }
+       
+       impl JSONConvertible for GLRParser {
+      @@ -228,6 +229,7 @@
+               // Do not serialize precomputed substring gotos; they will be re-derived from the table.
+               // Do not serialize self.actions
+               // Do not serialize reduce_goto_map
+      +        obj.insert("synthetic_terminal_map".to_string(), self.synthetic_terminal_map.to_json());
+               JSONNode::Object(obj)
+           }
+       
+      @@ -256,6 +258,10 @@
+                       let reduce_goto_map = crate::glr::table::stage_10(&table);
+                       let hallucinated_row = crate::glr::table::stage_11_create_hallucinated_row(&table);
+                       let hallucinated_state_id = StateID(usize::MAX);
+      +                let synthetic_terminal_map = obj.remove("synthetic_terminal_map")
+      +                    .and_then(|n| BTreeMap::from_json(n).ok())
+      +                    .unwrap_or_default();
+      +
+       
+                       Ok(GLRParser {
+                           table,
+      @@ -270,6 +276,7 @@
+                           reduce_goto_map,
+                           hallucinated_row,
+                           hallucinated_state_id,
+      +                    synthetic_terminal_map,
+                       })
+                   }
+                   _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
+      @@ -291,6 +298,7 @@
+                   .field("substring_gotos_size", &self.substring_gotos.len())
+                   .field("reduce_goto_map_size", &self.reduce_goto_map.len())
+                   .field("hallucinated_state_id", &self.hallucinated_state_id)
+      +            .field("synthetic_terminal_map", &self.synthetic_terminal_map)
+                   .finish()
+           }
+       }
+      @@ -307,7 +315,8 @@
+               self.substring_gotos == other.substring_gotos &&
+               self.reduce_goto_map == other.reduce_goto_map &&
+               self.hallucinated_row == other.hallucinated_row &&
+      -        self.hallucinated_state_id == other.hallucinated_state_id
+      +        self.hallucinated_state_id == other.hallucinated_state_id &&
+      +        self.synthetic_terminal_map == other.synthetic_terminal_map
+           }
+       }
+       
+      @@ -326,6 +335,7 @@
+               reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+               hallucinated_row: HallucinatedRow,
+               hallucinated_state_id: StateID,
+      +        synthetic_terminal_map: BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+           ) -> Self {
+               let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
+                   .into_iter()
+      @@ -348,6 +358,7 @@
+                   reduce_goto_map,
+                   hallucinated_row,
+                   hallucinated_state_id,
+      +            synthetic_terminal_map,
+               }
+           }
+       
+
+      ```
+      ```diff
+      diff --git a/src/glr/synthetic.rs b/src/glr/synthetic.rs
+      new file mode 100644
+      --- /dev/null
+      +++ b/src/glr/synthetic.rs
+      @@ -0,0 +1,101 @@
+      +use crate::glr::grammar::{Production, Symbol, Terminal};
+      +use crate::glr::table::{Stage7ShiftsAndReducesLookaheadValue, Table, TerminalID, NonTerminalID, ProductionID};
+      +use bimap::BiBTreeMap;
+      +use std::collections::{BTreeMap, BTreeSet};
+      +
+      +#[derive(Debug, Clone)]
+      +pub struct SyntheticTerminalAnalysis {
+      +    pub co_occurring_terminals: BTreeSet<TerminalID>,
+      +    pub synthetic_terminal_name: String,
+      +    pub estimated_gain: f64, // Some metric of how good this is
+      +}
+      +
+      +pub fn analyze_for_synthetic_terminal(
+      +    table: &Table,
+      +    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+      +) -> Option<SyntheticTerminalAnalysis> {
+      +    // 1. For each distinct reduction action, find its set of lookahead terminals.
+      +    let mut reduce_lookaheads: BTreeMap<(usize, NonTerminalID), BTreeSet<TerminalID>> = BTreeMap::new();
+      +
+      +    for row in table.values() {
+      +        for (&tid, action) in &row.shifts_and_reduces_full {
+      +            let mut process_reduces = |reduces: &BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>| {
+      +                for (&len, nts) in reduces {
+      +                    for (&nt_id, _) in nts {
+      +                        reduce_lookaheads.entry((len, nt_id)).or_default().insert(tid);
+      +                    }
+      +                }
+      +            };
+      +            match action {
+      +                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+      +                    reduce_lookaheads.entry((*len, *nonterminal_id)).or_default().insert(tid);
+      +                }
+      +                Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => process_reduces(reduces),
+      +                _ => {}
+      +            }
+      +        }
+      +    }
+      +
+      +    // 2. Find co-occurrence counts for pairs of terminals across all lookahead sets.
+      +    let mut pair_counts: BTreeMap<(TerminalID, TerminalID), usize> = BTreeMap::new();
+      +    for lookaheads in reduce_lookaheads.values() {
+      +        if lookaheads.len() < 2 {
+      +            continue;
+      +        }
+      +        let terminals: Vec<_> = lookaheads.iter().copied().collect();
+      +        for i in 0..terminals.len() {
+      +            for j in (i + 1)..terminals.len() {
+      +                let t1 = terminals[i];
+      +                let t2 = terminals[j];
+      +                let pair = if t1 < t2 { (t1, t2) } else { (t2, t1) };
+      +                *pair_counts.entry(pair).or_default() += 1;
+      +            }
+      +        }
+      +    }
+      +
+      +    // 3. Find the best pair to synthesize.
+      +    if let Some((&(t1, t2), &count)) = pair_counts.iter().max_by_key(|(_, &count)| *count) {
+      +        if count < 2 {
+      +            return None;
+      +        } // Heuristic: don't bother for pairs that only co-occur once.
+      +
+      +        let co_occurring_terminals = BTreeSet::from([t1, t2]);
+      +        let t1_name = terminal_map.get_by_right(&t1).unwrap().to_string().replace(|c: char| !c.is_alphanumeric(), "");
+      +        let t2_name = terminal_map.get_by_right(&t2).unwrap().to_string().replace(|c: char| !c.is_alphanumeric(), "");
+      +        let synthetic_terminal_name = format!("__synth_{}_{}", t1_name, t2_name);
+      +
+      +        // Gain is just the count for now.
+      +        let estimated_gain = count as f64;
+      +
+      +        return Some(SyntheticTerminalAnalysis {
+      +            co_occurring_terminals,
+      +            synthetic_terminal_name,
+      +            estimated_gain,
+      +        });
+      +    }
+      +
+      +    None
+      +}
+      +
+      +pub fn apply_synthetic_terminal(
+      +    productions: &mut Vec<Production>,
+      +    terminal_map: &mut BiBTreeMap<Terminal, TerminalID>,
+      +    analysis: &SyntheticTerminalAnalysis,
+      +) -> (TerminalID, BTreeSet<TerminalID>) {
+      +    let synth_terminal = Terminal::RegexName(analysis.synthetic_terminal_name.clone());
+      +    let synth_symbol = Symbol::Terminal(synth_terminal.clone());
+      +
+      +    // Add to terminal_map
+      +    let new_tid = TerminalID(terminal_map.len());
+      +    terminal_map.insert(synth_terminal, new_tid);
+      +
+      +    for prod in productions.iter_mut() {
+      +        let mut new_rhs = Vec::new();
+      +        for symbol in &prod.rhs {
+      +            if let Symbol::Terminal(t) = symbol {
+      +                if let Some(tid) = terminal_map.get_by_left(t) {
+      +                    if analysis.co_occurring_terminals.contains(tid) {
+      +                        new_rhs.push(synth_symbol.clone());
+      +                    }
+      +                }
+      +            }
+      +            new_rhs.push(symbol.clone());
+      +        }
+      +        prod.rhs = new_rhs;
+      +    }
+      +
+      +    (new_tid, analysis.co_occurring_terminals.clone())
+      +}
+
+      ```
+    metadata:
+  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
+      applied now.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/src/glr/parser.rs b/src/glr/parser.rs
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -211,6 +211,7 @@
+           pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+           pub hallucinated_row: HallucinatedRow,
+           pub hallucinated_state_id: StateID,
+      +    pub synthetic_terminal_map: BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+       }
+       
+       impl JSONConvertible for GLRParser {
+      @@ -228,6 +229,7 @@
+               // Do not serialize precomputed substring gotos; they will be re-derived from the table.
+               // Do not serialize self.actions
+               // Do not serialize reduce_goto_map
+      +        obj.insert("synthetic_terminal_map".to_string(), self.synthetic_terminal_map.to_json());
+               JSONNode::Object(obj)
+           }
+       
+      @@ -256,6 +258,10 @@
+                       let reduce_goto_map = crate::glr::table::stage_10(&table);
+                       let hallucinated_row = crate::glr::table::stage_11_create_hallucinated_row(&table);
+                       let hallucinated_state_id = StateID(usize::MAX);
+      +                let synthetic_terminal_map = obj.remove("synthetic_terminal_map")
+      +                    .and_then(|n| BTreeMap::from_json(n).ok())
+      +                    .unwrap_or_default();
+      +
+       
+                       Ok(GLRParser {
+                           table,
+      @@ -270,6 +276,7 @@
+                           reduce_goto_map,
+                           hallucinated_row,
+                           hallucinated_state_id,
+      +                    synthetic_terminal_map,
+                       })
+                   }
+                   _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
+      @@ -291,6 +298,7 @@
+                   .field("substring_gotos_size", &self.substring_gotos.len())
+                   .field("reduce_goto_map_size", &self.reduce_goto_map.len())
+                   .field("hallucinated_state_id", &self.hallucinated_state_id)
+      +            .field("synthetic_terminal_map", &self.synthetic_terminal_map)
+                   .finish()
+           }
+       }
+      @@ -382,8 +382,8 @@
+               self.reduce_goto_map == other.reduce_goto_map &&
+               self.hallucinated_row == other.hallucinated_row &&
+      -        self.hallucinated_state_id == other.hallucinated_state_id &&
+      -        self.synthetic_terminal_map == other.synthetic_terminal_map
+      +        self.hallucinated_state_id == other.hallucinated_state_id &&
+      +        self.synthetic_terminal_map == other.synthetic_terminal_map
+           }
+       }
+      @@ -326,6 +335,7 @@
+               reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+               hallucinated_row: HallucinatedRow,
+               hallucinated_state_id: StateID,
+      +        synthetic_terminal_map: BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+           ) -> Self {
+               let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
+                   .into_iter()
+      @@ -348,6 +358,7 @@
+                   reduce_goto_map,
+                   hallucinated_row,
+                   hallucinated_state_id,
+      +            synthetic_terminal_map,
+               }
+           }
+       
+
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
+    metadata:
+  - user: 'Changes committed with message: "Feat: Add synthetic_terminal_map to GLRParser
+      to track synthesized terminals"'
     metadata:
 ...

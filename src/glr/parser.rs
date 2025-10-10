@@ -118,8 +118,13 @@ impl JSONConvertible for ParseStateEdgeContent {
         obj.insert("state_id".to_string(), self.state_id.to_json());
         // Handle user_data serialization:
         // Option 1: Panic if not default.
+        // Do not serialize precomputed substring gotos; they will be re-derived from the table.
+        // Do not serialize self.actions
+        // Do not serialize reduce_goto_map
+        obj.insert("synthetic_terminal_map".to_string(), self.synthetic_terminal_map.to_json());
         JSONNode::Object(obj)
     }
+
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
@@ -333,13 +338,10 @@ impl JSONConvertible for GLRParser {
                     everything_state_id,
                     ignore_terminal_id,
                     substring_gotos,
-                    reduce_goto_map,
-                    hallucinated_row,
-                    hallucinated_state_id,
-                    synthetic_terminal_map,
-                })
-            }
-            _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
+            reduce_goto_map,
+            hallucinated_row,
+            hallucinated_state_id,
+            synthetic_terminal_map,
         }
     }
 }

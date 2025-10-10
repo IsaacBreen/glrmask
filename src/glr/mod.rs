@@ -8,3 +8,4 @@ pub mod analyze;
 pub mod automaton;
 pub mod minimizer;
 pub mod synthetic;
+pub mod synthetic;
