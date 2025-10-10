@@ -1749,7 +1749,7 @@ impl GrammarConstraint {
                     edge_bv |= bv;
                 }
                 // allow_only_llm_tokens_and_prune_arc(&mut glr_s.active_state.stack, &edge_bv, &mut HashMap::new());
-                allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s.active_state.stack, &edge_bv, &mut HashMap::new(), glr_s.active_state.trie2_god.as_ref().unwrap());
+                // allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(&mut glr_s.active_state.stack, &edge_bv, &mut HashMap::new(), glr_s.active_state.trie2_god.as_ref().unwrap());
 
                 if let Some(gt) = edge_grammar_token_opt {
                     glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
@@ -1812,15 +1812,15 @@ impl GrammarConstraint {
                 timeit!("precompute3 process node", {
 
                 // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
-                timeit!("Normalize", {
-                    Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
-                });
+                // timeit!("Normalize", {
+                //     Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
+                // });
 
-                crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
-                    &mut glr_s.active_state.stack,
-                    &mut HashMap::new(),
-                    glr_s.active_state.trie2_god.as_ref().unwrap(),
-                );
+                // crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
+                //     &mut glr_s.active_state.stack,
+                //     &mut HashMap::new(),
+                //     glr_s.active_state.trie2_god.as_ref().unwrap(),
+                // );
                 keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
                     let stored_trie_nodes = glr_s.active_state.stack.stored_trie_nodes();
