@@ -1418,8 +1418,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
     {
         timeit!({
             let stats = gather_gss_stats(&[peek.isolated_parent().as_ref()]);
-            let num_nodes = stats.unique_nodes;
-            // format!("GLRParserState::reduce_and_goto::PoppedGSSStats: {} unique nodes, {} edges. len {}", stats.unique_nodes, stats.total_edges, len)
+            let num_nodes = stats.unique_nodes();
+            // format!("GLRParserState::reduce_and_goto::PoppedGSSStats: {} unique nodes, {} edges. len {}", stats.unique_nodes(), stats.total_edges(), len)
             "GLRParserState::reduce_and_goto"
         }, {
         hit!(&format!("GLRParserState::reduce_and_goto popped nt '{}', len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len));
@@ -2200,10 +2200,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         for (name, root) in &roots_to_log {
             let stats = gather_gss_stats(&[root.as_ref()]);
-            total_nodes += stats.unique_nodes;
+            total_nodes += stats.unique_nodes();
 
             let (current_gss_string, current_state_ids) = {
-                let print_full_forest = stats.total_edges <= MAX;
+                let print_full_forest = stats.total_edges() <= MAX;
                 let max_edges_to_print = if print_full_forest { usize::MAX } else { MAX };
                 let config = GSSPrintConfig {
                     max_edges: max_edges_to_print,
@@ -2211,19 +2211,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 };
                 let (gss_string, state_ids) = print_gss_forest(&[root.clone()], &self.parser.terminal_map, &config);
                 let final_string = if print_full_forest {
-                    format!("{} GSS ({} nodes, {} edges):\n{}", name, stats.unique_nodes, stats.total_edges, gss_string)
+                    format!("{} GSS ({} nodes, {} edges):\n{}", name, stats.unique_nodes(), stats.total_edges(), gss_string)
                 } else {
                     match find_longest_path(root) {
                         Some(p) => format!("{} GSS too big ({} nodes, {} edges). Longest path ({}): {}",
                                            name,
-                                           stats.unique_nodes,
-                                           stats.total_edges,
+                                           stats.unique_nodes(),
+                                           stats.total_edges(),
                                            p.len(),
                                            p.iter().map(|(ec, _n)| ec.state_id.0) // n is Arc<GSSNode>
                                                 .map(|id| id.to_string())
                                                 .collect::<Vec<_>>()
                                             .join(" → ")),
-                        None => format!("{} GSS too big ({} nodes, {} edges) – path not found", name, stats.unique_nodes, stats.total_edges),
+                        None => format!("{} GSS too big ({} nodes, {} edges) – path not found", name, stats.unique_nodes(), stats.total_edges()),
                     }
                 };
                 (final_string, state_ids)

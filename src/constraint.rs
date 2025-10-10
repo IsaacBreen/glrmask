@@ -1754,7 +1754,7 @@ impl GrammarConstraint {
                 if let Some(gt) = edge_grammar_token_opt {
                     glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                     let stats = glr_s.stats();
-                    println!("After processing token {:?}, number of GSS nodes: {}, edges: {}", gt, stats.unique_nodes, stats.total_edges);
+                    println!("After processing token {:?}, number of GSS nodes: {}, edges: {}", gt, stats.unique_nodes(), stats.total_edges());
                 }
 
                 out = Vec::new();
@@ -3348,7 +3348,7 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn num_unique_nodes(&self) -> usize {
         gather_gss_stats(
             &self.state.values().map(|s| s.active_state.stack.as_ref()).collect::<Vec<_>>(),
-        ).unique_nodes
+        ).unique_nodes()
     }
 
     pub fn get_mask3(&self) -> LLMTokenBV {

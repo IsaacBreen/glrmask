@@ -77,20 +77,30 @@ impl LGMerge for Acc {
 // --- Minimal GSSStats for logging/debug ---
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GSSStats {
-    pub(crate) num_roots: usize,
-    pub(crate) num_root_predecessors: usize,
-    pub(crate) num_unique_root_predecessor_keys: usize,
-    pub(crate) total_edges: usize,
-    pub(crate) unique_nodes: usize,
-    pub(crate) num_leaves: usize,
-    pub(crate) structurally_unique_nodes: usize,
-    pub(crate) structural_redundancy: f64,
-    pub(crate) num_redundant_nodes: usize,
-    pub(crate) max_depth: usize,
-    pub(crate) average_depth: f64,
-    pub(crate) merge_points: usize,
-    pub(crate) max_predecessors_with_values: usize,
-    pub(crate) average_predecessors_with_values: f64,
+    num_roots: usize,
+    num_root_predecessors: usize,
+    num_unique_root_predecessor_keys: usize,
+    total_edges: usize,
+    unique_nodes: usize,
+    num_leaves: usize,
+    structurally_unique_nodes: usize,
+    structural_redundancy: f64,
+    num_redundant_nodes: usize,
+    max_depth: usize,
+    average_depth: f64,
+    merge_points: usize,
+    max_predecessors_with_values: usize,
+    average_predecessors_with_values: f64,
+}
+
+impl GSSStats {
+    pub fn unique_nodes(&self) -> usize {
+        self.unique_nodes
+    }
+
+    pub fn total_edges(&self) -> usize {
+        self.total_edges
+    }
 }
 
 #[time_it]
