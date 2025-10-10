@@ -27,6 +27,7 @@ use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::finite_automata::Regex;
 use crate::glr::analyze::compute_terminal_follow_sets;
+use crate::glr::synthetic::analyze_synthetic_terminals;
 use crate::glr::grammar::Terminal;
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::parser::{BelowBottomReductionMode, ExpectElse, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessDefaultReductionsAdvancedConfig, ProcessTokenAdvancedConfig};
@@ -537,6 +538,7 @@ pub struct GrammarConstraint {
     pub precompute_vocab1: StageVocab,
     pub precompute2_vocab: StageVocab,
     pub precompute3_vocab: StageVocab,
+    pub synthetic_terminal_map: BTreeMap<TerminalID, BTreeSet<TerminalID>>,
 }
 
 impl GrammarConstraint {
@@ -569,6 +571,7 @@ impl GrammarConstraint {
         assert_eq!(self.post_commit_allow_check_mode, other.post_commit_allow_check_mode);
         assert_eq!(self.state_map_by_llm, other.state_map_by_llm);
         assert_eq!(self.terminal_map_by_llm, other.terminal_map_by_llm);
+        assert_eq!(self.synthetic_terminal_map, other.synthetic_terminal_map);
     }
 }
 
@@ -597,6 +600,7 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("precompute_vocab".to_string(), self.precompute_vocab1.to_json());
         obj.insert("precompute2_vocab".to_string(), self.precompute2_vocab.to_json());
         obj.insert("precompute3_vocab".to_string(), self.precompute3_vocab.to_json());
+        obj.insert("synthetic_terminal_map".to_string(), self.synthetic_terminal_map.to_json());
         JSONNode::Object(obj)
     }
 
@@ -661,6 +665,10 @@ impl JSONConvertible for GrammarConstraint {
                     Some(n) => StageVocab::from_json(n)?,
                     None => precompute_vocab.clone(),
 				};
+                let synthetic_terminal_map = obj.remove("synthetic_terminal_map")
+                    .map(|n| BTreeMap::<TerminalID, BTreeSet<TerminalID>>::from_json(n))
+                    .transpose()?
+                    .unwrap_or_default();
 
                 Ok(GrammarConstraint {
                     tokenizer,
@@ -683,6 +691,7 @@ impl JSONConvertible for GrammarConstraint {
                     precompute_vocab1: precompute_vocab,
                     precompute2_vocab,
                     precompute3_vocab,
+                    synthetic_terminal_map,
                 })
             }
             _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
@@ -774,7 +783,7 @@ impl GrammarConstraint {
         tokenizer:        Regex,
         parser:           GLRParser,
         llm_token_map:    LLMTokenMap,
-        token_name_map:   BiBTreeMap<Terminal, usize>,
+        mut token_name_map:   BiBTreeMap<Terminal, usize>,
         max_original_llm_token_id: usize,
         config: &GrammarConstraintConfig,
     ) -> Self {
@@ -900,6 +909,7 @@ impl GrammarConstraint {
                 precompute_vocab1: precompute_vocab,
                 precompute2_vocab,
                 precompute3_vocab,
+                synthetic_terminal_map: BTreeMap::new(),
             };
         }
 
@@ -941,7 +951,7 @@ impl GrammarConstraint {
             };
         }
 
-        let (precomputed1, trie1_god) = Self::precompute1(
+        let (mut precomputed1, trie1_god, node0_to_node1_map) = Self::precompute1(
             &precomputed0,
             &trie0_god,
             &tokenizer,
@@ -949,6 +959,21 @@ impl GrammarConstraint {
             &terminal_follow_map,
             &mut precompute_vocab,
             &config.trie1,
+            &token_name_map,
+        );
+
+        let synthetic_terminal_map = analyze_synthetic_terminals(
+            &mut precomputed1,
+            &trie1_god,
+            &parser.terminal_map,
+            &mut token_name_map,
+        );
+
+        // Second optimization pass after synthetic terminal analysis
+        constraint_precompute1_utils::optimize_trie1_size(
+            &mut precomputed1, &trie1_god, &trie0_god, &node0_to_node1_map,
+            parser.ignore_terminal_id, precompute_vocab.internal_max_llm_token,
+            &terminal_follow_map, &config.trie1, &mut precompute_vocab,
             &token_name_map,
         );
 
@@ -1022,6 +1047,7 @@ impl GrammarConstraint {
             precompute_vocab1: precompute_vocab,
             precompute2_vocab,
             precompute3_vocab,
+            synthetic_terminal_map,
         };
 
         gc
@@ -1030,7 +1056,7 @@ impl GrammarConstraint {
         tokenizer:        Regex,
         parser:           GLRParser,
         llm_token_map:    LLMTokenMap,
-        token_name_map:   BiBTreeMap<Terminal, usize>,
+        mut token_name_map:   BiBTreeMap<Terminal, usize>,
         max_original_llm_token_id: usize,
         config: &GrammarConstraintConfig,
         precompute0_cache: Option<Precompute0Cache>,
@@ -1207,7 +1233,7 @@ impl GrammarConstraint {
             };
         }
 
-        let (precomputed1, trie1_god) = Self::precompute1(
+        let (mut precomputed1, trie1_god, node0_to_node1_map) = Self::precompute1(
             &precomputed0,
             &trie0_god,
             &tokenizer,
@@ -1215,6 +1241,21 @@ impl GrammarConstraint {
             &terminal_follow_map,
             &mut precompute_vocab,
             &config.trie1,
+            &token_name_map,
+        );
+
+        let synthetic_terminal_map = analyze_synthetic_terminals(
+            &mut precomputed1,
+            &trie1_god,
+            &parser.terminal_map,
+            &mut token_name_map,
+        );
+
+        // Second optimization pass after synthetic terminal analysis
+        constraint_precompute1_utils::optimize_trie1_size(
+            &mut precomputed1, &trie1_god, &trie0_god, &node0_to_node1_map,
+            parser.ignore_terminal_id, precompute_vocab.internal_max_llm_token,
+            &terminal_follow_map, &config.trie1, &mut precompute_vocab,
             &token_name_map,
         );
 
@@ -1269,6 +1310,7 @@ impl GrammarConstraint {
             precompute_vocab1: precompute_vocab,
             precompute2_vocab,
             precompute3_vocab,
+            synthetic_terminal_map,
         };
 
         gc
@@ -1537,7 +1579,7 @@ impl GrammarConstraint {
         stage_vocab: &mut StageVocab,
         config: &Trie1Config,
         token_name_map: &BiBTreeMap<Terminal, usize>,
-    ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
+    ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper, HashMap<PrecomputeNode0Index, PrecomputeNode1Index>) {
         let trie1_god = Trie1GodWrapper::new();
         let mut precomputed1: BTreeMap<TokenizerStateID, PrecomputeNode1Index> = BTreeMap::new();
         let mut node0_to_node1_map: HashMap<PrecomputeNode0Index, PrecomputeNode1Index> = HashMap::new();
@@ -1644,7 +1686,7 @@ impl GrammarConstraint {
             token_name_map,
         );
 
-        (precomputed1, trie1_god)
+        (precomputed1, trie1_god, node0_to_node1_map)
     }
 
     /// Build the "Trie 2" precomputation.
@@ -2890,9 +2932,11 @@ impl<'a> GrammarConstraintState<'a> {
                         let terminal_name = self.parent.parser.terminal_map.get_by_right(gtid)
                             .map(|s| s.to_string())
                             .unwrap_or("UNKNOWN_TERMINAL".to_string());
-                        // timeit!(format!("get_mask step for terminal '{}'", terminal_name), {
-                        glr_s.process_token(*gtid);
-                        // });
+                        if !self.parent.synthetic_terminal_map.contains_key(gtid) {
+                            // timeit!(format!("get_mask step for terminal '{}'", terminal_name), {
+                            glr_s.process_token(*gtid);
+                            // });
+                        }
 
                         crate::debug!(4, "glr_s.is_ok()_after_process_token: {}", glr_s.is_ok());
 
