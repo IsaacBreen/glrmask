@@ -507,6 +507,7 @@ pub struct LeveledGSSStats<T: Clone + Eq + Hash, A: Clone + Eq + Hash> {
     pub num_interface_nodes: usize,
     pub num_lower_nodes: usize,
     pub total_unique_nodes: usize,
+    pub num_structurally_unique_nodes: usize,
     pub upper_edges: usize,
     pub interface_to_lower_edges: usize,
     pub lower_edges: usize,
@@ -1535,6 +1536,112 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     pub fn stats(&self) -> LeveledGSSStats<T, A> {
         let top_values: HashSet<T> = self.inner.children_keys().into_iter().collect();
 
+        fn compute_structural_hash_lower<T: Clone + Eq + Hash>(
+            node: &Arc<Lower<T>>,
+            memo: &mut StdHashMap<usize, u64>,
+            unique_hashes: &mut HashSet<u64>,
+        ) -> u64 {
+            use std::hash::{Hash, Hasher};
+            let ptr = Arc::as_ptr(node) as usize;
+            if let Some(hash) = memo.get(&ptr) {
+                return *hash;
+            }
+
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            2u8.hash(&mut hasher); // Differentiate from Upper nodes
+            node.empty.hash(&mut hasher);
+
+            let mut child_hashes: Vec<u64> = Vec::new();
+            for (val, kids) in &node.children {
+                let mut inner_hasher = std::collections::hash_map::DefaultHasher::new();
+                val.hash(&mut inner_hasher);
+                for (depth, child) in kids {
+                    depth.hash(&mut inner_hasher);
+                    let child_hash = compute_structural_hash_lower(child, memo, unique_hashes);
+                    child_hash.hash(&mut inner_hasher);
+                }
+                child_hashes.push(inner_hasher.finish());
+            }
+            child_hashes.sort_unstable();
+            for h in child_hashes {
+                h.hash(&mut hasher);
+            }
+
+            let final_hash = hasher.finish();
+            memo.insert(ptr, final_hash);
+            unique_hashes.insert(final_hash);
+            final_hash
+        }
+
+        fn compute_structural_hash_upper<T, A>(
+            node: &Arc<Upper<T, A>>,
+            memo_upper: &mut StdHashMap<usize, u64>,
+            memo_lower: &mut StdHashMap<usize, u64>,
+            unique_hashes: &mut HashSet<u64>,
+        ) -> u64
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+        {
+            use std::hash::{Hash, Hasher};
+            let ptr = Arc::as_ptr(node) as usize;
+            if let Some(hash) = memo_upper.get(&ptr) {
+                return *hash;
+            }
+
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            let final_hash = match &**node {
+                Upper::Branch(b) => {
+                    0u8.hash(&mut hasher);
+                    b.empty.is_some().hash(&mut hasher);
+
+                    let mut child_hashes: Vec<u64> = Vec::new();
+                    for (val, kids) in &b.children {
+                        let mut inner_hasher = std::collections::hash_map::DefaultHasher::new();
+                        val.hash(&mut inner_hasher);
+                        for (depth, child) in kids {
+                            depth.hash(&mut inner_hasher);
+                            let child_hash =
+                                compute_structural_hash_upper(child, memo_upper, memo_lower, unique_hashes);
+                            child_hash.hash(&mut inner_hasher);
+                        }
+                        child_hashes.push(inner_hasher.finish());
+                    }
+                    child_hashes.sort_unstable();
+                    for h in child_hashes {
+                        h.hash(&mut hasher);
+                    }
+                    hasher.finish()
+                }
+                Upper::Interface(i) => {
+                    1u8.hash(&mut hasher);
+                    i.empty.is_some().hash(&mut hasher);
+
+                    let mut child_hashes: Vec<u64> = Vec::new();
+                    for (val, kids) in &i.children {
+                        let mut inner_hasher = std::collections::hash_map::DefaultHasher::new();
+                        val.hash(&mut inner_hasher);
+                        for (depth, child) in kids {
+                            depth.hash(&mut inner_hasher);
+                            let child_hash =
+                                compute_structural_hash_lower(child, memo_lower, unique_hashes);
+                            child_hash.hash(&mut inner_hasher);
+                        }
+                        child_hashes.push(inner_hasher.finish());
+                    }
+                    child_hashes.sort_unstable();
+                    for h in child_hashes {
+                        h.hash(&mut hasher);
+                    }
+                    hasher.finish()
+                }
+            };
+
+            memo_upper.insert(ptr, final_hash);
+            unique_hashes.insert(final_hash);
+            final_hash
+        }
+
         let mut visited_upperbranch: HashSet<usize> = HashSet::new();
         let mut visited_interface: HashSet<usize> = HashSet::new();
         let mut visited_lower: HashSet<usize> = HashSet::new();
@@ -1656,6 +1763,17 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
         }
 
+        let mut structural_hashes_upper: StdHashMap<usize, u64> = StdHashMap::new();
+        let mut structural_hashes_lower: StdHashMap<usize, u64> = StdHashMap::new();
+        let mut unique_structural_hashes: HashSet<u64> = HashSet::new();
+        compute_structural_hash_upper(
+            &self.inner,
+            &mut structural_hashes_upper,
+            &mut structural_hashes_lower,
+            &mut unique_structural_hashes,
+        );
+        let num_structurally_unique_nodes = unique_structural_hashes.len();
+
         let total_unique_nodes = num_upperbranch_nodes + num_interface_nodes + num_lower_nodes;
         let total_edges = upper_edges + interface_to_lower_edges + lower_edges;
         let max_upper_depth = self.inner.max_depth();
@@ -1671,10 +1789,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             (0, 0.0)
         };
 
-        let structural_sharing_factor = if total_unique_nodes > 1 {
-            total_edges as f64 / (total_unique_nodes - 1) as f64
+        let structural_sharing_factor = if total_unique_nodes > 0 {
+            num_structurally_unique_nodes as f64 / total_unique_nodes as f64
         } else {
-            total_edges as f64
+            1.0
         };
 
         LeveledGSSStats {
@@ -1683,6 +1801,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             num_interface_nodes,
             num_lower_nodes,
             total_unique_nodes,
+            num_structurally_unique_nodes,
             upper_edges,
             interface_to_lower_edges,
             lower_edges,
