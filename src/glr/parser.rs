@@ -1766,7 +1766,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.active_state.prev_accepted_state = self.active_state.accepted_state.take().unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
         self.active_state.accepted_state = None;
 
-        self.log_gss("Phase1/2-end", token_id, false, false);
+        // self.log_gss("Phase1/2-end", token_id, false, false);
         self.below_bottom_cache.clear();
     }
 
@@ -2158,6 +2158,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
             self.process_default_reductions();
         }
         self.active_state.accepted_state.as_ref().map_or(false, |s| !s.is_empty())
+    }
+    pub fn stats(&self) -> GSSStats {
+        gather_gss_stats(&[self.active_state.stack.as_ref()])
     }
     pub fn log_gss(&self, phase: &str, token: TerminalID, explain_states: bool, generate_dot: bool) {
         if !GSS_LOGGING_ENABLED {
