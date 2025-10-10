@@ -606,6 +606,434 @@ where
 }
 
 // --------------------
+// Normalization (hash-cons + depth fusion)
+// --------------------
+
+#[derive(Clone, PartialEq, Eq)]
+struct LowerSig<T: Clone + Eq + Hash> {
+    empty: bool,
+    // Order-independent: label -> sorted list of canonical child ids
+    edges: StdHashMap<T, Vec<usize>>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum UpperSig<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+    Branch {
+        empty: Option<A>,
+        // Order-independent: label -> sorted list of canonical child ids (Upper)
+        edges: StdHashMap<T, Vec<usize>>,
+    },
+    Interface {
+        acc: A,
+        empty: Option<A>,
+        // Order-independent: label -> sorted list of canonical child ids (Lower)
+        edges: StdHashMap<T, Vec<usize>>,
+    },
+}
+
+struct NormalizationLowerInterner<T: Clone + Eq + Hash> {
+    // hash -> bucket of (signature, canonical id, canonical node)
+    map: StdHashMap<u64, Vec<(LowerSig<T>, usize, Arc<Lower<T>>)>>,
+    next_id: usize,
+}
+
+impl<T: Clone + Eq + Hash> Default for NormalizationLowerInterner<T> {
+    fn default() -> Self {
+        Self {
+            map: StdHashMap::new(),
+            next_id: 0,
+        }
+    }
+}
+
+struct NormalizationUpperInterner<
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+> {
+    // hash -> bucket of (signature, canonical id, canonical node)
+    map: StdHashMap<u64, Vec<(UpperSig<T, A>, usize, Arc<Upper<T, A>>)>>,
+    next_id: usize,
+}
+
+impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Default
+    for NormalizationUpperInterner<T, A>
+{
+    fn default() -> Self {
+        Self {
+            map: StdHashMap::new(),
+            next_id: 0,
+        }
+    }
+}
+
+fn lower_sig_hash<T: Clone + Eq + Hash>(sig: &LowerSig<T>) -> u64 {
+    use std::hash::{Hash as _, Hasher};
+    let mut seed: u64 = if sig.empty {
+        0x9e37_79b9_7f4a_7c15
+    } else {
+        0x243f_6a88_85a3_08d3
+    };
+    seed ^= (sig.edges.len() as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
+    let mut xor_acc: u64 = 0;
+    let mut sum_acc: u64 = 0;
+    let mut prod_acc: u64 = 0x517c_c1b7_2722_0a95 ^ (sig.edges.len() as u64);
+    for (k, ids) in &sig.edges {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        k.hash(&mut h);
+        ids.hash(&mut h); // ids are sorted
+        let e = h.finish();
+        xor_acc ^= e;
+        sum_acc = sum_acc.wrapping_add(e);
+        prod_acc = prod_acc.wrapping_mul(e.wrapping_add(0x9e37_79b9_7f4a_7c15));
+    }
+    seed ^ xor_acc ^ sum_acc ^ prod_acc
+}
+
+fn upper_sig_hash<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+    sig: &UpperSig<T, A>,
+) -> u64 {
+    use std::hash::{Hash as _, Hasher};
+    let mut seed: u64 = match sig {
+        UpperSig::Branch { empty, edges } => {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            if let Some(e) = empty {
+                e.hash(&mut h);
+            }
+            0x6a09_e667_f3bc_c908u64 ^ h.finish() ^ (edges.len() as u64)
+        }
+        UpperSig::Interface { acc, empty, edges } => {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            acc.hash(&mut h);
+            if let Some(e) = empty {
+                e.hash(&mut h);
+            }
+            0xbb67_ae85_84ca_a73bu64 ^ h.finish() ^ (edges.len() as u64)
+        }
+    };
+    let edges = match sig {
+        UpperSig::Branch { edges, .. } => edges,
+        UpperSig::Interface { edges, .. } => edges,
+    };
+    let mut xor_acc: u64 = 0;
+    let mut sum_acc: u64 = 0;
+    let mut prod_acc: u64 = 0x3c6e_f372_fe94_f82b ^ (edges.len() as u64);
+    for (k, ids) in edges {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        k.hash(&mut h);
+        ids.hash(&mut h); // ids are sorted
+        let e = h.finish();
+        xor_acc ^= e;
+        sum_acc = sum_acc.wrapping_add(e);
+        prod_acc = prod_acc.wrapping_mul(e.wrapping_add(0xa54f_f53a_5f1d_36f1));
+    }
+    seed ^ xor_acc ^ sum_acc ^ prod_acc
+}
+
+fn normalize_canonicalize_lower<T>(
+    node: &Arc<Lower<T>>,
+    memo_lower: &mut StdHashMap<usize, (usize, Arc<Lower<T>>)>,
+    interner_lower: &mut NormalizationLowerInterner<T>,
+) -> (usize, Arc<Lower<T>>)
+where
+    T: Clone + Eq + Hash,
+{
+    let ptr = Arc::as_ptr(node) as usize;
+    if let Some((id, arc)) = memo_lower.get(&ptr) {
+        return (*id, arc.clone());
+    }
+
+    // Recurse: canonicalize children first.
+    let mut edges_raw: StdHashMap<T, Vec<(usize, Arc<Lower<T>>)>> = StdHashMap::new();
+    for (v, kids) in node.children.iter() {
+        let entry = edges_raw.entry(v.clone()).or_default();
+        for child in kids.values() {
+            let (cid, carc) = normalize_canonicalize_lower(child, memo_lower, interner_lower);
+            entry.push((cid, carc));
+        }
+    }
+
+    // Build order-independent signature: label -> sorted child ids
+    let mut sig_edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
+    for (v, items) in &edges_raw {
+        let mut ids: Vec<usize> = items.iter().map(|(cid, _)| *cid).collect();
+        ids.sort_unstable();
+        sig_edges.insert(v.clone(), ids);
+    }
+    let sig = LowerSig {
+        empty: node.empty,
+        edges: sig_edges,
+    };
+    let h = lower_sig_hash(&sig);
+
+    if let Some(bucket) = interner_lower.map.get_mut(&h) {
+        for (existing_sig, id, arc) in bucket.iter() {
+            if existing_sig == &sig {
+                memo_lower.insert(ptr, (*id, arc.clone()));
+                return (*id, arc.clone());
+            }
+        }
+    }
+
+    // Rebuild canonical children: deduplicate by depth key, merging if necessary.
+    let mut new_children: Children<T, Lower<T>> = IHashMap::new();
+    for (v, items) in edges_raw {
+        let mut ord: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
+        for (_, carc) in items {
+            let d = carc.max_depth;
+            if let Some(prev) = ord.get(&d) {
+                let merged = merge_lower(prev, &carc);
+                ord.insert(d, merged);
+            } else {
+                ord.insert(d, carc);
+            }
+        }
+        if !ord.is_empty() {
+            new_children.insert(v, ord);
+        }
+    }
+    let new_node = new_lower(new_children, node.empty);
+
+    let id = interner_lower.next_id;
+    interner_lower.next_id += 1;
+    interner_lower
+        .map
+        .entry(h)
+        .or_default()
+        .push((sig, id, new_node.clone()));
+    memo_lower.insert(ptr, (id, new_node.clone()));
+    (id, new_node)
+}
+
+fn normalize_canonicalize_upper<T, A>(
+    node: &Arc<Upper<T, A>>,
+    memo_upper: &mut StdHashMap<usize, (usize, Arc<Upper<T, A>>)>,
+    memo_lower: &mut StdHashMap<usize, (usize, Arc<Lower<T>>)>,
+    interner_upper: &mut NormalizationUpperInterner<T, A>,
+    interner_lower: &mut NormalizationLowerInterner<T>,
+) -> (usize, Arc<Upper<T, A>>)
+where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
+    let ptr = Arc::as_ptr(node) as usize;
+    if let Some((id, arc)) = memo_upper.get(&ptr) {
+        return (*id, arc.clone());
+    }
+
+    match &**node {
+        Upper::Branch(b) => {
+            // Recurse into children.
+            let mut edges_raw: StdHashMap<T, Vec<(usize, Arc<Upper<T, A>>)>> = StdHashMap::new();
+            for (v, kids) in b.children.iter() {
+                let entry = edges_raw.entry(v.clone()).or_default();
+                for child in kids.values() {
+                    let (cid, carc) = normalize_canonicalize_upper(
+                        child,
+                        memo_upper,
+                        memo_lower,
+                        interner_upper,
+                        interner_lower,
+                    );
+                    entry.push((cid, carc));
+                }
+            }
+
+            // Compute signature (branch)
+            let mut sig_edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
+            for (v, items) in &edges_raw {
+                let mut ids: Vec<usize> = items.iter().map(|(cid, _)| *cid).collect();
+                ids.sort_unstable();
+                sig_edges.insert(v.clone(), ids);
+            }
+            let mut sig = UpperSig::Branch {
+                empty: b.empty.clone(),
+                edges: sig_edges,
+            };
+            let mut h = upper_sig_hash(&sig);
+
+            if let Some(bucket) = interner_upper.map.get_mut(&h) {
+                for (existing_sig, id, arc) in bucket.iter() {
+                    if existing_sig == &sig {
+                        memo_upper.insert(ptr, (*id, arc.clone()));
+                        return (*id, arc.clone());
+                    }
+                }
+            }
+
+            // Build new branch with canonical children; dedup per depth.
+            let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+            for (v, items) in &edges_raw {
+                let mut ord: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
+                for (_, carc) in items {
+                    let d = carc.max_depth();
+                    if let Some(prev) = ord.get(&d) {
+                        let merged = merge_upper(prev, carc);
+                        ord.insert(d, merged);
+                    } else {
+                        ord.insert(d, carc.clone());
+                    }
+                }
+                if !ord.is_empty() {
+                    new_children.insert(v.clone(), ord);
+                }
+            }
+            let new_b = new_branch(new_children, b.empty.clone());
+            let mut new_node = try_promote(&new_b); // Might become Interface
+
+            // If promoted, ensure lower children are canonical and rebuild the interface for interning.
+            match &*new_node {
+                Upper::Interface(i2) => {
+                    // Canonicalize lower children
+                    let mut edges_raw_lower: StdHashMap<T, Vec<(usize, Arc<Lower<T>>)>> =
+                        StdHashMap::new();
+                    for (v, kids) in i2.children.iter() {
+                        let entry = edges_raw_lower.entry(v.clone()).or_default();
+                        for child_l in kids.values() {
+                            let (lid, larc) =
+                                normalize_canonicalize_lower(child_l, memo_lower, interner_lower);
+                            entry.push((lid, larc));
+                        }
+                    }
+                    // Rebuild interface with canonical lower children; dedup per depth
+                    let mut final_children: Children<T, Lower<T>> = IHashMap::new();
+                    for (v, items) in &edges_raw_lower {
+                        let mut ord: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
+                        for (_, larc) in items {
+                            let d = larc.max_depth;
+                            if let Some(prev) = ord.get(&d) {
+                                let merged = merge_lower(prev, larc);
+                                ord.insert(d, merged);
+                            } else {
+                                ord.insert(d, larc.clone());
+                            }
+                        }
+                        if !ord.is_empty() {
+                            final_children.insert(v.clone(), ord);
+                        }
+                    }
+                    let rebuilt_iface =
+                        new_interface(final_children, i2.acc.clone(), i2.empty.clone());
+                    new_node = rebuilt_iface;
+
+                    // Compute interface signature
+                    let mut sig_edges2: StdHashMap<T, Vec<usize>> = StdHashMap::new();
+                    if let Upper::Interface(i3) = &*new_node {
+                        for (v, kids) in i3.children.iter() {
+                            let mut ids: Vec<usize> = kids
+                                .values()
+                                .map(|child_l| {
+                                    let (lid, _) = normalize_canonicalize_lower(
+                                        child_l,
+                                        memo_lower,
+                                        interner_lower,
+                                    );
+                                    lid
+                                })
+                                .collect();
+                            ids.sort_unstable();
+                            sig_edges2.insert(v.clone(), ids);
+                        }
+                        sig = UpperSig::Interface {
+                            acc: i3.acc.clone(),
+                            empty: i3.empty.clone(),
+                            edges: sig_edges2,
+                        };
+                        h = upper_sig_hash(&sig);
+                    }
+                }
+                Upper::Branch(_) => {
+                    // keep branch signature as computed
+                }
+            }
+
+            // Intern (possibly with updated signature)
+            if let Some(bucket) = interner_upper.map.get_mut(&h) {
+                for (existing_sig, id, arc) in bucket.iter() {
+                    if existing_sig == &sig {
+                        memo_upper.insert(ptr, (*id, arc.clone()));
+                        return (*id, arc.clone());
+                    }
+                }
+            }
+
+            let id = interner_upper.next_id;
+            interner_upper.next_id += 1;
+            interner_upper
+                .map
+                .entry(h)
+                .or_default()
+                .push((sig, id, new_node.clone()));
+            memo_upper.insert(ptr, (id, new_node.clone()));
+            (id, new_node)
+        }
+        Upper::Interface(i) => {
+            // Canonicalize lower children
+            let mut edges_raw_lower: StdHashMap<T, Vec<(usize, Arc<Lower<T>>)>> =
+                StdHashMap::new();
+            for (v, kids) in i.children.iter() {
+                let entry = edges_raw_lower.entry(v.clone()).or_default();
+                for child_l in kids.values() {
+                    let (lid, larc) =
+                        normalize_canonicalize_lower(child_l, memo_lower, interner_lower);
+                    entry.push((lid, larc));
+                }
+            }
+            // Build signature
+            let mut sig_edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
+            for (v, items) in &edges_raw_lower {
+                let mut ids: Vec<usize> = items.iter().map(|(lid, _)| *lid).collect();
+                ids.sort_unstable();
+                sig_edges.insert(v.clone(), ids);
+            }
+            let sig = UpperSig::Interface {
+                acc: i.acc.clone(),
+                empty: i.empty.clone(),
+                edges: sig_edges,
+            };
+            let h = upper_sig_hash(&sig);
+
+            if let Some(bucket) = interner_upper.map.get_mut(&h) {
+                for (existing_sig, id, arc) in bucket.iter() {
+                    if existing_sig == &sig {
+                        memo_upper.insert(ptr, (*id, arc.clone()));
+                        return (*id, arc.clone());
+                    }
+                }
+            }
+
+            // Rebuild canonical interface children; dedup per depth
+            let mut final_children: Children<T, Lower<T>> = IHashMap::new();
+            for (v, items) in edges_raw_lower {
+                let mut ord: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
+                for (_, larc) in items {
+                    let d = larc.max_depth;
+                    if let Some(prev) = ord.get(&d) {
+                        let merged = merge_lower(prev, &larc);
+                        ord.insert(d, merged);
+                    } else {
+                        ord.insert(d, larc);
+                    }
+                }
+                if !ord.is_empty() {
+                    final_children.insert(v, ord);
+                }
+            }
+            let new_node = new_interface(final_children, i.acc.clone(), i.empty.clone());
+
+            let id = interner_upper.next_id;
+            interner_upper.next_id += 1;
+            interner_upper
+                .map
+                .entry(h)
+                .or_default()
+                .push((sig, id, new_node.clone()));
+            memo_upper.insert(ptr, (id, new_node.clone()));
+            (id, new_node)
+        }
+    }
+}
+
+// --------------------
 // Public GSS type
 // --------------------
 
@@ -1476,7 +1904,29 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     pub fn normalize(&self) -> Self {
-        todo!()
+        // 1) Fuse all levels to collapse per-value multiplicity across depths.
+        //    This dramatically reduces branching in most real-world cases.
+        let fused = self.fuse(None);
+
+        // 2) Hash-cons the resulting DAG bottom-up to maximally share all equal subgraphs.
+        //    We memoize by pointer to avoid repeated work and use interners keyed by
+        //    order-independent structural signatures.
+        let mut memo_upper: StdHashMap<usize, (usize, Arc<Upper<T, A>>)> = StdHashMap::new();
+        let mut memo_lower: StdHashMap<usize, (usize, Arc<Lower<T>>)> = StdHashMap::new();
+        let mut interner_upper: NormalizationUpperInterner<T, A> = Default::default();
+        let mut interner_lower: NormalizationLowerInterner<T> = Default::default();
+
+        let (_id, inner) = normalize_canonicalize_upper::<T, A>(
+            &fused.inner,
+            &mut memo_upper,
+            &mut memo_lower,
+            &mut interner_upper,
+            &mut interner_lower,
+        );
+
+        // Typically the inner pointer changes due to canonicalization. We just return the
+        // canonicalized GSS regardless.
+        LeveledGSS { inner }
     }
 
     fn expand_lower_recursive(
