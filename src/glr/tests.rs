@@ -5,6 +5,7 @@ use crate::glr::analyze::{self, remove_productions_with_undefined_nonterminals, 
 use crate::glr::stats;
 use bimap::BiBTreeMap;
 use std::collections::BTreeSet;
+use crate::glr::synthetic_terminals::{analyze_best_cooccurring_pair, apply_synthetic_to_grammar, propose_plan_for_pair};
 use crate::interface::display_productions;
 // --- Helper Functions for Tests ---
 
@@ -22,6 +23,66 @@ fn create_simple_parser() -> GLRParser {
 // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
 //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
 //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+
+#[test]
+fn test_synthetic_terminal_analysis_and_application() {
+    // This grammar is designed to have a clear co-occurrence.
+    // The reduction A -> 'id' is valid on lookaheads 'x' and 'y'.
+    // The reduction B -> 'id' is valid on lookahead 'z'.
+    // The analysis should identify {'x', 'y'} as the best pair.
+    let productions = vec![
+        prod("S'", vec![nt("S"), t("$")]), // Start rule
+        prod("S", vec![nt("A"), t("x")]),
+        prod("S", vec![nt("A"), t("y")]),
+        prod("S", vec![nt("B"), t("z")]),
+        prod("A", vec![t("id")]),
+        prod("B", vec![t("id")]),
+    ];
+
+    // 1. Generate the parser and its table to analyze.
+    let parser = generate_glr_parser(&productions, None);
+
+    // 2. Analyze the table to find the best co-occurring pair.
+    let candidate = analyze_best_cooccurring_pair(&parser.table, &parser.terminal_map)
+        .expect("Analysis should find a candidate pair.");
+
+    // 3. Assert the analysis results.
+    let mut expected_members = BTreeSet::new();
+    expected_members.insert(Terminal::RegexName("x".to_string()));
+    expected_members.insert(Terminal::RegexName("y".to_string()));
+
+    assert_eq!(candidate.members, expected_members);
+    assert_eq!(candidate.support, 1, "The pair {x, y} should appear in one signature group.");
+    assert_eq!(candidate.estimated_gain_tokens, 1.0);
+
+    // 4. Propose a plan with a custom name for stability.
+    let plan = propose_plan_for_pair(&candidate, Some("__SYN_XY"));
+    assert_eq!(plan.synthetic, Terminal::RegexName("__SYN_XY".to_string()));
+
+    // 5. Apply the transformation to the grammar.
+    let (new_prods, mapping) = apply_synthetic_to_grammar(&productions, &plan);
+
+    // 6. Assert the mapping is correct.
+    assert_eq!(mapping.synthetic, plan.synthetic);
+    assert_eq!(mapping.members, expected_members);
+
+    // 7. Assert the grammar was transformed correctly.
+    let new_prods_str: BTreeSet<String> = new_prods.iter().map(|p| p.to_string()).collect();
+    let expected_prods_str: BTreeSet<String> = vec![
+        "S' -> S $".to_string(),
+        "S -> A __SYN_XY x".to_string(), // Transformed
+        "S -> A __SYN_XY y".to_string(), // Transformed
+        "S -> B z".to_string(),          // Unchanged
+        "A -> id".to_string(),           // Unchanged
+        "B -> id".to_string(),           // Unchanged
+    ].into_iter().collect();
+
+    assert_eq!(new_prods_str, expected_prods_str);
+
+    // 8. (Optional but good) Verify the new grammar can be parsed.
+    let new_parser = generate_glr_parser(&new_prods, None);
+    assert!(new_parser.terminal_map.contains_left(&Terminal::RegexName("__SYN_XY".to_string())));
+}
 
 #[test]
 fn test_repetition_no_eof_1() {
