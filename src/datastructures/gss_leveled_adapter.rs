@@ -98,49 +98,45 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
     let mut stats = GSSStats::default();
     stats.num_roots = roots.len();
 
-    if roots.is_empty() {
+    let active_roots: Vec<_> = roots.iter().copied().filter(|r| !r.is_empty()).collect();
+    if active_roots.is_empty() {
         return stats;
     }
 
-    let mut total_nodes = 0;
-    let mut total_edges = 0;
-    let mut max_depth = 0;
-    let mut total_leaves = 0;
-    let mut num_root_predecessors = 0;
-    let mut all_root_predecessor_keys = HashSet::new();
-    let mut total_merge_points = 0;
-
-    for r in roots {
-        if r.is_empty() {
-            continue;
-        }
-        let l_stats = r.inner.stats();
-
-        total_nodes += l_stats.total_unique_nodes;
-        total_edges += l_stats.total_edges;
-        max_depth = max_depth.max(l_stats.max_upper_depth as usize);
-        total_leaves += l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
-        num_root_predecessors += l_stats.top_values.len();
-        all_root_predecessor_keys.extend(l_stats.top_values);
-        total_merge_points += l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
-    }
-
-    stats.num_root_predecessors = num_root_predecessors;
+    // --- Forest-level stats ---
+    stats.num_root_predecessors = active_roots.iter().map(|r| r.inner.peek().len()).sum();
+    let all_root_predecessor_keys: HashSet<_> =
+        active_roots.iter().flat_map(|r| r.inner.peek()).collect();
     stats.num_unique_root_predecessor_keys = all_root_predecessor_keys.len();
-    stats.total_edges = total_edges;
-    stats.unique_nodes = total_nodes;
-    stats.num_leaves = total_leaves;
-    stats.structurally_unique_nodes = total_nodes;
-    stats.max_depth = max_depth;
-    stats.merge_points = total_merge_points;
-
-    if !roots.is_empty() {
-        stats.average_predecessors_with_values = num_root_predecessors as f64 / roots.len() as f64;
+    stats.max_depth = active_roots
+        .iter()
+        .map(|r| r.inner.max_depth() as usize)
+        .max()
+        .unwrap_or(0);
+    if stats.num_roots > 0 {
+        stats.average_predecessors_with_values =
+            stats.num_root_predecessors as f64 / stats.num_roots as f64;
     }
-    if total_nodes > 1 {
-        stats.structural_redundancy = total_edges as f64 / (total_nodes - 1) as f64;
-    } else if total_nodes == 1 {
-        stats.structural_redundancy = total_edges as f64;
+
+    // --- Graph-level stats (from merged GSS to handle sharing correctly) ---
+    let mut merged_gss = LeveledGSS::empty();
+    for r in &active_roots {
+        merged_gss = merged_gss.merge(&r.inner);
+    }
+
+    let l_stats = merged_gss.stats();
+    stats.total_edges = l_stats.total_edges;
+    stats.unique_nodes = l_stats.total_unique_nodes;
+    stats.num_leaves =
+        l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
+    stats.structurally_unique_nodes = l_stats.total_unique_nodes;
+    stats.merge_points =
+        l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
+
+    if stats.unique_nodes > 1 {
+        stats.structural_redundancy = stats.total_edges as f64 / (stats.unique_nodes - 1) as f64;
+    } else if stats.unique_nodes == 1 {
+        stats.structural_redundancy = stats.total_edges as f64;
     }
 
     stats

@@ -2,7 +2,7 @@ local_system:
   attached_files:
     - src/datastructures/leveled_gss.rs
     - src/datastructures/gss_leveled_adapter.rs
-  conversation_file: conversation.yaml
+  conversation_file:
   compile_command:
   initial_file_contents:
     src/datastructures/leveled_gss.rs: |
@@ -2173,34 +2173,52 @@ local_system:
       pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
           let mut stats = GSSStats::default();
           stats.num_roots = roots.len();
-          let mut total_depth: usize = 0;
-          let mut paths: usize = 0;
-          let mut max_depth = 0;
-          let mut total_edges = 0;
-          let mut num_root_predecessors = 0usize;
-          let mut unique_root_keys = BTreeSet::new();
-          for r in roots {
-              let info = r.inner.paths_info();
-              paths += info.num_paths;
-              total_depth += info.total_depth;
-              total_edges += info.total_depth;
-              max_depth = max_depth.max(r.inner.max_depth() as usize);
 
-              if let Some(peek) = r.inner.peek().into_iter().next() {
-                  unique_root_keys.insert(peek);
+          if roots.is_empty() {
+              return stats;
+          }
+
+          let mut total_nodes = 0;
+          let mut total_edges = 0;
+          let mut max_depth = 0;
+          let mut total_leaves = 0;
+          let mut num_root_predecessors = 0;
+          let mut all_root_predecessor_keys = HashSet::new();
+          let mut total_merge_points = 0;
+
+          for r in roots {
+              if r.is_empty() {
+                  continue;
               }
-              num_root_predecessors += r.inner.peek().len();
+              let l_stats = r.inner.stats();
+
+              total_nodes += l_stats.total_unique_nodes;
+              total_edges += l_stats.total_edges;
+              max_depth = max_depth.max(l_stats.max_upper_depth as usize);
+              total_leaves += l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
+              num_root_predecessors += l_stats.top_values.len();
+              all_root_predecessor_keys.extend(l_stats.top_values);
+              total_merge_points += l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
           }
-          stats.max_depth = max_depth;
-          stats.total_edges = total_edges;
-          stats.unique_nodes = paths;
-          stats.num_leaves = paths;
+
           stats.num_root_predecessors = num_root_predecessors;
-          stats.num_unique_root_predecessor_keys = unique_root_keys.len();
-          if paths > 0 {
-              stats.average_depth = total_depth as f64 / paths as f64;
-              stats.average_predecessors_with_values = (num_root_predecessors as f64) / (roots.len().max(1) as f64);
+          stats.num_unique_root_predecessor_keys = all_root_predecessor_keys.len();
+          stats.total_edges = total_edges;
+          stats.unique_nodes = total_nodes;
+          stats.num_leaves = total_leaves;
+          stats.structurally_unique_nodes = total_nodes;
+          stats.max_depth = max_depth;
+          stats.merge_points = total_merge_points;
+
+          if !roots.is_empty() {
+              stats.average_predecessors_with_values = num_root_predecessors as f64 / roots.len() as f64;
           }
+          if total_nodes > 1 {
+              stats.structural_redundancy = total_edges as f64 / (total_nodes - 1) as f64;
+          } else if total_nodes == 1 {
+              stats.structural_redundancy = total_edges as f64;
+          }
+
           stats
       }
 
@@ -5336,49 +5354,45 @@ local_system:
           let mut stats = GSSStats::default();
           stats.num_roots = roots.len();
 
-          if roots.is_empty() {
+          let active_roots: Vec<_> = roots.iter().copied().filter(|r| !r.is_empty()).collect();
+          if active_roots.is_empty() {
               return stats;
           }
 
-          let mut total_nodes = 0;
-          let mut total_edges = 0;
-          let mut max_depth = 0;
-          let mut total_leaves = 0;
-          let mut num_root_predecessors = 0;
-          let mut all_root_predecessor_keys = HashSet::new();
-          let mut total_merge_points = 0;
-
-          for r in roots {
-              if r.is_empty() {
-                  continue;
-              }
-              let l_stats = r.inner.stats();
-
-              total_nodes += l_stats.total_unique_nodes;
-              total_edges += l_stats.total_edges;
-              max_depth = max_depth.max(l_stats.max_upper_depth as usize);
-              total_leaves += l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
-              num_root_predecessors += l_stats.top_values.len();
-              all_root_predecessor_keys.extend(l_stats.top_values);
-              total_merge_points += l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
-          }
-
-          stats.num_root_predecessors = num_root_predecessors;
+          // --- Forest-level stats ---
+          stats.num_root_predecessors = active_roots.iter().map(|r| r.inner.peek().len()).sum();
+          let all_root_predecessor_keys: HashSet<_> =
+              active_roots.iter().flat_map(|r| r.inner.peek()).collect();
           stats.num_unique_root_predecessor_keys = all_root_predecessor_keys.len();
-          stats.total_edges = total_edges;
-          stats.unique_nodes = total_nodes;
-          stats.num_leaves = total_leaves;
-          stats.structurally_unique_nodes = total_nodes;
-          stats.max_depth = max_depth;
-          stats.merge_points = total_merge_points;
-
-          if !roots.is_empty() {
-              stats.average_predecessors_with_values = num_root_predecessors as f64 / roots.len() as f64;
+          stats.max_depth = active_roots
+              .iter()
+              .map(|r| r.inner.max_depth() as usize)
+              .max()
+              .unwrap_or(0);
+          if stats.num_roots > 0 {
+              stats.average_predecessors_with_values =
+                  stats.num_root_predecessors as f64 / stats.num_roots as f64;
           }
-          if total_nodes > 1 {
-              stats.structural_redundancy = total_edges as f64 / (total_nodes - 1) as f64;
-          } else if total_nodes == 1 {
-              stats.structural_redundancy = total_edges as f64;
+
+          // --- Graph-level stats (from merged GSS to handle sharing correctly) ---
+          let mut merged_gss = LeveledGSS::empty();
+          for r in &active_roots {
+              merged_gss = merged_gss.merge(&r.inner);
+          }
+
+          let l_stats = merged_gss.stats();
+          stats.total_edges = l_stats.total_edges;
+          stats.unique_nodes = l_stats.total_unique_nodes;
+          stats.num_leaves =
+              l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
+          stats.structurally_unique_nodes = l_stats.total_unique_nodes;
+          stats.merge_points =
+              l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
+
+          if stats.unique_nodes > 1 {
+              stats.structural_redundancy = stats.total_edges as f64 / (stats.unique_nodes - 1) as f64;
+          } else if stats.unique_nodes == 1 {
+              stats.structural_redundancy = stats.total_edges as f64;
           }
 
           stats
@@ -6356,7 +6370,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gp
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -8561,34 +8575,52 @@ messages:
       pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
           let mut stats = GSSStats::default();
           stats.num_roots = roots.len();
-          let mut total_depth: usize = 0;
-          let mut paths: usize = 0;
-          let mut max_depth = 0;
-          let mut total_edges = 0;
-          let mut num_root_predecessors = 0usize;
-          let mut unique_root_keys = BTreeSet::new();
-          for r in roots {
-              let info = r.inner.paths_info();
-              paths += info.num_paths;
-              total_depth += info.total_depth;
-              total_edges += info.total_depth;
-              max_depth = max_depth.max(r.inner.max_depth() as usize);
 
-              if let Some(peek) = r.inner.peek().into_iter().next() {
-                  unique_root_keys.insert(peek);
+          if roots.is_empty() {
+              return stats;
+          }
+
+          let mut total_nodes = 0;
+          let mut total_edges = 0;
+          let mut max_depth = 0;
+          let mut total_leaves = 0;
+          let mut num_root_predecessors = 0;
+          let mut all_root_predecessor_keys = HashSet::new();
+          let mut total_merge_points = 0;
+
+          for r in roots {
+              if r.is_empty() {
+                  continue;
               }
-              num_root_predecessors += r.inner.peek().len();
+              let l_stats = r.inner.stats();
+
+              total_nodes += l_stats.total_unique_nodes;
+              total_edges += l_stats.total_edges;
+              max_depth = max_depth.max(l_stats.max_upper_depth as usize);
+              total_leaves += l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
+              num_root_predecessors += l_stats.top_values.len();
+              all_root_predecessor_keys.extend(l_stats.top_values);
+              total_merge_points += l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
           }
-          stats.max_depth = max_depth;
-          stats.total_edges = total_edges;
-          stats.unique_nodes = paths;
-          stats.num_leaves = paths;
+
           stats.num_root_predecessors = num_root_predecessors;
-          stats.num_unique_root_predecessor_keys = unique_root_keys.len();
-          if paths > 0 {
-              stats.average_depth = total_depth as f64 / paths as f64;
-              stats.average_predecessors_with_values = (num_root_predecessors as f64) / (roots.len().max(1) as f64);
+          stats.num_unique_root_predecessor_keys = all_root_predecessor_keys.len();
+          stats.total_edges = total_edges;
+          stats.unique_nodes = total_nodes;
+          stats.num_leaves = total_leaves;
+          stats.structurally_unique_nodes = total_nodes;
+          stats.max_depth = max_depth;
+          stats.merge_points = total_merge_points;
+
+          if !roots.is_empty() {
+              stats.average_predecessors_with_values = num_root_predecessors as f64 / roots.len() as f64;
           }
+          if total_nodes > 1 {
+              stats.structural_redundancy = total_edges as f64 / (total_nodes - 1) as f64;
+          } else if total_nodes == 1 {
+              stats.structural_redundancy = total_edges as f64;
+          }
+
           stats
       }
 
@@ -9557,9 +9589,7 @@ messages:
       ```
     metadata:
       filename: src/datastructures/gss_leveled_adapter.rs
-  - user: The way `gather_gss_stats` works is wrong. Rewrite it to reuse the stats
-      in `leveled_gss.rs`, transferring from the struct returned by `LeveledGSS::stats()`
-      to `gss_leveled_adapter.rs`'s own stats struct.
+  - user: Simplify `gather_gss_stats`.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9578,268 +9608,170 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to refactor `gather_gss_stats`, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to simplify `gather_gss_stats`, followed by the corresponding git diff.
 
-      ### Step-by-step Instructions
+      ### Instructions
 
-      1.  **Open the file `src/datastructures/gss_leveled_adapter.rs`**.
-      2.  **Navigate to the `gather_gss_stats` function**, which is located around line 110.
-      3.  **Replace the entire body of the function** with the new implementation below. The updated version correctly uses the `LeveledGSS::stats()` method to gather detailed structural statistics and combines them with path information from `LeveledGSS::paths_info()` to populate the `GSSStats` struct accurately.
+      The current implementation of `gather_gss_stats` is inefficient and can produce incorrect results (like double-counting nodes) when GSS structures are shared between roots. The following changes will simplify the function, improve its correctness by properly handling shared structures, and make it more performant.
+
+      The simplification strategy is to separate the calculation into two parts:
+      1.  **Forest-level stats**: These are metrics about the collection of roots, like the total number of root predecessors. These can be calculated by iterating over the roots without a deep traversal.
+      2.  **Graph-level stats**: These are metrics about the underlying graph structure, like the total number of unique nodes and edges. To calculate these correctly, we first merge all GSS roots into a single structure and then run the comprehensive `stats()` method once.
+
+      Here are the edits for `src/datastructures/gss_leveled_adapter.rs`:
+
+      1.  **Locate the `gather_gss_stats` function.**
+      2.  **Replace the entire body of the function** with the new, simplified implementation below.
 
       ```rust
+      #[time_it]
+      pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
           let mut stats = GSSStats::default();
           stats.num_roots = roots.len();
 
-          if roots.is_empty() {
+          let active_roots: Vec<_> = roots.iter().copied().filter(|r| !r.is_empty()).collect();
+          if active_roots.is_empty() {
               return stats;
           }
 
-          let mut total_paths = 0;
-          let mut total_path_depth = 0;
-          let mut total_nodes = 0;
-          let mut total_edges = 0;
-          let mut max_depth = 0;
-          let mut total_leaves = 0;
-          let mut num_root_predecessors = 0;
-          let mut all_root_predecessor_keys = HashSet::new();
-          let mut total_merge_points = 0;
-
-          for r in roots {
-              if r.is_empty() {
-                  continue;
-              }
-              let l_stats = r.inner.stats();
-              let p_info = r.inner.paths_info();
-
-              total_paths += p_info.num_paths;
-              total_path_depth += p_info.total_depth;
-
-              total_nodes += l_stats.total_unique_nodes;
-              total_edges += l_stats.total_edges;
-              max_depth = max_depth.max(l_stats.max_upper_depth as usize);
-              total_leaves += l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
-              num_root_predecessors += l_stats.top_values.len();
-              all_root_predecessor_keys.extend(l_stats.top_values);
-              total_merge_points += l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
-          }
-
-          stats.num_root_predecessors = num_root_predecessors;
+          // --- Forest-level stats ---
+          stats.num_root_predecessors = active_roots.iter().map(|r| r.inner.peek().len()).sum();
+          let all_root_predecessor_keys: HashSet<_> =
+              active_roots.iter().flat_map(|r| r.inner.peek()).collect();
           stats.num_unique_root_predecessor_keys = all_root_predecessor_keys.len();
-          stats.total_edges = total_edges;
-          stats.unique_nodes = total_nodes;
-          stats.num_leaves = total_leaves;
-          stats.structurally_unique_nodes = total_nodes;
-          stats.max_depth = max_depth;
-          stats.merge_points = total_merge_points;
+          stats.max_depth = active_roots
+              .iter()
+              .map(|r| r.inner.max_depth() as usize)
+              .max()
+              .unwrap_or(0);
+          if stats.num_roots > 0 {
+              stats.average_predecessors_with_values =
+                  stats.num_root_predecessors as f64 / stats.num_roots as f64;
+          }
 
-          if total_paths > 0 {
-              stats.average_depth = total_path_depth as f64 / total_paths as f64;
+          // --- Graph-level stats (from merged GSS to handle sharing correctly) ---
+          let mut merged_gss = LeveledGSS::empty();
+          for r in &active_roots {
+              merged_gss = merged_gss.merge(&r.inner);
           }
-          if !roots.is_empty() {
-              stats.average_predecessors_with_values = num_root_predecessors as f64 / roots.len() as f64;
-          }
-          if total_nodes > 1 {
-              stats.structural_redundancy = total_edges as f64 / (total_nodes - 1) as f64;
-          } else if total_nodes == 1 {
-              stats.structural_redundancy = total_edges as f64;
+
+          let l_stats = merged_gss.stats();
+          stats.total_edges = l_stats.total_edges;
+          stats.unique_nodes = l_stats.total_unique_nodes;
+          stats.num_leaves =
+              l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
+          stats.structurally_unique_nodes = l_stats.total_unique_nodes;
+          stats.merge_points =
+              l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
+
+          if stats.unique_nodes > 1 {
+              stats.structural_redundancy = stats.total_edges as f64 / (stats.unique_nodes - 1) as f64;
+          } else if stats.unique_nodes == 1 {
+              stats.structural_redundancy = stats.total_edges as f64;
           }
 
           stats
+      }
       ```
+
+      This new version is more robust, correct, and easier to understand due to the clear separation of concerns.
 
       ### Git Diff
 
-      Here is the git patch to apply the changes:
+      Here is the git diff to apply the changes:
 
       ```diff
       diff --git a/src/datastructures/gss_leveled_adapter.rs b/src/datastructures/gss_leveled_adapter.rs
-      index 7380922..b95345a 100644
       --- a/src/datastructures/gss_leveled_adapter.rs
       +++ b/src/datastructures/gss_leveled_adapter.rs
-      @@ -112,35 +112,56 @@
-       #[time_it]
+      @@ -100,48 +100,46 @@
        pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
            let mut stats = GSSStats::default();
            stats.num_roots = roots.len();
-      -    let mut total_depth: usize = 0;
-      -    let mut paths: usize = 0;
+      -
+      -    if roots.is_empty() {
       +
-      +    if roots.is_empty() {
-      +        return stats;
-      +    }
-      +
-      +    let mut total_paths = 0;
-      +    let mut total_path_depth = 0;
-      +    let mut total_nodes = 0;
-      +    let mut total_edges = 0;
-           let mut max_depth = 0;
-      -    let mut total_edges = 0;
-      -    let mut num_root_predecessors = 0usize;
-      -    let mut unique_root_keys = BTreeSet::new();
-      +    let mut total_leaves = 0;
-      +    let mut num_root_predecessors = 0;
-      +    let mut all_root_predecessor_keys = HashSet::new();
-      +    let mut total_merge_points = 0;
-      +
-           for r in roots {
-      -        let info = r.inner.paths_info();
-      -        paths += info.num_paths;
-      -        total_depth += info.total_depth;
-      -        total_edges += info.total_depth;
-      -        max_depth = max_depth.max(r.inner.max_depth() as usize);
-      +        if r.is_empty() {
-      +            continue;
-      +        }
-      +        let l_stats = r.inner.stats();
-      +        let p_info = r.inner.paths_info();
-       
-      -        if let Some(peek) = r.inner.peek().into_iter().next() {
-      -            unique_root_keys.insert(peek);
-      -        }
-      -        num_root_predecessors += r.inner.peek().len();
-      +        total_paths += p_info.num_paths;
-      +        total_path_depth += p_info.total_depth;
-      +
-      +        total_nodes += l_stats.total_unique_nodes;
-      +        total_edges += l_stats.total_edges;
-      +        max_depth = max_depth.max(l_stats.max_upper_depth as usize);
-      +        total_leaves += l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
-      +        num_root_predecessors += l_stats.top_values.len();
-      +        all_root_predecessor_keys.extend(l_stats.top_values);
-      +        total_merge_points += l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
-           }
-      +
-      +    stats.num_root_predecessors = num_root_predecessors;
-      +    stats.num_unique_root_predecessor_keys = all_root_predecessor_keys.len();
-      +    stats.total_edges = total_edges;
-      +    stats.unique_nodes = total_nodes;
-      +    stats.num_leaves = total_leaves;
-      +    stats.structurally_unique_nodes = total_nodes;
-           stats.max_depth = max_depth;
-      -    stats.total_edges = total_edges;
-      -    stats.unique_nodes = paths;
-      -    stats.num_leaves = paths;
-      -    stats.num_root_predecessors = num_root_predecessors;
-      -    stats.num_unique_root_predecessor_keys = unique_root_keys.len();
-      -    if paths > 0 {
-      -        stats.average_depth = total_depth as f64 / paths as f64;
-      -        stats.average_predecessors_with_values = (num_root_predecessors as f64) / (roots.len().max(1) as f64);
-      +    stats.merge_points = total_merge_points;
-      +
-      +    if total_paths > 0 {
-      +        stats.average_depth = total_path_depth as f64 / total_paths as f64;
-           }
-      +    if !roots.is_empty() {
-      +        stats.average_predecessors_with_values = num_root_predecessors as f64 / roots.len() as f64;
-      +    }
-      +    if total_nodes > 1 {
-      +        stats.structural_redundancy = total_edges as f64 / (total_nodes - 1) as f64;
-      +    } else if total_nodes == 1 {
-      +        stats.structural_redundancy = total_edges as f64;
-      +    }
-      +
-           stats
-       }
-       
-
-      ```
-    metadata:
-  - user: |
-      Apply result (git-llm mode):
-      Found 1 diff block(s) to process using custom patcher.
-
-      --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/gss_leveled_adapter.rs
-      Applying patch to 'src/datastructures/gss_leveled_adapter.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/gss_leveled_adapter.rs.
-    metadata:
-  - user: 'Changes committed with message: "Refactor: Update gather_gss_stats to correctly
-      aggregate stats using LeveledGSS::stats()"'
-    metadata:
-  - user: |-
-      Diff of src/datastructures/leveled_gss.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: |-
-      Diff of src/datastructures/gss_leveled_adapter.rs since previous turn:
-      ```diff
-
-      ```
-    metadata:
-  - user: What use is paths info in `gather_gss_stats`? Don't use it in `gather_gss_stats`.
-      Leave paths info in `leveled_gss.rs`. But in `gather_gss_stats` just use `.stats()`.
-      Simplify `gather_gss_stats`.
-    metadata:
-  - assistant: |-
-      You are right, the `paths_info` provides useful metrics like `average_depth`, but the core structural statistics can be gathered more simply from `LeveledGSS::stats()`. Using `paths_info` is redundant if we only need the structural information.
-
-      Here are the step-by-step instructions to simplify `gather_gss_stats` by removing the dependency on `paths_info`.
-
-      ### Step-by-step Instructions
-
-      1.  **Open `src/datastructures/gss_leveled_adapter.rs`**.
-      2.  **Navigate to the `gather_gss_stats` function**.
-      3.  **Remove variable declarations**: Delete the lines that declare `total_paths` and `total_path_depth`.
-          ```rust
-          -    let mut total_paths = 0;
-          -    let mut total_path_depth = 0;
-          ```
-      4.  **Remove `paths_info` logic**: Inside the `for` loop, delete the call to `r.inner.paths_info()` and the two lines that use its result.
-          ```rust
-          -        let p_info = r.inner.paths_info();
-          -
-          -        total_paths += p_info.num_paths;
-          -        total_path_depth += p_info.total_depth;
-          ```
-      5.  **Remove `average_depth` calculation**: After the loop, remove the `if` block that calculates `stats.average_depth`.
-          ```rust
-          -    if total_paths > 0 {
-          -        stats.average_depth = total_path_depth as f64 / total_paths as f64;
-          -    }
-          ```
-      This change will leave `stats.average_depth` at its default value of `0.0`, as its calculation is no longer possible without path information.
-
-      ### Git Diff
-
-      Here is the git patch that applies these changes:
-
-      ```diff
-      diff --git a/src/datastructures/gss_leveled_adapter.rs b/src/datastructures/gss_leveled_adapter.rs
-      index b95345a..e79471e 100644
-      --- a/src/datastructures/gss_leveled_adapter.rs
-      +++ b/src/datastructures/gss_leveled_adapter.rs
-      @@ -118,9 +118,6 @@
+      +    let active_roots: Vec<_> = roots.iter().copied().filter(|r| !r.is_empty()).collect();
+      +    if active_roots.is_empty() {
                return stats;
            }
-       
-      -    let mut total_paths = 0;
-      -    let mut total_path_depth = 0;
-           let mut total_nodes = 0;
-           let mut total_edges = 0;
-           let mut max_depth = 0;
-      @@ -134,11 +131,6 @@
-                   continue;
-               }
-               let l_stats = r.inner.stats();
-      -        let p_info = r.inner.paths_info();
       -
-      -        total_paths += p_info.num_paths;
-      -        total_path_depth += p_info.total_depth;
-       
-               total_nodes += l_stats.total_unique_nodes;
-               total_edges += l_stats.total_edges;
-      @@ -158,9 +150,6 @@
-           stats.max_depth = max_depth;
-           stats.merge_points = total_merge_points;
-       
-      -    if total_paths > 0 {
-      -        stats.average_depth = total_path_depth as f64 / total_paths as f64;
+      -    let mut total_nodes = 0;
+      -    let mut total_edges = 0;
+      -    let mut max_depth = 0;
+      -    let mut total_leaves = 0;
+      -    let mut num_root_predecessors = 0;
+      -    let mut all_root_predecessor_keys = HashSet::new();
+      -    let mut total_merge_points = 0;
+      -
+      -    for r in roots {
+      -        if r.is_empty() {
+      -            continue;
+      -        }
+      -        let l_stats = r.inner.stats();
+      -
+      -        total_nodes += l_stats.total_unique_nodes;
+      -        total_edges += l_stats.total_edges;
+      -        max_depth = max_depth.max(l_stats.max_upper_depth as usize);
+      -        total_leaves += l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
+      -        num_root_predecessors += l_stats.top_values.len();
+      -        all_root_predecessor_keys.extend(l_stats.top_values);
+      -        total_merge_points += l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
       -    }
-           if !roots.is_empty() {
-               stats.average_predecessors_with_values = num_root_predecessors as f64 / roots.len() as f64;
+      -
+      -    stats.num_root_predecessors = num_root_predecessors;
+      +
+      +    // --- Forest-level stats ---
+      +    stats.num_root_predecessors = active_roots.iter().map(|r| r.inner.peek().len()).sum();
+      +    let all_root_predecessor_keys: HashSet<_> =
+      +        active_roots.iter().flat_map(|r| r.inner.peek()).collect();
+           stats.num_unique_root_predecessor_keys = all_root_predecessor_keys.len();
+      -    stats.total_edges = total_edges;
+      -    stats.unique_nodes = total_nodes;
+      -    stats.num_leaves = total_leaves;
+      -    stats.structurally_unique_nodes = total_nodes;
+      -    stats.max_depth = max_depth;
+      -    stats.merge_points = total_merge_points;
+      -
+      -    if !roots.is_empty() {
+      -        stats.average_predecessors_with_values = num_root_predecessors as f64 / roots.len() as f64;
+      -    }
+      -    if total_nodes > 1 {
+      -        stats.structural_redundancy = total_edges as f64 / (total_nodes - 1) as f64;
+      -    } else if total_nodes == 1 {
+      -        stats.structural_redundancy = total_edges as f64;
+      +    stats.max_depth = active_roots
+      +        .iter()
+      +        .map(|r| r.inner.max_depth() as usize)
+      +        .max()
+      +        .unwrap_or(0);
+      +    if stats.num_roots > 0 {
+      +        stats.average_predecessors_with_values =
+      +            stats.num_root_predecessors as f64 / stats.num_roots as f64;
+      +    }
+      +
+      +    // --- Graph-level stats (from merged GSS to handle sharing correctly) ---
+      +    let mut merged_gss = LeveledGSS::empty();
+      +    for r in &active_roots {
+      +        merged_gss = merged_gss.merge(&r.inner);
+      +    }
+      +
+      +    let l_stats = merged_gss.stats();
+      +    stats.total_edges = l_stats.total_edges;
+      +    stats.unique_nodes = l_stats.total_unique_nodes;
+      +    stats.num_leaves =
+      +        l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
+      +    stats.structurally_unique_nodes = l_stats.total_unique_nodes;
+      +    stats.merge_points =
+      +        l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
+      +
+      +    if stats.unique_nodes > 1 {
+      +        stats.structural_redundancy = stats.total_edges as f64 / (stats.unique_nodes - 1) as f64;
+      +    } else if stats.unique_nodes == 1 {
+      +        stats.structural_redundancy = stats.total_edges as f64;
            }
+       
+           stats
 
       ```
     metadata:
@@ -9852,7 +9784,7 @@ messages:
       Applying patch to 'src/datastructures/gss_leveled_adapter.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/gss_leveled_adapter.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Simplify gather_gss_stats by
-      removing dependency on paths_info"'
+  - user: 'Changes committed with message: "Refactor: Simplify and correct gather_gss_stats
+      by merging roots for graph stats"'
     metadata:
 ...
