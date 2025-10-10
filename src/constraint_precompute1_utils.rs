@@ -639,11 +639,11 @@ fn llm_subset_of(a: &LLMTokenBV, b: &LLMTokenBV) -> bool {
 /// Returns a map: reachable_node -> tokens that can reach it through some None-only path.
 /// Semantics: along a path, token masks are intersected, and across multiple paths we take union.
 /// Includes start itself with mask = max_ones() (zero-length path).
-fn none_closure_for_node(
-    trie1_god: &Trie1GodWrapper,
+fn none_closure_for_node<'a>(
+    trie1_god: &'a Trie1GodWrapper,
     start: PrecomputeNode1Index,
-    cache: &mut HashMap<PrecomputeNode1Index, BTreeMap<PrecomputeNode1Index, LLMTokenBV>>,
-) -> &BTreeMap<PrecomputeNode1Index, LLMTokenBV> {
+    cache: &'a mut HashMap<PrecomputeNode1Index, BTreeMap<PrecomputeNode1Index, LLMTokenBV>>,
+) -> &'a BTreeMap<PrecomputeNode1Index, LLMTokenBV> {
     if !cache.contains_key(&start) {
         let mut reach: BTreeMap<PrecomputeNode1Index, LLMTokenBV> = BTreeMap::new();
         // zero-length path: all tokens
