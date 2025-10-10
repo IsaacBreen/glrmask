@@ -27,7 +27,6 @@ use crate::datastructures::trie::{EdgeInserter, Trie, Trie2Index};
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::finite_automata::Regex;
 use crate::glr::analyze::compute_terminal_follow_sets;
-use crate::glr::synthetic;
 use crate::glr::grammar::Terminal;
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::parser::{BelowBottomReductionMode, ExpectElse, GLRParser, GLRParserState, ParseState, ParseStateEdgeContent, ProcessDefaultReductionsAdvancedConfig, ProcessTokenAdvancedConfig};
@@ -773,7 +772,7 @@ impl GrammarConstraint {
 
     pub fn new_with_config(
         tokenizer:        Regex,
-        mut parser:           GLRParser,
+        parser:           GLRParser,
         llm_token_map:    LLMTokenMap,
         token_name_map:   BiBTreeMap<Terminal, usize>,
         max_original_llm_token_id: usize,
@@ -782,45 +781,6 @@ impl GrammarConstraint {
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer.execute_from_state(&[], tokenizer.initial_state_id()).matches.iter().map(|token| token.id).collect();
         let epsilon_terminals: BTreeSet<&Terminal> = epsilon_terminal_group_ids.iter().map(|id| token_name_map.get_by_right(id).unwrap()).collect();
         assert!(epsilon_terminals.is_empty(), "Epsilon tokens (tokens that can match an empty string) are not supported by the grammar constraint. Got: {:?}", epsilon_terminals);
-
-        // --- Synthetic Terminal Transformation ---
-        // First, compute follow sets from the original parser for later optimizations.
-        let terminal_follow_sets_named_orig = compute_terminal_follow_sets(&parser.productions);
-
-        const MAX_SYNTHETIC_ITERATIONS: usize = 1;
-        let mut cumulative_synthetic_terminals = BTreeMap::new();
-
-        for i in 0..MAX_SYNTHETIC_ITERATIONS {
-            if let Some(analysis) = synthetic::analyze_for_synthetic_terminals(&parser) {
-                if analysis.score > 0 {
-                    crate::debug!(2, "Applying synthetic terminal optimization (iteration {}), score: {}", i + 1, analysis.score);
-
-                    let mut prods = parser.productions.clone();
-                    let mut t_map = parser.terminal_map.clone();
-                    let synthetic_name = format!("__SYNTHETIC_{}__", i);
-
-                    let synthetic_id = synthetic::apply_synthetic_terminal_to_grammar(
-                        &mut prods,
-                        &mut t_map,
-                        &analysis.co_occurring_terminals,
-                        synthetic_name,
-                    );
-
-                    cumulative_synthetic_terminals.insert(synthetic_id, analysis.co_occurring_terminals);
-
-                    // Re-assign non-terminal IDs and re-generate the parser.
-                    let nt_map = crate::glr::table::assign_non_terminal_ids(&prods);
-                    parser = crate::glr::table::generate_glr_parser_with_terminal_map_and_synthetic_terminals(
-                        &prods, t_map, parser.ignore_terminal_id, cumulative_synthetic_terminals.clone()
-                    );
-                } else {
-                    break; // No more beneficial transformations
-                }
-            } else {
-                break; // No candidates found
-            }
-        }
-
         let original_to_internal_map = Self::setup_llm_token_mappings(&llm_token_map);
 
 
@@ -878,8 +838,12 @@ impl GrammarConstraint {
         let grammar_productions = &parser.productions; // Assuming parser is the GLRParser instance
         let grammar_term_map = &parser.terminal_map;
 
+        // These might be computed elsewhere or need to be computed here.
+        // Assuming compute_first_sets is available from grammar module.
+
         crate::debug!(2, "Computing terminal follow sets");
-        let terminal_follow_sets_named = terminal_follow_sets_named_orig;
+        let terminal_follow_sets_named = compute_terminal_follow_sets(grammar_productions);
+        crate::debug!(5, "terminal_follow_sets_named:");
         for (terminal, following_terminals) in &terminal_follow_sets_named {
             crate::debug!(4, "{} -> {}", terminal, following_terminals.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "));
         }
