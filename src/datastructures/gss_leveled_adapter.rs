@@ -102,8 +102,6 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
         return stats;
     }
 
-    let mut total_paths = 0;
-    let mut total_path_depth = 0;
     let mut total_nodes = 0;
     let mut total_edges = 0;
     let mut max_depth = 0;
@@ -117,10 +115,6 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
             continue;
         }
         let l_stats = r.inner.stats();
-        let p_info = r.inner.paths_info();
-
-        total_paths += p_info.num_paths;
-        total_path_depth += p_info.total_depth;
 
         total_nodes += l_stats.total_unique_nodes;
         total_edges += l_stats.total_edges;
@@ -140,9 +134,6 @@ pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
     stats.max_depth = max_depth;
     stats.merge_points = total_merge_points;
 
-    if total_paths > 0 {
-        stats.average_depth = total_path_depth as f64 / total_paths as f64;
-    }
     if !roots.is_empty() {
         stats.average_predecessors_with_values = num_root_predecessors as f64 / roots.len() as f64;
     }
