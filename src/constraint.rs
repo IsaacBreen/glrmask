@@ -493,7 +493,7 @@ impl Default for GrammarConstraintConfig {
             skip_precomputation: false,
             precompute0_only: false,
             trie0: Trie0Config::off(),
-            trie1: Trie1Config::off(),
+            trie1: Trie1Config::default(),
             trie2: Trie2Config::off(),
             trie3: Trie3Config::default(),
         }
@@ -1754,7 +1754,7 @@ impl GrammarConstraint {
                 if let Some(gt) = edge_grammar_token_opt {
                     glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                     let stats = glr_s.stats();
-                    println!("After processing token {:?}, number of GSS nodes: {}, edges: {}", gt, stats.unique_nodes, stats.total_edges);
+                    // println!("After processing token {:?}, number of GSS nodes: {}, edges: {}", gt, stats.unique_nodes, stats.total_edges);
                 }
 
                 out = Vec::new();
