@@ -1047,6 +1047,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
+    pub fn has_empty_path(&self) -> bool {
+        match &*self.inner {
+            Upper::Branch(b) => b.empty.is_some(),
+            Upper::Interface(i) => i.empty.is_some() || (i.children.is_empty() && i.empty.is_none()),
+        }
+    }
+
     pub fn empty() -> Self {
         empty_upper()
     }

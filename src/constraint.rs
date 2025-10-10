@@ -1699,9 +1699,7 @@ impl GrammarConstraint {
                 let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
                 let mut acc = Acc::new_fresh();
                 acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
-                let gss_leaf = Arc::new(GSSNode::new(acc));
-
-                let gss_stack = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id }));
+                let gss_stack = Arc::new(GSSNode::new(acc));
 
                 let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
                 glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
@@ -1723,9 +1721,7 @@ impl GrammarConstraint {
 
             let mut acc = Acc::new_fresh();
             // acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
-            let gss_leaf = Arc::new(GSSNode::new(acc));
-
-            let gss_stack = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id }));
+            let gss_stack = Arc::new(GSSNode::new(acc));
 
             let glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
 

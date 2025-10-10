@@ -890,13 +890,7 @@ impl Ord for WorkMapKey {
         // self_depth.cmp(&other_depth).then_with(|| self_state_id.cmp(&other_state_id))
         // self_state_id.cmp(&other_state_id).then_with(|| other_depth.cmp(&self_depth))
         // self_state_id.cmp(&other_state_id).then_with(|| self_depth.cmp(&other_depth))
-    }
 }
-
-type WorkMap = BTreeMap<WorkMapKey, (ParseState, Option<usize>)>;
-
-// New alias: an action coupled with an optional StateID bitvector filter (used by hallucinated state).
-type FilteredAction<'a> = (Action<'a>, Option<StateIDBV>);
 
 impl<'a> GLRParserState<'a> { // No longer generic
     pub fn with_god(mut self, trie2_god: Trie3GodWrapper) -> GLRParserState<'a> {
@@ -904,7 +898,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self
     }
 
-    fn enqueue(work_map: &mut WorkMap, state: ParseState, fuel: Option<usize>) {
+    fn enqueue(work_map: &mut WorkMap, state: ParseState, fuel: Option<usize>, hallucinated_state_id: StateID) {
         // Peel off the top edges of the GSS in the given state,
         // and group the resulting isolated paths by their (depth, state_id) key.
         // This merges paths that are in the same logical state, reducing redundant processing.
@@ -915,8 +909,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 prev_accepted_state: state.prev_accepted_state.clone(),
                 trie2_god: state.trie2_god.clone(),
             };
+            let state_id = peek.edge_value().as_ref().map_or(hallucinated_state_id, |e| e.state_id);
             let depth = isolated_state.stack.max_depth();
-            let state_id = peek.edge_value().state_id;
             work_map
                 .entry(WorkMapKey::new(depth, state_id))
                 .and_modify(|(s, existing_fuel)| {
@@ -995,9 +989,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         };
         let state = constrained_state_opt.as_ref().unwrap_or(state);
 
-        crate::debug!(5, "Handling action for state ID {}. Action: {:?}, Filter: {:?}", state_id.0, action, filter);
+        crate::debug!(5, "Handling action for state ID {}. Action: {:?}, Filter: {:?}", state_id.0, action, filter.is_some());
         for peek in GSSNode::peek_iter(&state.stack) {
-            assert_eq!(peek.edge_value().state_id, state_id);
+            assert_eq!(peek.edge_value().as_ref().map_or(self.parser.hallucinated_state_id, |e| e.state_id), state_id);
             hit!("GLRParserState::handle_action::ForEachPeek");
             match action {
                 Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
@@ -1030,9 +1024,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             trie2_god: state.trie2_god.clone(),
                         };
                         if let Some(ref mut r_map) = reduce_map {
-                            Self::enqueue(r_map, new_parse_state, new_per_state_fuel);
+                            self.enqueue(r_map, new_parse_state, new_per_state_fuel);
                         } else {
-                            Self::enqueue(work_map, new_parse_state, new_per_state_fuel);
+                            self.enqueue(work_map, new_parse_state, new_per_state_fuel);
                         }
                     }
                     if !accepted_s_new_arc.is_empty() {
@@ -1073,9 +1067,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         trie2_god: state.trie2_god.clone(),
                                     };
                                     if let Some(ref mut r_map) = reduce_map {
-                                        Self::enqueue(r_map, new_parse_state, new_per_state_fuel);
+                                        self.enqueue(r_map, new_parse_state, new_per_state_fuel);
                                     } else {
-                                        Self::enqueue(work_map, new_parse_state, new_per_state_fuel);
+                                        self.enqueue(work_map, new_parse_state, new_per_state_fuel);
                                     }
                                 }
                                 if !accepted_s_new_arc.is_empty() {
@@ -1100,6 +1094,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
             }
         }
         (found_shift, false)
+    }
+
+    fn enqueue(&self, work_map: &mut WorkMap, state: ParseState, fuel: Option<usize>) {
+        Self::enqueue(work_map, state, fuel, self.parser.hallucinated_state_id)
     }
 
     /// Shared inner loop for phase 1 and phase 2.
@@ -1224,9 +1222,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     trie2_god: state.trie2_god.clone(),
                                 };
                                 if let Some(ref mut r_map) = reduce_map {
-                                    Self::enqueue(r_map, new_parse_state, new_per_state_fuel);
+                                    self.enqueue(r_map, new_parse_state, new_per_state_fuel);
                                 } else {
-                                    Self::enqueue(work_map, new_parse_state, new_per_state_fuel);
+                                    self.enqueue(work_map, new_parse_state, new_per_state_fuel);
                                 }
                             }
                             if !accepted_s_new_arc.is_empty() {
@@ -1408,9 +1406,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
             new_acc.stored_trie_nodes_mut().clear();
         }
 
-        let new_leaf = Arc::new(GSSNode::new(new_acc));
-        let new_gss = Arc::new(new_leaf.push(ParseStateEdgeContent { state_id: hallucinate_sid }));
-        let new_todo_items = vec![(hallucinate_sid, new_gss)];
+        let new_gss = Arc::new(GSSNode::new(new_acc));
+        let new_todo_items = vec![(self.parser.hallucinated_state_id, new_gss)];
 
         new_todo_items
     }
@@ -1489,7 +1486,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         timeit!("GLRParserState::reduce_and_goto::BuildTodoMap", {
             for popper_item in popper.iter() {
                 for peek2 in popper_item.peek_iter() {
-                    let predecessor_state_id = peek2.edge_value().state_id;
+                    let predecessor_state_id = peek2.edge_value().as_ref().map_or(self.parser.hallucinated_state_id, |e| e.state_id);
                     let isolated_parent = peek2.isolated_parent();
                     let pred_ptr = Arc::as_ptr(&isolated_parent);
                     todo_map.entry(predecessor_state_id)
@@ -1752,10 +1749,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         if self.phase == ParserPhase::ReadyForToken {
             let mut phase1_todo: WorkMap = WorkMap::new();
-            Self::enqueue(&mut phase1_todo, self.active_state.clone(), None);
+            self.enqueue(&mut phase1_todo, self.active_state.clone(), None);
             self._do_actions_without_default(token_id, &mut phase1_todo, &mut phase2_todo, &mut shifted_states_todo, &mut accepted_states_todo, config);
         } else { // ParserPhase::ReadyForDefaultReductions
-            Self::enqueue(&mut phase2_todo, self.active_state.clone(), None);
+            self.enqueue(&mut phase2_todo, self.active_state.clone(), None);
         }
 
         // --- Phase 2 ---
@@ -1803,7 +1800,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // Phase 3: apply default reductions until fixpoint (no token involved).
         let mut work_map: WorkMap = WorkMap::new();
         // Seed the queue with the current active state.
-        Self::enqueue(&mut work_map, self.active_state.clone(), config.per_state_fuel);
+        self.enqueue(&mut work_map, self.active_state.clone(), config.per_state_fuel);
 
         // Collect survivors (clone-and-merge states and reduction results that finalize).
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
@@ -1858,7 +1855,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 self.log_gss("has_action_for-start", token_id, false, false);
                 let mut llm_tokens = LLMTokenBV::zeros();
                 for peek in GSSNode::peek_iter(&self.active_state.stack) {
-                    let sid = peek.edge_value().state_id;
+                    let sid = peek.edge_value().as_ref().map_or(self.parser.hallucinated_state_id, |e| e.state_id);
                     let mut actions_exist = false;
                     match self.phase {
                         ParserPhase::ReadyForToken => {
@@ -1917,9 +1914,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let cfg = ProcessTokenAdvancedConfig::default();
 
         let parser = s.parser;
+
         if s.phase == ParserPhase::ReadyForToken {
             let mut phase1_todo: WorkMap = WorkMap::new();
-            Self::enqueue(&mut phase1_todo, s.active_state.clone(), None);
+            s.enqueue(&mut phase1_todo, s.active_state.clone(), None);
             if s.process_action_queue(
                 &mut phase1_todo,
                 Some(&mut phase2_todo),
@@ -1952,7 +1950,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 return true;
             }
         } else {
-            Self::enqueue(&mut phase2_todo, s.active_state.clone(), None);
+            s.enqueue(&mut phase2_todo, s.active_state.clone(), None);
         }
 
         s.process_action_queue(
@@ -1991,7 +1989,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     pub fn has_immediate_action_for_terminal(&self, token_id: TerminalID) -> Option<bool> {
         let mut any = false;
         for peek in GSSNode::peek_iter(&self.active_state.stack) {
-            let sid = peek.edge_value().state_id;
+            let sid = peek.edge_value().as_ref().map_or(self.parser.hallucinated_state_id, |e| e.state_id);
             let has = if self.phase == ParserPhase::ReadyForToken {
                 if sid == self.parser.hallucinated_state_id {
                     self.parser.hallucinated_row.shifts_and_reduces.get(&token_id).map(|v| !v.is_empty()).unwrap_or(false)
@@ -2017,7 +2015,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     pub fn immediate_shift_terminals(&self) -> BTreeSet<TerminalID> {
         let mut out = BTreeSet::new();
         for peek in GSSNode::peek_iter(&self.active_state.stack) {
-            let sid = peek.edge_value().state_id;
+            let sid = peek.edge_value().as_ref().map_or(self.parser.hallucinated_state_id, |e| e.state_id);
             if sid == self.parser.hallucinated_state_id {
                 for (tid, actions) in &self.parser.hallucinated_row.shifts_and_reduces {
                     for (act, _bv) in actions {
@@ -2063,7 +2061,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     pub fn immediate_reduce_terminals(&self) -> BTreeSet<TerminalID> {
         let mut out = BTreeSet::new();
         for peek in GSSNode::peek_iter(&self.active_state.stack) {
-            let sid = peek.edge_value().state_id;
+            let sid = peek.edge_value().as_ref().map_or(self.parser.hallucinated_state_id, |e| e.state_id);
             if sid == self.parser.hallucinated_state_id {
                 for (tid, actions) in &self.parser.hallucinated_row.shifts_and_reduces {
                     for (act, _bv) in actions {
