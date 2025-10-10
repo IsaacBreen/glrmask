@@ -408,7 +408,7 @@ impl GLRParser {
         hallucinated_state_id: StateID,
         synthetic_info: Vec<SyntheticTerminalInfo>,
     ) -> Self {
-        let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
+        let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions.clone()
             .into_iter()
             .map(|(nt, func)| {
                 let nt_id = non_terminal_map.get_by_left(&nt)
@@ -428,7 +428,7 @@ impl GLRParser {
             item_set_map,
             start_state_id,
             everything_state_id,
-            actions: converted_actions,
+            actions,
             ignore_terminal_id,
             substring_gotos,
             reduce_goto_map,

@@ -14,25 +14,11 @@ pub struct SyntheticTerminalInfo {
 
 impl JSONConvertible for SyntheticTerminalInfo {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("synthetic_terminal".to_string(), self.synthetic_terminal.to_json());
-        obj.insert("synthetic_terminal_id".to_string(), self.synthetic_terminal_id.to_json());
-        obj.insert("represented_terminals".to_string(), self.represented_terminals.to_json());
-        JSONNode::Object(obj)
+        todo!()
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => Ok(SyntheticTerminalInfo {
-                synthetic_terminal: obj.remove("synthetic_terminal").ok_or("Missing synthetic_terminal")
-                    .and_then(Terminal::from_json)?,
-                synthetic_terminal_id: obj.remove("synthetic_terminal_id").ok_or("Missing synthetic_terminal_id")
-                    .and_then(TerminalID::from_json)?,
-                represented_terminals: obj.remove("represented_terminals").ok_or("Missing represented_terminals")
-                    .and_then(|n| BTreeSet::<TerminalID>::from_json(n))?,
-            }),
-            _ => Err("Expected JSONNode::Object for SyntheticTerminalInfo".to_string()),
-        }
+        todo!()
     }
 }
 
