@@ -500,7 +500,7 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LeveledGSSStats<T: Clone + Eq + Hash, A: Clone + Eq + Hash> {
     pub top_values: HashSet<T>,
     pub num_upperbranch_nodes: usize,
