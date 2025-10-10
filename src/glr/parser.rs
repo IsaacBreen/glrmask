@@ -178,7 +178,10 @@ impl ParseState {
 
     #[time_it]
     pub fn merge(&mut self, mut other: ParseState) {
+        timeit!("ParseState::merge::merge main stacks", {
         Arc::make_mut(&mut self.stack).merge_with_depth(MAX_MERGE_DEPTH, &other.stack);
+        });
+        timeit!("ParseState::merge::merge accepted states", {
         if let Some(other_accepted) = other.accepted_state {
             if let Some(self_accepted) = self.accepted_state.as_mut() {
                 Arc::make_mut(self_accepted).merge_with_depth(MAX_MERGE_DEPTH, &other_accepted);
@@ -186,6 +189,8 @@ impl ParseState {
                 self.accepted_state = Some(other_accepted);
             }
         }
+        });
+        timeit!("ParseState::merge::merge prev accepted states", {
         Arc::make_mut(&mut self.prev_accepted_state).merge_with_depth(MAX_MERGE_DEPTH, &other.prev_accepted_state);
         // assert_eq!(self.trie2_god.is_none(), other.trie2_god.is_none());
         if self.trie2_god.is_some() && other.trie2_god.is_some() {
@@ -193,6 +198,7 @@ impl ParseState {
         } else if other.trie2_god.is_some() {
             self.trie2_god = other.trie2_god;
         }
+        });
     }
 }
 
