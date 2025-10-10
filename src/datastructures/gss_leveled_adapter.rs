@@ -286,6 +286,11 @@ impl GSSNode {
 
     pub fn merge_with_depth(&mut self, merge_depth: usize, other: &Self) {
         self.inner = self.inner.merge(&other.inner);
+        // If there's more than 10k nodes, panic
+        let num_nodes = self.inner.stats().total_unique_nodes;
+        if num_nodes > 10_000 {
+            panic!("GSSNode merge resulted in too many nodes: {}", num_nodes);
+        }
         self.inner.fuse(Some(merge_depth as isize));
     }
     pub fn merged(mut self, other: Self, depth: usize) -> Self {
