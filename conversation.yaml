@@ -1,6 +1,7 @@
 local_system:
   attached_files:
     - src/datastructures/leveled_gss.rs
+    - src/datastructures/gss_leveled_adapter.rs
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -2061,111 +2062,6 @@ local_system:
 
           pub fn stats(&self) -> LeveledGSSStats<T, A> {
               let top_values: HashSet<T> = self.inner.children_keys().into_iter().collect();
-              // Minimal DAWG/MADFA node count for the set of lists represented by this GSS (ignoring accumulators).
-              // Build a trie of sequences, then merge isomorphic subtries bottom-up to get the unique minimal DAG.
-              fn count_minimal_dag_nodes_for_sequences<T>(seqs: &[Vec<T>]) -> usize
-              where
-                  T: Clone + Eq + Hash,
-              {
-                  struct TrieNode<T: Clone + Eq + Hash> {
-                      term: bool,
-                      children: StdHashMap<T, TrieNode<T>>,
-                  }
-
-                  impl<T: Clone + Eq + Hash> Default for TrieNode<T> {
-                      fn default() -> Self {
-                          TrieNode {
-                              term: false,
-                              children: StdHashMap::new(),
-                          }
-                      }
-                  }
-
-                  #[derive(Clone)]
-                  struct NodeSig<T: Clone + Eq + Hash> {
-                      term: bool,
-                      edges: StdHashMap<T, usize>, // label -> canonical child id
-                  }
-
-                  // Build trie
-                  let mut root: TrieNode<T> = TrieNode {
-                      term: false,
-                      children: StdHashMap::new(),
-                  };
-                  for seq in seqs {
-                      let mut node = &mut root;
-                      if seq.is_empty() {
-                          node.term = true;
-                          continue;
-                      }
-                      for v in seq {
-                          node = node
-                              .children
-                              .entry(v.clone())
-                              .or_insert_with(TrieNode::default);
-                      }
-                      node.term = true;
-                  }
-
-                  use std::hash::{Hash as _, Hasher};
-                  fn sig_hash<T: Clone + Eq + Hash>(sig: &NodeSig<T>) -> u64 {
-                      // Order-independent hash of the node signature: terminal flag + multiset of (label, child_id).
-                      // We only use commutative/associative ops over per-edge hashes so iteration order does not matter.
-                      let mut seed: u64 = if sig.term { 0x9e37_79b9_7f4a_7c15 } else { 0x243f_6a88_85a3_08d3 };
-                      // Mix edge count to separate small vs large degree nodes
-                      seed ^= (sig.edges.len() as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
-
-                      // Accumulate per-edge hashes
-                      let mut xor_acc: u64 = 0;
-                      let mut sum_acc: u64 = 0;
-                      let mut prod_acc: u64 = 0x9e37_79b9_7f4a_7c15 ^ (sig.edges.len() as u64);
-
-                      for (k, v) in &sig.edges {
-                          let mut h = std::collections::hash_map::DefaultHasher::new();
-                          k.hash(&mut h);
-                          v.hash(&mut h);
-                          let pair = h.finish();
-                          xor_acc ^= pair;
-                          sum_acc = sum_acc.wrapping_add(pair);
-                          prod_acc = prod_acc.wrapping_mul(pair.wrapping_add(0x517c_c1b7_2722_0a95));
-                      }
-
-                      seed ^ xor_acc ^ sum_acc ^ prod_acc
-                  }
-
-                  fn intern<T: Clone + Eq + Hash>(
-                      node: &TrieNode<T>,
-                      interner: &mut StdHashMap<u64, Vec<(NodeSig<T>, usize)>>,
-                      next_id: &mut usize,
-                  ) -> usize {
-                      // Compute child ids first (post-order)
-                      let mut edges: StdHashMap<T, usize> = StdHashMap::new();
-                      for (label, child) in node.children.iter() {
-                          let cid = intern::<T>(child, interner, next_id);
-                          edges.insert(label.clone(), cid);
-                      }
-                      let sig = NodeSig { term: node.term, edges };
-                      let h = sig_hash(&sig);
-                      let bucket = interner.entry(h).or_default();
-                      // Check for exact match in the bucket
-                      for (existing, id) in bucket.iter() {
-                          if existing.term == sig.term && existing.edges.len() == sig.edges.len() && existing.edges == sig.edges {
-                              return *id;
-                          }
-                      }
-                      // New canonical node
-                      let id = *next_id;
-                      *next_id += 1;
-                      bucket.push((sig, id));
-                      id
-                  }
-
-                  // Intern the trie and count unique canonical states
-                  let mut interner: StdHashMap<u64, Vec<(NodeSig<T>, usize)>> = StdHashMap::new();
-                  let mut next_id = 0usize;
-                  let _root_id = intern::<T>(&root, &mut interner, &mut next_id);
-                  interner.values().map(|v| v.len()).sum()
-              }
 
               let mut visited_upperbranch: HashSet<usize> = HashSet::new();
               let mut visited_interface: HashSet<usize> = HashSet::new();
@@ -2288,13 +2184,165 @@ local_system:
                   }
               }
 
-              // Compute the number of nodes in the minimal DAWG for the represented language (ignoring accumulators).
-              let mut unique_sequences: HashSet<Vec<T>> = HashSet::new();
-              for (seq, _) in self.to_stacks().into_iter() {
-                  unique_sequences.insert(seq);
+              // Compute the number of structurally unique nodes in the maximally compressed
+              // nondeterministic DAG obtained by merging isomorphic subgraphs of the current GSS,
+              // completely ignoring accumulators. This baseline is always <= total_unique_nodes.
+              #[derive(Clone, PartialEq, Eq)]
+              struct StatsSig<T: Clone + Eq + Hash> {
+                  terminal: bool,
+                  // label -> sorted, deduplicated list of canonical child ids (set per label)
+                  edges: StdHashMap<T, Vec<usize>>,
               }
-              let sequences: Vec<Vec<T>> = unique_sequences.into_iter().collect();
-              let num_structurally_unique_nodes = count_minimal_dag_nodes_for_sequences(&sequences);
+
+              fn stats_sig_hash<T: Clone + Eq + Hash>(sig: &StatsSig<T>) -> u64 {
+                  use std::hash::{Hash as _, Hasher};
+                  let mut seed: u64 = if sig.terminal {
+                      0x9e37_79b9_7f4a_7c15
+                  } else {
+                      0x243f_6a88_85a3_08d3
+                  };
+                  seed ^= (sig.edges.len() as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
+                  let mut xor_acc: u64 = 0;
+                  let mut sum_acc: u64 = 0;
+                  let mut prod_acc: u64 = 0x517c_c1b7_2722_0a95 ^ (sig.edges.len() as u64);
+                  for (k, ids) in &sig.edges {
+                      let mut h = std::collections::hash_map::DefaultHasher::new();
+                      k.hash(&mut h);
+                      ids.hash(&mut h); // ids sorted and deduplicated
+                      let e = h.finish();
+                      xor_acc ^= e;
+                      sum_acc = sum_acc.wrapping_add(e);
+                      prod_acc = prod_acc.wrapping_mul(e.wrapping_add(0x9e37_79b9_7f4a_7c15));
+                  }
+                  seed ^ xor_acc ^ sum_acc ^ prod_acc
+              }
+
+              struct StatsInterner<T: Clone + Eq + Hash> {
+                  map: StdHashMap<u64, Vec<(StatsSig<T>, usize)>>,
+                  next_id: usize,
+              }
+
+              impl<T: Clone + Eq + Hash> Default for StatsInterner<T> {
+                  fn default() -> Self {
+                      Self {
+                          map: StdHashMap::new(),
+                          next_id: 0,
+                      }
+                  }
+              }
+
+              fn intern_stats_sig<T: Clone + Eq + Hash>(
+                  sig: StatsSig<T>,
+                  interner: &mut StatsInterner<T>,
+              ) -> usize {
+                  let h = stats_sig_hash(&sig);
+                  let bucket = interner.map.entry(h).or_default();
+                  for (existing, id) in bucket.iter() {
+                      if existing == &sig {
+                          return *id;
+                      }
+                  }
+                  let id = interner.next_id;
+                  interner.next_id += 1;
+                  bucket.push((sig, id));
+                  id
+              }
+
+              fn canon_lower_for_stats<T, A>(
+                  node: &Arc<Lower<T>>,
+                  memo_lower: &mut StdHashMap<usize, usize>,
+                  interner: &mut StatsInterner<T>,
+              ) -> usize
+              where
+                  T: Clone + Eq + Hash,
+                  A: Merge + Clone + Eq + Hash,
+              {
+                  let ptr = Arc::as_ptr(node) as usize;
+                  if let Some(id) = memo_lower.get(&ptr) {
+                      return *id;
+                  }
+                  let mut edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
+                  for (v, kids) in node.children.iter() {
+                      let e = edges.entry(v.clone()).or_default();
+                      for child in kids.values() {
+                          let cid = canon_lower_for_stats::<T, A>(child, memo_lower, interner);
+                          e.push(cid);
+                      }
+                      e.sort_unstable();
+                      e.dedup();
+                  }
+                  let sig = StatsSig {
+                      terminal: node.empty,
+                      edges,
+                  };
+                  let id = intern_stats_sig(sig, interner);
+                  memo_lower.insert(ptr, id);
+                  id
+              }
+
+              fn canon_upper_for_stats<T, A>(
+                  node: &Arc<Upper<T, A>>,
+                  memo_upper: &mut StdHashMap<usize, usize>,
+                  memo_lower: &mut StdHashMap<usize, usize>,
+                  interner: &mut StatsInterner<T>,
+              ) -> usize
+              where
+                  T: Clone + Eq + Hash,
+                  A: Merge + Clone + Eq + Hash,
+              {
+                  let ptr = Arc::as_ptr(node) as usize;
+                  if let Some(id) = memo_upper.get(&ptr) {
+                      return *id;
+                  }
+                  let (terminal, edges) = match &**node {
+                      Upper::Branch(b) => {
+                          let mut edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
+                          for (v, kids) in b.children.iter() {
+                              let e = edges.entry(v.clone()).or_default();
+                              for child in kids.values() {
+                                  let cid = canon_upper_for_stats::<T, A>(child, memo_upper, memo_lower, interner);
+                                  e.push(cid);
+                              }
+                              e.sort_unstable();
+                              e.dedup();
+                          }
+                          (b.empty.is_some(), edges)
+                      }
+                      Upper::Interface(i) => {
+                          let mut edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
+                          for (v, kids) in i.children.iter() {
+                              let e = edges.entry(v.clone()).or_default();
+                              for child in kids.values() {
+                                  let cid = canon_lower_for_stats::<T, A>(child, memo_lower, interner);
+                                  e.push(cid);
+                              }
+                              e.sort_unstable();
+                              e.dedup();
+                          }
+                          let terminal = i.empty.is_some() || (i.children.is_empty() && i.empty.is_none());
+                          (terminal, edges)
+                      }
+                  };
+                  let sig = StatsSig { terminal, edges };
+                  let id = intern_stats_sig(sig, interner);
+                  memo_upper.insert(ptr, id);
+                  id
+              }
+
+              fn count_structural_unique_nodes_ignoring_accs<T, A>(root: &Arc<Upper<T, A>>) -> usize
+              where
+                  T: Clone + Eq + Hash,
+                  A: Merge + Clone + Eq + Hash,
+              {
+                  let mut interner: StatsInterner<T> = Default::default();
+                  let mut memo_upper: StdHashMap<usize, usize> = StdHashMap::new();
+                  let mut memo_lower: StdHashMap<usize, usize> = StdHashMap::new();
+                  let _root_id = canon_upper_for_stats::<T, A>(root, &mut memo_upper, &mut memo_lower, &mut interner);
+                  interner.next_id
+              }
+
+              let num_structurally_unique_nodes =
+                  count_structural_unique_nodes_ignoring_accs::<T, A>(&self.inner);
 
               let total_unique_nodes = num_upperbranch_nodes + num_interface_nodes + num_lower_nodes;
               let total_edges = upper_edges + interface_to_lower_edges + lower_edges;
@@ -2704,6 +2752,1070 @@ local_system:
                       }
                   }
               }
+          }
+      }
+    src/datastructures/gss_leveled_adapter.rs: |-
+      use std::cmp::Ordering;
+      use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+      use std::fmt::{Debug, Write};
+      use std::hash::{Hash, Hasher};
+      use std::sync::Arc;
+
+      use bimap::BiBTreeMap;
+      use profiler_macro::time_it;
+      use crate::constraint::StateIDBV;
+      use crate::constraint::{LLMTokenBV, TerminalBV};
+      use crate::datastructures::hybrid_bitset::HybridBitset;
+      use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
+      use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats, Merge as LGMerge};
+      use crate::datastructures::trie::Trie2Index;
+      use crate::glr::grammar::Terminal;
+      use crate::glr::parser::{GLRParser, ParseStateEdgeContent};
+      use crate::glr::table::{StateID, TerminalID};
+      use crate::hit;
+      use crate::tokenizer::LLMTokenID;
+
+      // Adapter aliases for precompute-trie types (referencing constraint.rs)
+      pub type StoredPrecomputeNodeIndex = crate::constraint::PrecomputeNode3Index;
+      pub type StoredTrieGodWrapper = crate::constraint::Trie3GodWrapper;
+
+      // --- Acc type compatible with LeveledGSS A ---
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct Acc {
+          pub llm_tokens_union: HybridBitset,
+          pub terminals_union: HybridL2Bitset,
+          pub stored_trie_nodes: BTreeSet<StoredPrecomputeNodeIndex>,
+      }
+
+      impl Acc {
+          pub fn new_fresh() -> Self {
+              Self {
+                  llm_tokens_union: HybridBitset::max_ones(),
+                  terminals_union: HybridL2Bitset::all(),
+                  stored_trie_nodes: BTreeSet::new(),
+              }
+          }
+          pub fn new_dead() -> Self {
+              Self {
+                  llm_tokens_union: HybridBitset::zeros(),
+                  terminals_union: HybridL2Bitset::all(),
+                  stored_trie_nodes: BTreeSet::new(),
+              }
+          }
+          pub fn is_default(&self) -> bool {
+              self.llm_tokens_union == HybridBitset::max_ones()
+                  && self.terminals_union == HybridL2Bitset::all()
+                  && self.stored_trie_nodes.is_empty()
+          }
+          pub fn union_llm_tokens(&self) -> HybridBitset {
+              self.llm_tokens_union.clone()
+          }
+
+          pub fn stored_trie_nodes(&self) -> &BTreeSet<StoredPrecomputeNodeIndex> {
+              &self.stored_trie_nodes
+          }
+
+          pub fn stored_trie_nodes_mut(&mut self) -> &mut BTreeSet<StoredPrecomputeNodeIndex> {
+              &mut self.stored_trie_nodes
+          }
+      }
+
+      impl LGMerge for Acc {
+          fn merge(&self, other: &Self) -> Self {
+              hit!("LGMerge for Acc");
+              Acc {
+                  llm_tokens_union: &self.llm_tokens_union | &other.llm_tokens_union,
+                  terminals_union: &self.terminals_union | &other.terminals_union,
+                  stored_trie_nodes: &self.stored_trie_nodes | &other.stored_trie_nodes,
+              }
+          }
+      }
+
+      pub type GSSStats = LeveledGSSStats<ParseStateEdgeContent, Acc>;
+
+      impl GSSStats {
+          pub fn unique_nodes(&self) -> usize {
+              self.total_unique_nodes
+          }
+
+          pub fn total_edges(&self) -> usize {
+              self.total_edges
+          }
+      }
+
+      #[time_it]
+      pub fn gather_gss_stats(roots: &[&GSSNode]) -> LeveledGSSStats<ParseStateEdgeContent, Acc> {
+          let active_roots: Vec<_> = roots.iter().copied().filter(|r| !r.is_empty()).collect();
+
+           // --- Graph-level stats (from merged GSS to handle sharing correctly) ---
+           let mut merged_gss = LeveledGSS::empty();
+           for r in &active_roots {
+               merged_gss = merged_gss.merge(&r.inner);
+           }
+
+          merged_gss.stats()
+      }
+      // --- GSS printer config & helpers ---
+      pub struct GSSPrintConfig<'a> {
+          pub(crate) labels: Option<&'a [String]>,
+          pub(crate) max_edges: usize,
+          pub(crate) original_internal_bimap: Option<&'a BTreeMap<usize, usize>>,
+          pub(crate) llm_token_map: Option<&'a BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          pub(crate) verbose: bool,
+      }
+      impl<'a> Default for GSSPrintConfig<'a> {
+          fn default() -> Self {
+              Self {
+                  labels: None,
+                  max_edges: usize::MAX,
+                  original_internal_bimap: None,
+                  llm_token_map: None,
+                  verbose: false,
+              }
+          }
+      }
+
+      pub fn print_gss_forest(
+          roots: &[Arc<GSSNode>],
+          terminal_map: &BiBTreeMap<crate::glr::grammar::Terminal, TerminalID>,
+          config: &GSSPrintConfig,
+      ) -> (String, Vec<StateID>) {
+          let mut out = String::new();
+          let mut state_ids_in_order = Vec::new();
+          if roots.is_empty() {
+              return ("GSS Forest: (No roots)".to_string(), state_ids_in_order);
+          }
+          writeln!(&mut out, "GSS Forest (leveled adapter):").unwrap();
+          for (i, r) in roots.iter().enumerate() {
+              // Use label if available
+              if let Some(labels) = config.labels {
+                  assert!(labels.len() == roots.len());
+                  writeln!(&mut out, "{}", labels[i]).unwrap();
+              } else {
+                  writeln!(&mut out, " Root {}:", i).unwrap();
+              }
+              let stacks = r.inner.to_stacks();
+              for (path, acc) in stacks {
+                  let sids: Vec<_> = path.iter().map(|e| e.state_id).collect();
+                  for sid in &sids {
+                      if !state_ids_in_order.contains(sid) {
+                          state_ids_in_order.push(*sid);
+                      }
+                  }
+                  let s: Vec<_> = sids.iter().map(|s| s.0.to_string()).collect();
+                  let acc_str = format_acc(
+                      &acc,
+                      terminal_map,
+                      config.original_internal_bimap,
+                      config.llm_token_map,
+                      config,
+                  );
+                  if acc_str.is_empty() {
+                      writeln!(&mut out, "  - [{}]", s.join(" ")).unwrap();
+                  } else {
+                      writeln!(&mut out, "  - [{}] {}", s.join(" "), acc_str).unwrap();
+                  }
+              }
+          }
+          (out, state_ids_in_order)
+      }
+
+      pub fn find_longest_path(root: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
+          root.inner
+              .get_longest_path()
+              .map(|(p, _a)| p.into_iter().map(|e| (e, root.clone())).collect())
+      }
+
+      pub fn sample_path<'a>(roots: &[&'a GSSNode], _seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
+          roots
+              .get(0)
+              .map(|r| r.inner.get_first_path().map(|(p, _)| p).unwrap_or_default())
+      }
+
+      // --- GSS wrapper ---
+      #[derive(Clone)]
+      pub struct GSSNode {
+          pub(crate) inner: LeveledGSS<ParseStateEdgeContent, Acc>,
+      }
+
+      impl Debug for GSSNode {
+          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+              write!(f, "GSSNode(len_paths={})", self.inner.num_paths())
+          }
+      }
+
+      impl PartialEq for GSSNode {
+          fn eq(&self, other: &Self) -> bool {
+              println!("Warning: GSSNode PartialEq compares full stacks, which may be expensive.");
+              let mut a_stacks = self.inner.to_stacks();
+              let mut b_stacks = other.inner.to_stacks();
+              a_stacks.sort();
+              b_stacks.sort();
+              a_stacks == b_stacks
+          }
+      }
+      impl Eq for GSSNode {}
+
+      impl GSSNode {
+          pub fn new(acc: Acc) -> Self {
+              GSSNode {
+                  inner: LeveledGSS::from_stacks(&vec![(vec![], acc)]),
+              }
+          }
+          pub fn new_fresh() -> Self {
+              GSSNode {
+                  inner: LeveledGSS::from_stacks(&vec![(vec![], Acc::new_fresh())]),
+              }
+          }
+          pub fn new_dead() -> Self {
+              // Represent dead as empty; allowed_llm_tokens() on empty returns zeros.
+              GSSNode {
+                  inner: LeveledGSS::empty(),
+              }
+          }
+
+          // Helper: append a value to all stacks; if empty, create singleton stack.
+          fn push_all(
+              inner: &LeveledGSS<ParseStateEdgeContent, Acc>,
+              edge: ParseStateEdgeContent,
+          ) -> LeveledGSS<ParseStateEdgeContent, Acc> {
+              if inner.is_empty() {
+                  LeveledGSS::from_stacks(&[(vec![edge], Acc::new_fresh())])
+              } else {
+                  inner.push(edge)
+              }
+          }
+
+          pub fn push(&self, edge_value: ParseStateEdgeContent) -> Self {
+              GSSNode {
+                  inner: Self::push_all(&self.inner, edge_value),
+              }
+          }
+          pub fn push_many(&self, edge_values: Vec<ParseStateEdgeContent>) -> Self {
+              if edge_values.is_empty() {
+                  return self.clone();
+              }
+              let mut merged = LeveledGSS::empty();
+              for e in edge_values {
+                  let next = Self::push_all(&self.inner, e);
+                  merged = merged.merge(&next);
+              }
+              GSSNode { inner: merged }
+          }
+
+          pub fn is_empty(&self) -> bool {
+              self.inner.is_empty() || self.inner.max_depth() == 0
+          }
+          pub fn is_alive(&self) -> bool {
+              !self.is_empty()
+          }
+          pub fn is_ok(&self) -> bool {
+              self.is_alive()
+          }
+          pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
+              self.inner
+                  .reduce_acc()
+                  .map_or(HybridBitset::zeros(), |acc| acc.llm_tokens_union)
+          }
+          pub fn disallowed_terminals(&self) -> HybridL2Bitset {
+              self.inner
+                  .reduce_acc()
+                  .map(|acc| acc.terminals_union.complement())
+                  .unwrap_or_else(|| HybridL2Bitset::all().complement())
+          }
+          #[time_it]
+          pub fn stored_trie_nodes(&self) -> BTreeSet<StoredPrecomputeNodeIndex> {
+              self.inner
+                  .reduce_acc()
+                  .map_or_else(BTreeSet::new, |acc| acc.stored_trie_nodes.clone())
+          }
+          pub fn max_depth(&self) -> usize {
+              self.inner.max_depth() as usize
+          }
+          pub fn flatten(&self) -> Vec<(Vec<ParseStateEdgeContent>, Acc)> {
+              self.inner.to_stacks()
+          }
+
+          pub fn print(&self) -> String {
+              let (s, _sid) = print_gss_forest(&[Arc::new(self.clone())], &BiBTreeMap::new(), &GSSPrintConfig::default());
+              s
+          }
+
+          pub fn merge_with_depth(&mut self, merge_depth: usize, other: &Self) {
+              self.inner = self.inner.merge(&other.inner);
+              self.inner.fuse(Some(merge_depth as isize));
+          }
+          pub fn merged(mut self, other: Self, depth: usize) -> Self {
+              self.merge_with_depth(depth, &other);
+              self
+          }
+
+          pub fn merge_many_with_depth(merge_depth: usize, nodes: impl IntoIterator<Item = Arc<GSSNode>>) -> Arc<GSSNode> {
+              let mut it = nodes.into_iter();
+              if let Some(first) = it.next() {
+                  let mut acc = (*first).clone();
+                  for n in it {
+                      acc.merge_with_depth(merge_depth, &n);
+                  }
+                  Arc::new(acc)
+              } else {
+                  Arc::new(GSSNode::new_dead())
+              }
+          }
+
+          pub fn predecessors(&self) -> BTreeMap<ParseStateEdgeContent, BTreeMap<isize, Vec<Arc<GSSNode>>>> {
+              self.inner
+                  .predecessors()
+                  .into_iter()
+                  .map(|(edge_val, preds_by_depth)| {
+                      let new_preds_by_depth = preds_by_depth
+                          .into_iter()
+                          .map(|(depth, gss_vec)| {
+                              let new_gss_vec = gss_vec.into_iter().map(|gss| Arc::new(GSSNode { inner: gss })).collect();
+                              (depth, new_gss_vec)
+                          })
+                          .collect();
+                      (edge_val, new_preds_by_depth)
+                  })
+                  .collect()
+          }
+
+          pub fn num_predecessors(&self) -> usize {
+              self.inner.peek().len()
+          }
+
+          pub fn popn(&self, n: usize) -> GSSPopper {
+              let mut popper = GSSPopper {
+                  inner: self.inner.clone(),
+                  below_bottom: BTreeMap::new(),
+              };
+              popper.popn(n);
+              popper
+          }
+
+          pub(crate) fn peek_iter(parent_arc: &Arc<GSSNode>) -> impl Iterator<Item = GSSPeek<'_>> {
+              let keys: Vec<_> = parent_arc.inner.peek().into_iter().collect();
+              GSSPeekIter {
+                  parent: &parent_arc.inner,
+                  keys,
+                  idx: 0,
+              }
+          }
+
+          #[time_it]
+          pub fn fuse_predecessors(&mut self, levels: usize) {
+              if levels == 0 {
+                  return;
+              }
+              let self_arc = Arc::new(self.clone());
+              let mut memo = HashMap::new();
+              let fused_arc = fuse_predecessors_recursive(&self_arc, levels, &mut memo);
+              if !Arc::ptr_eq(&self_arc, &fused_arc) {
+                  *self = (*fused_arc).clone();
+              }
+          }
+
+          pub fn fuse_predecessors_recursive(&self, levels: usize, _memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
+              let self_arc = Arc::new(self.clone());
+              let mut dummy_memo = HashMap::new();
+              fuse_predecessors_recursive(&self_arc, levels, &mut dummy_memo)
+          }
+      }
+
+      // --- GSSPeek & iterator (updated to borrow LeveledGSS directly) ---
+      pub struct GSSPeek<'a> {
+          parent_arc: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          edge_value: ParseStateEdgeContent,
+      }
+      struct GSSPeekIter<'a> {
+          parent: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          keys: Vec<ParseStateEdgeContent>,
+          idx: usize,
+      }
+      impl<'a> Iterator for GSSPeekIter<'a> {
+          type Item = GSSPeek<'a>;
+          fn next(&mut self) -> Option<Self::Item> {
+              if self.idx >= self.keys.len() {
+                  None
+              } else {
+                  let ev = self.keys[self.idx].clone();
+                  self.idx += 1;
+                  Some(GSSPeek {
+                      parent_arc: self.parent,
+                      edge_value: ev,
+                  })
+              }
+          }
+      }
+      impl<'a> GSSPeek<'a> {
+          pub fn edge_value(&self) -> &ParseStateEdgeContent {
+              &self.edge_value
+          }
+          pub fn isolated_parent(&self) -> Arc<GSSNode> {
+              let iso = self.parent_arc.isolate(Some(self.edge_value.clone()));
+              Arc::new(GSSNode { inner: iso })
+          }
+          pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+              let iso = self.isolated_parent();
+              iso.as_ref().push(edge_value)
+          }
+          pub fn popn(&self, n: usize) -> GSSPopper {
+              self.isolated_parent().popn(n)
+          }
+          pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
+              self.isolated_parent().allowed_llm_tokens()
+          }
+      }
+
+      // --- Popper ---
+      pub struct GSSPopper {
+          inner: LeveledGSS<ParseStateEdgeContent, Acc>,
+          below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Acc>>,
+      }
+      pub struct GSSPopperItem {
+          inner: LeveledGSS<ParseStateEdgeContent, Acc>,
+      }
+      pub struct GSSPopperItemPeek<'a> {
+          parent_arc: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          edge_value: &'a ParseStateEdgeContent,
+      }
+
+      impl GSSPopper {
+          pub fn new_from_node(node: Arc<GSSNode>, _acc: Arc<Acc>) -> Self {
+              GSSPopper { inner: node.inner.clone(), below_bottom: BTreeMap::new() }
+          }
+          pub fn iter(&self) -> impl Iterator<Item = GSSPopperItem> {
+              let keys: Vec<_> = self.inner.peek().into_iter().collect();
+              let parent = self.inner.clone();
+              keys.into_iter().map(move |edge| {
+                  let iso = parent.isolate(Some(edge));
+                  GSSPopperItem { inner: iso }
+              })
+          }
+          pub fn below_bottom(&self) -> &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Acc>> {
+              &self.below_bottom
+          }
+          pub fn num_predecessors(&self) -> usize {
+              self.inner.peek().len()
+          }
+          pub fn popn(&mut self, n: usize) {
+              for _ in 0..n {
+                  self.pop();
+              }
+          }
+          pub fn pop(&mut self) {
+              let mut inner = self.inner.clone();
+              let mut belows: BTreeMap<_, _> = self.below_bottom.iter().map(|(k, v)| (*k + 1, v.clone())).collect();
+              let new_below_slice = inner.filter_by_length(Some(1), Some(1));
+              if !new_below_slice.is_empty() {
+                  let mut new_below_map = BTreeMap::new();
+                  for edge in new_below_slice.peek() {
+                      let isolated = new_below_slice.isolate(Some(edge.clone()));
+                      if let Some(acc) = isolated.reduce_acc() {
+                          new_below_map.insert(edge, acc);
+                      }
+                  }
+                  if !new_below_map.is_empty() {
+                      belows.insert(1, new_below_map);
+                  }
+              }
+              self.below_bottom = belows;
+              inner = inner.pop();
+              inner = inner.filter_by_length(Some(1), None);
+              self.inner = inner;
+          }
+      }
+
+      impl GSSPopperItem {
+          pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
+              let keys: Vec<_> = self.inner.peek().into_iter().collect();
+              GSSPopperItemPeekIter {
+                  parent: &self.inner,
+                  keys,
+                  idx: 0,
+              }
+          }
+          pub(crate) fn resolved_acc(&self) -> Acc {
+              self.inner.reduce_acc().unwrap_or_else(Acc::new_dead)
+          }
+      }
+      struct GSSPopperItemPeekIter<'a> {
+          parent: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          keys: Vec<ParseStateEdgeContent>,
+          idx: usize,
+      }
+      impl<'a> Iterator for GSSPopperItemPeekIter<'a> {
+          type Item = GSSPopperItemPeek<'a>;
+          fn next(&mut self) -> Option<Self::Item> {
+              if self.idx >= self.keys.len() {
+                  None
+              } else {
+                  let ev = &self.keys[self.idx];
+                  self.idx += 1;
+                  Some(GSSPopperItemPeek {
+                      parent_arc: self.parent,
+                      edge_value: unsafe { &*(ev as *const ParseStateEdgeContent) },
+                  })
+              }
+          }
+      }
+      impl<'a> GSSPopperItemPeek<'a> {
+          pub fn edge_value(&self) -> &'a ParseStateEdgeContent {
+              self.edge_value
+          }
+          pub fn isolated_parent(&self) -> Arc<GSSNode> {
+              let iso = self.parent_arc.isolate(Some(self.edge_value.clone()));
+              Arc::new(GSSNode { inner: iso })
+          }
+          pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+              let iso = self.isolated_parent();
+              iso.as_ref().push(edge_value)
+          }
+      }
+
+      // --- Roots & helpers ---
+      #[time_it]
+      pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
+          let mut out: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
+          for n in nodes {
+              for edge in n.inner.peek() {
+                  let iso = n.inner.isolate(Some(edge.clone()));
+                  if let Some(acc) = iso.reduce_acc() {
+                      out.entry(edge).or_default().insert(Arc::new(acc));
+                  }
+              }
+          }
+          out
+      }
+
+      // --- Transformations (simplified) ---
+      fn transform_all(root_arc: &mut Arc<GSSNode>, f: impl FnMut(&Acc) -> Option<Acc>) {
+          let new_inner = root_arc.inner.apply_and_prune(f);
+          *root_arc = Arc::new(GSSNode { inner: new_inner });
+      }
+
+      pub type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<Arc<GSSNode>>>;
+
+      pub fn allow_only_llm_tokens_and_prune(root_arc: &mut Arc<GSSNode>, allowed_tokens: &LLMTokenBV) {
+          let mut memo = HashMap::new();
+          allow_only_llm_tokens_and_prune_arc(root_arc, allowed_tokens, &mut memo);
+      }
+
+      pub(crate) fn allow_only_llm_tokens_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          allowed_tokens: &LLMTokenBV,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              na.llm_tokens_union &= allowed_tokens;
+              if na.llm_tokens_union.is_empty() {
+                  None
+              } else {
+                  Some(na)
+              }
+          });
+      }
+
+      pub(crate) fn disallow_llm_tokens_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          tokens_to_disallow: &LLMTokenBV,
+          memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          let allowed = HybridBitset::max_ones() - tokens_to_disallow.clone();
+          allow_only_llm_tokens_and_prune_arc(root_arc, &allowed, memo);
+      }
+
+      pub fn reset_llm_tokens(root_arc: &mut Arc<GSSNode>, _memo: &mut PruneAndTransformRecursiveMemo) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              na.llm_tokens_union = HybridBitset::max_ones();
+              Some(na)
+          });
+      }
+
+      pub(crate) fn reset_terminals(root_arc: &mut Arc<GSSNode>, _memo: &mut PruneAndTransformRecursiveMemo) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              na.terminals_union = HybridL2Bitset::all();
+              Some(na)
+          });
+      }
+
+      pub(crate) fn disallow_terminals_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          disallowed_terminals: &HybridL2Bitset,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              println!("Disallowing terminals: {:?}", disallowed_terminals);
+              println!("Before: {:?}", na.terminals_union);
+              na.terminals_union -= disallowed_terminals;
+              println!("After: {:?}", na.terminals_union);
+              Some(na)
+          });
+      }
+
+      pub fn prune_llm_tokens_by_disallowed_terminals(
+          root_arc: &mut Arc<GSSNode>,
+          possible_matches: &BTreeMap<crate::tokenizer::TokenizerStateID, BTreeMap<crate::types::TerminalID, LLMTokenBV>>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          // Very simplified: keep as-is (no change). Implement exact logic later.
+          let _ = possible_matches;
+          let _ = root_arc;
+      }
+
+      pub fn prune_disallowed_terminals(
+          root_arc: &mut Arc<GSSNode>,
+          matched_terminals: &BTreeMap<crate::tokenizer::TokenizerStateID, TerminalBV>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          let matched = matched_terminals.clone();
+          let all = HybridBitset::max_ones();
+          transform_all(root_arc, |a| {
+              for (sid, bv) in &matched {
+                  let allowed = a.terminals_union.get_l2_bitset(sid.0).unwrap_or(&all);
+                  if !bv.is_subset(allowed) {
+                      return None;
+                  }
+              }
+              Some(a.clone())
+          });
+      }
+
+      pub fn map_allowed_terminals_tokenizer_states(
+          root_arc: &mut Arc<GSSNode>,
+          map: &BTreeMap<crate::tokenizer::TokenizerStateID, crate::tokenizer::TokenizerStateID>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          let mapping = map.clone();
+          transform_all(root_arc, |a| {
+              let mut new_map = BTreeMap::new();
+              for (old, new) in &mapping {
+                  if let Some(bv) = a.terminals_union.get_l2_bitset(old.0) {
+                      new_map
+                          .entry(new.0)
+                          .and_modify(|b: &mut HybridBitset| *b |= bv.clone())
+                          .or_insert_with(|| bv.clone());
+                  }
+              }
+              let mut out = HybridL2Bitset::all();
+              for (sid, bv) in new_map {
+                  out.insert_l2_bitset(sid, bv);
+              }
+              let mut na = a.clone();
+              na.terminals_union = out;
+              Some(na)
+          });
+      }
+
+      #[time_it]
+      pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          allowed_tokens: &LLMTokenBV,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+          stored_trie_god: &StoredTrieGodWrapper,
+      ) {
+          // --- Global Analysis: Find common subsets (macros) ---
+          let mut all_accs = Vec::new();
+          root_arc.inner.visit_accs(|acc| all_accs.push(acc.clone()));
+          let mut all_needs_edge_sets = Vec::new();
+          for acc in &all_accs {
+              let needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = acc
+                  .stored_trie_nodes()
+                  .iter()
+                  .filter(|node| {
+                      !node
+                          .as_arc()
+                          .read(stored_trie_god)
+                          .expect("poison")
+                          .value
+                          .live_tokens
+                          .is_subset(allowed_tokens)
+                  })
+                  .cloned()
+                  .collect();
+              if !needs_edge.is_empty() {
+                  all_needs_edge_sets.push(needs_edge);
+              }
+          }
+
+          let mut pair_counts: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, usize> = BTreeMap::new();
+          for needs_edge_set in &all_needs_edge_sets {
+              let nodes: Vec<_> = needs_edge_set.iter().cloned().collect();
+              if nodes.len() >= 2 {
+                  for i in 0..nodes.len() {
+                      for j in (i + 1)..nodes.len() {
+                          let mut pair = BTreeSet::new();
+                          pair.insert(nodes[i].clone());
+                          pair.insert(nodes[j].clone());
+                          *pair_counts.entry(pair).or_insert(0) += 1;
+                      }
+                  }
+              }
+          }
+
+          let mut macros: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, StoredPrecomputeNodeIndex> = BTreeMap::new();
+          for (pair, count) in pair_counts {
+              if count > 1 { // Only create macros for pairs that are reused.
+                  let dest_node = StoredPrecomputeNodeIndex::new(
+                      stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                          crate::constraint::PrecomputedNodeContents::internal(),
+                      )),
+                  );
+                  macros.insert(pair, dest_node);
+              }
+          }
+          let sorted_macros: Vec<_> = macros.into_iter().collect();
+
+          // --- Transformation ---
+          let mut new_destinations_for_leftovers = BTreeMap::new();
+          transform_all(root_arc, |acc| {
+              let mut na = acc.clone();
+              let original_nodes = na.stored_trie_nodes.clone();
+              let mut needs_edge: BTreeSet<_> = original_nodes
+                  .iter()
+                  .filter(|node| {
+                      !node
+                      .as_arc()
+                      .read(stored_trie_god)
+                      .expect("poison")
+                      .value
+                      .live_tokens
+                          .is_subset(allowed_tokens)
+                  })
+                  .cloned()
+                  .collect();
+
+              if needs_edge.is_empty() {
+                  return Some(na);
+              }
+
+              let mut final_nodes = original_nodes.difference(&needs_edge).cloned().collect::<BTreeSet<_>>();
+
+              // Greedily apply discovered macros
+              for (macro_nodes, macro_dest) in &sorted_macros {
+                  if macro_nodes.is_subset(&needs_edge) {
+                      let edge_key = (0, allowed_tokens.clone());
+                      let edge_value = StateIDBV::max_ones();
+                      for src in macro_nodes {
+                          let inserter = crate::datastructures::trie::EdgeInserter::new(
+                              stored_trie_god,
+                              src.as_arc().clone(),
+                              edge_key.clone(),
+                              edge_value.clone(),
+                              |e, n| *e |= n,
+                              |node_value, _| node_value.live_tokens |= allowed_tokens,
+                              |_, _| {},
+                          );
+                          inserter.try_destination(macro_dest.clone()).expect("Cycle detected");
+                      }
+                      macro_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+                      final_nodes.insert(macro_dest.clone());
+                      needs_edge = needs_edge.difference(macro_nodes).cloned().collect();
+                  }
+              }
+
+              // Handle leftovers using the original "macro for the whole set" logic
+              if !needs_edge.is_empty() {
+                  let new_dest = new_destinations_for_leftovers
+                      .entry(needs_edge.clone())
+                      .or_insert_with(|| {
+                          StoredPrecomputeNodeIndex::new(
+                              stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                                  crate::constraint::PrecomputedNodeContents::internal(),
+                              )),
+                          )
+                      })
+                      .clone();
+
+                  let edge_key = (0, allowed_tokens.clone());
+                  let edge_value = StateIDBV::max_ones();
+                  for src in &needs_edge {
+                      let inserter = crate::datastructures::trie::EdgeInserter::new(
+                          stored_trie_god,
+                          src.as_arc().clone(),
+                          edge_key.clone(),
+                          edge_value.clone(),
+                          |e, n| *e |= n,
+                          |node_value, _| node_value.live_tokens |= allowed_tokens,
+                          |_, _| {},
+                      );
+                      inserter.try_destination(new_dest.clone()).expect("Cycle detected");
+                  }
+                  new_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+                  final_nodes.insert(new_dest);
+              }
+
+              na.stored_trie_nodes = final_nodes;
+              Some(na)
+          });
+      }
+
+      pub fn simplify(_states: &mut BTreeMap<crate::tokenizer::TokenizerStateID, Arc<GSSNode>>) {}
+      pub(crate) fn simplify_roots_in_place(_roots: &mut [Arc<GSSNode>]) {}
+      pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
+          let fused_inner = node_arc.inner.fuse(Some(levels as isize));
+          if fused_inner.ptr_eq(&node_arc.inner) {
+              node_arc.clone()
+          } else {
+              Arc::new(GSSNode { inner: fused_inner })
+          }
+      }
+
+      impl GSSNode {
+          pub fn reset_llm_tokens(&mut self) {
+              let mut memo = PruneAndTransformRecursiveMemo::new();
+              let mut arc = Arc::new(self.clone());
+              reset_llm_tokens(&mut arc, &mut memo);
+              *self = (*arc).clone();
+          }
+      }
+
+      // --- Trie-utils stubs (no-ops) ---
+      #[time_it]
+      pub(crate) fn deep_add_precompute_trie_edges(
+          root_arc: &mut Arc<GSSNode>,
+          god: &StoredTrieGodWrapper,
+          edge_key: &(usize, LLMTokenBV),
+          edge_value: &StateIDBV,
+          tokens_for_update: &LLMTokenBV,
+          destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          transform_all(root_arc, |acc| {
+              if acc.stored_trie_nodes().is_empty() {
+                  return Some(acc.clone());
+              }
+
+              let destination = destination_provider();
+
+              for source_wrapper in acc.stored_trie_nodes() {
+                  let source_arc = source_wrapper.as_arc().clone();
+
+                  let inserter = crate::datastructures::trie::EdgeInserter::new(
+                      god,
+                      source_arc,
+                      edge_key.clone(),
+                      edge_value.clone(),
+                      |e, n| *e |= n,
+                      |node_value, _edge_value| node_value.live_tokens |= tokens_for_update,
+                      |_, _| {}, // Unconditional insertion
+                  );
+                  inserter.try_destination(destination.clone()).expect("Cycle detected when adding precompute trie edges");
+              }
+
+              // destination.write(god).expect("poison").value.live_tokens |= tokens_for_update;
+
+              let mut new_acc = acc.clone();
+              *new_acc.stored_trie_nodes_mut() = BTreeSet::from([destination]);
+              Some(new_acc)
+          });
+      }
+
+      #[time_it]
+      pub(crate) fn merge_stored_trie_nodes(
+          root_arc: &mut Arc<GSSNode>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+          stored_trie_god: &StoredTrieGodWrapper,
+      ) {
+          let mut new_destinations = BTreeMap::new();
+
+          transform_all(root_arc, |acc| {
+              if !acc.stored_trie_nodes().iter().any(
+                  |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != acc.llm_tokens_union
+              ) {
+                  return Some(acc.clone());
+              }
+
+              let mut new_acc = acc.clone();
+              // Create a single new destination for this merge operation.
+              let new_destination = new_destinations.entry((new_acc.stored_trie_nodes().clone(), acc.llm_tokens_union.clone()))
+                  .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(crate::constraint::PrecomputedNodeContents::internal()))))
+                  .clone();
+
+              let edge_key = (0, new_acc.llm_tokens_union.clone());
+              let edge_value = crate::constraint::StateIDBV::max_ones();
+              let tokens_for_edge = new_acc.llm_tokens_union.clone();
+
+              for source_wrapper in new_acc.stored_trie_nodes() {
+                  let source_arc = source_wrapper.as_arc().clone();
+
+                  let inserter = crate::datastructures::trie::EdgeInserter::new(
+                      stored_trie_god,
+                      source_arc,
+                      edge_key.clone(),
+                      edge_value.clone(),
+                      |e, n| *e |= n,
+                      |node_value, _edge_value| node_value.live_tokens |= &tokens_for_edge,
+                      |_, _| {}, // Unconditional insertion
+                  );
+                  inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging stored_trie nodes; this should be impossible.");
+              }
+
+              new_destination.write(stored_trie_god).expect("poison").value.live_tokens |= &tokens_for_edge;
+
+              new_acc.stored_trie_nodes = BTreeSet::from([new_destination]);
+              Some(new_acc)
+          });
+      }
+
+      #[time_it]
+      pub(crate) fn is_simple_gss(
+          node: &Arc<GSSNode>,
+          hallucinated_state_id: StateID,
+      ) -> Option<(StateID, Arc<Acc>)> {
+          if let Some((path, acc)) = node.inner.as_single_path() {
+              // Path must have length 2. The path is from leaf to root.
+              if path.len() == 2 {
+                  let edge_to_leaf = &path[0];
+                  let edge_to_middle = &path[1];
+
+                  // The edge into the leaf must be the hallucinated one.
+                  if edge_to_leaf.state_id == hallucinated_state_id {
+                      let state_id_x = edge_to_middle.state_id;
+                      // The structure is what matters for caching, not the contents.
+                      return Some((state_id_x, Arc::new(acc)));
+                  }
+              }
+          }
+          None
+      }
+
+      // helper used by parser logging
+      pub fn popn_collect_isolated_parents(node_arc: &Arc<GSSNode>, n: usize) -> Vec<(StateID, Arc<GSSNode>)> {
+          let popped = node_arc.inner.popn(n as isize);
+          let mut out = Vec::new();
+          for edge in popped.peek() {
+              let iso_inner = popped.isolate(Some(edge.clone()));
+              let num_paths = iso_inner.num_paths();
+              if num_paths > 0 {
+                  let gss_node = Arc::new(GSSNode { inner: iso_inner });
+                  for _ in 0..num_paths {
+                      out.push((edge.state_id, gss_node.clone()));
+                  }
+              }
+          }
+          out
+      }
+
+      // Compatibility for formatting acc (used by printer)
+      pub(crate) fn format_acc(
+          acc: &Acc,
+          terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+          original_internal_bimap: Option<&BTreeMap<usize, usize>>,
+          llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          config: &GSSPrintConfig,
+      ) -> String {
+          let _ = (original_internal_bimap, llm_token_map);
+
+          if config.verbose {
+              // In verbose mode, print the full debug representation of the Acc.
+              return format!("[acc: {:?}]", acc);
+          }
+
+          let summarize_llm = |bv: &HybridBitset, label: &str| -> Option<String> {
+              if *bv == HybridBitset::max_ones() {
+                  return None;
+              }
+              if bv.is_empty() {
+                  return Some(format!("{}=∅", label));
+              }
+              let total = bv.len();
+              const MAX_SHOW: usize = 8;
+              let sample: Vec<String> = bv.iter().take(MAX_SHOW).map(|id| id.to_string()).collect();
+              if total > MAX_SHOW {
+                  Some(format!("{}({}): [{} …]", label, total, sample.join(", ")))
+              } else {
+                  Some(format!("{}({}): [{}]", label, total, sample.join(", ")))
+              }
+          };
+
+          let summarize_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> Option<String> {
+              let mut any_disallowed = false;
+              let mut parts = Vec::new();
+              const MAX_RANGES_TO_SHOW: usize = 3;
+              for (range, allowed_bv) in allowed_terminals.range_values() {
+                  let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
+                  if disallowed_bv.is_empty() {
+                      continue;
+                  }
+                  any_disallowed = true;
+                  if parts.len() >= MAX_RANGES_TO_SHOW {
+                      break;
+                  }
+                  let range_str = if range.start() == range.end() {
+                      format!("{}", range.start())
+                  } else {
+                      format!("{}..={}", range.start(), range.end())
+                  };
+
+                  if disallowed_bv == HybridBitset::max_ones() {
+                      parts.push(format!("state(s) {}: all", range_str));
+                      continue;
+                  }
+
+                  const MAX_NAMES_TO_SHOW: usize = 5;
+                  let num_disallowed = disallowed_bv.len();
+                  let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES_TO_SHOW)
+                      .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
+                          .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.to_string()))
+                      .collect();
+                  let names_str = names.join(", ");
+
+                  if num_disallowed > MAX_NAMES_TO_SHOW {
+                      parts.push(format!("state(s) {} ({}): [{}, …]", range_str, num_disallowed, names_str));
+                  } else {
+                      parts.push(format!("state(s) {}: [{}]", range_str, names_str));
+                  }
+              }
+              if !any_disallowed {
+                  None
+              } else if parts.is_empty() {
+                  Some(format!("Disallowed {}(…)", label))
+              } else {
+                  Some(format!("Disallowed {}({})", label, parts.join("; ")))
+              }
+          };
+
+          let union_llm_opt = summarize_llm(&acc.llm_tokens_union, "LLM(U)");
+          let union_terminals_opt = summarize_disallowed_terminals(&acc.terminals_union, "Term(U)");
+
+          let stored_trie_nodes_str = {
+              const MAX_PTRS_TO_SHOW: usize = 5;
+              let n = acc.stored_trie_nodes().len();
+              if n == 0 {
+                  None
+              } else if n <= MAX_PTRS_TO_SHOW {
+                  let ptrs: Vec<String> = acc
+                      .stored_trie_nodes()
+                      .iter()
+                      .map(|wrapper| format!("{}", wrapper.as_arc()))
+                      .collect();
+                  Some(format!("Trie(n={}, [{}])", n, ptrs.join(", ")))
+              } else {
+                  let ptrs_sample: Vec<String> = acc
+                      .stored_trie_nodes()
+                      .iter()
+                      .take(MAX_PTRS_TO_SHOW)
+                      .map(|wrapper| format!("{}", wrapper.as_arc()))
+                      .collect();
+                  let remaining = n - MAX_PTRS_TO_SHOW;
+                  Some(format!("Trie(n={}, first {}: {}, …; +{} more)", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining))
+              }
+          };
+
+          let mut parts: Vec<String> = Vec::new();
+          if let Some(s) = union_llm_opt { parts.push(s); }
+          if let Some(s) = union_terminals_opt { parts.push(s); }
+          if let Some(s) = stored_trie_nodes_str { parts.push(s); }
+
+          if parts.is_empty() {
+              String::new()
+          } else {
+              format!("[{}]", parts.join(", "))
           }
       }
   prev_file_contents:
@@ -5456,6 +6568,1083 @@ local_system:
               }
           }
       }
+    src/datastructures/gss_leveled_adapter.rs: |-
+      use std::cmp::Ordering;
+      use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+      use std::fmt::{Debug, Write};
+      use std::hash::{Hash, Hasher};
+      use std::sync::Arc;
+
+      use bimap::BiBTreeMap;
+      use profiler_macro::time_it;
+      use crate::constraint::StateIDBV;
+      use crate::constraint::{LLMTokenBV, TerminalBV};
+      use crate::datastructures::hybrid_bitset::HybridBitset;
+      use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
+      use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats, Merge as LGMerge};
+      use crate::datastructures::trie::Trie2Index;
+      use crate::glr::grammar::Terminal;
+      use crate::glr::parser::{GLRParser, ParseStateEdgeContent};
+      use crate::glr::table::{StateID, TerminalID};
+      use crate::hit;
+      use crate::tokenizer::LLMTokenID;
+
+      // Adapter aliases for precompute-trie types (referencing constraint.rs)
+      pub type StoredPrecomputeNodeIndex = crate::constraint::PrecomputeNode3Index;
+      pub type StoredTrieGodWrapper = crate::constraint::Trie3GodWrapper;
+
+      // --- Acc type compatible with LeveledGSS A ---
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct Acc {
+          pub llm_tokens_union: HybridBitset,
+          pub terminals_union: HybridL2Bitset,
+          pub stored_trie_nodes: BTreeSet<StoredPrecomputeNodeIndex>,
+      }
+
+      impl Acc {
+          pub fn new_fresh() -> Self {
+              Self {
+                  llm_tokens_union: HybridBitset::max_ones(),
+                  terminals_union: HybridL2Bitset::all(),
+                  stored_trie_nodes: BTreeSet::new(),
+              }
+          }
+          pub fn new_dead() -> Self {
+              Self {
+                  llm_tokens_union: HybridBitset::zeros(),
+                  terminals_union: HybridL2Bitset::all(),
+                  stored_trie_nodes: BTreeSet::new(),
+              }
+          }
+          pub fn is_default(&self) -> bool {
+              self.llm_tokens_union == HybridBitset::max_ones()
+                  && self.terminals_union == HybridL2Bitset::all()
+                  && self.stored_trie_nodes.is_empty()
+          }
+          pub fn union_llm_tokens(&self) -> HybridBitset {
+              self.llm_tokens_union.clone()
+          }
+
+          pub fn stored_trie_nodes(&self) -> &BTreeSet<StoredPrecomputeNodeIndex> {
+              &self.stored_trie_nodes
+          }
+
+          pub fn stored_trie_nodes_mut(&mut self) -> &mut BTreeSet<StoredPrecomputeNodeIndex> {
+              &mut self.stored_trie_nodes
+          }
+      }
+
+      impl LGMerge for Acc {
+          fn merge(&self, other: &Self) -> Self {
+              hit!("LGMerge for Acc");
+              Acc {
+                  llm_tokens_union: &self.llm_tokens_union | &other.llm_tokens_union,
+                  terminals_union: &self.terminals_union | &other.terminals_union,
+                  stored_trie_nodes: &self.stored_trie_nodes | &other.stored_trie_nodes,
+              }
+          }
+      }
+
+      pub type GSSStats = LeveledGSSStats<ParseStateEdgeContent, Acc>;
+
+      impl GSSStats {
+          pub fn unique_nodes(&self) -> usize {
+              self.total_unique_nodes
+          }
+
+          pub fn total_edges(&self) -> usize {
+              self.total_edges
+          }
+      }
+
+      #[time_it]
+      pub fn gather_gss_stats(roots: &[&GSSNode]) -> LeveledGSSStats<ParseStateEdgeContent, Acc> {
+          let active_roots: Vec<_> = roots.iter().copied().filter(|r| !r.is_empty()).collect();
+
+           // --- Graph-level stats (from merged GSS to handle sharing correctly) ---
+           let mut merged_gss = LeveledGSS::empty();
+           for r in &active_roots {
+               merged_gss = merged_gss.merge(&r.inner);
+           }
+
+          merged_gss.stats()
+      }
+      // --- GSS printer config & helpers ---
+      pub struct GSSPrintConfig<'a> {
+          pub(crate) labels: Option<&'a [String]>,
+          pub(crate) max_edges: usize,
+          pub(crate) original_internal_bimap: Option<&'a BTreeMap<usize, usize>>,
+          pub(crate) llm_token_map: Option<&'a BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          pub(crate) verbose: bool,
+      }
+      impl<'a> Default for GSSPrintConfig<'a> {
+          fn default() -> Self {
+              Self {
+                  labels: None,
+                  max_edges: usize::MAX,
+                  original_internal_bimap: None,
+                  llm_token_map: None,
+                  verbose: false,
+              }
+          }
+      }
+
+      pub fn print_gss_forest(
+          roots: &[Arc<GSSNode>],
+          terminal_map: &BiBTreeMap<crate::glr::grammar::Terminal, TerminalID>,
+          config: &GSSPrintConfig,
+      ) -> (String, Vec<StateID>) {
+          let mut out = String::new();
+          let mut state_ids_in_order = Vec::new();
+          if roots.is_empty() {
+              return ("GSS Forest: (No roots)".to_string(), state_ids_in_order);
+          }
+          writeln!(&mut out, "GSS Forest (leveled adapter):").unwrap();
+          for (i, r) in roots.iter().enumerate() {
+              // Use label if available
+              if let Some(labels) = config.labels {
+                  assert!(labels.len() == roots.len());
+                  writeln!(&mut out, "{}", labels[i]).unwrap();
+              } else {
+                  writeln!(&mut out, " Root {}:", i).unwrap();
+              }
+              let stacks = r.inner.to_stacks();
+              for (path, acc) in stacks {
+                  let sids: Vec<_> = path.iter().map(|e| e.state_id).collect();
+                  for sid in &sids {
+                      if !state_ids_in_order.contains(sid) {
+                          state_ids_in_order.push(*sid);
+                      }
+                  }
+                  let s: Vec<_> = sids.iter().map(|s| s.0.to_string()).collect();
+                  let acc_str = format_acc(
+                      &acc,
+                      terminal_map,
+                      config.original_internal_bimap,
+                      config.llm_token_map,
+                      config,
+                  );
+                  if acc_str.is_empty() {
+                      writeln!(&mut out, "  - [{}]", s.join(" ")).unwrap();
+                  } else {
+                      writeln!(&mut out, "  - [{}] {}", s.join(" "), acc_str).unwrap();
+                  }
+              }
+          }
+          (out, state_ids_in_order)
+      }
+
+      pub fn find_longest_path(root: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
+          root.inner
+              .get_longest_path()
+              .map(|(p, _a)| p.into_iter().map(|e| (e, root.clone())).collect())
+      }
+
+      pub fn sample_path<'a>(roots: &[&'a GSSNode], _seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
+          roots
+              .get(0)
+              .map(|r| r.inner.get_first_path().map(|(p, _)| p).unwrap_or_default())
+      }
+
+      // --- GSS wrapper ---
+      #[derive(Clone)]
+      pub struct GSSNode {
+          pub(crate) inner: LeveledGSS<ParseStateEdgeContent, Acc>,
+      }
+
+      impl Debug for GSSNode {
+          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+              write!(f, "GSSNode(len_paths={})", self.inner.num_paths())
+          }
+      }
+
+      impl PartialEq for GSSNode {
+          fn eq(&self, other: &Self) -> bool {
+              println!("Warning: GSSNode PartialEq compares full stacks, which may be expensive.");
+              let mut a_stacks = self.inner.to_stacks();
+              let mut b_stacks = other.inner.to_stacks();
+              a_stacks.sort();
+              b_stacks.sort();
+              a_stacks == b_stacks
+          }
+      }
+      impl Eq for GSSNode {}
+
+      impl GSSNode {
+          pub fn new(acc: Acc) -> Self {
+              GSSNode {
+                  inner: LeveledGSS::from_stacks(&vec![(vec![], acc)]),
+              }
+          }
+          pub fn new_fresh() -> Self {
+              GSSNode {
+                  inner: LeveledGSS::from_stacks(&vec![(vec![], Acc::new_fresh())]),
+              }
+          }
+          pub fn new_dead() -> Self {
+              // Represent dead as empty; allowed_llm_tokens() on empty returns zeros.
+              GSSNode {
+                  inner: LeveledGSS::empty(),
+              }
+          }
+
+          // Helper: append a value to all stacks; if empty, create singleton stack.
+          fn push_all(
+              inner: &LeveledGSS<ParseStateEdgeContent, Acc>,
+              edge: ParseStateEdgeContent,
+          ) -> LeveledGSS<ParseStateEdgeContent, Acc> {
+              if inner.is_empty() {
+                  LeveledGSS::from_stacks(&[(vec![edge], Acc::new_fresh())])
+              } else {
+                  inner.push(edge)
+              }
+          }
+
+          pub fn push(&self, edge_value: ParseStateEdgeContent) -> Self {
+              GSSNode {
+                  inner: Self::push_all(&self.inner, edge_value),
+              }
+          }
+          pub fn push_many(&self, edge_values: Vec<ParseStateEdgeContent>) -> Self {
+              if edge_values.is_empty() {
+                  return self.clone();
+              }
+              let mut merged = LeveledGSS::empty();
+              for e in edge_values {
+                  let next = Self::push_all(&self.inner, e);
+                  merged = merged.merge(&next);
+              }
+              GSSNode { inner: merged }
+          }
+
+          pub fn is_empty(&self) -> bool {
+              self.inner.is_empty() || self.inner.max_depth() == 0
+          }
+          pub fn is_alive(&self) -> bool {
+              !self.is_empty()
+          }
+          pub fn is_ok(&self) -> bool {
+              self.is_alive()
+          }
+          pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
+              self.inner
+                  .reduce_acc()
+                  .map_or(HybridBitset::zeros(), |acc| acc.llm_tokens_union)
+          }
+          pub fn disallowed_terminals(&self) -> HybridL2Bitset {
+              self.inner
+                  .reduce_acc()
+                  .map(|acc| acc.terminals_union.complement())
+                  .unwrap_or_else(|| HybridL2Bitset::all().complement())
+          }
+          #[time_it]
+          pub fn stored_trie_nodes(&self) -> BTreeSet<StoredPrecomputeNodeIndex> {
+              self.inner
+                  .reduce_acc()
+                  .map_or_else(BTreeSet::new, |acc| acc.stored_trie_nodes.clone())
+          }
+          pub fn max_depth(&self) -> usize {
+              self.inner.max_depth() as usize
+          }
+          pub fn flatten(&self) -> Vec<(Vec<ParseStateEdgeContent>, Acc)> {
+              self.inner.to_stacks()
+          }
+
+          pub fn print(&self) -> String {
+              let (s, _sid) = print_gss_forest(&[Arc::new(self.clone())], &BiBTreeMap::new(), &GSSPrintConfig::default());
+              s
+          }
+
+          pub fn merge_with_depth(&mut self, merge_depth: usize, other: &Self) {
+              self.inner = self.inner.merge(&other.inner);
+              self.inner.fuse(Some(merge_depth as isize));
+          }
+          pub fn merged(mut self, other: Self, depth: usize) -> Self {
+              self.merge_with_depth(depth, &other);
+              self
+          }
+
+          pub fn merge_many_with_depth(merge_depth: usize, nodes: impl IntoIterator<Item = Arc<GSSNode>>) -> Arc<GSSNode> {
+              let mut it = nodes.into_iter();
+              if let Some(first) = it.next() {
+                  let mut acc = (*first).clone();
+                  for n in it {
+                      acc.merge_with_depth(merge_depth, &n);
+                  }
+                  Arc::new(acc)
+              } else {
+                  Arc::new(GSSNode::new_dead())
+              }
+          }
+
+          pub fn predecessors(&self) -> BTreeMap<ParseStateEdgeContent, BTreeMap<isize, Vec<Arc<GSSNode>>>> {
+              self.inner
+                  .predecessors()
+                  .into_iter()
+                  .map(|(edge_val, preds_by_depth)| {
+                      let new_preds_by_depth = preds_by_depth
+                          .into_iter()
+                          .map(|(depth, gss_vec)| {
+                              let new_gss_vec = gss_vec.into_iter().map(|gss| Arc::new(GSSNode { inner: gss })).collect();
+                              (depth, new_gss_vec)
+                          })
+                          .collect();
+                      (edge_val, new_preds_by_depth)
+                  })
+                  .collect()
+          }
+
+          pub fn num_predecessors(&self) -> usize {
+              self.inner.peek().len()
+          }
+
+          pub fn popn(&self, n: usize) -> GSSPopper {
+              let mut popper = GSSPopper {
+                  inner: self.inner.clone(),
+                  below_bottom: BTreeMap::new(),
+              };
+              popper.popn(n);
+              popper
+          }
+
+          pub(crate) fn peek_iter(parent_arc: &Arc<GSSNode>) -> impl Iterator<Item = GSSPeek<'_>> {
+              let keys: Vec<_> = parent_arc.inner.peek().into_iter().collect();
+              GSSPeekIter {
+                  parent: &parent_arc.inner,
+                  keys,
+                  idx: 0,
+              }
+          }
+
+          #[time_it]
+          pub fn fuse_predecessors(&mut self, levels: usize) {
+              if levels == 0 {
+                  return;
+              }
+              let self_arc = Arc::new(self.clone());
+              let mut memo = HashMap::new();
+              let fused_arc = fuse_predecessors_recursive(&self_arc, levels, &mut memo);
+              if !Arc::ptr_eq(&self_arc, &fused_arc) {
+                  *self = (*fused_arc).clone();
+              }
+          }
+
+          pub fn fuse_predecessors_recursive(&self, levels: usize, _memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
+              let self_arc = Arc::new(self.clone());
+              let mut dummy_memo = HashMap::new();
+              fuse_predecessors_recursive(&self_arc, levels, &mut dummy_memo)
+          }
+      }
+
+      // --- GSSPeek & iterator (updated to borrow LeveledGSS directly) ---
+      pub struct GSSPeek<'a> {
+          parent_arc: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          edge_value: ParseStateEdgeContent,
+      }
+      struct GSSPeekIter<'a> {
+          parent: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          keys: Vec<ParseStateEdgeContent>,
+          idx: usize,
+      }
+      impl<'a> Iterator for GSSPeekIter<'a> {
+          type Item = GSSPeek<'a>;
+          fn next(&mut self) -> Option<Self::Item> {
+              if self.idx >= self.keys.len() {
+                  None
+              } else {
+                  let ev = self.keys[self.idx].clone();
+                  self.idx += 1;
+                  Some(GSSPeek {
+                      parent_arc: self.parent,
+                      edge_value: ev,
+                  })
+              }
+          }
+      }
+      impl<'a> GSSPeek<'a> {
+          pub fn edge_value(&self) -> &ParseStateEdgeContent {
+              &self.edge_value
+          }
+          pub fn isolated_parent(&self) -> Arc<GSSNode> {
+              let iso = self.parent_arc.isolate(Some(self.edge_value.clone()));
+              Arc::new(GSSNode { inner: iso })
+          }
+          pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+              let iso = self.isolated_parent();
+              iso.as_ref().push(edge_value)
+          }
+          pub fn popn(&self, n: usize) -> GSSPopper {
+              self.isolated_parent().popn(n)
+          }
+          pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
+              self.isolated_parent().allowed_llm_tokens()
+          }
+      }
+
+      // --- Popper ---
+      pub struct GSSPopper {
+          inner: LeveledGSS<ParseStateEdgeContent, Acc>,
+          below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Acc>>,
+      }
+      pub struct GSSPopperItem {
+          inner: LeveledGSS<ParseStateEdgeContent, Acc>,
+      }
+      pub struct GSSPopperItemPeek<'a> {
+          parent_arc: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          edge_value: &'a ParseStateEdgeContent,
+      }
+
+      impl GSSPopper {
+          pub fn new_from_node(node: Arc<GSSNode>, _acc: Arc<Acc>) -> Self {
+              GSSPopper { inner: node.inner.clone(), below_bottom: BTreeMap::new() }
+          }
+          pub fn iter(&self) -> impl Iterator<Item = GSSPopperItem> {
+              let keys: Vec<_> = self.inner.peek().into_iter().collect();
+              let parent = self.inner.clone();
+              keys.into_iter().map(move |edge| {
+                  let iso = parent.isolate(Some(edge));
+                  GSSPopperItem { inner: iso }
+              })
+          }
+          pub fn below_bottom(&self) -> &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Acc>> {
+              &self.below_bottom
+          }
+          pub fn num_predecessors(&self) -> usize {
+              self.inner.peek().len()
+          }
+          pub fn popn(&mut self, n: usize) {
+              if n == 0 {
+                  return;
+              }
+
+              // 1. Shift existing below_bottom
+              let mut belows: BTreeMap<_, _> = self.below_bottom.drain().map(|(k, v)| (k + n, v)).collect();
+
+              // 2. Extract and process top n levels that will be removed
+              for d in 1..=n {
+                  let slice_at_d = self.inner.filter_by_length(Some(d as isize), Some(d as isize));
+                  if !slice_at_d.is_empty() {
+                      let mut map_at_d = BTreeMap::new();
+                      for edge in slice_at_d.peek() {
+                          let isolated = slice_at_d.isolate(Some(edge.clone()));
+                          if let Some(acc) = isolated.reduce_acc() {
+                              map_at_d
+                                  .entry(edge)
+                                  .and_modify(|a| *a = a.merge(&acc))
+                                  .or_insert(acc);
+                          }
+                      }
+                      if !map_at_d.is_empty() {
+                          belows.insert(d, map_at_d);
+                      }
+                  }
+              }
+
+              // 3. Update inner by popping n levels and removing any resulting 0-length paths
+              let mut new_inner = self.inner.popn(n as isize);
+              new_inner = new_inner.filter_by_length(Some(1), None);
+              self.inner = new_inner;
+
+              // 4. Update below_bottom
+              self.below_bottom = belows;
+          }
+          pub fn pop(&mut self) {
+              self.popn(1);
+          }
+      }
+
+      impl GSSPopperItem {
+          pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
+              let keys: Vec<_> = self.inner.peek().into_iter().collect();
+              GSSPopperItemPeekIter {
+                  parent: &self.inner,
+                  keys,
+                  idx: 0,
+              }
+          }
+          pub(crate) fn resolved_acc(&self) -> Acc {
+              self.inner.reduce_acc().unwrap_or_else(Acc::new_dead)
+          }
+      }
+      struct GSSPopperItemPeekIter<'a> {
+          parent: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          keys: Vec<ParseStateEdgeContent>,
+          idx: usize,
+      }
+      impl<'a> Iterator for GSSPopperItemPeekIter<'a> {
+          type Item = GSSPopperItemPeek<'a>;
+          fn next(&mut self) -> Option<Self::Item> {
+              if self.idx >= self.keys.len() {
+                  None
+              } else {
+                  let ev = &self.keys[self.idx];
+                  self.idx += 1;
+                  Some(GSSPopperItemPeek {
+                      parent_arc: self.parent,
+                      edge_value: unsafe { &*(ev as *const ParseStateEdgeContent) },
+                  })
+              }
+          }
+      }
+      impl<'a> GSSPopperItemPeek<'a> {
+          pub fn edge_value(&self) -> &'a ParseStateEdgeContent {
+              self.edge_value
+          }
+          pub fn isolated_parent(&self) -> Arc<GSSNode> {
+              let iso = self.parent_arc.isolate(Some(self.edge_value.clone()));
+              Arc::new(GSSNode { inner: iso })
+          }
+          pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+              let iso = self.isolated_parent();
+              iso.as_ref().push(edge_value)
+          }
+      }
+
+      // --- Roots & helpers ---
+      #[time_it]
+      pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
+          let mut out: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
+          for n in nodes {
+              for edge in n.inner.peek() {
+                  let iso = n.inner.isolate(Some(edge.clone()));
+                  if let Some(acc) = iso.reduce_acc() {
+                      out.entry(edge).or_default().insert(Arc::new(acc));
+                  }
+              }
+          }
+          out
+      }
+
+      // --- Transformations (simplified) ---
+      fn transform_all(root_arc: &mut Arc<GSSNode>, f: impl FnMut(&Acc) -> Option<Acc>) {
+          let new_inner = root_arc.inner.apply_and_prune(f);
+          *root_arc = Arc::new(GSSNode { inner: new_inner });
+      }
+
+      pub type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<Arc<GSSNode>>>;
+
+      pub fn allow_only_llm_tokens_and_prune(root_arc: &mut Arc<GSSNode>, allowed_tokens: &LLMTokenBV) {
+          let mut memo = HashMap::new();
+          allow_only_llm_tokens_and_prune_arc(root_arc, allowed_tokens, &mut memo);
+      }
+
+      pub(crate) fn allow_only_llm_tokens_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          allowed_tokens: &LLMTokenBV,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              na.llm_tokens_union &= allowed_tokens;
+              if na.llm_tokens_union.is_empty() {
+                  None
+              } else {
+                  Some(na)
+              }
+          });
+      }
+
+      pub(crate) fn disallow_llm_tokens_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          tokens_to_disallow: &LLMTokenBV,
+          memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          let allowed = HybridBitset::max_ones() - tokens_to_disallow.clone();
+          allow_only_llm_tokens_and_prune_arc(root_arc, &allowed, memo);
+      }
+
+      pub fn reset_llm_tokens(root_arc: &mut Arc<GSSNode>, _memo: &mut PruneAndTransformRecursiveMemo) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              na.llm_tokens_union = HybridBitset::max_ones();
+              Some(na)
+          });
+      }
+
+      pub(crate) fn reset_terminals(root_arc: &mut Arc<GSSNode>, _memo: &mut PruneAndTransformRecursiveMemo) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              na.terminals_union = HybridL2Bitset::all();
+              Some(na)
+          });
+      }
+
+      pub(crate) fn disallow_terminals_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          disallowed_terminals: &HybridL2Bitset,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              println!("Disallowing terminals: {:?}", disallowed_terminals);
+              println!("Before: {:?}", na.terminals_union);
+              na.terminals_union -= disallowed_terminals;
+              println!("After: {:?}", na.terminals_union);
+              Some(na)
+          });
+      }
+
+      pub fn prune_llm_tokens_by_disallowed_terminals(
+          root_arc: &mut Arc<GSSNode>,
+          possible_matches: &BTreeMap<crate::tokenizer::TokenizerStateID, BTreeMap<crate::types::TerminalID, LLMTokenBV>>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          // Very simplified: keep as-is (no change). Implement exact logic later.
+          let _ = possible_matches;
+          let _ = root_arc;
+      }
+
+      pub fn prune_disallowed_terminals(
+          root_arc: &mut Arc<GSSNode>,
+          matched_terminals: &BTreeMap<crate::tokenizer::TokenizerStateID, TerminalBV>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          let matched = matched_terminals.clone();
+          let all = HybridBitset::max_ones();
+          transform_all(root_arc, |a| {
+              for (sid, bv) in &matched {
+                  let allowed = a.terminals_union.get_l2_bitset(sid.0).unwrap_or(&all);
+                  if !bv.is_subset(allowed) {
+                      return None;
+                  }
+              }
+              Some(a.clone())
+          });
+      }
+
+      pub fn map_allowed_terminals_tokenizer_states(
+          root_arc: &mut Arc<GSSNode>,
+          map: &BTreeMap<crate::tokenizer::TokenizerStateID, crate::tokenizer::TokenizerStateID>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          let mapping = map.clone();
+          transform_all(root_arc, |a| {
+              let mut new_map = BTreeMap::new();
+              for (old, new) in &mapping {
+                  if let Some(bv) = a.terminals_union.get_l2_bitset(old.0) {
+                      new_map
+                          .entry(new.0)
+                          .and_modify(|b: &mut HybridBitset| *b |= bv.clone())
+                          .or_insert_with(|| bv.clone());
+                  }
+              }
+              let mut out = HybridL2Bitset::all();
+              for (sid, bv) in new_map {
+                  out.insert_l2_bitset(sid, bv);
+              }
+              let mut na = a.clone();
+              na.terminals_union = out;
+              Some(na)
+          });
+      }
+
+      #[time_it]
+      pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          allowed_tokens: &LLMTokenBV,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+          stored_trie_god: &StoredTrieGodWrapper,
+      ) {
+          // --- Global Analysis: Find common subsets (macros) ---
+          let mut all_accs = Vec::new();
+          root_arc.inner.visit_accs(|acc| all_accs.push(acc.clone()));
+          let mut all_needs_edge_sets = Vec::new();
+          for acc in &all_accs {
+              let needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = acc
+                  .stored_trie_nodes()
+                  .iter()
+                  .filter(|node| {
+                      !node
+                          .as_arc()
+                          .read(stored_trie_god)
+                          .expect("poison")
+                          .value
+                          .live_tokens
+                          .is_subset(allowed_tokens)
+                  })
+                  .cloned()
+                  .collect();
+              if !needs_edge.is_empty() {
+                  all_needs_edge_sets.push(needs_edge);
+              }
+          }
+
+          let mut pair_counts: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, usize> = BTreeMap::new();
+          for needs_edge_set in &all_needs_edge_sets {
+              let nodes: Vec<_> = needs_edge_set.iter().cloned().collect();
+              if nodes.len() >= 2 {
+                  for i in 0..nodes.len() {
+                      for j in (i + 1)..nodes.len() {
+                          let mut pair = BTreeSet::new();
+                          pair.insert(nodes[i].clone());
+                          pair.insert(nodes[j].clone());
+                          *pair_counts.entry(pair).or_insert(0) += 1;
+                      }
+                  }
+              }
+          }
+
+          let mut macros: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, StoredPrecomputeNodeIndex> = BTreeMap::new();
+          for (pair, count) in pair_counts {
+              if count > 1 { // Only create macros for pairs that are reused.
+                  let dest_node = StoredPrecomputeNodeIndex::new(
+                      stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                          crate::constraint::PrecomputedNodeContents::internal(),
+                      )),
+                  );
+                  macros.insert(pair, dest_node);
+              }
+          }
+          let sorted_macros: Vec<_> = macros.into_iter().collect();
+
+          // --- Transformation ---
+          let mut new_destinations_for_leftovers = BTreeMap::new();
+          transform_all(root_arc, |acc| {
+              let mut na = acc.clone();
+              let original_nodes = na.stored_trie_nodes.clone();
+              let mut needs_edge: BTreeSet<_> = original_nodes
+                  .iter()
+                  .filter(|node| {
+                      !node
+                      .as_arc()
+                      .read(stored_trie_god)
+                      .expect("poison")
+                      .value
+                      .live_tokens
+                          .is_subset(allowed_tokens)
+                  })
+                  .cloned()
+                  .collect();
+
+              if needs_edge.is_empty() {
+                  return Some(na);
+              }
+
+              let mut final_nodes = original_nodes.difference(&needs_edge).cloned().collect::<BTreeSet<_>>();
+
+              // Greedily apply discovered macros
+              for (macro_nodes, macro_dest) in &sorted_macros {
+                  if macro_nodes.is_subset(&needs_edge) {
+                      let edge_key = (0, allowed_tokens.clone());
+                      let edge_value = StateIDBV::max_ones();
+                      for src in macro_nodes {
+                          let inserter = crate::datastructures::trie::EdgeInserter::new(
+                              stored_trie_god,
+                              src.as_arc().clone(),
+                              edge_key.clone(),
+                              edge_value.clone(),
+                              |e, n| *e |= n,
+                              |node_value, _| node_value.live_tokens |= allowed_tokens,
+                              |_, _| {},
+                          );
+                          inserter.try_destination(macro_dest.clone()).expect("Cycle detected");
+                      }
+                      macro_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+                      final_nodes.insert(macro_dest.clone());
+                      needs_edge = needs_edge.difference(macro_nodes).cloned().collect();
+                  }
+              }
+
+              // Handle leftovers using the original "macro for the whole set" logic
+              if !needs_edge.is_empty() {
+                  let new_dest = new_destinations_for_leftovers
+                      .entry(needs_edge.clone())
+                      .or_insert_with(|| {
+                          StoredPrecomputeNodeIndex::new(
+                              stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                                  crate::constraint::PrecomputedNodeContents::internal(),
+                              )),
+                          )
+                      })
+                      .clone();
+
+                  let edge_key = (0, allowed_tokens.clone());
+                  let edge_value = StateIDBV::max_ones();
+                  for src in &needs_edge {
+                      let inserter = crate::datastructures::trie::EdgeInserter::new(
+                          stored_trie_god,
+                          src.as_arc().clone(),
+                          edge_key.clone(),
+                          edge_value.clone(),
+                          |e, n| *e |= n,
+                          |node_value, _| node_value.live_tokens |= allowed_tokens,
+                          |_, _| {},
+                      );
+                      inserter.try_destination(new_dest.clone()).expect("Cycle detected");
+                  }
+                  new_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+                  final_nodes.insert(new_dest);
+              }
+
+              na.stored_trie_nodes = final_nodes;
+              Some(na)
+          });
+      }
+
+      pub fn simplify(_states: &mut BTreeMap<crate::tokenizer::TokenizerStateID, Arc<GSSNode>>) {}
+      pub(crate) fn simplify_roots_in_place(_roots: &mut [Arc<GSSNode>]) {}
+      pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
+          let fused_inner = node_arc.inner.fuse(Some(levels as isize));
+          if fused_inner.ptr_eq(&node_arc.inner) {
+              node_arc.clone()
+          } else {
+              Arc::new(GSSNode { inner: fused_inner })
+          }
+      }
+
+      impl GSSNode {
+          pub fn reset_llm_tokens(&mut self) {
+              let mut memo = PruneAndTransformRecursiveMemo::new();
+              let mut arc = Arc::new(self.clone());
+              reset_llm_tokens(&mut arc, &mut memo);
+              *self = (*arc).clone();
+          }
+      }
+
+      // --- Trie-utils stubs (no-ops) ---
+      #[time_it]
+      pub(crate) fn deep_add_precompute_trie_edges(
+          root_arc: &mut Arc<GSSNode>,
+          god: &StoredTrieGodWrapper,
+          edge_key: &(usize, LLMTokenBV),
+          edge_value: &StateIDBV,
+          tokens_for_update: &LLMTokenBV,
+          destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          transform_all(root_arc, |acc| {
+              if acc.stored_trie_nodes().is_empty() {
+                  return Some(acc.clone());
+              }
+
+              let destination = destination_provider();
+
+              for source_wrapper in acc.stored_trie_nodes() {
+                  let source_arc = source_wrapper.as_arc().clone();
+
+                  let inserter = crate::datastructures::trie::EdgeInserter::new(
+                      god,
+                      source_arc,
+                      edge_key.clone(),
+                      edge_value.clone(),
+                      |e, n| *e |= n,
+                      |node_value, _edge_value| node_value.live_tokens |= tokens_for_update,
+                      |_, _| {}, // Unconditional insertion
+                  );
+                  inserter.try_destination(destination.clone()).expect("Cycle detected when adding precompute trie edges");
+              }
+
+              // destination.write(god).expect("poison").value.live_tokens |= tokens_for_update;
+
+              let mut new_acc = acc.clone();
+              *new_acc.stored_trie_nodes_mut() = BTreeSet::from([destination]);
+              Some(new_acc)
+          });
+      }
+
+      #[time_it]
+      pub(crate) fn merge_stored_trie_nodes(
+          root_arc: &mut Arc<GSSNode>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+          stored_trie_god: &StoredTrieGodWrapper,
+      ) {
+          let mut new_destinations = BTreeMap::new();
+
+          transform_all(root_arc, |acc| {
+              if !acc.stored_trie_nodes().iter().any(
+                  |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != acc.llm_tokens_union
+              ) {
+                  return Some(acc.clone());
+              }
+
+              let mut new_acc = acc.clone();
+              // Create a single new destination for this merge operation.
+              let new_destination = new_destinations.entry((new_acc.stored_trie_nodes().clone(), acc.llm_tokens_union.clone()))
+                  .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(crate::constraint::PrecomputedNodeContents::internal()))))
+                  .clone();
+
+              let edge_key = (0, new_acc.llm_tokens_union.clone());
+              let edge_value = crate::constraint::StateIDBV::max_ones();
+              let tokens_for_edge = new_acc.llm_tokens_union.clone();
+
+              for source_wrapper in new_acc.stored_trie_nodes() {
+                  let source_arc = source_wrapper.as_arc().clone();
+
+                  let inserter = crate::datastructures::trie::EdgeInserter::new(
+                      stored_trie_god,
+                      source_arc,
+                      edge_key.clone(),
+                      edge_value.clone(),
+                      |e, n| *e |= n,
+                      |node_value, _edge_value| node_value.live_tokens |= &tokens_for_edge,
+                      |_, _| {}, // Unconditional insertion
+                  );
+                  inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging stored_trie nodes; this should be impossible.");
+              }
+
+              new_destination.write(stored_trie_god).expect("poison").value.live_tokens |= &tokens_for_edge;
+
+              new_acc.stored_trie_nodes = BTreeSet::from([new_destination]);
+              Some(new_acc)
+          });
+      }
+
+      #[time_it]
+      pub(crate) fn is_simple_gss(
+          node: &Arc<GSSNode>,
+          hallucinated_state_id: StateID,
+      ) -> Option<(StateID, Arc<Acc>)> {
+          if let Some((path, acc)) = node.inner.as_single_path() {
+              // Path must have length 2. The path is from leaf to root.
+              if path.len() == 2 {
+                  let edge_to_leaf = &path[0];
+                  let edge_to_middle = &path[1];
+
+                  // The edge into the leaf must be the hallucinated one.
+                  if edge_to_leaf.state_id == hallucinated_state_id {
+                      let state_id_x = edge_to_middle.state_id;
+                      // The structure is what matters for caching, not the contents.
+                      return Some((state_id_x, Arc::new(acc)));
+                  }
+              }
+          }
+          None
+      }
+
+      // helper used by parser logging
+      pub fn popn_collect_isolated_parents(node_arc: &Arc<GSSNode>, n: usize) -> Vec<(StateID, Arc<GSSNode>)> {
+          let popped = node_arc.inner.popn(n as isize);
+          let mut out = Vec::new();
+          for edge in popped.peek() {
+              let iso_inner = popped.isolate(Some(edge.clone()));
+              let num_paths = iso_inner.num_paths();
+              if num_paths > 0 {
+                  let gss_node = Arc::new(GSSNode { inner: iso_inner });
+                  for _ in 0..num_paths {
+                      out.push((edge.state_id, gss_node.clone()));
+                  }
+              }
+          }
+          out
+      }
+
+      // Compatibility for formatting acc (used by printer)
+      pub(crate) fn format_acc(
+          acc: &Acc,
+          terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+          original_internal_bimap: Option<&BTreeMap<usize, usize>>,
+          llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          config: &GSSPrintConfig,
+      ) -> String {
+          let _ = (original_internal_bimap, llm_token_map);
+
+          if config.verbose {
+              // In verbose mode, print the full debug representation of the Acc.
+              return format!("[acc: {:?}]", acc);
+          }
+
+          let summarize_llm = |bv: &HybridBitset, label: &str| -> Option<String> {
+              if *bv == HybridBitset::max_ones() {
+                  return None;
+              }
+              if bv.is_empty() {
+                  return Some(format!("{}=∅", label));
+              }
+              let total = bv.len();
+              const MAX_SHOW: usize = 8;
+              let sample: Vec<String> = bv.iter().take(MAX_SHOW).map(|id| id.to_string()).collect();
+              if total > MAX_SHOW {
+                  Some(format!("{}({}): [{} …]", label, total, sample.join(", ")))
+              } else {
+                  Some(format!("{}({}): [{}]", label, total, sample.join(", ")))
+              }
+          };
+
+          let summarize_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> Option<String> {
+              let mut any_disallowed = false;
+              let mut parts = Vec::new();
+              const MAX_RANGES_TO_SHOW: usize = 3;
+              for (range, allowed_bv) in allowed_terminals.range_values() {
+                  let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
+                  if disallowed_bv.is_empty() {
+                      continue;
+                  }
+                  any_disallowed = true;
+                  if parts.len() >= MAX_RANGES_TO_SHOW {
+                      break;
+                  }
+                  let range_str = if range.start() == range.end() {
+                      format!("{}", range.start())
+                  } else {
+                      format!("{}..={}", range.start(), range.end())
+                  };
+
+                  if disallowed_bv == HybridBitset::max_ones() {
+                      parts.push(format!("state(s) {}: all", range_str));
+                      continue;
+                  }
+
+                  const MAX_NAMES_TO_SHOW: usize = 5;
+                  let num_disallowed = disallowed_bv.len();
+                  let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES_TO_SHOW)
+                      .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
+                          .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.to_string()))
+                      .collect();
+                  let names_str = names.join(", ");
+
+                  if num_disallowed > MAX_NAMES_TO_SHOW {
+                      parts.push(format!("state(s) {} ({}): [{}, …]", range_str, num_disallowed, names_str));
+                  } else {
+                      parts.push(format!("state(s) {}: [{}]", range_str, names_str));
+                  }
+              }
+              if !any_disallowed {
+                  None
+              } else if parts.is_empty() {
+                  Some(format!("Disallowed {}(…)", label))
+              } else {
+                  Some(format!("Disallowed {}({})", label, parts.join("; ")))
+              }
+          };
+
+          let union_llm_opt = summarize_llm(&acc.llm_tokens_union, "LLM(U)");
+          let union_terminals_opt = summarize_disallowed_terminals(&acc.terminals_union, "Term(U)");
+
+          let stored_trie_nodes_str = {
+              const MAX_PTRS_TO_SHOW: usize = 5;
+              let n = acc.stored_trie_nodes().len();
+              if n == 0 {
+                  None
+              } else if n <= MAX_PTRS_TO_SHOW {
+                  let ptrs: Vec<String> = acc
+                      .stored_trie_nodes()
+                      .iter()
+                      .map(|wrapper| format!("{}", wrapper.as_arc()))
+                      .collect();
+                  Some(format!("Trie(n={}, [{}])", n, ptrs.join(", ")))
+              } else {
+                  let ptrs_sample: Vec<String> = acc
+                      .stored_trie_nodes()
+                      .iter()
+                      .take(MAX_PTRS_TO_SHOW)
+                      .map(|wrapper| format!("{}", wrapper.as_arc()))
+                      .collect();
+                  let remaining = n - MAX_PTRS_TO_SHOW;
+                  Some(format!("Trie(n={}, first {}: {}, …; +{} more)", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining))
+              }
+          };
+
+          let mut parts: Vec<String> = Vec::new();
+          if let Some(s) = union_llm_opt { parts.push(s); }
+          if let Some(s) = union_terminals_opt { parts.push(s); }
+          if let Some(s) = stored_trie_nodes_str { parts.push(s); }
+
+          if parts.is_empty() {
+              String::new()
+          } else {
+              format!("[{}]", parts.join(", "))
+          }
+      }
   diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
@@ -5466,7 +7655,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - gp
   code_completion_model:
     - cp
   commit_message_model:
@@ -7555,111 +9744,6 @@ messages:
 
           pub fn stats(&self) -> LeveledGSSStats<T, A> {
               let top_values: HashSet<T> = self.inner.children_keys().into_iter().collect();
-              // Minimal DAWG/MADFA node count for the set of lists represented by this GSS (ignoring accumulators).
-              // Build a trie of sequences, then merge isomorphic subtries bottom-up to get the unique minimal DAG.
-              fn count_minimal_dag_nodes_for_sequences<T>(seqs: &[Vec<T>]) -> usize
-              where
-                  T: Clone + Eq + Hash,
-              {
-                  struct TrieNode<T: Clone + Eq + Hash> {
-                      term: bool,
-                      children: StdHashMap<T, TrieNode<T>>,
-                  }
-
-                  impl<T: Clone + Eq + Hash> Default for TrieNode<T> {
-                      fn default() -> Self {
-                          TrieNode {
-                              term: false,
-                              children: StdHashMap::new(),
-                          }
-                      }
-                  }
-
-                  #[derive(Clone)]
-                  struct NodeSig<T: Clone + Eq + Hash> {
-                      term: bool,
-                      edges: StdHashMap<T, usize>, // label -> canonical child id
-                  }
-
-                  // Build trie
-                  let mut root: TrieNode<T> = TrieNode {
-                      term: false,
-                      children: StdHashMap::new(),
-                  };
-                  for seq in seqs {
-                      let mut node = &mut root;
-                      if seq.is_empty() {
-                          node.term = true;
-                          continue;
-                      }
-                      for v in seq {
-                          node = node
-                              .children
-                              .entry(v.clone())
-                              .or_insert_with(TrieNode::default);
-                      }
-                      node.term = true;
-                  }
-
-                  use std::hash::{Hash as _, Hasher};
-                  fn sig_hash<T: Clone + Eq + Hash>(sig: &NodeSig<T>) -> u64 {
-                      // Order-independent hash of the node signature: terminal flag + multiset of (label, child_id).
-                      // We only use commutative/associative ops over per-edge hashes so iteration order does not matter.
-                      let mut seed: u64 = if sig.term { 0x9e37_79b9_7f4a_7c15 } else { 0x243f_6a88_85a3_08d3 };
-                      // Mix edge count to separate small vs large degree nodes
-                      seed ^= (sig.edges.len() as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
-
-                      // Accumulate per-edge hashes
-                      let mut xor_acc: u64 = 0;
-                      let mut sum_acc: u64 = 0;
-                      let mut prod_acc: u64 = 0x9e37_79b9_7f4a_7c15 ^ (sig.edges.len() as u64);
-
-                      for (k, v) in &sig.edges {
-                          let mut h = std::collections::hash_map::DefaultHasher::new();
-                          k.hash(&mut h);
-                          v.hash(&mut h);
-                          let pair = h.finish();
-                          xor_acc ^= pair;
-                          sum_acc = sum_acc.wrapping_add(pair);
-                          prod_acc = prod_acc.wrapping_mul(pair.wrapping_add(0x517c_c1b7_2722_0a95));
-                      }
-
-                      seed ^ xor_acc ^ sum_acc ^ prod_acc
-                  }
-
-                  fn intern<T: Clone + Eq + Hash>(
-                      node: &TrieNode<T>,
-                      interner: &mut StdHashMap<u64, Vec<(NodeSig<T>, usize)>>,
-                      next_id: &mut usize,
-                  ) -> usize {
-                      // Compute child ids first (post-order)
-                      let mut edges: StdHashMap<T, usize> = StdHashMap::new();
-                      for (label, child) in node.children.iter() {
-                          let cid = intern::<T>(child, interner, next_id);
-                          edges.insert(label.clone(), cid);
-                      }
-                      let sig = NodeSig { term: node.term, edges };
-                      let h = sig_hash(&sig);
-                      let bucket = interner.entry(h).or_default();
-                      // Check for exact match in the bucket
-                      for (existing, id) in bucket.iter() {
-                          if existing.term == sig.term && existing.edges.len() == sig.edges.len() && existing.edges == sig.edges {
-                              return *id;
-                          }
-                      }
-                      // New canonical node
-                      let id = *next_id;
-                      *next_id += 1;
-                      bucket.push((sig, id));
-                      id
-                  }
-
-                  // Intern the trie and count unique canonical states
-                  let mut interner: StdHashMap<u64, Vec<(NodeSig<T>, usize)>> = StdHashMap::new();
-                  let mut next_id = 0usize;
-                  let _root_id = intern::<T>(&root, &mut interner, &mut next_id);
-                  interner.values().map(|v| v.len()).sum()
-              }
 
               let mut visited_upperbranch: HashSet<usize> = HashSet::new();
               let mut visited_interface: HashSet<usize> = HashSet::new();
@@ -7782,13 +9866,165 @@ messages:
                   }
               }
 
-              // Compute the number of nodes in the minimal DAWG for the represented language (ignoring accumulators).
-              let mut unique_sequences: HashSet<Vec<T>> = HashSet::new();
-              for (seq, _) in self.to_stacks().into_iter() {
-                  unique_sequences.insert(seq);
+              // Compute the number of structurally unique nodes in the maximally compressed
+              // nondeterministic DAG obtained by merging isomorphic subgraphs of the current GSS,
+              // completely ignoring accumulators. This baseline is always <= total_unique_nodes.
+              #[derive(Clone, PartialEq, Eq)]
+              struct StatsSig<T: Clone + Eq + Hash> {
+                  terminal: bool,
+                  // label -> sorted, deduplicated list of canonical child ids (set per label)
+                  edges: StdHashMap<T, Vec<usize>>,
               }
-              let sequences: Vec<Vec<T>> = unique_sequences.into_iter().collect();
-              let num_structurally_unique_nodes = count_minimal_dag_nodes_for_sequences(&sequences);
+
+              fn stats_sig_hash<T: Clone + Eq + Hash>(sig: &StatsSig<T>) -> u64 {
+                  use std::hash::{Hash as _, Hasher};
+                  let mut seed: u64 = if sig.terminal {
+                      0x9e37_79b9_7f4a_7c15
+                  } else {
+                      0x243f_6a88_85a3_08d3
+                  };
+                  seed ^= (sig.edges.len() as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
+                  let mut xor_acc: u64 = 0;
+                  let mut sum_acc: u64 = 0;
+                  let mut prod_acc: u64 = 0x517c_c1b7_2722_0a95 ^ (sig.edges.len() as u64);
+                  for (k, ids) in &sig.edges {
+                      let mut h = std::collections::hash_map::DefaultHasher::new();
+                      k.hash(&mut h);
+                      ids.hash(&mut h); // ids sorted and deduplicated
+                      let e = h.finish();
+                      xor_acc ^= e;
+                      sum_acc = sum_acc.wrapping_add(e);
+                      prod_acc = prod_acc.wrapping_mul(e.wrapping_add(0x9e37_79b9_7f4a_7c15));
+                  }
+                  seed ^ xor_acc ^ sum_acc ^ prod_acc
+              }
+
+              struct StatsInterner<T: Clone + Eq + Hash> {
+                  map: StdHashMap<u64, Vec<(StatsSig<T>, usize)>>,
+                  next_id: usize,
+              }
+
+              impl<T: Clone + Eq + Hash> Default for StatsInterner<T> {
+                  fn default() -> Self {
+                      Self {
+                          map: StdHashMap::new(),
+                          next_id: 0,
+                      }
+                  }
+              }
+
+              fn intern_stats_sig<T: Clone + Eq + Hash>(
+                  sig: StatsSig<T>,
+                  interner: &mut StatsInterner<T>,
+              ) -> usize {
+                  let h = stats_sig_hash(&sig);
+                  let bucket = interner.map.entry(h).or_default();
+                  for (existing, id) in bucket.iter() {
+                      if existing == &sig {
+                          return *id;
+                      }
+                  }
+                  let id = interner.next_id;
+                  interner.next_id += 1;
+                  bucket.push((sig, id));
+                  id
+              }
+
+              fn canon_lower_for_stats<T, A>(
+                  node: &Arc<Lower<T>>,
+                  memo_lower: &mut StdHashMap<usize, usize>,
+                  interner: &mut StatsInterner<T>,
+              ) -> usize
+              where
+                  T: Clone + Eq + Hash,
+                  A: Merge + Clone + Eq + Hash,
+              {
+                  let ptr = Arc::as_ptr(node) as usize;
+                  if let Some(id) = memo_lower.get(&ptr) {
+                      return *id;
+                  }
+                  let mut edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
+                  for (v, kids) in node.children.iter() {
+                      let e = edges.entry(v.clone()).or_default();
+                      for child in kids.values() {
+                          let cid = canon_lower_for_stats::<T, A>(child, memo_lower, interner);
+                          e.push(cid);
+                      }
+                      e.sort_unstable();
+                      e.dedup();
+                  }
+                  let sig = StatsSig {
+                      terminal: node.empty,
+                      edges,
+                  };
+                  let id = intern_stats_sig(sig, interner);
+                  memo_lower.insert(ptr, id);
+                  id
+              }
+
+              fn canon_upper_for_stats<T, A>(
+                  node: &Arc<Upper<T, A>>,
+                  memo_upper: &mut StdHashMap<usize, usize>,
+                  memo_lower: &mut StdHashMap<usize, usize>,
+                  interner: &mut StatsInterner<T>,
+              ) -> usize
+              where
+                  T: Clone + Eq + Hash,
+                  A: Merge + Clone + Eq + Hash,
+              {
+                  let ptr = Arc::as_ptr(node) as usize;
+                  if let Some(id) = memo_upper.get(&ptr) {
+                      return *id;
+                  }
+                  let (terminal, edges) = match &**node {
+                      Upper::Branch(b) => {
+                          let mut edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
+                          for (v, kids) in b.children.iter() {
+                              let e = edges.entry(v.clone()).or_default();
+                              for child in kids.values() {
+                                  let cid = canon_upper_for_stats::<T, A>(child, memo_upper, memo_lower, interner);
+                                  e.push(cid);
+                              }
+                              e.sort_unstable();
+                              e.dedup();
+                          }
+                          (b.empty.is_some(), edges)
+                      }
+                      Upper::Interface(i) => {
+                          let mut edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
+                          for (v, kids) in i.children.iter() {
+                              let e = edges.entry(v.clone()).or_default();
+                              for child in kids.values() {
+                                  let cid = canon_lower_for_stats::<T, A>(child, memo_lower, interner);
+                                  e.push(cid);
+                              }
+                              e.sort_unstable();
+                              e.dedup();
+                          }
+                          let terminal = i.empty.is_some() || (i.children.is_empty() && i.empty.is_none());
+                          (terminal, edges)
+                      }
+                  };
+                  let sig = StatsSig { terminal, edges };
+                  let id = intern_stats_sig(sig, interner);
+                  memo_upper.insert(ptr, id);
+                  id
+              }
+
+              fn count_structural_unique_nodes_ignoring_accs<T, A>(root: &Arc<Upper<T, A>>) -> usize
+              where
+                  T: Clone + Eq + Hash,
+                  A: Merge + Clone + Eq + Hash,
+              {
+                  let mut interner: StatsInterner<T> = Default::default();
+                  let mut memo_upper: StdHashMap<usize, usize> = StdHashMap::new();
+                  let mut memo_lower: StdHashMap<usize, usize> = StdHashMap::new();
+                  let _root_id = canon_upper_for_stats::<T, A>(root, &mut memo_upper, &mut memo_lower, &mut interner);
+                  interner.next_id
+              }
+
+              let num_structurally_unique_nodes =
+                  count_structural_unique_nodes_ignoring_accs::<T, A>(&self.inner);
 
               let total_unique_nodes = num_upperbranch_nodes + num_interface_nodes + num_lower_nodes;
               let total_edges = upper_edges + interface_to_lower_edges + lower_edges;
@@ -8205,17 +10441,1074 @@ messages:
     metadata:
       filename: src/datastructures/leveled_gss.rs
   - user: |-
-      Let's say we have a set of lists of numbers. Suppose we want to represent this by a DAG where each edge represents a number. Nodes can have more than one outgoing edge with the same number. What is the maximally compressed graph representation for this set of lists of numbers? Does this have a standard name?
+      ```rust 'src/datastructures/gss_leveled_adapter.rs'
+      use std::cmp::Ordering;
+      use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+      use std::fmt::{Debug, Write};
+      use std::hash::{Hash, Hasher};
+      use std::sync::Arc;
 
-      I want `LeveledGSSStats` to show the number of structurally unique nodes, which is the number of nodes in the maximally compressed graph (disregarding Accs). And the `structural_sharing_factor` now will represent the 'efficiency' of the existing graph.
-      I'm not too concerned about computing this efficiently. The computation can be slow. Generally, we only compute stats for debugging purposes.
+      use bimap::BiBTreeMap;
+      use profiler_macro::time_it;
+      use crate::constraint::StateIDBV;
+      use crate::constraint::{LLMTokenBV, TerminalBV};
+      use crate::datastructures::hybrid_bitset::HybridBitset;
+      use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
+      use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats, Merge as LGMerge};
+      use crate::datastructures::trie::Trie2Index;
+      use crate::glr::grammar::Terminal;
+      use crate::glr::parser::{GLRParser, ParseStateEdgeContent};
+      use crate::glr::table::{StateID, TerminalID};
+      use crate::hit;
+      use crate::tokenizer::LLMTokenID;
 
-      The current method, I feel, doesn't do as well as we could. I think `num_structurally_unique_nodes` is larger than it should be - significantly larger.
+      // Adapter aliases for precompute-trie types (referencing constraint.rs)
+      pub type StoredPrecomputeNodeIndex = crate::constraint::PrecomputeNode3Index;
+      pub type StoredTrieGodWrapper = crate::constraint::Trie3GodWrapper;
 
+      // --- Acc type compatible with LeveledGSS A ---
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct Acc {
+          pub llm_tokens_union: HybridBitset,
+          pub terminals_union: HybridL2Bitset,
+          pub stored_trie_nodes: BTreeSet<StoredPrecomputeNodeIndex>,
+      }
+
+      impl Acc {
+          pub fn new_fresh() -> Self {
+              Self {
+                  llm_tokens_union: HybridBitset::max_ones(),
+                  terminals_union: HybridL2Bitset::all(),
+                  stored_trie_nodes: BTreeSet::new(),
+              }
+          }
+          pub fn new_dead() -> Self {
+              Self {
+                  llm_tokens_union: HybridBitset::zeros(),
+                  terminals_union: HybridL2Bitset::all(),
+                  stored_trie_nodes: BTreeSet::new(),
+              }
+          }
+          pub fn is_default(&self) -> bool {
+              self.llm_tokens_union == HybridBitset::max_ones()
+                  && self.terminals_union == HybridL2Bitset::all()
+                  && self.stored_trie_nodes.is_empty()
+          }
+          pub fn union_llm_tokens(&self) -> HybridBitset {
+              self.llm_tokens_union.clone()
+          }
+
+          pub fn stored_trie_nodes(&self) -> &BTreeSet<StoredPrecomputeNodeIndex> {
+              &self.stored_trie_nodes
+          }
+
+          pub fn stored_trie_nodes_mut(&mut self) -> &mut BTreeSet<StoredPrecomputeNodeIndex> {
+              &mut self.stored_trie_nodes
+          }
+      }
+
+      impl LGMerge for Acc {
+          fn merge(&self, other: &Self) -> Self {
+              hit!("LGMerge for Acc");
+              Acc {
+                  llm_tokens_union: &self.llm_tokens_union | &other.llm_tokens_union,
+                  terminals_union: &self.terminals_union | &other.terminals_union,
+                  stored_trie_nodes: &self.stored_trie_nodes | &other.stored_trie_nodes,
+              }
+          }
+      }
+
+      pub type GSSStats = LeveledGSSStats<ParseStateEdgeContent, Acc>;
+
+      impl GSSStats {
+          pub fn unique_nodes(&self) -> usize {
+              self.total_unique_nodes
+          }
+
+          pub fn total_edges(&self) -> usize {
+              self.total_edges
+          }
+      }
+
+      #[time_it]
+      pub fn gather_gss_stats(roots: &[&GSSNode]) -> LeveledGSSStats<ParseStateEdgeContent, Acc> {
+          let active_roots: Vec<_> = roots.iter().copied().filter(|r| !r.is_empty()).collect();
+
+           // --- Graph-level stats (from merged GSS to handle sharing correctly) ---
+           let mut merged_gss = LeveledGSS::empty();
+           for r in &active_roots {
+               merged_gss = merged_gss.merge(&r.inner);
+           }
+
+          merged_gss.stats()
+      }
+      // --- GSS printer config & helpers ---
+      pub struct GSSPrintConfig<'a> {
+          pub(crate) labels: Option<&'a [String]>,
+          pub(crate) max_edges: usize,
+          pub(crate) original_internal_bimap: Option<&'a BTreeMap<usize, usize>>,
+          pub(crate) llm_token_map: Option<&'a BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          pub(crate) verbose: bool,
+      }
+      impl<'a> Default for GSSPrintConfig<'a> {
+          fn default() -> Self {
+              Self {
+                  labels: None,
+                  max_edges: usize::MAX,
+                  original_internal_bimap: None,
+                  llm_token_map: None,
+                  verbose: false,
+              }
+          }
+      }
+
+      pub fn print_gss_forest(
+          roots: &[Arc<GSSNode>],
+          terminal_map: &BiBTreeMap<crate::glr::grammar::Terminal, TerminalID>,
+          config: &GSSPrintConfig,
+      ) -> (String, Vec<StateID>) {
+          let mut out = String::new();
+          let mut state_ids_in_order = Vec::new();
+          if roots.is_empty() {
+              return ("GSS Forest: (No roots)".to_string(), state_ids_in_order);
+          }
+          writeln!(&mut out, "GSS Forest (leveled adapter):").unwrap();
+          for (i, r) in roots.iter().enumerate() {
+              // Use label if available
+              if let Some(labels) = config.labels {
+                  assert!(labels.len() == roots.len());
+                  writeln!(&mut out, "{}", labels[i]).unwrap();
+              } else {
+                  writeln!(&mut out, " Root {}:", i).unwrap();
+              }
+              let stacks = r.inner.to_stacks();
+              for (path, acc) in stacks {
+                  let sids: Vec<_> = path.iter().map(|e| e.state_id).collect();
+                  for sid in &sids {
+                      if !state_ids_in_order.contains(sid) {
+                          state_ids_in_order.push(*sid);
+                      }
+                  }
+                  let s: Vec<_> = sids.iter().map(|s| s.0.to_string()).collect();
+                  let acc_str = format_acc(
+                      &acc,
+                      terminal_map,
+                      config.original_internal_bimap,
+                      config.llm_token_map,
+                      config,
+                  );
+                  if acc_str.is_empty() {
+                      writeln!(&mut out, "  - [{}]", s.join(" ")).unwrap();
+                  } else {
+                      writeln!(&mut out, "  - [{}] {}", s.join(" "), acc_str).unwrap();
+                  }
+              }
+          }
+          (out, state_ids_in_order)
+      }
+
+      pub fn find_longest_path(root: &Arc<GSSNode>) -> Option<Vec<(ParseStateEdgeContent, Arc<GSSNode>)>> {
+          root.inner
+              .get_longest_path()
+              .map(|(p, _a)| p.into_iter().map(|e| (e, root.clone())).collect())
+      }
+
+      pub fn sample_path<'a>(roots: &[&'a GSSNode], _seed: u64) -> Option<Vec<ParseStateEdgeContent>> {
+          roots
+              .get(0)
+              .map(|r| r.inner.get_first_path().map(|(p, _)| p).unwrap_or_default())
+      }
+
+      // --- GSS wrapper ---
+      #[derive(Clone)]
+      pub struct GSSNode {
+          pub(crate) inner: LeveledGSS<ParseStateEdgeContent, Acc>,
+      }
+
+      impl Debug for GSSNode {
+          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+              write!(f, "GSSNode(len_paths={})", self.inner.num_paths())
+          }
+      }
+
+      impl PartialEq for GSSNode {
+          fn eq(&self, other: &Self) -> bool {
+              println!("Warning: GSSNode PartialEq compares full stacks, which may be expensive.");
+              let mut a_stacks = self.inner.to_stacks();
+              let mut b_stacks = other.inner.to_stacks();
+              a_stacks.sort();
+              b_stacks.sort();
+              a_stacks == b_stacks
+          }
+      }
+      impl Eq for GSSNode {}
+
+      impl GSSNode {
+          pub fn new(acc: Acc) -> Self {
+              GSSNode {
+                  inner: LeveledGSS::from_stacks(&vec![(vec![], acc)]),
+              }
+          }
+          pub fn new_fresh() -> Self {
+              GSSNode {
+                  inner: LeveledGSS::from_stacks(&vec![(vec![], Acc::new_fresh())]),
+              }
+          }
+          pub fn new_dead() -> Self {
+              // Represent dead as empty; allowed_llm_tokens() on empty returns zeros.
+              GSSNode {
+                  inner: LeveledGSS::empty(),
+              }
+          }
+
+          // Helper: append a value to all stacks; if empty, create singleton stack.
+          fn push_all(
+              inner: &LeveledGSS<ParseStateEdgeContent, Acc>,
+              edge: ParseStateEdgeContent,
+          ) -> LeveledGSS<ParseStateEdgeContent, Acc> {
+              if inner.is_empty() {
+                  LeveledGSS::from_stacks(&[(vec![edge], Acc::new_fresh())])
+              } else {
+                  inner.push(edge)
+              }
+          }
+
+          pub fn push(&self, edge_value: ParseStateEdgeContent) -> Self {
+              GSSNode {
+                  inner: Self::push_all(&self.inner, edge_value),
+              }
+          }
+          pub fn push_many(&self, edge_values: Vec<ParseStateEdgeContent>) -> Self {
+              if edge_values.is_empty() {
+                  return self.clone();
+              }
+              let mut merged = LeveledGSS::empty();
+              for e in edge_values {
+                  let next = Self::push_all(&self.inner, e);
+                  merged = merged.merge(&next);
+              }
+              GSSNode { inner: merged }
+          }
+
+          pub fn is_empty(&self) -> bool {
+              self.inner.is_empty() || self.inner.max_depth() == 0
+          }
+          pub fn is_alive(&self) -> bool {
+              !self.is_empty()
+          }
+          pub fn is_ok(&self) -> bool {
+              self.is_alive()
+          }
+          pub fn allowed_llm_tokens(&self) -> LLMTokenBV {
+              self.inner
+                  .reduce_acc()
+                  .map_or(HybridBitset::zeros(), |acc| acc.llm_tokens_union)
+          }
+          pub fn disallowed_terminals(&self) -> HybridL2Bitset {
+              self.inner
+                  .reduce_acc()
+                  .map(|acc| acc.terminals_union.complement())
+                  .unwrap_or_else(|| HybridL2Bitset::all().complement())
+          }
+          #[time_it]
+          pub fn stored_trie_nodes(&self) -> BTreeSet<StoredPrecomputeNodeIndex> {
+              self.inner
+                  .reduce_acc()
+                  .map_or_else(BTreeSet::new, |acc| acc.stored_trie_nodes.clone())
+          }
+          pub fn max_depth(&self) -> usize {
+              self.inner.max_depth() as usize
+          }
+          pub fn flatten(&self) -> Vec<(Vec<ParseStateEdgeContent>, Acc)> {
+              self.inner.to_stacks()
+          }
+
+          pub fn print(&self) -> String {
+              let (s, _sid) = print_gss_forest(&[Arc::new(self.clone())], &BiBTreeMap::new(), &GSSPrintConfig::default());
+              s
+          }
+
+          pub fn merge_with_depth(&mut self, merge_depth: usize, other: &Self) {
+              self.inner = self.inner.merge(&other.inner);
+              self.inner.fuse(Some(merge_depth as isize));
+          }
+          pub fn merged(mut self, other: Self, depth: usize) -> Self {
+              self.merge_with_depth(depth, &other);
+              self
+          }
+
+          pub fn merge_many_with_depth(merge_depth: usize, nodes: impl IntoIterator<Item = Arc<GSSNode>>) -> Arc<GSSNode> {
+              let mut it = nodes.into_iter();
+              if let Some(first) = it.next() {
+                  let mut acc = (*first).clone();
+                  for n in it {
+                      acc.merge_with_depth(merge_depth, &n);
+                  }
+                  Arc::new(acc)
+              } else {
+                  Arc::new(GSSNode::new_dead())
+              }
+          }
+
+          pub fn predecessors(&self) -> BTreeMap<ParseStateEdgeContent, BTreeMap<isize, Vec<Arc<GSSNode>>>> {
+              self.inner
+                  .predecessors()
+                  .into_iter()
+                  .map(|(edge_val, preds_by_depth)| {
+                      let new_preds_by_depth = preds_by_depth
+                          .into_iter()
+                          .map(|(depth, gss_vec)| {
+                              let new_gss_vec = gss_vec.into_iter().map(|gss| Arc::new(GSSNode { inner: gss })).collect();
+                              (depth, new_gss_vec)
+                          })
+                          .collect();
+                      (edge_val, new_preds_by_depth)
+                  })
+                  .collect()
+          }
+
+          pub fn num_predecessors(&self) -> usize {
+              self.inner.peek().len()
+          }
+
+          pub fn popn(&self, n: usize) -> GSSPopper {
+              let mut popper = GSSPopper {
+                  inner: self.inner.clone(),
+                  below_bottom: BTreeMap::new(),
+              };
+              popper.popn(n);
+              popper
+          }
+
+          pub(crate) fn peek_iter(parent_arc: &Arc<GSSNode>) -> impl Iterator<Item = GSSPeek<'_>> {
+              let keys: Vec<_> = parent_arc.inner.peek().into_iter().collect();
+              GSSPeekIter {
+                  parent: &parent_arc.inner,
+                  keys,
+                  idx: 0,
+              }
+          }
+
+          #[time_it]
+          pub fn fuse_predecessors(&mut self, levels: usize) {
+              if levels == 0 {
+                  return;
+              }
+              let self_arc = Arc::new(self.clone());
+              let mut memo = HashMap::new();
+              let fused_arc = fuse_predecessors_recursive(&self_arc, levels, &mut memo);
+              if !Arc::ptr_eq(&self_arc, &fused_arc) {
+                  *self = (*fused_arc).clone();
+              }
+          }
+
+          pub fn fuse_predecessors_recursive(&self, levels: usize, _memo: &mut PruneAndTransformRecursiveMemo) -> Arc<GSSNode> {
+              let self_arc = Arc::new(self.clone());
+              let mut dummy_memo = HashMap::new();
+              fuse_predecessors_recursive(&self_arc, levels, &mut dummy_memo)
+          }
+      }
+
+      // --- GSSPeek & iterator (updated to borrow LeveledGSS directly) ---
+      pub struct GSSPeek<'a> {
+          parent_arc: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          edge_value: ParseStateEdgeContent,
+      }
+      struct GSSPeekIter<'a> {
+          parent: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          keys: Vec<ParseStateEdgeContent>,
+          idx: usize,
+      }
+      impl<'a> Iterator for GSSPeekIter<'a> {
+          type Item = GSSPeek<'a>;
+          fn next(&mut self) -> Option<Self::Item> {
+              if self.idx >= self.keys.len() {
+                  None
+              } else {
+                  let ev = self.keys[self.idx].clone();
+                  self.idx += 1;
+                  Some(GSSPeek {
+                      parent_arc: self.parent,
+                      edge_value: ev,
+                  })
+              }
+          }
+      }
+      impl<'a> GSSPeek<'a> {
+          pub fn edge_value(&self) -> &ParseStateEdgeContent {
+              &self.edge_value
+          }
+          pub fn isolated_parent(&self) -> Arc<GSSNode> {
+              let iso = self.parent_arc.isolate(Some(self.edge_value.clone()));
+              Arc::new(GSSNode { inner: iso })
+          }
+          pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+              let iso = self.isolated_parent();
+              iso.as_ref().push(edge_value)
+          }
+          pub fn popn(&self, n: usize) -> GSSPopper {
+              self.isolated_parent().popn(n)
+          }
+          pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
+              self.isolated_parent().allowed_llm_tokens()
+          }
+      }
+
+      // --- Popper ---
+      pub struct GSSPopper {
+          inner: LeveledGSS<ParseStateEdgeContent, Acc>,
+          below_bottom: BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Acc>>,
+      }
+      pub struct GSSPopperItem {
+          inner: LeveledGSS<ParseStateEdgeContent, Acc>,
+      }
+      pub struct GSSPopperItemPeek<'a> {
+          parent_arc: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          edge_value: &'a ParseStateEdgeContent,
+      }
+
+      impl GSSPopper {
+          pub fn new_from_node(node: Arc<GSSNode>, _acc: Arc<Acc>) -> Self {
+              GSSPopper { inner: node.inner.clone(), below_bottom: BTreeMap::new() }
+          }
+          pub fn iter(&self) -> impl Iterator<Item = GSSPopperItem> {
+              let keys: Vec<_> = self.inner.peek().into_iter().collect();
+              let parent = self.inner.clone();
+              keys.into_iter().map(move |edge| {
+                  let iso = parent.isolate(Some(edge));
+                  GSSPopperItem { inner: iso }
+              })
+          }
+          pub fn below_bottom(&self) -> &BTreeMap<usize, BTreeMap<ParseStateEdgeContent, Acc>> {
+              &self.below_bottom
+          }
+          pub fn num_predecessors(&self) -> usize {
+              self.inner.peek().len()
+          }
+          pub fn popn(&mut self, n: usize) {
+              for _ in 0..n {
+                  self.pop();
+              }
+          }
+          pub fn pop(&mut self) {
+              let mut inner = self.inner.clone();
+              let mut belows: BTreeMap<_, _> = self.below_bottom.iter().map(|(k, v)| (*k + 1, v.clone())).collect();
+              let new_below_slice = inner.filter_by_length(Some(1), Some(1));
+              if !new_below_slice.is_empty() {
+                  let mut new_below_map = BTreeMap::new();
+                  for edge in new_below_slice.peek() {
+                      let isolated = new_below_slice.isolate(Some(edge.clone()));
+                      if let Some(acc) = isolated.reduce_acc() {
+                          new_below_map.insert(edge, acc);
+                      }
+                  }
+                  if !new_below_map.is_empty() {
+                      belows.insert(1, new_below_map);
+                  }
+              }
+              self.below_bottom = belows;
+              inner = inner.pop();
+              inner = inner.filter_by_length(Some(1), None);
+              self.inner = inner;
+          }
+      }
+
+      impl GSSPopperItem {
+          pub fn peek_iter(&self) -> impl Iterator<Item = GSSPopperItemPeek<'_>> {
+              let keys: Vec<_> = self.inner.peek().into_iter().collect();
+              GSSPopperItemPeekIter {
+                  parent: &self.inner,
+                  keys,
+                  idx: 0,
+              }
+          }
+          pub(crate) fn resolved_acc(&self) -> Acc {
+              self.inner.reduce_acc().unwrap_or_else(Acc::new_dead)
+          }
+      }
+      struct GSSPopperItemPeekIter<'a> {
+          parent: &'a LeveledGSS<ParseStateEdgeContent, Acc>,
+          keys: Vec<ParseStateEdgeContent>,
+          idx: usize,
+      }
+      impl<'a> Iterator for GSSPopperItemPeekIter<'a> {
+          type Item = GSSPopperItemPeek<'a>;
+          fn next(&mut self) -> Option<Self::Item> {
+              if self.idx >= self.keys.len() {
+                  None
+              } else {
+                  let ev = &self.keys[self.idx];
+                  self.idx += 1;
+                  Some(GSSPopperItemPeek {
+                      parent_arc: self.parent,
+                      edge_value: unsafe { &*(ev as *const ParseStateEdgeContent) },
+                  })
+              }
+          }
+      }
+      impl<'a> GSSPopperItemPeek<'a> {
+          pub fn edge_value(&self) -> &'a ParseStateEdgeContent {
+              self.edge_value
+          }
+          pub fn isolated_parent(&self) -> Arc<GSSNode> {
+              let iso = self.parent_arc.isolate(Some(self.edge_value.clone()));
+              Arc::new(GSSNode { inner: iso })
+          }
+          pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+              let iso = self.isolated_parent();
+              iso.as_ref().push(edge_value)
+          }
+      }
+
+      // --- Roots & helpers ---
+      #[time_it]
+      pub fn get_roots<'a>(nodes: impl IntoIterator<Item = &'a GSSNode>) -> BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> {
+          let mut out: BTreeMap<ParseStateEdgeContent, BTreeSet<Arc<Acc>>> = BTreeMap::new();
+          for n in nodes {
+              for edge in n.inner.peek() {
+                  let iso = n.inner.isolate(Some(edge.clone()));
+                  if let Some(acc) = iso.reduce_acc() {
+                      out.entry(edge).or_default().insert(Arc::new(acc));
+                  }
+              }
+          }
+          out
+      }
+
+      // --- Transformations (simplified) ---
+      fn transform_all(root_arc: &mut Arc<GSSNode>, f: impl FnMut(&Acc) -> Option<Acc>) {
+          let new_inner = root_arc.inner.apply_and_prune(f);
+          *root_arc = Arc::new(GSSNode { inner: new_inner });
+      }
+
+      pub type PruneAndTransformRecursiveMemo = HashMap<*const GSSNode, Option<Arc<GSSNode>>>;
+
+      pub fn allow_only_llm_tokens_and_prune(root_arc: &mut Arc<GSSNode>, allowed_tokens: &LLMTokenBV) {
+          let mut memo = HashMap::new();
+          allow_only_llm_tokens_and_prune_arc(root_arc, allowed_tokens, &mut memo);
+      }
+
+      pub(crate) fn allow_only_llm_tokens_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          allowed_tokens: &LLMTokenBV,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              na.llm_tokens_union &= allowed_tokens;
+              if na.llm_tokens_union.is_empty() {
+                  None
+              } else {
+                  Some(na)
+              }
+          });
+      }
+
+      pub(crate) fn disallow_llm_tokens_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          tokens_to_disallow: &LLMTokenBV,
+          memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          let allowed = HybridBitset::max_ones() - tokens_to_disallow.clone();
+          allow_only_llm_tokens_and_prune_arc(root_arc, &allowed, memo);
+      }
+
+      pub fn reset_llm_tokens(root_arc: &mut Arc<GSSNode>, _memo: &mut PruneAndTransformRecursiveMemo) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              na.llm_tokens_union = HybridBitset::max_ones();
+              Some(na)
+          });
+      }
+
+      pub(crate) fn reset_terminals(root_arc: &mut Arc<GSSNode>, _memo: &mut PruneAndTransformRecursiveMemo) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              na.terminals_union = HybridL2Bitset::all();
+              Some(na)
+          });
+      }
+
+      pub(crate) fn disallow_terminals_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          disallowed_terminals: &HybridL2Bitset,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          transform_all(root_arc, |a| {
+              let mut na = a.clone();
+              println!("Disallowing terminals: {:?}", disallowed_terminals);
+              println!("Before: {:?}", na.terminals_union);
+              na.terminals_union -= disallowed_terminals;
+              println!("After: {:?}", na.terminals_union);
+              Some(na)
+          });
+      }
+
+      pub fn prune_llm_tokens_by_disallowed_terminals(
+          root_arc: &mut Arc<GSSNode>,
+          possible_matches: &BTreeMap<crate::tokenizer::TokenizerStateID, BTreeMap<crate::types::TerminalID, LLMTokenBV>>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          // Very simplified: keep as-is (no change). Implement exact logic later.
+          let _ = possible_matches;
+          let _ = root_arc;
+      }
+
+      pub fn prune_disallowed_terminals(
+          root_arc: &mut Arc<GSSNode>,
+          matched_terminals: &BTreeMap<crate::tokenizer::TokenizerStateID, TerminalBV>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          let matched = matched_terminals.clone();
+          let all = HybridBitset::max_ones();
+          transform_all(root_arc, |a| {
+              for (sid, bv) in &matched {
+                  let allowed = a.terminals_union.get_l2_bitset(sid.0).unwrap_or(&all);
+                  if !bv.is_subset(allowed) {
+                      return None;
+                  }
+              }
+              Some(a.clone())
+          });
+      }
+
+      pub fn map_allowed_terminals_tokenizer_states(
+          root_arc: &mut Arc<GSSNode>,
+          map: &BTreeMap<crate::tokenizer::TokenizerStateID, crate::tokenizer::TokenizerStateID>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          let mapping = map.clone();
+          transform_all(root_arc, |a| {
+              let mut new_map = BTreeMap::new();
+              for (old, new) in &mapping {
+                  if let Some(bv) = a.terminals_union.get_l2_bitset(old.0) {
+                      new_map
+                          .entry(new.0)
+                          .and_modify(|b: &mut HybridBitset| *b |= bv.clone())
+                          .or_insert_with(|| bv.clone());
+                  }
+              }
+              let mut out = HybridL2Bitset::all();
+              for (sid, bv) in new_map {
+                  out.insert_l2_bitset(sid, bv);
+              }
+              let mut na = a.clone();
+              na.terminals_union = out;
+              Some(na)
+          });
+      }
+
+      #[time_it]
+      pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
+          root_arc: &mut Arc<GSSNode>,
+          allowed_tokens: &LLMTokenBV,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+          stored_trie_god: &StoredTrieGodWrapper,
+      ) {
+          // --- Global Analysis: Find common subsets (macros) ---
+          let mut all_accs = Vec::new();
+          root_arc.inner.visit_accs(|acc| all_accs.push(acc.clone()));
+          let mut all_needs_edge_sets = Vec::new();
+          for acc in &all_accs {
+              let needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = acc
+                  .stored_trie_nodes()
+                  .iter()
+                  .filter(|node| {
+                      !node
+                          .as_arc()
+                          .read(stored_trie_god)
+                          .expect("poison")
+                          .value
+                          .live_tokens
+                          .is_subset(allowed_tokens)
+                  })
+                  .cloned()
+                  .collect();
+              if !needs_edge.is_empty() {
+                  all_needs_edge_sets.push(needs_edge);
+              }
+          }
+
+          let mut pair_counts: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, usize> = BTreeMap::new();
+          for needs_edge_set in &all_needs_edge_sets {
+              let nodes: Vec<_> = needs_edge_set.iter().cloned().collect();
+              if nodes.len() >= 2 {
+                  for i in 0..nodes.len() {
+                      for j in (i + 1)..nodes.len() {
+                          let mut pair = BTreeSet::new();
+                          pair.insert(nodes[i].clone());
+                          pair.insert(nodes[j].clone());
+                          *pair_counts.entry(pair).or_insert(0) += 1;
+                      }
+                  }
+              }
+          }
+
+          let mut macros: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, StoredPrecomputeNodeIndex> = BTreeMap::new();
+          for (pair, count) in pair_counts {
+              if count > 1 { // Only create macros for pairs that are reused.
+                  let dest_node = StoredPrecomputeNodeIndex::new(
+                      stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                          crate::constraint::PrecomputedNodeContents::internal(),
+                      )),
+                  );
+                  macros.insert(pair, dest_node);
+              }
+          }
+          let sorted_macros: Vec<_> = macros.into_iter().collect();
+
+          // --- Transformation ---
+          let mut new_destinations_for_leftovers = BTreeMap::new();
+          transform_all(root_arc, |acc| {
+              let mut na = acc.clone();
+              let original_nodes = na.stored_trie_nodes.clone();
+              let mut needs_edge: BTreeSet<_> = original_nodes
+                  .iter()
+                  .filter(|node| {
+                      !node
+                      .as_arc()
+                      .read(stored_trie_god)
+                      .expect("poison")
+                      .value
+                      .live_tokens
+                          .is_subset(allowed_tokens)
+                  })
+                  .cloned()
+                  .collect();
+
+              if needs_edge.is_empty() {
+                  return Some(na);
+              }
+
+              let mut final_nodes = original_nodes.difference(&needs_edge).cloned().collect::<BTreeSet<_>>();
+
+              // Greedily apply discovered macros
+              for (macro_nodes, macro_dest) in &sorted_macros {
+                  if macro_nodes.is_subset(&needs_edge) {
+                      let edge_key = (0, allowed_tokens.clone());
+                      let edge_value = StateIDBV::max_ones();
+                      for src in macro_nodes {
+                          let inserter = crate::datastructures::trie::EdgeInserter::new(
+                              stored_trie_god,
+                              src.as_arc().clone(),
+                              edge_key.clone(),
+                              edge_value.clone(),
+                              |e, n| *e |= n,
+                              |node_value, _| node_value.live_tokens |= allowed_tokens,
+                              |_, _| {},
+                          );
+                          inserter.try_destination(macro_dest.clone()).expect("Cycle detected");
+                      }
+                      macro_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+                      final_nodes.insert(macro_dest.clone());
+                      needs_edge = needs_edge.difference(macro_nodes).cloned().collect();
+                  }
+              }
+
+              // Handle leftovers using the original "macro for the whole set" logic
+              if !needs_edge.is_empty() {
+                  let new_dest = new_destinations_for_leftovers
+                      .entry(needs_edge.clone())
+                      .or_insert_with(|| {
+                          StoredPrecomputeNodeIndex::new(
+                              stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                                  crate::constraint::PrecomputedNodeContents::internal(),
+                              )),
+                          )
+                      })
+                      .clone();
+
+                  let edge_key = (0, allowed_tokens.clone());
+                  let edge_value = StateIDBV::max_ones();
+                  for src in &needs_edge {
+                      let inserter = crate::datastructures::trie::EdgeInserter::new(
+                          stored_trie_god,
+                          src.as_arc().clone(),
+                          edge_key.clone(),
+                          edge_value.clone(),
+                          |e, n| *e |= n,
+                          |node_value, _| node_value.live_tokens |= allowed_tokens,
+                          |_, _| {},
+                      );
+                      inserter.try_destination(new_dest.clone()).expect("Cycle detected");
+                  }
+                  new_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+                  final_nodes.insert(new_dest);
+              }
+
+              na.stored_trie_nodes = final_nodes;
+              Some(na)
+          });
+      }
+
+      pub fn simplify(_states: &mut BTreeMap<crate::tokenizer::TokenizerStateID, Arc<GSSNode>>) {}
+      pub(crate) fn simplify_roots_in_place(_roots: &mut [Arc<GSSNode>]) {}
+      pub fn fuse_predecessors_recursive(node_arc: &Arc<GSSNode>, levels: usize, _memo: &mut HashMap<*const GSSNode, Arc<GSSNode>>) -> Arc<GSSNode> {
+          let fused_inner = node_arc.inner.fuse(Some(levels as isize));
+          if fused_inner.ptr_eq(&node_arc.inner) {
+              node_arc.clone()
+          } else {
+              Arc::new(GSSNode { inner: fused_inner })
+          }
+      }
+
+      impl GSSNode {
+          pub fn reset_llm_tokens(&mut self) {
+              let mut memo = PruneAndTransformRecursiveMemo::new();
+              let mut arc = Arc::new(self.clone());
+              reset_llm_tokens(&mut arc, &mut memo);
+              *self = (*arc).clone();
+          }
+      }
+
+      // --- Trie-utils stubs (no-ops) ---
+      #[time_it]
+      pub(crate) fn deep_add_precompute_trie_edges(
+          root_arc: &mut Arc<GSSNode>,
+          god: &StoredTrieGodWrapper,
+          edge_key: &(usize, LLMTokenBV),
+          edge_value: &StateIDBV,
+          tokens_for_update: &LLMTokenBV,
+          destination_provider: &mut impl FnMut() -> StoredPrecomputeNodeIndex,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+      ) {
+          transform_all(root_arc, |acc| {
+              if acc.stored_trie_nodes().is_empty() {
+                  return Some(acc.clone());
+              }
+
+              let destination = destination_provider();
+
+              for source_wrapper in acc.stored_trie_nodes() {
+                  let source_arc = source_wrapper.as_arc().clone();
+
+                  let inserter = crate::datastructures::trie::EdgeInserter::new(
+                      god,
+                      source_arc,
+                      edge_key.clone(),
+                      edge_value.clone(),
+                      |e, n| *e |= n,
+                      |node_value, _edge_value| node_value.live_tokens |= tokens_for_update,
+                      |_, _| {}, // Unconditional insertion
+                  );
+                  inserter.try_destination(destination.clone()).expect("Cycle detected when adding precompute trie edges");
+              }
+
+              // destination.write(god).expect("poison").value.live_tokens |= tokens_for_update;
+
+              let mut new_acc = acc.clone();
+              *new_acc.stored_trie_nodes_mut() = BTreeSet::from([destination]);
+              Some(new_acc)
+          });
+      }
+
+      #[time_it]
+      pub(crate) fn merge_stored_trie_nodes(
+          root_arc: &mut Arc<GSSNode>,
+          _memo: &mut PruneAndTransformRecursiveMemo,
+          stored_trie_god: &StoredTrieGodWrapper,
+      ) {
+          let mut new_destinations = BTreeMap::new();
+
+          transform_all(root_arc, |acc| {
+              if !acc.stored_trie_nodes().iter().any(
+                  |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != acc.llm_tokens_union
+              ) {
+                  return Some(acc.clone());
+              }
+
+              let mut new_acc = acc.clone();
+              // Create a single new destination for this merge operation.
+              let new_destination = new_destinations.entry((new_acc.stored_trie_nodes().clone(), acc.llm_tokens_union.clone()))
+                  .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(crate::constraint::PrecomputedNodeContents::internal()))))
+                  .clone();
+
+              let edge_key = (0, new_acc.llm_tokens_union.clone());
+              let edge_value = crate::constraint::StateIDBV::max_ones();
+              let tokens_for_edge = new_acc.llm_tokens_union.clone();
+
+              for source_wrapper in new_acc.stored_trie_nodes() {
+                  let source_arc = source_wrapper.as_arc().clone();
+
+                  let inserter = crate::datastructures::trie::EdgeInserter::new(
+                      stored_trie_god,
+                      source_arc,
+                      edge_key.clone(),
+                      edge_value.clone(),
+                      |e, n| *e |= n,
+                      |node_value, _edge_value| node_value.live_tokens |= &tokens_for_edge,
+                      |_, _| {}, // Unconditional insertion
+                  );
+                  inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging stored_trie nodes; this should be impossible.");
+              }
+
+              new_destination.write(stored_trie_god).expect("poison").value.live_tokens |= &tokens_for_edge;
+
+              new_acc.stored_trie_nodes = BTreeSet::from([new_destination]);
+              Some(new_acc)
+          });
+      }
+
+      #[time_it]
+      pub(crate) fn is_simple_gss(
+          node: &Arc<GSSNode>,
+          hallucinated_state_id: StateID,
+      ) -> Option<(StateID, Arc<Acc>)> {
+          if let Some((path, acc)) = node.inner.as_single_path() {
+              // Path must have length 2. The path is from leaf to root.
+              if path.len() == 2 {
+                  let edge_to_leaf = &path[0];
+                  let edge_to_middle = &path[1];
+
+                  // The edge into the leaf must be the hallucinated one.
+                  if edge_to_leaf.state_id == hallucinated_state_id {
+                      let state_id_x = edge_to_middle.state_id;
+                      // The structure is what matters for caching, not the contents.
+                      return Some((state_id_x, Arc::new(acc)));
+                  }
+              }
+          }
+          None
+      }
+
+      // helper used by parser logging
+      pub fn popn_collect_isolated_parents(node_arc: &Arc<GSSNode>, n: usize) -> Vec<(StateID, Arc<GSSNode>)> {
+          let popped = node_arc.inner.popn(n as isize);
+          let mut out = Vec::new();
+          for edge in popped.peek() {
+              let iso_inner = popped.isolate(Some(edge.clone()));
+              let num_paths = iso_inner.num_paths();
+              if num_paths > 0 {
+                  let gss_node = Arc::new(GSSNode { inner: iso_inner });
+                  for _ in 0..num_paths {
+                      out.push((edge.state_id, gss_node.clone()));
+                  }
+              }
+          }
+          out
+      }
+
+      // Compatibility for formatting acc (used by printer)
+      pub(crate) fn format_acc(
+          acc: &Acc,
+          terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+          original_internal_bimap: Option<&BTreeMap<usize, usize>>,
+          llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
+          config: &GSSPrintConfig,
+      ) -> String {
+          let _ = (original_internal_bimap, llm_token_map);
+
+          if config.verbose {
+              // In verbose mode, print the full debug representation of the Acc.
+              return format!("[acc: {:?}]", acc);
+          }
+
+          let summarize_llm = |bv: &HybridBitset, label: &str| -> Option<String> {
+              if *bv == HybridBitset::max_ones() {
+                  return None;
+              }
+              if bv.is_empty() {
+                  return Some(format!("{}=∅", label));
+              }
+              let total = bv.len();
+              const MAX_SHOW: usize = 8;
+              let sample: Vec<String> = bv.iter().take(MAX_SHOW).map(|id| id.to_string()).collect();
+              if total > MAX_SHOW {
+                  Some(format!("{}({}): [{} …]", label, total, sample.join(", ")))
+              } else {
+                  Some(format!("{}({}): [{}]", label, total, sample.join(", ")))
+              }
+          };
+
+          let summarize_disallowed_terminals = |allowed_terminals: &HybridL2Bitset, label: &str| -> Option<String> {
+              let mut any_disallowed = false;
+              let mut parts = Vec::new();
+              const MAX_RANGES_TO_SHOW: usize = 3;
+              for (range, allowed_bv) in allowed_terminals.range_values() {
+                  let disallowed_bv = HybridBitset::max_ones() - allowed_bv;
+                  if disallowed_bv.is_empty() {
+                      continue;
+                  }
+                  any_disallowed = true;
+                  if parts.len() >= MAX_RANGES_TO_SHOW {
+                      break;
+                  }
+                  let range_str = if range.start() == range.end() {
+                      format!("{}", range.start())
+                  } else {
+                      format!("{}..={}", range.start(), range.end())
+                  };
+
+                  if disallowed_bv == HybridBitset::max_ones() {
+                      parts.push(format!("state(s) {}: all", range_str));
+                      continue;
+                  }
+
+                  const MAX_NAMES_TO_SHOW: usize = 5;
+                  let num_disallowed = disallowed_bv.len();
+                  let names: Vec<_> = disallowed_bv.iter().take(MAX_NAMES_TO_SHOW)
+                      .map(|tid_val| terminal_map.get_by_right(&TerminalID(tid_val))
+                          .map_or_else(|| format!("<ID:{}>", tid_val), |t| t.to_string()))
+                      .collect();
+                  let names_str = names.join(", ");
+
+                  if num_disallowed > MAX_NAMES_TO_SHOW {
+                      parts.push(format!("state(s) {} ({}): [{}, …]", range_str, num_disallowed, names_str));
+                  } else {
+                      parts.push(format!("state(s) {}: [{}]", range_str, names_str));
+                  }
+              }
+              if !any_disallowed {
+                  None
+              } else if parts.is_empty() {
+                  Some(format!("Disallowed {}(…)", label))
+              } else {
+                  Some(format!("Disallowed {}({})", label, parts.join("; ")))
+              }
+          };
+
+          let union_llm_opt = summarize_llm(&acc.llm_tokens_union, "LLM(U)");
+          let union_terminals_opt = summarize_disallowed_terminals(&acc.terminals_union, "Term(U)");
+
+          let stored_trie_nodes_str = {
+              const MAX_PTRS_TO_SHOW: usize = 5;
+              let n = acc.stored_trie_nodes().len();
+              if n == 0 {
+                  None
+              } else if n <= MAX_PTRS_TO_SHOW {
+                  let ptrs: Vec<String> = acc
+                      .stored_trie_nodes()
+                      .iter()
+                      .map(|wrapper| format!("{}", wrapper.as_arc()))
+                      .collect();
+                  Some(format!("Trie(n={}, [{}])", n, ptrs.join(", ")))
+              } else {
+                  let ptrs_sample: Vec<String> = acc
+                      .stored_trie_nodes()
+                      .iter()
+                      .take(MAX_PTRS_TO_SHOW)
+                      .map(|wrapper| format!("{}", wrapper.as_arc()))
+                      .collect();
+                  let remaining = n - MAX_PTRS_TO_SHOW;
+                  Some(format!("Trie(n={}, first {}: {}, …; +{} more)", n, MAX_PTRS_TO_SHOW, ptrs_sample.join(", "), remaining))
+              }
+          };
+
+          let mut parts: Vec<String> = Vec::new();
+          if let Some(s) = union_llm_opt { parts.push(s); }
+          if let Some(s) = union_terminals_opt { parts.push(s); }
+          if let Some(s) = stored_trie_nodes_str { parts.push(s); }
+
+          if parts.is_empty() {
+              String::new()
+          } else {
+              format!("[{}]", parts.join(", "))
+          }
+      }
       ```
-      [DEBUG] 2] src/glr/parser.rs:2200: Phase1/2-start (ReadyForDefaultReductions) - accepted: now=false, prev=false - token ''--'' (67) - active_nodes: LeveledGSSStats { num_upperbranch_nodes: 0, num_interface_nodes: 1, num_lower_nodes: 199, total_unique_nodes: 200, num_structurally_unique_nodes: 207, upper_edges: 0, interface_to_lower_edges: 1, lower_edges: 1528, total_edges: 1529, max_upper_depth: 9, max_lower_depth: 8, distinct_values_count: 181, unique_accumulators_count: 1, total_accumulator_instances: 1, num_upper_with_empty: 0, num_interfaces_with_empty: 0, num_lower_terminal_nodes: 1, num_interface_implicit_terminals: 0, num_multi_depth_slots_upper: 0, num_multi_depth_slots_lower: 0, max_multiplicity_per_value_upper: 1, max_multiplicity_per_value_lower: 1, average_in_degree: 7.683417085427136, max_in_degree: 326, structural_sharing_factor: 1.035, promotable_upper_nodes: 0 }
-      ```
-      Oh dear. Obviously something is wrong in the way we're computing `num_structurally_unique_nodes`. It can't be less than `total_unique_nodes`. 
+    metadata:
+      filename: src/datastructures/gss_leveled_adapter.rs
+  - user: I want to make `GSSPopper::pop` and `GSSPopper::popn` as efficient as possible.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -8234,362 +11527,173 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Here’s how to fix the computation and align it with the notion of a maximally compressed DAG disregarding accumulators:
+      Of course. To make `GSSPopper::pop` and `GSSPopper::popn` more efficient, we can refactor them to avoid repeated work. The current `popn` calls `pop` in a loop, and `pop` itself performs multiple traversals of the GSS.
 
-      High-level explanation and plan
-      - Standard name: The “maximally compressed graph representation” of a set of lists (strings over an alphabet of numbers) is commonly known as a minimal acyclic deterministic finite automaton (MADFA), also called a DAWG (Directed Acyclic Word Graph). However, MADFA/DAWG is deterministic: at most one edge per label from a node.
+      I'll provide a more efficient implementation for `popn` that calculates the result in a single pass, reducing the number of traversals from `3*n` to `n+2`. The `pop` method will then be a simple call to `popn(1)`.
 
-      - Why your current stat can exceed total nodes: Your current computation builds a deterministic trie/DAWG from the language represented by the GSS and counts its canonical nodes. Your GSS itself is a nondeterministic DAG (multiple edges per label and shared subgraphs). A minimal deterministic automaton can be larger than a particular nondeterministic DAG. That’s why num_structurally_unique_nodes can be larger than total_unique_nodes, and the “efficiency” factor can exceed 1.0.
+      Here are the step-by-step instructions to apply the changes:
 
-      - What we want: For a debugging “efficiency” factor, we want a baseline that is always less than or equal to the current structure size. So we should compute the minimal number of distinct nodes you can get by merging isomorphic subgraphs of the current DAG, while completely ignoring accumulators (A). That is, do a bottom-up hash-cons of the existing DAG, where two nodes are equal if:
-        - they have the same terminal/accepting flag (ignoring the actual accumulator value),
-        - and for each edge label, the set of child canonical-ids is the same (ignore multiplicity and depths; duplicates to the same subgraph don’t change the accepted set).
-        This yields a “maximally compressed nondeterministic DAG” under your semantics and will always be less than or equal to the current number of unique nodes.
+      ### Step-by-step Instructions
 
-      - Implementation strategy:
-        - In stats(), replace the trie/DAWG-based count with a new bottom-up canonicalization over the current GSS:
-          - Define a StatsSig with fields:
-            - terminal: bool (true if node accepts the current path)
-            - edges: map from label T to a sorted, deduplicated list of canonical child IDs (so it’s a set per label; multiplicity is irrelevant for language).
-          - Use a single interner across both Upper and Lower nodes, so identical structures across the two layers are unified.
-          - For terminal flags:
-            - Upper::Branch: terminal if b.empty.is_some()
-            - Upper::Interface: terminal if i.empty.is_some() or (i.children.is_empty() and i.empty.is_none())  // implicit terminal
-            - Lower: terminal if l.empty
-          - Children:
-            - Upper::Branch children traverse to Upper
-            - Upper::Interface children traverse to Lower
-            - Lower children traverse to Lower
-          - For each label, collect child canonical IDs, sort, and deduplicate.
-        - Set num_structurally_unique_nodes to the number of unique StatsSig instances (interner size).
-        - Keep structural_sharing_factor = num_structurally_unique_nodes / total_unique_nodes. With this new baseline, it will always be <= 1.0.
+      1.  **Open the file `src/datastructures/gss_leveled_adapter.rs`**.
 
-      Step-by-step instructions
-      1) Edit src/datastructures/leveled_gss.rs, inside impl LeveledGSS<T, A>::stats:
-         - Remove the trie-based function count_minimal_dag_nodes_for_sequences and its local helper types NodeSig/TrieNode/etc.
-         - Add a new set of local helpers:
-           - StatsSig<T>, StatsInterner<T>, stats_sig_hash
-           - canonicalization functions: canon_lower_for_stats and canon_upper_for_stats
-           - count_structural_unique_nodes_ignoring_accs(&Arc<Upper<T, A>>) -> usize
-         - Replace the old computation of num_structurally_unique_nodes (which currently builds a set of sequences and calls the trie-based counting) with a call to count_structural_unique_nodes_ignoring_accs(&self.inner).
-         - Remove the code that builds unique_sequences and sequences, since we no longer use it to compute num_structurally_unique_nodes.
+      2.  **Locate the `impl GSSPopper` block.** This is where the methods `popn` and `pop` are defined.
 
-      2) Leave structural_sharing_factor formula as:
-         structural_sharing_factor = num_structurally_unique_nodes as f64 / total_unique_nodes as f64
-         With the new computation, this will always be <= 1.0.
+      3.  **Replace the entire body of the `popn` and `pop` methods.** You will be replacing this code block:
 
-      3) Keep all other stats logic unchanged.
+          ```rust
+              pub fn popn(&mut self, n: usize) {
+                  for _ in 0..n {
+                      self.pop();
+                  }
+              }
+              pub fn pop(&mut self) {
+                  let mut inner = self.inner.clone();
+                  let mut belows: BTreeMap<_, _> = self.below_bottom.iter().map(|(k, v)| (*k + 1, v.clone())).collect();
+                  let new_below_slice = inner.filter_by_length(Some(1), Some(1));
+                  if !new_below_slice.is_empty() {
+                      let mut new_below_map = BTreeMap::new();
+                      for edge in new_below_slice.peek() {
+                          let isolated = new_below_slice.isolate(Some(edge.clone()));
+                          if let Some(acc) = isolated.reduce_acc() {
+                              new_below_map.insert(edge, acc);
+                          }
+                      }
+                      if !new_below_map.is_empty() {
+                          belows.insert(1, new_below_map);
+                      }
+                  }
+                  self.below_bottom = belows;
+                  inner = inner.pop();
+                  inner = inner.filter_by_length(Some(1), None);
+                  self.inner = inner;
+              }
+          ```
 
-      4) Concept clarification (for your reference/documentation):
-         - If you ever want to also report the minimal deterministic baseline (MADFA/DAWG size) for comparison, you can keep both numbers:
-           - ndag_min_nodes (new number we compute)
-           - madfa_min_nodes (via trie/DAWG as before)
-           Then, you can derive two different “efficiency” metrics. For now, per your request, we replace the old method with the new nondeterministic DAG canonicalization.
+          with the following more efficient implementation:
 
-      Git patches
-      Below is a patch that:
-      - Replaces the trie/DAWG-based node counting with a bottom-up canonicalization of the existing GSS (ignoring accumulators).
-      - Removes the no-longer-needed unique_sequences/sequences code.
+          ```rust
+              pub fn popn(&mut self, n: usize) {
+                  if n == 0 {
+                      return;
+                  }
+          
+                  // 1. Shift existing below_bottom
+                  let mut belows: BTreeMap<_, _> = self.below_bottom.drain().map(|(k, v)| (k + n, v)).collect();
+          
+                  // 2. Extract and process top n levels that will be removed
+                  for d in 1..=n {
+                      let slice_at_d = self.inner.filter_by_length(Some(d as isize), Some(d as isize));
+                      if !slice_at_d.is_empty() {
+                          let mut map_at_d = BTreeMap::new();
+                          for edge in slice_at_d.peek() {
+                              let isolated = slice_at_d.isolate(Some(edge.clone()));
+                              if let Some(acc) = isolated.reduce_acc() {
+                                  map_at_d
+                                      .entry(edge)
+                                      .and_modify(|a| *a = a.merge(&acc))
+                                      .or_insert(acc);
+                              }
+                          }
+                          if !map_at_d.is_empty() {
+                              belows.insert(d, map_at_d);
+                          }
+                      }
+                  }
+          
+                  // 3. Update inner by popping n levels and removing any resulting 0-length paths
+                  let mut new_inner = self.inner.popn(n as isize);
+                  new_inner = new_inner.filter_by_length(Some(1), None);
+                  self.inner = new_inner;
+          
+                  // 4. Update below_bottom
+                  self.below_bottom = belows;
+              }
+              pub fn pop(&mut self) {
+                  self.popn(1);
+              }
+          ```
+
+      This change directly implements `popn` to be more efficient for `n > 1` and simplifies `pop` to be a special case of `popn`.
+
+      ### Git Diff
+
+      Here is the git diff for the changes described above. You can apply this patch directly.
 
       ```diff
-      diff --git a/src/datastructures/leveled_gss.rs b/src/datastructures/leveled_gss.rs
-      index 5892f19..cda7b0d 100644
-      --- a/src/datastructures/leveled_gss.rs
-      +++ b/src/datastructures/leveled_gss.rs
-      @@ -1071,115 +1071,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-       
-           pub fn stats(&self) -> LeveledGSSStats<T, A> {
-               let top_values: HashSet<T> = self.inner.children_keys().into_iter().collect();
-      -        // Minimal DAWG/MADFA node count for the set of lists represented by this GSS (ignoring accumulators).
-      -        // Build a trie of sequences, then merge isomorphic subtries bottom-up to get the unique minimal DAG.
-      -        fn count_minimal_dag_nodes_for_sequences<T>(seqs: &[Vec<T>]) -> usize
-      -        where
-      -            T: Clone + Eq + Hash,
-      -        {
-      -            struct TrieNode<T: Clone + Eq + Hash> {
-      -                term: bool,
-      -                children: StdHashMap<T, TrieNode<T>>,
-      -            }
-      -
-      -            impl<T: Clone + Eq + Hash> Default for TrieNode<T> {
-      -                fn default() -> Self {
-      -                    TrieNode {
-      -                        term: false,
-      -                        children: StdHashMap::new(),
-      -                    }
-      -                }
-      -            }
-      -
-      -            #[derive(Clone)]
-      -            struct NodeSig<T: Clone + Eq + Hash> {
-      -                term: bool,
-      -                edges: StdHashMap<T, usize>, // label -> canonical child id
-      -            }
-      -
-      -            // Build trie
-      -            let mut root: TrieNode<T> = TrieNode {
-      -                term: false,
-      -                children: StdHashMap::new(),
-      -            };
-      -            for seq in seqs {
-      -                let mut node = &mut root;
-      -                if seq.is_empty() {
-      -                    node.term = true;
-      -                    continue;
-      -                }
-      -                for v in seq {
-      -                    node = node
-      -                        .children
-      -                        .entry(v.clone())
-      -                        .or_insert_with(TrieNode::default);
-      -                }
-      -                node.term = true;
-      -            }
-      -
-      -            use std::hash::{Hash as _, Hasher};
-      -            fn sig_hash<T: Clone + Eq + Hash>(sig: &NodeSig<T>) -> u64 {
-      -                // Order-independent hash of the node signature: terminal flag + multiset of (label, child_id).
-      -                // We only use commutative/associative ops over per-edge hashes so iteration order does not matter.
-      -                let mut seed: u64 = if sig.term { 0x9e37_79b9_7f4a_7c15 } else { 0x243f_6a88_85a3_08d3 };
-      -                // Mix edge count to separate small vs large degree nodes
-      -                seed ^= (sig.edges.len() as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
-      -
-      -                // Accumulate per-edge hashes
-      -                let mut xor_acc: u64 = 0;
-      -                let mut sum_acc: u64 = 0;
-      -                let mut prod_acc: u64 = 0x9e37_79b9_7f4a_7c15 ^ (sig.edges.len() as u64);
-      -
-      -                for (k, v) in &sig.edges {
-      -                    let mut h = std::collections::hash_map::DefaultHasher::new();
-      -                    k.hash(&mut h);
-      -                    v.hash(&mut h);
-      -                    let pair = h.finish();
-      -                    xor_acc ^= pair;
-      -                    sum_acc = sum_acc.wrapping_add(pair);
-      -                    prod_acc = prod_acc.wrapping_mul(pair.wrapping_add(0x517c_c1b7_2722_0a95));
-      -                }
-      -
-      -                seed ^ xor_acc ^ sum_acc ^ prod_acc
-      -            }
-      -
-      -            fn intern<T: Clone + Eq + Hash>(
-      -                node: &TrieNode<T>,
-      -                interner: &mut StdHashMap<u64, Vec<(NodeSig<T>, usize)>>,
-      -                next_id: &mut usize,
-      -            ) -> usize {
-      -                // Compute child ids first (post-order)
-      -                let mut edges: StdHashMap<T, usize> = StdHashMap::new();
-      -                for (label, child) in node.children.iter() {
-      -                    let cid = intern::<T>(child, interner, next_id);
-      -                    edges.insert(label.clone(), cid);
-      -                }
-      -                let sig = NodeSig { term: node.term, edges };
-      -                let h = sig_hash(&sig);
-      -                let bucket = interner.entry(h).or_default();
-      -                // Check for exact match in the bucket
-      -                for (existing, id) in bucket.iter() {
-      -                    if existing.term == sig.term && existing.edges.len() == sig.edges.len() && existing.edges == sig.edges {
-      -                        return *id;
-      -                    }
-      -                }
-      -                // New canonical node
-      -                let id = *next_id;
-      -                *next_id += 1;
-      -                bucket.push((sig, id));
-      -                id
-      -            }
-      -
-      -            // Intern the trie and count unique canonical states
-      -            let mut interner: StdHashMap<u64, Vec<(NodeSig<T>, usize)>> = StdHashMap::new();
-      -            let mut next_id = 0usize;
-      -            let _root_id = intern::<T>(&root, &mut interner, &mut next_id);
-      -            interner.values().map(|v| v.len()).sum()
+      diff --git a/src/datastructures/gss_leveled_adapter.rs b/src/datastructures/gss_leveled_adapter.rs
+      index 00810e8..40f531d 100644
+      --- a/src/datastructures/gss_leveled_adapter.rs
+      +++ b/src/datastructures/gss_leveled_adapter.rs
+      @@ -480,33 +480,39 @@
+           pub fn num_predecessors(&self) -> usize {
+               self.inner.peek().len()
+           }
+           pub fn popn(&mut self, n: usize) {
+      -        for _ in 0..n {
+      -            self.pop();
       -        }
-       
-               let mut visited_upperbranch: HashSet<usize> = HashSet::new();
-               let mut visited_interface: HashSet<usize> = HashSet::new();
-      @@ -1314,14 +1205,93 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-                   }
-               }
-       
-      -        // Compute the number of nodes in the minimal DAWG for the represented language (ignoring accumulators).
-      -        let mut unique_sequences: HashSet<Vec<T>> = HashSet::new();
-      -        for (seq, _) in self.to_stacks().into_iter() {
-      -            unique_sequences.insert(seq);
-      +        // Compute the number of structurally unique nodes in the maximally compressed
-      +        // nondeterministic DAG obtained by merging isomorphic subgraphs of the current GSS,
-      +        // completely ignoring accumulators. This baseline is always <= total_unique_nodes.
-      +        #[derive(Clone, PartialEq, Eq)]
-      +        struct StatsSig<T: Clone + Eq + Hash> {
-      +            terminal: bool,
-      +            // label -> sorted, deduplicated list of canonical child ids (set per label)
-      +            edges: StdHashMap<T, Vec<usize>>,
-               }
-      -        let sequences: Vec<Vec<T>> = unique_sequences.into_iter().collect();
-      -        let num_structurally_unique_nodes = count_minimal_dag_nodes_for_sequences(&sequences);
-       
-      +        fn stats_sig_hash<T: Clone + Eq + Hash>(sig: &StatsSig<T>) -> u64 {
-      +            use std::hash::{Hash as _, Hasher};
-      +            let mut seed: u64 = if sig.terminal {
-      +                0x9e37_79b9_7f4a_7c15
-      +            } else {
-      +                0x243f_6a88_85a3_08d3
-      +            };
-      +            seed ^= (sig.edges.len() as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
-      +            let mut xor_acc: u64 = 0;
-      +            let mut sum_acc: u64 = 0;
-      +            let mut prod_acc: u64 = 0x517c_c1b7_2722_0a95 ^ (sig.edges.len() as u64);
-      +            for (k, ids) in &sig.edges {
-      +                let mut h = std::collections::hash_map::DefaultHasher::new();
-      +                k.hash(&mut h);
-      +                ids.hash(&mut h); // ids sorted and deduplicated
-      +                let e = h.finish();
-      +                xor_acc ^= e;
-      +                sum_acc = sum_acc.wrapping_add(e);
-      +                prod_acc = prod_acc.wrapping_mul(e.wrapping_add(0x9e37_79b9_7f4a_7c15));
-      +            }
-      +            seed ^ xor_acc ^ sum_acc ^ prod_acc
+      -    }
+      -    pub fn pop(&mut self) {
+      -        let mut inner = self.inner.clone();
+      -        let mut belows: BTreeMap<_, _> = self.below_bottom.iter().map(|(k, v)| (*k + 1, v.clone())).collect();
+      -        let new_below_slice = inner.filter_by_length(Some(1), Some(1));
+      -        if !new_below_slice.is_empty() {
+      -            let mut new_below_map = BTreeMap::new();
+      -            for edge in new_below_slice.peek() {
+      -                let isolated = new_below_slice.isolate(Some(edge.clone()));
+      -                if let Some(acc) = isolated.reduce_acc() {
+      -                    new_below_map.insert(edge, acc);
+      -                }
+      -            }
+      -            if !new_below_map.is_empty() {
+      -                belows.insert(1, new_below_map);
+      -            }
+      -        }
+      +        if n == 0 {
+      +            return;
       +        }
       +
-      +        struct StatsInterner<T: Clone + Eq + Hash> {
-      +            map: StdHashMap<u64, Vec<(StatsSig<T>, usize)>>,
-      +            next_id: usize,
-      +        }
+      +        // 1. Shift existing below_bottom
+      +        let mut belows: BTreeMap<_, _> = self.below_bottom.drain().map(|(k, v)| (k + n, v)).collect();
       +
-      +        impl<T: Clone + Eq + Hash> Default for StatsInterner<T> {
-      +            fn default() -> Self {
-      +                Self {
-      +                    map: StdHashMap::new(),
-      +                    next_id: 0,
-      +                }
-      +            }
-      +        }
-      +
-      +        fn intern_stats_sig<T: Clone + Eq + Hash>(
-      +            sig: StatsSig<T>,
-      +            interner: &mut StatsInterner<T>,
-      +        ) -> usize {
-      +            let h = stats_sig_hash(&sig);
-      +            let bucket = interner.map.entry(h).or_default();
-      +            for (existing, id) in bucket.iter() {
-      +                if existing == &sig {
-      +                    return *id;
-      +                }
-      +            }
-      +            let id = interner.next_id;
-      +            interner.next_id += 1;
-      +            bucket.push((sig, id));
-      +            id
-      +        }
-      +
-      +        fn canon_lower_for_stats<T, A>(
-      +            node: &Arc<Lower<T>>,
-      +            memo_lower: &mut StdHashMap<usize, usize>,
-      +            interner: &mut StatsInterner<T>,
-      +        ) -> usize
-      +        where
-      +            T: Clone + Eq + Hash,
-      +            A: Merge + Clone + Eq + Hash,
-      +        {
-      +            let ptr = Arc::as_ptr(node) as usize;
-      +            if let Some(id) = memo_lower.get(&ptr) {
-      +                return *id;
-      +            }
-      +            let mut edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
-      +            for (v, kids) in node.children.iter() {
-      +                let e = edges.entry(v.clone()).or_default();
-      +                for child in kids.values() {
-      +                    let cid = canon_lower_for_stats::<T, A>(child, memo_lower, interner);
-      +                    e.push(cid);
-      +                }
-      +                e.sort_unstable();
-      +                e.dedup();
-      +            }
-      +            let sig = StatsSig {
-      +                terminal: node.empty,
-      +                edges,
-      +            };
-      +            let id = intern_stats_sig(sig, interner);
-      +            memo_lower.insert(ptr, id);
-      +            id
-      +        }
-      +
-      +        fn canon_upper_for_stats<T, A>(
-      +            node: &Arc<Upper<T, A>>,
-      +            memo_upper: &mut StdHashMap<usize, usize>,
-      +            memo_lower: &mut StdHashMap<usize, usize>,
-      +            interner: &mut StatsInterner<T>,
-      +        ) -> usize
-      +        where
-      +            T: Clone + Eq + Hash,
-      +            A: Merge + Clone + Eq + Hash,
-      +        {
-      +            let ptr = Arc::as_ptr(node) as usize;
-      +            if let Some(id) = memo_upper.get(&ptr) {
-      +                return *id;
-      +            }
-      +            let (terminal, edges) = match &**node {
-      +                Upper::Branch(b) => {
-      +                    let mut edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
-      +                    for (v, kids) in b.children.iter() {
-      +                        let e = edges.entry(v.clone()).or_default();
-      +                        for child in kids.values() {
-      +                            let cid = canon_upper_for_stats::<T, A>(child, memo_upper, memo_lower, interner);
-      +                            e.push(cid);
-      +                        }
-      +                        e.sort_unstable();
-      +                        e.dedup();
+      +        // 2. Extract and process top n levels that will be removed
+      +        for d in 1..=n {
+      +            let slice_at_d = self.inner.filter_by_length(Some(d as isize), Some(d as isize));
+      +            if !slice_at_d.is_empty() {
+      +                let mut map_at_d = BTreeMap::new();
+      +                for edge in slice_at_d.peek() {
+      +                    let isolated = slice_at_d.isolate(Some(edge.clone()));
+      +                    if let Some(acc) = isolated.reduce_acc() {
+      +                        map_at_d
+      +                            .entry(edge)
+      +                            .and_modify(|a| *a = a.merge(&acc))
+      +                            .or_insert(acc);
       +                    }
-      +                    (b.empty.is_some(), edges)
       +                }
-      +                Upper::Interface(i) => {
-      +                    let mut edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
-      +                    for (v, kids) in i.children.iter() {
-      +                        let e = edges.entry(v.clone()).or_default();
-      +                        for child in kids.values() {
-      +                            let cid = canon_lower_for_stats::<T, A>(child, memo_lower, interner);
-      +                            e.push(cid);
-      +                        }
-      +                        e.sort_unstable();
-      +                        e.dedup();
-      +                    }
-      +                    let terminal = i.empty.is_some() || (i.children.is_empty() && i.empty.is_none());
-      +                    (terminal, edges)
+      +                if !map_at_d.is_empty() {
+      +                    belows.insert(d, map_at_d);
       +                }
-      +            };
-      +            let sig = StatsSig { terminal, edges };
-      +            let id = intern_stats_sig(sig, interner);
-      +            memo_upper.insert(ptr, id);
-      +            id
+      +            }
       +        }
       +
-      +        fn count_structural_unique_nodes_ignoring_accs<T, A>(root: &Arc<Upper<T, A>>) -> usize
-      +        where
-      +            T: Clone + Eq + Hash,
-      +            A: Merge + Clone + Eq + Hash,
-      +        {
-      +            let mut interner: StatsInterner<T> = Default::default();
-      +            let mut memo_upper: StdHashMap<usize, usize> = StdHashMap::new();
-      +            let mut memo_lower: StdHashMap<usize, usize> = StdHashMap::new();
-      +            let _root_id = canon_upper_for_stats::<T, A>(root, &mut memo_upper, &mut memo_lower, &mut interner);
-      +            interner.next_id
-      +        }
+      +        // 3. Update inner by popping n levels and removing any resulting 0-length paths
+      +        let mut new_inner = self.inner.popn(n as isize);
+      +        new_inner = new_inner.filter_by_length(Some(1), None);
+      +        self.inner = new_inner;
       +
-      +        let num_structurally_unique_nodes =
-      +            count_structural_unique_nodes_ignoring_accs::<T, A>(&self.inner);
-      +
-               let total_unique_nodes = num_upperbranch_nodes + num_interface_nodes + num_lower_nodes;
-               let total_edges = upper_edges + interface_to_lower_edges + lower_edges;
-               let max_upper_depth = self.inner.max_depth();
-      @@ -1336,7 +1306,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-                   (0, 0.0)
-               };
+      +        // 4. Update below_bottom
+               self.below_bottom = belows;
+      -        inner = inner.pop();
+      -        inner = inner.filter_by_length(Some(1), None);
+      -        self.inner = inner;
+      +    }
+      +    pub fn pop(&mut self) {
+      +        self.popn(1);
+           }
+       }
        
-      -        let structural_sharing_factor = if total_unique_nodes > 0 {
-      +        let structural_sharing_factor = if total_unique_nodes > 0 {
-                   num_structurally_unique_nodes as f64 / total_unique_nodes as f64
-               } else {
-                   1.0
+
       ```
     metadata:
   - user: |
@@ -8597,11 +11701,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/datastructures/leveled_gss.rs
-      Applying patch to 'src/datastructures/leveled_gss.rs' using custom patcher...
-      Successfully applied patch and wrote to src/datastructures/leveled_gss.rs.
+      Identified target file: src/datastructures/gss_leveled_adapter.rs
+      Applying patch to 'src/datastructures/gss_leveled_adapter.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/gss_leveled_adapter.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Update num_structurally_unique_nodes
-      stat to use bottom-up canonicalization of GSS structure ignoring accumulators"'
+  - user: 'Changes committed with message: "Refactor GSSPopper::popn for efficiency
+      and simplify pop to call popn(1)"'
     metadata:
 ...
