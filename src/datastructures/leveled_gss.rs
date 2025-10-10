@@ -1535,111 +1535,92 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn stats(&self) -> LeveledGSSStats<T, A> {
         let top_values: HashSet<T> = self.inner.children_keys().into_iter().collect();
-
-        fn compute_structural_hash_lower<T: Clone + Eq + Hash>(
-            node: &Arc<Lower<T>>,
-            memo: &mut StdHashMap<usize, u64>,
-            unique_hashes: &mut HashSet<u64>,
-        ) -> u64 {
-            use std::hash::{Hash, Hasher};
-            let ptr = Arc::as_ptr(node) as usize;
-            if let Some(hash) = memo.get(&ptr) {
-                return *hash;
-            }
-
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            2u8.hash(&mut hasher); // Differentiate from Upper nodes
-            node.empty.hash(&mut hasher);
-
-            let mut child_hashes: Vec<u64> = Vec::new();
-            for (val, kids) in &node.children {
-                let mut inner_hasher = std::collections::hash_map::DefaultHasher::new();
-                val.hash(&mut inner_hasher);
-                for (depth, child) in kids {
-                    depth.hash(&mut inner_hasher);
-                    let child_hash = compute_structural_hash_lower(child, memo, unique_hashes);
-                    child_hash.hash(&mut inner_hasher);
-                }
-                child_hashes.push(inner_hasher.finish());
-            }
-            child_hashes.sort_unstable();
-            for h in child_hashes {
-                h.hash(&mut hasher);
-            }
-
-            let final_hash = hasher.finish();
-            memo.insert(ptr, final_hash);
-            unique_hashes.insert(final_hash);
-            final_hash
-        }
-
-        fn compute_structural_hash_upper<T, A>(
-            node: &Arc<Upper<T, A>>,
-            memo_upper: &mut StdHashMap<usize, u64>,
-            memo_lower: &mut StdHashMap<usize, u64>,
-            unique_hashes: &mut HashSet<u64>,
-        ) -> u64
+        // Minimal DAWG/MADFA node count for the set of lists represented by this GSS (ignoring accumulators).
+        // Build a trie of sequences, then merge isomorphic subtries bottom-up to get the unique minimal DAG.
+        fn count_minimal_dag_nodes_for_sequences<T>(seqs: &[Vec<T>]) -> usize
         where
             T: Clone + Eq + Hash,
-            A: Merge + Clone + Eq + Hash,
         {
-            use std::hash::{Hash, Hasher};
-            let ptr = Arc::as_ptr(node) as usize;
-            if let Some(hash) = memo_upper.get(&ptr) {
-                return *hash;
+            #[derive(Default)]
+            struct TrieNode<T: Clone + Eq + Hash> {
+                term: bool,
+                children: StdHashMap<T, TrieNode<T>>,
             }
 
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            let final_hash = match &**node {
-                Upper::Branch(b) => {
-                    0u8.hash(&mut hasher);
-                    b.empty.is_some().hash(&mut hasher);
+            #[derive(Clone)]
+            struct NodeSig<T: Clone + Eq + Hash> {
+                term: bool,
+                edges: StdHashMap<T, usize>, // label -> canonical child id
+            }
 
-                    let mut child_hashes: Vec<u64> = Vec::new();
-                    for (val, kids) in &b.children {
-                        let mut inner_hasher = std::collections::hash_map::DefaultHasher::new();
-                        val.hash(&mut inner_hasher);
-                        for (depth, child) in kids {
-                            depth.hash(&mut inner_hasher);
-                            let child_hash =
-                                compute_structural_hash_upper(child, memo_upper, memo_lower, unique_hashes);
-                            child_hash.hash(&mut inner_hasher);
-                        }
-                        child_hashes.push(inner_hasher.finish());
-                    }
-                    child_hashes.sort_unstable();
-                    for h in child_hashes {
-                        h.hash(&mut hasher);
-                    }
-                    hasher.finish()
-                }
-                Upper::Interface(i) => {
-                    1u8.hash(&mut hasher);
-                    i.empty.is_some().hash(&mut hasher);
-
-                    let mut child_hashes: Vec<u64> = Vec::new();
-                    for (val, kids) in &i.children {
-                        let mut inner_hasher = std::collections::hash_map::DefaultHasher::new();
-                        val.hash(&mut inner_hasher);
-                        for (depth, child) in kids {
-                            depth.hash(&mut inner_hasher);
-                            let child_hash =
-                                compute_structural_hash_lower(child, memo_lower, unique_hashes);
-                            child_hash.hash(&mut inner_hasher);
-                        }
-                        child_hashes.push(inner_hasher.finish());
-                    }
-                    child_hashes.sort_unstable();
-                    for h in child_hashes {
-                        h.hash(&mut hasher);
-                    }
-                    hasher.finish()
-                }
+            // Build trie
+            let mut root: TrieNode<T> = TrieNode {
+                term: false,
+                children: StdHashMap::new(),
             };
+            for seq in seqs {
+                let mut node = &mut root;
+                if seq.is_empty() {
+                    node.term = true;
+                    continue;
+                }
+                for v in seq {
+                    node = node
+                        .children
+                        .entry(v.clone())
+                        .or_insert_with(TrieNode::default);
+                }
+                node.term = true;
+            }
 
-            memo_upper.insert(ptr, final_hash);
-            unique_hashes.insert(final_hash);
-            final_hash
+            use std::hash::{Hash as _, Hasher};
+            fn sig_hash<T: Clone + Eq + Hash>(sig: &NodeSig<T>) -> u64 {
+                // Order-independent combination of (label, child_id) pairs plus terminal flag.
+                let mut acc: u64 = if sig.term { 0x9e37_79b9_7f4a_7c15 } else { 0x243f_6a88_85a3_08d3 };
+                acc ^= (sig.edges.len() as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
+                for (k, v) in &sig.edges {
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    k.hash(&mut h);
+                    v.hash(&mut h);
+                    let pair = h.finish();
+                    // Mix in a rotation and a large odd multiplier
+                    acc = acc.rotate_left(1) ^ pair.wrapping_mul(0x517c_c1b7_2722_0a95);
+                }
+                acc
+            }
+
+            fn intern<T: Clone + Eq + Hash>(
+                node: &TrieNode<T>,
+                interner: &mut StdHashMap<u64, Vec<(NodeSig<T>, usize)>>,
+                next_id: &mut usize,
+            ) -> usize {
+                // Compute child ids first (post-order)
+                let mut edges: StdHashMap<T, usize> = StdHashMap::new();
+                for (label, child) in node.children.iter() {
+                    let cid = intern::<T>(child, interner, next_id);
+                    edges.insert(label.clone(), cid);
+                }
+                let sig = NodeSig { term: node.term, edges };
+                let h = sig_hash(&sig);
+                let bucket = interner.entry(h).or_default();
+                // Check for exact match in the bucket
+                for (existing, id) in bucket.iter() {
+                    if existing.term == sig.term && existing.edges.len() == sig.edges.len() && existing.edges == sig.edges {
+                        return *id;
+                    }
+                }
+                // New canonical node
+                let id = *next_id;
+                *next_id += 1;
+                bucket.push((sig, id));
+                id
+            }
+
+            // Intern the trie and count unique canonical states
+            let mut interner: StdHashMap<u64, Vec<(NodeSig<T>, usize)>> = StdHashMap::new();
+            let mut next_id = 0usize;
+            let _root_id = intern::<T>(&root, &mut interner, &mut next_id);
+            interner.values().map(|v| v.len()).sum()
         }
 
         let mut visited_upperbranch: HashSet<usize> = HashSet::new();
@@ -1763,16 +1744,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
         }
 
-        let mut structural_hashes_upper: StdHashMap<usize, u64> = StdHashMap::new();
-        let mut structural_hashes_lower: StdHashMap<usize, u64> = StdHashMap::new();
-        let mut unique_structural_hashes: HashSet<u64> = HashSet::new();
-        compute_structural_hash_upper(
-            &self.inner,
-            &mut structural_hashes_upper,
-            &mut structural_hashes_lower,
-            &mut unique_structural_hashes,
-        );
-        let num_structurally_unique_nodes = unique_structural_hashes.len();
+        // Compute the number of nodes in the minimal DAWG for the represented language (ignoring accumulators).
+        let mut unique_sequences: HashSet<Vec<T>> = HashSet::new();
+        for (seq, _) in self.to_stacks().into_iter() {
+            unique_sequences.insert(seq);
+        }
+        let sequences: Vec<Vec<T>> = unique_sequences.into_iter().collect();
+        let num_structurally_unique_nodes = count_minimal_dag_nodes_for_sequences(&sequences);
 
         let total_unique_nodes = num_upperbranch_nodes + num_interface_nodes + num_lower_nodes;
         let total_edges = upper_edges + interface_to_lower_edges + lower_edges;
