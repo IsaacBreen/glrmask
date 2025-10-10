@@ -1,6 +1,7 @@
 use crate::constraint::{LLMTokenBV, LLMVocab, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, Trie3GodWrapper};
 use crate::datastructures::gss_leveled_adapter::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
 use crate::datastructures::gss_leveled_adapter::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
+use crate::glr::synthetic::{analyze_for_synthetic_terminals, SyntheticTerminalAnalysis, SyntheticTerminalInfo};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
@@ -256,6 +257,12 @@ impl Default for ProcessDefaultReductionsAdvancedConfig {
 
 #[derive(Clone)]
 pub struct GLRParser {
+    // --- User-facing, original grammar ---
+    pub original_productions: Vec<Production>,
+    pub original_terminal_map: BiBTreeMap<Terminal, TerminalID>,
+    pub original_non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+
+    // --- Internal, transformed grammar and table ---
     pub table: Table,
     pub productions: Vec<Production>,
     pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
@@ -263,74 +270,69 @@ pub struct GLRParser {
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
     pub start_state_id: StateID,
     pub everything_state_id: StateID,
+    pub actions: BTreeMap<NonTerminal, ActionFn>,
     pub ignore_terminal_id: Option<TerminalID>,
     // Precomputed tables for substring parsing reductions.
     pub(crate) substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
     pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
     pub hallucinated_row: HallucinatedRow,
     pub hallucinated_state_id: StateID,
+
+    // --- Synthetic terminal info ---
+    pub synthetic_info: Vec<SyntheticTerminalInfo>,
 }
 
 impl JSONConvertible for GLRParser {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert("stage_7_table".to_string(), self.table.to_json());
-        obj.insert("productions".to_string(), self.productions.to_json());
-        // obj.insert("start_production_id".to_string(), self.start_production_id.to_json()); // Implicitly 0
-        obj.insert("terminal_map".to_string(), self.terminal_map.to_json());
-        obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
-        obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
-        obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
-        obj.insert("everything_state_id".to_string(), self.everything_state_id.to_json());
+        // Serialize the original grammar and transformations, not the derived internal state.
+        obj.insert("original_productions".to_string(), self.original_productions.to_json());
+        obj.insert("original_terminal_map".to_string(), self.original_terminal_map.to_json());
+        obj.insert("original_non_terminal_map".to_string(), self.original_non_terminal_map.to_json());
         obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
-        // Do not serialize precomputed substring gotos; they will be re-derived from the table.
-        // Do not serialize self.actions
-        // Do not serialize reduce_goto_map
+        obj.insert("synthetic_info".to_string(), self.synthetic_info.to_json());
+        // Note: `actions` are not serialized.
         JSONNode::Object(obj)
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let table = obj.remove("stage_7_table").ok_or_else(|| "Missing field stage_7_table".to_string())
-                                 .and_then(Table::from_json)?;
-                let productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
-                                     .and_then(Vec::<Production>::from_json)?;
-                // For backwards compatibility, we can read and ignore it.
-                let _start_production_id = obj.remove("start_production_id").and_then(|n| usize::from_json(n).ok());
-                let terminal_map = obj.remove("terminal_map").ok_or_else(|| "Missing field terminal_map".to_string())
-                                      .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
-                let non_terminal_map = obj.remove("non_terminal_map").ok_or_else(|| "Missing field non_terminal_map".to_string())
-                                          .and_then(|n| BiBTreeMap::<NonTerminal, NonTerminalID>::from_json(n))?;
-                let item_set_map = obj.remove("item_set_map").ok_or_else(|| "Missing field item_set_map".to_string())
-                                      .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
-                let start_state_id = obj.remove("start_state_id").ok_or_else(|| "Missing field start_state_id".to_string())
-                                        .and_then(StateID::from_json)?;
-                let everything_state_id = obj.remove("everything_state_id").ok_or_else(|| "Missing field everything_state_id".to_string())
-                                        .and_then(StateID::from_json)?;
+                let original_productions = obj.remove("original_productions").ok_or_else(|| "Missing field original_productions".to_string())
+                    .and_then(Vec::<Production>::from_json)?;
+                let original_terminal_map = obj.remove("original_terminal_map").ok_or_else(|| "Missing field original_terminal_map".to_string())
+                    .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
+                let original_non_terminal_map = obj.remove("original_non_terminal_map").ok_or_else(|| "Missing field original_non_terminal_map".to_string())
+                    .and_then(|n| BiBTreeMap::<NonTerminal, NonTerminalID>::from_json(n))?;
                 let ignore_terminal_id = obj.remove("ignore_terminal_id")
                     .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
+                let synthetic_info = obj.remove("synthetic_info").ok_or_else(|| "Missing field synthetic_info".to_string())
+                    .and_then(Vec::<SyntheticTerminalInfo>::from_json)?;
 
-                let substring_gotos = stage_9(&table, &non_terminal_map);
-                let reduce_goto_map = crate::glr::table::stage_10(&table);
-                let hallucinated_row = crate::glr::table::stage_11_create_hallucinated_row(&table);
-                let hallucinated_state_id = StateID(usize::MAX);
+                // Re-generate the parser from the original grammar and synthetic info.
+                // This is computationally expensive but ensures correctness.
+                let mut productions_with_synthetics = original_productions.clone();
+                if !synthetic_info.is_empty() {
+                    // This requires a function to apply transformations, which is complex.
+                    // For now, we assume from_json is used on parsers without synthetics,
+                    // or we need to implement the transformation logic here.
+                    // Let's assume for now that we can just call the generator.
+                    // The generator itself would need to be modified to take synthetic_info.
+                    // This is a deep change. For now, we'll just regenerate without synthetics.
+                    // A proper implementation would pass synthetic_info to the generator.
+                    if !synthetic_info.is_empty() {
+                        return Err("Deserializing a parser with synthetic terminals is not yet fully supported. Re-analyze and apply transformations after loading.".to_string());
+                    }
+                }
 
-                Ok(GLRParser {
-                    table,
-                    productions,
-                    terminal_map,
-                    non_terminal_map,
-                    item_set_map,
-                    start_state_id,
-                    everything_state_id,
+                Ok(crate::glr::table::generate_glr_parser_with_maps(
+                    &original_productions,
+                    original_terminal_map,
+                    original_non_terminal_map,
+                    BTreeMap::new(), // Actions are not serialized
                     ignore_terminal_id,
-                    substring_gotos,
-                    reduce_goto_map,
-                    hallucinated_row,
-                    hallucinated_state_id,
-                })
+                ))
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
         }
@@ -340,6 +342,9 @@ impl JSONConvertible for GLRParser {
 impl Debug for GLRParser {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GLRParser")
+            .field("original_productions", &self.original_productions)
+            .field("original_terminal_map", &self.original_terminal_map)
+            .field("original_non_terminal_map", &self.original_non_terminal_map)
             .field("table", &self.table)
             .field("productions", &self.productions)
             .field("terminal_map", &self.terminal_map)
@@ -347,16 +352,23 @@ impl Debug for GLRParser {
             .field("item_set_map", &self.item_set_map)
             .field("start_state_id", &self.start_state_id)
             .field("everything_state_id", &self.everything_state_id)
+            .field("actions_count", &self.actions.len())
             .field("ignore_terminal_id", &self.ignore_terminal_id)
             .field("substring_gotos_size", &self.substring_gotos.len())
             .field("reduce_goto_map_size", &self.reduce_goto_map.len())
             .field("hallucinated_state_id", &self.hallucinated_state_id)
+            .field("synthetic_info", &self.synthetic_info)
             .finish()
     }
 }
 
 impl PartialEq for GLRParser {
     fn eq(&self, other: &Self) -> bool {
+        // Note: Actions are function pointers, cannot be compared directly.
+        // We compare their presence by keys.
+        self.original_productions == other.original_productions &&
+        self.original_terminal_map == other.original_terminal_map &&
+        self.original_non_terminal_map == other.original_non_terminal_map &&
         self.table == other.table &&
         self.productions == other.productions &&
         self.terminal_map == other.terminal_map &&
@@ -364,11 +376,13 @@ impl PartialEq for GLRParser {
         self.item_set_map == other.item_set_map &&
         self.start_state_id == other.start_state_id &&
         self.everything_state_id == other.everything_state_id &&
+        self.actions.keys().collect::<BTreeSet<_>>() == other.actions.keys().collect::<BTreeSet<_>>() &&
         self.ignore_terminal_id == other.ignore_terminal_id &&
         self.substring_gotos == other.substring_gotos &&
         self.reduce_goto_map == other.reduce_goto_map &&
         self.hallucinated_row == other.hallucinated_row &&
-        self.hallucinated_state_id == other.hallucinated_state_id
+        self.hallucinated_state_id == other.hallucinated_state_id &&
+        self.synthetic_info == other.synthetic_info
     }
 }
 
@@ -376,6 +390,9 @@ impl Eq for GLRParser {}
 
 impl GLRParser {
     pub fn new(
+        original_productions: Vec<Production>,
+        original_terminal_map: BiBTreeMap<Terminal, TerminalID>,
+        original_non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
         table: Table,
         productions: Vec<Production>,
         terminal_map: BiBTreeMap<Terminal, TerminalID>,
@@ -389,6 +406,7 @@ impl GLRParser {
         reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
         hallucinated_row: HallucinatedRow,
         hallucinated_state_id: StateID,
+        synthetic_info: Vec<SyntheticTerminalInfo>,
     ) -> Self {
         let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
             .into_iter()
@@ -400,6 +418,9 @@ impl GLRParser {
             .collect();
 
         Self {
+            original_productions,
+            original_terminal_map,
+            original_non_terminal_map,
             table,
             productions,
             terminal_map,
@@ -407,12 +428,49 @@ impl GLRParser {
             item_set_map,
             start_state_id,
             everything_state_id,
+            actions: converted_actions,
             ignore_terminal_id,
             substring_gotos,
             reduce_goto_map,
             hallucinated_row,
             hallucinated_state_id,
+            synthetic_info,
         }
+    }
+
+    /// Analyzes the current parse table for opportunities to introduce a synthetic terminal
+    /// to reduce lookahead complexity. Returns an analysis result which can be used with
+    /// `apply_synthetic_terminal`.
+    pub fn analyze_for_synthetic_terminals(&self) -> Option<SyntheticTerminalAnalysis> {
+        analyze_for_synthetic_terminals(self)
+    }
+
+    /// Applies a synthetic terminal transformation based on a prior analysis.
+    /// This consumes the current parser and returns a new, recompiled parser with the
+    /// transformation applied. All prior transformations are preserved.
+    pub fn apply_synthetic_terminal(self, analysis: &SyntheticTerminalAnalysis) -> GLRParser {
+        // 1. Create new synthetic terminal info.
+        let synth_term_name = format!("__synth_{}", self.synthetic_info.len());
+        let synth_term = Terminal::RegexName(synth_term_name);
+
+        // 2. Create new productions by transforming the *original* productions with all synthetic infos.
+        let mut new_synthetic_info = self.synthetic_info;
+        new_synthetic_info.push(SyntheticTerminalInfo {
+            synthetic_terminal: synth_term,
+            // The ID will be assigned during parser generation. We put a dummy one here.
+            synthetic_terminal_id: TerminalID(usize::MAX),
+            represented_terminals: analysis.candidate_terminals.clone(),
+        });
+
+        // 3. Re-generate the entire parser.
+        crate::glr::table::generate_glr_parser_with_info(
+            &self.original_productions,
+            self.original_terminal_map,
+            self.original_non_terminal_map,
+            self.actions,
+            self.ignore_terminal_id,
+            new_synthetic_info,
+        )
     }
 
     pub fn init_glr_parser(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
@@ -425,6 +483,7 @@ impl GLRParser {
             active_state: stack,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            pending_synthetic_terminal: None,
         }
     }
 
@@ -434,6 +493,7 @@ impl GLRParser {
             active_state: ParseState::new(),
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            pending_synthetic_terminal: None,
         }
     }
 
@@ -444,6 +504,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            pending_synthetic_terminal: None,
         };
         parser_state
     }
@@ -454,6 +515,7 @@ impl GLRParser {
             active_state: parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            pending_synthetic_terminal: None,
         };
         parser_state
     }
@@ -476,6 +538,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            pending_synthetic_terminal: None,
         }
     }
 
@@ -502,6 +565,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            pending_synthetic_terminal: None,
         }
     }
 
@@ -829,6 +893,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub active_state: ParseState,
     phase: ParserPhase,
     below_bottom_cache: HashMap<BelowBottomCacheKey, (PrecomputeNode3Index, LLMTokenBV)>,
+    pending_synthetic_terminal: Option<TerminalID>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -887,6 +952,21 @@ type WorkMap = BTreeMap<WorkMapKey, (ParseState, Option<usize>)>;
 type FilteredAction<'a> = (Action<'a>, Option<StateIDBV>);
 
 impl<'a> GLRParserState<'a> { // No longer generic
+    /// Informs the parser that the next token is expected to be one of the terminals
+    /// represented by the given synthetic terminal. The parser will validate this
+    /// when `process_token` is next called.
+    pub fn with_pending_synthetic_terminal(mut self, terminal: &Terminal) -> Self {
+        let terminal_id = self.parser.terminal_map.get_by_left(terminal)
+            .expect_else(|| format!("Unknown synthetic terminal: {}", terminal));
+
+        // Validate that it is indeed a synthetic terminal
+        if !self.parser.synthetic_info.iter().any(|i| i.synthetic_terminal_id == *terminal_id) {
+            panic!("Terminal {} is not a known synthetic terminal.", terminal);
+        }
+        self.pending_synthetic_terminal = Some(*terminal_id);
+        self
+    }
+
     pub fn with_god(mut self, trie2_god: Trie3GodWrapper) -> GLRParserState<'a> {
         self.active_state.trie2_god = Some(trie2_god);
         self
@@ -1717,8 +1797,46 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.process_token_advanced(token_id, &ProcessTokenAdvancedConfig::default())
     }
 
+    /// The core token processing logic. This is now a wrapper that handles synthetic terminals.
     #[time_it("GLRParserState::process_token_advanced")]
     pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
+        // 1. Validate any user-provided pending synthetic terminal.
+        if let Some(pending_synth_id) = self.pending_synthetic_terminal.take() {
+            let info = self.parser.synthetic_info.iter().find(|i| i.synthetic_terminal_id == pending_synth_id)
+                .expect("Pending synthetic terminal ID not found in parser info.");
+            if !info.represented_terminals.contains(&token_id) {
+                let pending_name = self.parser.terminal_map.get_by_right(&pending_synth_id).unwrap();
+                let token_name = self.parser.terminal_map.get_by_right(&token_id).unwrap();
+                panic!("Provided synthetic terminal '{}' is not valid for the following terminal '{}'", pending_name, token_name);
+            }
+        }
+
+        // 2. Automatically inject any synthetic predecessors required by the grammar transformation.
+        let mut processed_synthetics = BTreeSet::new();
+        self.process_synthetic_predecessors(token_id, config, &mut processed_synthetics);
+
+        // 3. Process the actual token.
+        self._process_single_token(token_id, config);
+    }
+
+    /// Recursively finds and processes synthetic terminals that must precede a given token.
+    fn process_synthetic_predecessors(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig, processed: &mut BTreeSet<TerminalID>) {
+        let predecessors: Vec<TerminalID> = self.parser.synthetic_info.iter()
+            .filter(|info| info.represented_terminals.contains(&token_id))
+            .map(|info| info.synthetic_terminal_id)
+            .collect();
+
+        for synth_id in predecessors {
+            if processed.insert(synth_id) {
+                // Recursively process predecessors of this synthetic token itself
+                self.process_synthetic_predecessors(synth_id, config, processed);
+                // Process the synthetic token
+                self._process_single_token(synth_id, config);
+            }
+        }
+    }
+
+    fn _process_single_token(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
         self.below_bottom_cache.clear();
 
         if Some(token_id) == self.parser.ignore_terminal_id {
@@ -1762,7 +1880,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         });
         self.active_state = next_active;
 
-        // Move current accepted state to previous, and reset current.
+        // Move current accepted state to previous, and clear current.
         self.active_state.prev_accepted_state = self.active_state.accepted_state.take().unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
         self.active_state.accepted_state = None;
 
@@ -2139,6 +2257,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             _ => {},
         }
         self.active_state.merge(other.active_state);
+        self.pending_synthetic_terminal = self.pending_synthetic_terminal.or(other.pending_synthetic_terminal);
     }
 
     pub fn is_ok(&self) -> bool {

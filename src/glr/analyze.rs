@@ -671,7 +671,7 @@ pub fn resolve_direct_right_recursion(
     // The BTreeMap is just for efficient lookup; we don't iterate over its keys for ordering.
     let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
     for prod in productions.iter().cloned() {
-        prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
+        prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod.clone());
     }
 
     // 2. Identify all non-terminals that have simple direct right-recursive rules.
