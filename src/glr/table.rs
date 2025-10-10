@@ -1,7 +1,6 @@
 use super::items::{Item, LRMode, LR_MODE};
 use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
 use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
-use crate::glr::synthetic::SyntheticTerminalInfo;
 use crate::constraint::StateIDBV;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use bimap::BiBTreeMap;
@@ -1085,52 +1084,12 @@ fn merge_compatible_states(
 }
 
 #[time_it]
-pub fn generate_glr_parser_with_info(
-    original_productions: &[Production],
-    original_terminal_map: BiBTreeMap<Terminal, TerminalID>,
-    original_non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
-    actions: BTreeMap<NonTerminal, ActionFn>,
-    ignore_terminal_id: Option<TerminalID>,
-    synthetic_info: Vec<SyntheticTerminalInfo>,
-) -> crate::glr::parser::GLRParser {
-    // This is the main factory for GLRParser. It takes original grammar and transformations,
-    // applies them, and builds the final parser object.
-
-    // 1. Apply synthetic terminal transformations to the productions.
-    let mut productions = original_productions.to_vec();
-    let mut terminal_map = original_terminal_map.clone();
-    let mut non_terminal_map = original_non_terminal_map.clone();
-
-    // This is a simplified transformation application. A full implementation would be more robust.
-    for info in &synthetic_info {
-        let mut next_productions = Vec::new();
-        for prod in &productions {
-            let mut new_rhs = Vec::new();
-            for symbol in &prod.rhs {
-                if let Symbol::Terminal(t) = symbol {
-                    if let Some(tid) = terminal_map.get_by_left(t) {
-                        if info.represented_terminals.contains(tid) {
-                            new_rhs.push(Symbol::Terminal(info.synthetic_terminal.clone()));
-                        }
-                    }
-                }
-                new_rhs.push(symbol.clone());
-            }
-            next_productions.push(Production { lhs: prod.lhs.clone(), rhs: new_rhs });
-        }
-        productions = next_productions;
-    }
-
-    // Re-assign all terminal and non-terminal IDs for the new grammar
-    terminal_map = assign_terminal_ids(&productions);
-    non_terminal_map = assign_non_terminal_ids(&productions);
-
-    // Now, `productions` is the fully transformed grammar for table generation.
-
+pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
     assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
     crate::debug!(2, "Validating initial grammar");
-    validate(&productions).expect("Initial grammar validation failed");
+    validate(productions).expect("Initial grammar validation failed");
 
+    let original_productions = productions.to_vec();
     let start_production_id = 0;
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
@@ -1213,35 +1172,12 @@ pub fn generate_glr_parser_with_info(
     print_summary();
     print_summary_flat();
 
-    crate::glr::parser::GLRParser::new(
-        original_productions.to_vec(),
-        original_terminal_map,
-        original_non_terminal_map,
-        final_table,
-        productions,
-        terminal_map,
-        non_terminal_map,
-        item_set_map,
-        start_state_id,
-        everything_state_id,
-        actions,
-        ignore_terminal_id,
-        substring_gotos,
-        reduce_goto_map,
-        hallucinated_row,
-        hallucinated_state_id,
-        synthetic_info,
-    )
-}
-
-pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
-    generate_glr_parser_with_info(productions, terminal_map, non_terminal_map, actions, ignore_terminal_id, Vec::new())
+    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos, reduce_goto_map, hallucinated_row, hallucinated_state_id)
 }
 
 pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
     let terminal_map = assign_terminal_ids(productions);
-    let non_terminal_map = assign_non_terminal_ids(productions);
-    generate_glr_parser_with_maps(productions, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id)
+    generate_glr_parser_with_terminal_map(productions, terminal_map, ignore_terminal_id)
 }
 
 pub fn generate_glr_parser_with_terminal_map(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {

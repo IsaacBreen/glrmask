@@ -20,7 +20,7 @@ impl Display for NonTerminal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Terminal {
     RegexName(String),
     Literal(Vec<u8>),
@@ -104,7 +104,7 @@ impl Terminal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Symbol {
     Terminal(Terminal),
     NonTerminal(NonTerminal),
