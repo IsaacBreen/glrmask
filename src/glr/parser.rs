@@ -257,10 +257,7 @@ impl Default for ProcessDefaultReductionsAdvancedConfig {
 #[derive(Clone)]
 pub struct GLRParser {
     pub table: Table,
-    /// The original, user-provided productions.
     pub productions: Vec<Production>,
-    /// Productions transformed by optimizations (e.g., synthetic terminals), used internally by the parser.
-    pub internal_productions: Vec<Production>,
     pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
     pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -272,16 +269,13 @@ pub struct GLRParser {
     pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
     pub hallucinated_row: HallucinatedRow,
     pub hallucinated_state_id: StateID,
-    /// Maps a real terminal ID to its synthetic terminal ID, if one exists.
-    pub real_to_synthetic_map: BTreeMap<TerminalID, TerminalID>,
 }
 
 impl JSONConvertible for GLRParser {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
+        obj.insert("stage_7_table".to_string(), self.table.to_json());
         obj.insert("productions".to_string(), self.productions.to_json());
-        obj.insert("internal_productions".to_string(), self.internal_productions.to_json());
-        obj.insert("table".to_string(), self.table.to_json());
         // obj.insert("start_production_id".to_string(), self.start_production_id.to_json()); // Implicitly 0
         obj.insert("terminal_map".to_string(), self.terminal_map.to_json());
         obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
@@ -289,7 +283,6 @@ impl JSONConvertible for GLRParser {
         obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
         obj.insert("everything_state_id".to_string(), self.everything_state_id.to_json());
         obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
-        obj.insert("real_to_synthetic_map".to_string(), self.real_to_synthetic_map.to_json());
         // Do not serialize precomputed substring gotos; they will be re-derived from the table.
         // Do not serialize self.actions
         // Do not serialize reduce_goto_map
@@ -301,10 +294,8 @@ impl JSONConvertible for GLRParser {
             JSONNode::Object(mut obj) => {
                 let table = obj.remove("stage_7_table").ok_or_else(|| "Missing field stage_7_table".to_string())
                                  .and_then(Table::from_json)?;
-                let original_productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
+                let productions = obj.remove("productions").ok_or_else(|| "Missing field productions".to_string())
                                      .and_then(Vec::<Production>::from_json)?;
-                let internal_productions = obj.remove("internal_productions").ok_or_else(|| "Missing field internal_productions".to_string())
-                    .and_then(Vec::<Production>::from_json)?;
                 // For backwards compatibility, we can read and ignore it.
                 let _start_production_id = obj.remove("start_production_id").and_then(|n| usize::from_json(n).ok());
                 let terminal_map = obj.remove("terminal_map").ok_or_else(|| "Missing field terminal_map".to_string())
@@ -320,8 +311,6 @@ impl JSONConvertible for GLRParser {
                 let ignore_terminal_id = obj.remove("ignore_terminal_id")
                     .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
-                let real_to_synthetic_map = obj.remove("real_to_synthetic_map").ok_or_else(|| "Missing field real_to_synthetic_map".to_string())
-                    .and_then(|n| BTreeMap::<TerminalID, TerminalID>::from_json(n))?;
 
                 let substring_gotos = stage_9(&table, &non_terminal_map);
                 let reduce_goto_map = crate::glr::table::stage_10(&table);
@@ -330,8 +319,7 @@ impl JSONConvertible for GLRParser {
 
                 Ok(GLRParser {
                     table,
-                    productions: original_productions,
-                    internal_productions,
+                    productions,
                     terminal_map,
                     non_terminal_map,
                     item_set_map,
@@ -342,7 +330,6 @@ impl JSONConvertible for GLRParser {
                     reduce_goto_map,
                     hallucinated_row,
                     hallucinated_state_id,
-                    real_to_synthetic_map,
                 })
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -355,7 +342,6 @@ impl Debug for GLRParser {
         f.debug_struct("GLRParser")
             .field("table", &self.table)
             .field("productions", &self.productions)
-            .field("internal_productions", &self.internal_productions)
             .field("terminal_map", &self.terminal_map)
             .field("non_terminal_map", &self.non_terminal_map)
             .field("item_set_map", &self.item_set_map)
@@ -365,7 +351,6 @@ impl Debug for GLRParser {
             .field("substring_gotos_size", &self.substring_gotos.len())
             .field("reduce_goto_map_size", &self.reduce_goto_map.len())
             .field("hallucinated_state_id", &self.hallucinated_state_id)
-            .field("real_to_synthetic_map", &self.real_to_synthetic_map)
             .finish()
     }
 }
@@ -374,8 +359,7 @@ impl PartialEq for GLRParser {
     fn eq(&self, other: &Self) -> bool {
         self.table == other.table &&
         self.productions == other.productions &&
-        self.internal_productions == other.internal_productions &&
-            self.terminal_map == other.terminal_map &&
+        self.terminal_map == other.terminal_map &&
         self.non_terminal_map == other.non_terminal_map &&
         self.item_set_map == other.item_set_map &&
         self.start_state_id == other.start_state_id &&
@@ -384,8 +368,7 @@ impl PartialEq for GLRParser {
         self.substring_gotos == other.substring_gotos &&
         self.reduce_goto_map == other.reduce_goto_map &&
         self.hallucinated_row == other.hallucinated_row &&
-        self.hallucinated_state_id == other.hallucinated_state_id &&
-        self.real_to_synthetic_map == other.real_to_synthetic_map
+        self.hallucinated_state_id == other.hallucinated_state_id
     }
 }
 
@@ -394,8 +377,7 @@ impl Eq for GLRParser {}
 impl GLRParser {
     pub fn new(
         table: Table,
-        original_productions: Vec<Production>,
-        internal_productions: Vec<Production>,
+        productions: Vec<Production>,
         terminal_map: BiBTreeMap<Terminal, TerminalID>,
         non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
         item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
@@ -407,7 +389,6 @@ impl GLRParser {
         reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
         hallucinated_row: HallucinatedRow,
         hallucinated_state_id: StateID,
-        real_to_synthetic_map: BTreeMap<TerminalID, TerminalID>,
     ) -> Self {
         let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
             .into_iter()
@@ -420,8 +401,7 @@ impl GLRParser {
 
         Self {
             table,
-            productions: original_productions,
-            internal_productions,
+            productions,
             terminal_map,
             non_terminal_map,
             item_set_map,
@@ -432,7 +412,6 @@ impl GLRParser {
             reduce_goto_map,
             hallucinated_row,
             hallucinated_state_id,
-            real_to_synthetic_map,
         }
     }
 
@@ -694,7 +673,7 @@ impl GLRParser {
                                 for (_len, nts) in reduces {
                                     for (_nt_id, prod_ids) in nts {
                                         for prod_id_val in prod_ids {
-                                            let prod = self.internal_productions.get(prod_id_val.0).unwrap();
+                                            let prod = self.productions.get(prod_id_val.0).unwrap();
                                             let _ = write!(s, "{}  - Reduce by rule #{} ({})", inner_indent, prod_id_val.0, prod);
                                         }
                                     }
@@ -800,7 +779,7 @@ fn format_actions<W: std::fmt::Write>(
                 for (_len, nts) in reduces {
                     for (_nt_id, prod_ids) in nts {
                         for prod_id_val in prod_ids {
-                            let prod = productions.get(prod_id_val.0).unwrap(); // This is using the transformed productions
+                            let prod = productions.get(prod_id_val.0).unwrap();
                             let _ = write!(s, "{}  - Reduce by rule #{} ({})", inner_indent, prod_id_val.0, prod);
                         }
                     }
@@ -1738,22 +1717,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.process_token_advanced(token_id, &ProcessTokenAdvancedConfig::default())
     }
 
-    #[time_it("GLRParserState::process_token_advanced_wrapper")]
-    pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
-        // Handle synthetic terminals: if the current token is associated with a synthetic one,
-        // process the synthetic token first, then the real one.
-        if let Some(&synthetic_id) = self.parser.real_to_synthetic_map.get(&token_id) {
-            // Create a temporary state to process the synthetic token.
-            let mut synthetic_state = self.clone();
-            synthetic_state.process_token_internal(synthetic_id, config);
-            // Replace the current state with the result of processing the synthetic token.
-            *self = synthetic_state;
-        }
-        self.process_token_internal(token_id, config);
-    }
-
     #[time_it("GLRParserState::process_token_advanced")]
-    fn process_token_internal(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
+    pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
         self.below_bottom_cache.clear();
 
         if Some(token_id) == self.parser.ignore_terminal_id {
@@ -1803,6 +1768,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // self.log_gss("Phase1/2-end", token_id, false, false);
         self.below_bottom_cache.clear();
+    }
+
+    pub fn process_default_reductions(&mut self) {
+        self.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig::default());
     }
 
     #[time_it("GLRParserState::process_default_reductions_advanced")]
@@ -1857,10 +1826,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // After Phase 3, we’re ready for the next token.
         self.phase = ParserPhase::ReadyForToken;
         self.log_gss("Phase3-end", TerminalID(0), false, false);
-    }
-
-    pub fn process_default_reductions(&mut self) {
-        self.process_default_reductions_advanced(&ProcessDefaultReductionsAdvancedConfig::default());
     }
 
     pub fn has_action_for(&self, token_id: TerminalID) -> Option<LLMTokenBV> {
