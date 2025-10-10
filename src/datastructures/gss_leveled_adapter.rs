@@ -97,34 +97,61 @@ pub struct GSSStats {
 pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
     let mut stats = GSSStats::default();
     stats.num_roots = roots.len();
-    let mut total_depth: usize = 0;
-    let mut paths: usize = 0;
-    let mut max_depth = 0;
-    let mut total_edges = 0;
-    let mut num_root_predecessors = 0usize;
-    let mut unique_root_keys = BTreeSet::new();
-    for r in roots {
-        let info = r.inner.paths_info();
-        paths += info.num_paths;
-        total_depth += info.total_depth;
-        total_edges += info.total_depth;
-        max_depth = max_depth.max(r.inner.max_depth() as usize);
 
-        if let Some(peek) = r.inner.peek().into_iter().next() {
-            unique_root_keys.insert(peek);
+    if roots.is_empty() {
+        return stats;
+    }
+
+    let mut total_paths = 0;
+    let mut total_path_depth = 0;
+    let mut total_nodes = 0;
+    let mut total_edges = 0;
+    let mut max_depth = 0;
+    let mut total_leaves = 0;
+    let mut num_root_predecessors = 0;
+    let mut all_root_predecessor_keys = HashSet::new();
+    let mut total_merge_points = 0;
+
+    for r in roots {
+        if r.is_empty() {
+            continue;
         }
-        num_root_predecessors += r.inner.peek().len();
+        let l_stats = r.inner.stats();
+        let p_info = r.inner.paths_info();
+
+        total_paths += p_info.num_paths;
+        total_path_depth += p_info.total_depth;
+
+        total_nodes += l_stats.total_unique_nodes;
+        total_edges += l_stats.total_edges;
+        max_depth = max_depth.max(l_stats.max_upper_depth as usize);
+        total_leaves += l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
+        num_root_predecessors += l_stats.top_values.len();
+        all_root_predecessor_keys.extend(l_stats.top_values);
+        total_merge_points += l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
     }
-    stats.max_depth = max_depth;
-    stats.total_edges = total_edges;
-    stats.unique_nodes = paths;
-    stats.num_leaves = paths;
+
     stats.num_root_predecessors = num_root_predecessors;
-    stats.num_unique_root_predecessor_keys = unique_root_keys.len();
-    if paths > 0 {
-        stats.average_depth = total_depth as f64 / paths as f64;
-        stats.average_predecessors_with_values = (num_root_predecessors as f64) / (roots.len().max(1) as f64);
+    stats.num_unique_root_predecessor_keys = all_root_predecessor_keys.len();
+    stats.total_edges = total_edges;
+    stats.unique_nodes = total_nodes;
+    stats.num_leaves = total_leaves;
+    stats.structurally_unique_nodes = total_nodes;
+    stats.max_depth = max_depth;
+    stats.merge_points = total_merge_points;
+
+    if total_paths > 0 {
+        stats.average_depth = total_path_depth as f64 / total_paths as f64;
     }
+    if !roots.is_empty() {
+        stats.average_predecessors_with_values = num_root_predecessors as f64 / roots.len() as f64;
+    }
+    if total_nodes > 1 {
+        stats.structural_redundancy = total_edges as f64 / (total_nodes - 1) as f64;
+    } else if total_nodes == 1 {
+        stats.structural_redundancy = total_edges as f64;
+    }
+
     stats
 }
 
