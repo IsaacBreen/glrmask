@@ -810,7 +810,7 @@ impl GrammarConstraint {
 
                     // Re-assign non-terminal IDs and re-generate the parser.
                     let nt_map = crate::glr::table::assign_non_terminal_ids(&prods);
-                    parser = crate::glr::table::generate_glr_parser_with_terminal_map(
+                    parser = crate::glr::table::generate_glr_parser_with_terminal_map_and_synthetic_terminals(
                         &prods, t_map, parser.ignore_terminal_id, cumulative_synthetic_terminals.clone()
                     );
                 } else {
