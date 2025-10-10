@@ -284,8 +284,9 @@ impl GSSNode {
         s
     }
 
-    pub fn merge_with_depth(&mut self, _merge_depth: usize, other: &Self) {
+    pub fn merge_with_depth(&mut self, merge_depth: usize, other: &Self) {
         self.inner = self.inner.merge(&other.inner);
+        self.inner.fuse(Some(merge_depth as isize));
     }
     pub fn merged(mut self, other: Self, depth: usize) -> Self {
         self.merge_with_depth(depth, &other);
