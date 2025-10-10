@@ -1431,8 +1431,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         timeit!({
             let stats = gather_gss_stats(&[peek.isolated_parent().as_ref()]);
             let num_nodes = stats.unique_nodes();
-            // format!("GLRParserState::reduce_and_goto::PoppedGSSStats: {} unique nodes, {} edges. len {}", stats.unique_nodes(), stats.total_edges(), len)
-            "GLRParserState::reduce_and_goto"
+            format!("GLRParserState::reduce_and_goto::PoppedGSSStats: {} unique nodes, {} edges. len {}", stats.unique_nodes(), stats.total_edges(), len)
+            // "GLRParserState::reduce_and_goto"
         }, {
         hit!(&format!("GLRParserState::reduce_and_goto popped nt '{}', len {}", self.parser.non_terminal_map.get_by_right(&nt).unwrap(), len));
         // 1) Pop len
