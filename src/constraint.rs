@@ -1834,6 +1834,10 @@ impl GrammarConstraint {
                     glr_s.active_state.trie2_god.as_ref().unwrap(),
                 );
 
+                // timeit!("Normalize", {
+                //     Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
+                // });
+
                 keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
                     let stored_trie_nodes = glr_s.active_state.stack.stored_trie_nodes();
