@@ -269,12 +269,6 @@ pub struct GLRParser {
     pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
     pub hallucinated_row: HallucinatedRow,
     pub hallucinated_state_id: StateID,
-
-    // New fields for internal use
-    pub(crate) transformed_productions: Vec<Production>,
-    pub(crate) transformed_terminal_map: BiBTreeMap<Terminal, TerminalID>,
-    // Maps an original terminal ID to the ID of the synthetic terminal that should precede it.
-    pub(crate) synthetic_token_map: BTreeMap<TerminalID, TerminalID>,
 }
 
 impl JSONConvertible for GLRParser {
@@ -289,9 +283,9 @@ impl JSONConvertible for GLRParser {
         obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
         obj.insert("everything_state_id".to_string(), self.everything_state_id.to_json());
         obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
-        obj.insert("transformed_productions".to_string(), self.transformed_productions.to_json());
-        obj.insert("transformed_terminal_map".to_string(), self.transformed_terminal_map.to_json());
-        obj.insert("synthetic_token_map".to_string(), self.synthetic_token_map.to_json());
+        // Do not serialize precomputed substring gotos; they will be re-derived from the table.
+        // Do not serialize self.actions
+        // Do not serialize reduce_goto_map
         JSONNode::Object(obj)
     }
 
@@ -317,12 +311,6 @@ impl JSONConvertible for GLRParser {
                 let ignore_terminal_id = obj.remove("ignore_terminal_id")
                     .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
-                let transformed_productions = obj.remove("transformed_productions").ok_or_else(|| "Missing field transformed_productions".to_string())
-                    .and_then(Vec::<Production>::from_json)?;
-                let transformed_terminal_map = obj.remove("transformed_terminal_map").ok_or_else(|| "Missing field transformed_terminal_map".to_string())
-                    .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
-                let synthetic_token_map = obj.remove("synthetic_token_map").ok_or_else(|| "Missing field synthetic_token_map".to_string())
-                    .and_then(|n| BTreeMap::<TerminalID, TerminalID>::from_json(n))?;
 
                 let substring_gotos = stage_9(&table, &non_terminal_map);
                 let reduce_goto_map = crate::glr::table::stage_10(&table);
@@ -342,9 +330,6 @@ impl JSONConvertible for GLRParser {
                     reduce_goto_map,
                     hallucinated_row,
                     hallucinated_state_id,
-                    transformed_productions,
-                    transformed_terminal_map,
-                    synthetic_token_map,
                 })
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -366,9 +351,6 @@ impl Debug for GLRParser {
             .field("substring_gotos_size", &self.substring_gotos.len())
             .field("reduce_goto_map_size", &self.reduce_goto_map.len())
             .field("hallucinated_state_id", &self.hallucinated_state_id)
-            .field("transformed_productions_len", &self.transformed_productions.len())
-            .field("transformed_terminal_map_len", &self.transformed_terminal_map.len())
-            .field("synthetic_token_map_len", &self.synthetic_token_map.len())
             .finish()
     }
 }
@@ -386,10 +368,7 @@ impl PartialEq for GLRParser {
         self.substring_gotos == other.substring_gotos &&
         self.reduce_goto_map == other.reduce_goto_map &&
         self.hallucinated_row == other.hallucinated_row &&
-        self.hallucinated_state_id == other.hallucinated_state_id &&
-        self.transformed_productions == other.transformed_productions &&
-        self.transformed_terminal_map == other.transformed_terminal_map &&
-        self.synthetic_token_map == other.synthetic_token_map
+        self.hallucinated_state_id == other.hallucinated_state_id
     }
 }
 
@@ -410,9 +389,6 @@ impl GLRParser {
         reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
         hallucinated_row: HallucinatedRow,
         hallucinated_state_id: StateID,
-        transformed_productions: Vec<Production>,
-        transformed_terminal_map: BiBTreeMap<Terminal, TerminalID>,
-        synthetic_token_map: BTreeMap<TerminalID, TerminalID>,
     ) -> Self {
         let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
             .into_iter()
@@ -436,9 +412,6 @@ impl GLRParser {
             reduce_goto_map,
             hallucinated_row,
             hallucinated_state_id,
-            transformed_productions,
-            transformed_terminal_map,
-            synthetic_token_map,
         }
     }
 
@@ -1744,15 +1717,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.process_token_advanced(token_id, &ProcessTokenAdvancedConfig::default())
     }
 
+    #[time_it("GLRParserState::process_token_advanced")]
     pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
-        if let Some(&synthetic_token_id) = self.parser.synthetic_token_map.get(&token_id) {
-            self._internal_process_token(synthetic_token_id, config);
-        }
-        self._internal_process_token(token_id, config);
-    }
-
-    #[time_it("GLRParserState::_internal_process_token")]
-    fn _internal_process_token(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
         self.below_bottom_cache.clear();
 
         if Some(token_id) == self.parser.ignore_terminal_id {
@@ -1797,7 +1763,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.active_state = next_active;
 
         // Move current accepted state to previous, and reset current.
-        if self.active_state.accepted_state.is_some() { self.active_state.prev_accepted_state = self.active_state.accepted_state.take().unwrap(); }
+        self.active_state.prev_accepted_state = self.active_state.accepted_state.take().unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
         self.active_state.accepted_state = None;
 
         // self.log_gss("Phase1/2-end", token_id, false, false);
