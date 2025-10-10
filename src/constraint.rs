@@ -1725,8 +1725,7 @@ impl GrammarConstraint {
             // acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
             let gss_leaf = Arc::new(GSSNode::new(acc));
 
-            let gss_stack = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id }));
-
+            let gss_stack = gss_leaf;
             let glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
 
             initial_values_for_map.push((trie1_root.clone(), glr_state));

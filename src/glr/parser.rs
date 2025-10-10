@@ -1403,13 +1403,9 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // Only rewrite stored_trie_nodes if there were any source nodes to connect to the destination.
         if any_sources {
             new_acc.stored_trie_nodes_mut().clear();
-            new_acc.stored_trie_nodes_mut().insert(dest);
-        } else {
-            new_acc.stored_trie_nodes_mut().clear();
         }
 
-        let new_leaf = Arc::new(GSSNode::new(new_acc));
-        let new_gss = Arc::new(new_leaf.push(ParseStateEdgeContent { state_id: hallucinate_sid }));
+        let new_gss = new_leaf;
         let new_todo_items = vec![(hallucinate_sid, new_gss)];
 
         new_todo_items
@@ -1738,6 +1734,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
     pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
         self.below_bottom_cache.clear();
 
+        if self.active_state.stack.is_leaf() {
+            self.active_state.stack = Arc::new(self.active_state.stack.push(ParseStateEdgeContent { state_id: self.parser.hallucinated_state_id }));
+        }
+
         if Some(token_id) == self.parser.ignore_terminal_id {
             crate::debug!(4, "Ignoring token '{}'", self.parser.terminal_map.get_by_right(&token_id).unwrap());
             self.phase = ParserPhase::ReadyForDefaultReductions; // Skip phase 1 and 2, go straight to phase 3
@@ -1799,6 +1799,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
             return;
         }
         assert_eq!(self.phase, ParserPhase::ReadyForDefaultReductions);
+
+        if self.active_state.stack.is_leaf() {
+            self.active_state.stack = Arc::new(self.active_state.stack.push(ParseStateEdgeContent { state_id: self.parser.hallucinated_state_id }));
+        }
 
         // Phase 3: apply default reductions until fixpoint (no token involved).
         let mut work_map: WorkMap = WorkMap::new();
