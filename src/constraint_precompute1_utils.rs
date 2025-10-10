@@ -21,6 +21,7 @@ use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::ordered_hash_map::Retain;
 
 #[derive(Debug, Clone)]
+
 pub struct Trie1Config {
     pub enabled: bool,
     pub early_flatten_epsilon: bool,
@@ -456,6 +457,7 @@ pub fn optimize_trie1_size(
         shortcut_none_chains_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>());
     }
     constrain_bitvecs_trie1(trie1_god, &precomputed1.values().cloned().collect::<Vec<_>>(), internal_max_llm_token);
+    reduce_some_edges_via_post_none_dominance_trie1(precomputed1, trie1_god);
     if config.prune_on_no_terminal_follow {
         prune_on_no_terminal_follow_trie1(precomputed1, trie1_god, terminal_follow_map, ignore_terminal_id);
     }
@@ -473,6 +475,8 @@ pub fn optimize_trie1_size(
     if !config.early_flatten_epsilon {
         flatten_all_none_edges_trie1(precomputed1, trie1_god);
     }
+    // Trim keyed edges again after potential expansion
+    reduce_some_edges_via_post_none_dominance_trie1(precomputed1, trie1_god);
     if config.prune_nodes_not_reaching_end {
         prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
     }
@@ -492,6 +496,8 @@ pub fn optimize_trie1_size(
     if config.minimize_by_signature {
         merge_nodes_trie1(precomputed1, trie1_god);
     }
+    // Final aggressive Some-edge reduction after struct-level merging
+    reduce_some_edges_via_post_none_dominance_trie1(precomputed1, trie1_god);
     if config.prune_nodes_not_reaching_end {
         prune_nodes_not_reaching_end_trie1(precomputed1, trie1_god);
     }
@@ -618,6 +624,219 @@ fn replace_ignore_token_edges_with_none_edges_trie1(
     }
     crate::debug!(2, "Done replacing ignore token edges in Trie1.");
 }
+
+/// Helper: check if bitvector a is a subset of bitvector b (a ⊆ b).
+fn llm_subset_of(a: &LLMTokenBV, b: &LLMTokenBV) -> bool {
+    if a.is_empty() { return true; }
+    if *b == LLMTokenBV::max_ones() { return true; }
+    if b.is_empty() { return a.is_empty(); }
+    let mut u = b.clone();
+    u |= a;
+    u == *b
+}
+
+/// Compute the None-only closure (epsilon-closure) from a given start node.
+/// Returns a map: reachable_node -> tokens that can reach it through some None-only path.
+/// Semantics: along a path, token masks are intersected, and across multiple paths we take union.
+/// Includes start itself with mask = max_ones() (zero-length path).
+fn none_closure_for_node(
+    trie1_god: &Trie1GodWrapper,
+    start: PrecomputeNode1Index,
+    cache: &mut HashMap<PrecomputeNode1Index, BTreeMap<PrecomputeNode1Index, LLMTokenBV>>,
+) -> &BTreeMap<PrecomputeNode1Index, LLMTokenBV> {
+    if !cache.contains_key(&start) {
+        let mut reach: BTreeMap<PrecomputeNode1Index, LLMTokenBV> = BTreeMap::new();
+        // zero-length path: all tokens
+        reach.insert(start, LLMTokenBV::max_ones());
+        let mut q: VecDeque<PrecomputeNode1Index> = VecDeque::new();
+        q.push_back(start);
+        while let Some(u) = q.pop_front() {
+            let mask_u = reach.get(&u).cloned().unwrap_or_else(LLMTokenBV::zeros);
+            if mask_u.is_empty() { continue; }
+            let g = u.read(trie1_god).expect("read");
+            if let Some(dm) = g.children().get(&None) {
+                for (v, edge_bv) in dm {
+                    if edge_bv.is_empty() { continue; }
+                    let mut m = mask_u.clone();
+                    m &= edge_bv;
+                    if m.is_empty() { continue; }
+                    let entry = reach.entry(*v).or_insert_with(LLMTokenBV::zeros);
+                    let before = entry.len();
+                    *entry |= &m;
+                    if entry.len() > before {
+                        q.push_back(*v);
+                    }
+                }
+            }
+        }
+        cache.insert(start, reach);
+    }
+    cache.get(&start).unwrap()
+}
+
+/// Aggressively minimize the number of Some-edges (terminal-keyed edges) by removing those
+/// that are fully covered via other kept Some-edges followed by None-only paths.
+///
+/// For a fixed node U and terminal t:
+/// - Let E = {(dst_i, bv_i)} be the set of outgoing Some(t) edges.
+/// - We greedily keep a subset K ⊆ E. For each kept edge (dst_i, bv_i), it contributes coverage
+///   to every destination dst_j reachable via None-only paths from dst_i with mask (bv_i & clos(dst_i->dst_j)).
+/// - Any edge (dst_j, bv_j) is redundant if bv_j ⊆ coverage[dst_j] provided by previously kept edges.
+/// - We process edges in descending "coverage power" to minimize the number kept.
+///
+/// This pass is local to each node and terminal key, so it's safe: we only remove edges
+/// that are covered by edges we keep in the same node.
+fn reduce_some_edges_via_post_none_dominance_trie1(
+    roots: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+    trie1_god: &Trie1GodWrapper,
+) {
+    crate::debug!(2, "Trie1: reducing Some-edges using post-key epsilon coverage (local greedy)...");
+    let roots_vec: Vec<_> = roots.values().cloned().collect();
+    let all_nodes = Trie::all_nodes(trie1_god, &roots_vec);
+    if all_nodes.is_empty() { return; }
+
+    // Cache for None-closures from arbitrary nodes
+    let mut clos_cache: HashMap<PrecomputeNode1Index, BTreeMap<PrecomputeNode1Index, LLMTokenBV>> = HashMap::new();
+
+    // We'll accumulate all writes after per-node decisions.
+    for u in &all_nodes {
+        // Snapshot keyed edges: t -> Vec<(dst, bv)>
+        let keyed_snapshot: BTreeMap<GrammarTokenID, Vec<(PrecomputeNode1Index, LLMTokenBV)>> = {
+            let r = u.read(trie1_god).expect("read");
+            let mut map: BTreeMap<GrammarTokenID, Vec<(PrecomputeNode1Index, LLMTokenBV)>> = BTreeMap::new();
+            for (ek, dm) in r.children() {
+                if let Some(tid) = ek {
+                    let mut v: Vec<(PrecomputeNode1Index, LLMTokenBV)> = Vec::with_capacity(dm.len());
+                    for (dst, bv) in dm {
+                        if !bv.is_empty() {
+                            v.push((*dst, bv.clone()));
+                        }
+                    }
+                    if !v.is_empty() {
+                        map.insert(*tid, v);
+                    }
+                }
+            }
+            map
+        };
+
+        if keyed_snapshot.is_empty() { continue; }
+
+        // Per terminal key, decide which edges to keep.
+        let mut keep_for_term: HashMap<GrammarTokenID, BTreeSet<PrecomputeNode1Index>> = HashMap::new();
+
+        for (tid, edges) in &keyed_snapshot {
+            if edges.len() <= 1 {
+                // Keep as-is (no chance to reduce for this terminal)
+                if let Some((dst, _)) = edges.first() {
+                    keep_for_term.entry(*tid).or_default().insert(*dst);
+                }
+                continue;
+            }
+
+            // Build index set and precompute closures only for relevant destinations
+            let dests: Vec<PrecomputeNode1Index> = edges.iter().map(|(d, _)| *d).collect();
+
+            // Compute coverage power per edge: sum of |(bv_i & clos(dst_i->dst_j))| over all j.
+            let mut scored_indices: Vec<usize> = (0..edges.len()).collect();
+            scored_indices.sort_by_key(|&i| {
+                let (dst_i, ref bvi) = edges[i];
+                let clos_i = none_closure_for_node(trie1_god, dst_i, &mut clos_cache);
+                let mut total: usize = 0;
+                for dst_j in &dests {
+                    if let Some(m_ij) = clos_i.get(dst_j) {
+                        let mut c = m_ij.clone();
+                        c &= bvi;
+                        total = total.saturating_add(c.len());
+                    }
+                }
+                // Sort by descending total, then by id stable
+                (std::cmp::Reverse(total), i)
+            });
+
+            // Greedy keep
+            let mut coverage: HashMap<PrecomputeNode1Index, LLMTokenBV> = HashMap::new();
+            let mut keep: BTreeSet<PrecomputeNode1Index> = BTreeSet::new();
+            for &idx in &scored_indices {
+                let (dst_i, ref bvi) = edges[idx];
+                // Check if already covered at its own dest
+                let cov_at_i = coverage.get(&dst_i).cloned().unwrap_or_else(LLMTokenBV::zeros);
+                if llm_subset_of(bvi, &cov_at_i) {
+                    // Redundant, skip (remove later)
+                    continue;
+                }
+                // Keep this edge
+                keep.insert(dst_i);
+                // Spread its coverage to all reachable dests via None
+                let clos_i = none_closure_for_node(trie1_god, dst_i, &mut clos_cache);
+                for (dst_j, m_ij) in clos_i {
+                    // Only consider coverage for destinations belonging to this terminal key set
+                    if !dests.contains(dst_j) { continue; }
+                    let mut contrib = m_ij.clone();
+                    contrib &= bvi;
+                    if contrib.is_empty() { continue; }
+                    let entry = coverage.entry(*dst_j).or_insert_with(LLMTokenBV::zeros);
+                    *entry |= &contrib;
+                }
+            }
+
+            keep_for_term.insert(*tid, keep);
+        }
+
+        // Apply reductions
+        {
+            let mut w = u.write(trie1_god).expect("write");
+            let old_children = std::mem::take(w.children_mut());
+            let mut new_children: BTreeMap<Option<GrammarTokenID>, OrderedHashMap<PrecomputeNode1Index, LLMTokenBV>> = BTreeMap::new();
+
+            for (ek, dm) in old_children {
+                match ek {
+                    Some(tid) => {
+                        // Retain only kept destinations for this terminal
+                        if let Some(keep_set) = keep_for_term.get(&tid) {
+                            let mut new_dm: OrderedHashMap<PrecomputeNode1Index, LLMTokenBV> = OrderedHashMap::new();
+                            for (dst, bv) in dm {
+                                if keep_set.contains(&dst) {
+                                    if !bv.is_empty() {
+                                        new_dm.insert(dst, bv);
+                                    }
+                                }
+                            }
+                            if !new_dm.is_empty() {
+                                new_children.insert(Some(tid), new_dm);
+                            }
+                        } else {
+                            // No reductions known; keep as-is
+                            if !dm.is_empty() {
+                                new_children.insert(Some(tid), dm);
+                            }
+                        }
+                    }
+                    None => {
+                        // Keep None-edges untouched
+                        if !dm.is_empty() {
+                            new_children.insert(None, dm);
+                        }
+                    }
+                }
+            }
+
+            *w.children_mut() = new_children;
+            // Recompute live_tokens as union of all edge masks
+            let mut lt = LLMTokenBV::zeros();
+            for dm in w.children().values() {
+                for bv in dm.values() {
+                    lt |= bv;
+                }
+            }
+            w.value.live_tokens = lt;
+        }
+    }
+
+    let roots_vec2: Vec<_> = roots.values().cloned().collect();
+    Trie::recompute_all_max_depths(trie1_god, &roots_vec2);
+}
+
 fn count_total_ranges_trie1(
     all_nodes: &[PrecomputeNode1Index],
     trie1_god: &Trie1GodWrapper,
