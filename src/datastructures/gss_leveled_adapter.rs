@@ -447,7 +447,10 @@ impl GSSPopper {
         }
 
         // 1. Shift existing below_bottom
-        let mut belows: BTreeMap<_, _> = self.below_bottom.drain().map(|(k, v)| (k + n, v)).collect();
+        let mut belows = std::mem::take(&mut self.below_bottom)
+            .into_iter()
+            .map(|(k, v)| (k + n, v))
+            .collect::<BTreeMap<_, _>>();
 
         // 2. Extract and process top n levels that will be removed
         for d in 1..=n {
@@ -459,7 +462,7 @@ impl GSSPopper {
                     if let Some(acc) = isolated.reduce_acc() {
                         map_at_d
                             .entry(edge)
-                            .and_modify(|a| *a = a.merge(&acc))
+                            .and_modify(|a: &mut Acc| *a = a.merge(&acc))
                             .or_insert(acc);
                     }
                 }
