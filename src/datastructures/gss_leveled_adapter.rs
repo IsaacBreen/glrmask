@@ -10,7 +10,7 @@ use crate::constraint::StateIDBV;
 use crate::constraint::{LLMTokenBV, TerminalBV};
 use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::hybrid_l2_bitset::HybridL2Bitset;
-use crate::datastructures::leveled_gss::{LeveledGSS, Merge as LGMerge};
+use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats, Merge as LGMerge};
 use crate::datastructures::trie::Trie2Index;
 use crate::glr::grammar::Terminal;
 use crate::glr::parser::{GLRParser, ParseStateEdgeContent};
@@ -74,90 +74,17 @@ impl LGMerge for Acc {
     }
 }
 
-// --- Minimal GSSStats for logging/debug ---
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct GSSStats {
-    num_roots: usize,
-    num_root_predecessors: usize,
-    num_unique_root_predecessor_keys: usize,
-    total_edges: usize,
-    unique_nodes: usize,
-    num_leaves: usize,
-    structurally_unique_nodes: usize,
-    structural_redundancy: f64,
-    num_redundant_nodes: usize,
-    max_depth: usize,
-    average_depth: f64,
-    merge_points: usize,
-    max_predecessors_with_values: usize,
-    average_predecessors_with_values: f64,
-}
-
-impl GSSStats {
-    pub fn unique_nodes(&self) -> usize {
-        self.unique_nodes
-    }
-
-    pub fn total_edges(&self) -> usize {
-        self.total_edges
-    }
-}
-
 #[time_it]
-pub fn gather_gss_stats(roots: &[&GSSNode]) -> GSSStats {
-    let mut stats = GSSStats::default();
-    stats.num_roots = roots.len();
-
+pub fn gather_gss_stats(roots: &[&GSSNode]) -> LeveledGSSStats<ParseStateEdgeContent, Acc> {
     let active_roots: Vec<_> = roots.iter().copied().filter(|r| !r.is_empty()).collect();
-    if active_roots.is_empty() {
-        return stats;
-    }
-
-    // --- Forest-level stats ---
-    stats.num_root_predecessors = active_roots.iter().map(|r| r.inner.peek().len()).sum();
-    let all_root_predecessor_keys: HashSet<_> =
-        active_roots.iter().flat_map(|r| r.inner.peek()).collect();
-    stats.num_unique_root_predecessor_keys = all_root_predecessor_keys.len();
-    stats.max_depth = active_roots
-        .iter()
-        .map(|r| r.inner.max_depth() as usize)
-        .max()
-        .unwrap_or(0);
-    if stats.num_roots > 0 {
-        stats.average_predecessors_with_values =
-            stats.num_root_predecessors as f64 / stats.num_roots as f64;
-    }
 
      // --- Graph-level stats (from merged GSS to handle sharing correctly) ---
      let mut merged_gss = LeveledGSS::empty();
      for r in &active_roots {
          merged_gss = merged_gss.merge(&r.inner);
      }
- 
-     let l_stats = merged_gss.stats();
-     let paths_info = merged_gss.paths_info();
- 
-     stats.total_edges = l_stats.total_edges;
-     stats.unique_nodes = l_stats.total_unique_nodes;
-     stats.num_leaves =
-         l_stats.num_lower_terminal_nodes + l_stats.num_interface_implicit_terminals;
-     stats.structurally_unique_nodes = l_stats.num_structurally_unique_nodes;
-     stats.num_redundant_nodes = stats.unique_nodes - stats.structurally_unique_nodes;
-     stats.merge_points =
-         l_stats.num_multi_depth_slots_upper + l_stats.num_multi_depth_slots_lower;
-     stats.max_predecessors_with_values = l_stats.max_in_degree;
- 
-     if stats.unique_nodes > 0 {
-         stats.structural_redundancy = stats.num_redundant_nodes as f64 / stats.unique_nodes as f64;
-     } else {
-         stats.structural_redundancy = 0.0;
-     }
- 
-     if paths_info.num_paths > 0 {
-         stats.average_depth = paths_info.total_depth as f64 / paths_info.num_paths as f64;
-     }
- 
-     stats
+
+    merged_gss.stats()
 }
 // --- GSS printer config & helpers ---
 pub struct GSSPrintConfig<'a> {
