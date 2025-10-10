@@ -1755,6 +1755,13 @@ impl GrammarConstraint {
                     glr_s.process_token_advanced(*gt, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                     let stats = glr_s.stats();
                     println!("After processing token {:?}, number of GSS nodes: {}, edges: {}", gt, stats.unique_nodes(), stats.total_edges());
+
+                    timeit!("Normalize", {
+                        Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
+                    });
+
+                    let stats = glr_s.stats();
+                    println!("After normalization, number of GSS nodes: {}, edges: {}", stats.unique_nodes(), stats.total_edges());
                 }
 
                 out = Vec::new();
@@ -1792,6 +1799,11 @@ impl GrammarConstraint {
                     // println!("    {}: {:?}", i, p);
                 // }
                 glr_s1.merge_with(glr_s2);
+
+                timeit!("Normalize", {
+                    Arc::make_mut(&mut glr_s1.active_state.stack).inner = glr_s1.active_state.stack.inner.normalize();
+                });
+
                 // println!("After merge, flat:");
                 // for (i, p) in glr_s1.active_state.stack.flatten().iter().enumerate() {
                     // println!("    {}: {:?}", i, p);
@@ -1811,7 +1823,7 @@ impl GrammarConstraint {
                 let keep_going;
                 timeit!("precompute3 process node", {
 
-                Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
+                // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
                 timeit!("Normalize", {
                     Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
                 });
@@ -1821,10 +1833,6 @@ impl GrammarConstraint {
                     &mut HashMap::new(),
                     glr_s.active_state.trie2_god.as_ref().unwrap(),
                 );
-
-                timeit!("Normalize 2", {
-                    Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
-                });
 
                 keep_going = glr_s.is_ok();
                 if precomputed_node_data.value.end {
