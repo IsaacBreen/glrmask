@@ -60,7 +60,6 @@ fn assert_optimized_equivalent(
 
     // Apply optimization passes
     let mut optimization_config = GrammarConstraintConfig::default();
-    optimization_config.trie2.gc = false;
     optimize_trie2_size(&mut optimized_precomputed2, &trie2_god, &optimization_config.trie2);
 
     println!("\n--- Stats for Optimized Precompute2 Tree ---");
