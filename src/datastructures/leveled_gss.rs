@@ -500,6 +500,72 @@ where
     }
 }
 
+#[derive(Debug)]
+pub struct LeveledGSSStats<T: Clone + Eq + Hash, A: Clone + Eq + Hash> {
+    pub top_values: HashSet<T>,
+    pub num_upperbranch_nodes: usize,
+    pub num_interface_nodes: usize,
+    pub num_lower_nodes: usize,
+    pub total_unique_nodes: usize,
+    pub upper_edges: usize,
+    pub interface_to_lower_edges: usize,
+    pub lower_edges: usize,
+    pub total_edges: usize,
+    pub max_upper_depth: isize,
+    pub max_lower_depth: isize,
+    pub distinct_values_count: usize,
+    pub distinct_values: HashSet<T>,
+    pub unique_accumulators_count: usize,
+    pub unique_accumulators: HashSet<A>,
+    pub total_accumulator_instances: usize,
+    pub num_upper_with_empty: usize,
+    pub num_interfaces_with_empty: usize,
+    pub num_lower_terminal_nodes: usize,
+    pub num_interface_implicit_terminals: usize,
+    pub num_multi_depth_slots_upper: usize,
+    pub num_multi_depth_slots_lower: usize,
+    pub max_multiplicity_per_value_upper: usize,
+    pub max_multiplicity_per_value_lower: usize,
+    pub average_in_degree: f64,
+    pub max_in_degree: usize,
+    pub structural_sharing_factor: f64,
+    pub promotable_upper_nodes: usize,
+}
+
+fn is_promotable<T, A>(node: &Arc<UpperBranch<T, A>>) -> bool
+where
+    T: Clone + Eq + Hash,
+    A: Merge + Clone + Eq + Hash,
+{
+    let all_children: Vec<_> = node
+        .children
+        .values()
+        .flat_map(|kids| kids.values())
+        .collect();
+    if all_children.is_empty() {
+        return false;
+    }
+    if !all_children
+        .iter()
+        .all(|c| matches!(&***c, Upper::Interface(_)))
+    {
+        return false;
+    }
+    let mut accs: HashSet<A> = HashSet::new();
+    if let Some(empty) = &node.empty {
+        accs.insert(empty.clone());
+    }
+    for c in all_children {
+        if let Upper::Interface(ic) = &**c {
+            accs.insert(ic.acc.clone());
+            if let Some(e) = &ic.empty {
+                accs.insert(e.clone());
+            }
+        }
+    }
+    accs.len() == 1
+}
+
 // --------------------
 // Public GSS type
 // --------------------
@@ -1463,6 +1529,184 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let first = it.next()?;
         let reduced = it.fold(first, |acc, next| acc.merge(&next));
         Some(reduced)
+    }
+
+
+    pub fn stats(&self) -> LeveledGSSStats<T, A> {
+        let top_values: HashSet<T> = self.inner.children_keys().into_iter().collect();
+
+        let mut visited_upperbranch: HashSet<usize> = HashSet::new();
+        let mut visited_interface: HashSet<usize> = HashSet::new();
+        let mut visited_lower: HashSet<usize> = HashSet::new();
+
+        let mut num_upperbranch_nodes = 0;
+        let mut num_interface_nodes = 0;
+        let mut num_lower_nodes = 0;
+
+        let mut upper_edges = 0;
+        let mut interface_to_lower_edges = 0;
+        let mut lower_edges = 0;
+
+        let mut distinct_values: HashSet<T> = HashSet::new();
+        let mut unique_accumulators: HashSet<A> = HashSet::new();
+        let mut total_accumulator_instances = 0;
+
+        let mut num_upper_with_empty = 0;
+        let mut num_interfaces_with_empty = 0;
+        let mut num_lower_terminal_nodes = 0;
+        let mut num_interface_implicit_terminals = 0;
+
+        let mut num_multi_depth_slots_upper = 0;
+        let mut num_multi_depth_slots_lower = 0;
+        let mut max_multiplicity_per_value_upper = 1;
+        let mut max_multiplicity_per_value_lower = 1;
+
+        let mut max_lower_depth = 0;
+
+        let mut incoming_edges: StdHashMap<usize, usize> = StdHashMap::new();
+
+        let mut promotable_upper_nodes = 0;
+
+        let mut upper_queue: VecDeque<Arc<Upper<T, A>>> = VecDeque::new();
+        upper_queue.push_back(self.inner.clone());
+        let mut lower_queue: VecDeque<Arc<Lower<T>>> = VecDeque::new();
+
+        while let Some(node) = upper_queue.pop_front() {
+            match &*node {
+                Upper::Branch(b) => {
+                    let nid = Arc::as_ptr(b) as usize;
+                    if visited_upperbranch.insert(nid) {
+                        num_upperbranch_nodes += 1;
+                        if b.empty.is_some() {
+                            num_upper_with_empty += 1;
+                            unique_accumulators.insert(b.empty.as_ref().unwrap().clone());
+                            total_accumulator_instances += 1;
+                        }
+                        for (v, kids) in b.children.iter() {
+                            distinct_values.insert(v.clone());
+                            if kids.len() > 1 {
+                                num_multi_depth_slots_upper += 1;
+                                max_multiplicity_per_value_upper =
+                                    std::cmp::max(max_multiplicity_per_value_upper, kids.len());
+                            }
+                            for child in kids.values() {
+                                upper_edges += 1;
+                                *incoming_edges.entry(Arc::as_ptr(child) as usize).or_insert(0) += 1;
+                                upper_queue.push_back(child.clone());
+                            }
+                        }
+                        if is_promotable(b) {
+                            promotable_upper_nodes += 1;
+                        }
+                    }
+                }
+                Upper::Interface(i) => {
+                    let nid = Arc::as_ptr(i) as usize;
+                    if visited_interface.insert(nid) {
+                        num_interface_nodes += 1;
+                        unique_accumulators.insert(i.acc.clone());
+                        total_accumulator_instances += 1;
+                        if i.empty.is_some() {
+                            num_interfaces_with_empty += 1;
+                            unique_accumulators.insert(i.empty.as_ref().unwrap().clone());
+                            total_accumulator_instances += 1;
+                        }
+                        if i.children.is_empty() && i.empty.is_none() {
+                            num_interface_implicit_terminals += 1;
+                        }
+                        for (v, kids) in i.children.iter() {
+                            distinct_values.insert(v.clone());
+                            if kids.len() > 1 {
+                                num_multi_depth_slots_lower += 1;
+                                max_multiplicity_per_value_lower =
+                                    std::cmp::max(max_multiplicity_per_value_lower, kids.len());
+                            }
+                            for child in kids.values() {
+                                interface_to_lower_edges += 1;
+                                *incoming_edges.entry(Arc::as_ptr(child) as usize).or_insert(0) += 1;
+                                lower_queue.push_back(child.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        while let Some(node) = lower_queue.pop_front() {
+            let nid = Arc::as_ptr(&node) as usize;
+            if visited_lower.insert(nid) {
+                num_lower_nodes += 1;
+                if node.empty {
+                    num_lower_terminal_nodes += 1;
+                }
+                max_lower_depth = std::cmp::max(max_lower_depth, node.max_depth);
+                for (v, kids) in node.children.iter() {
+                    distinct_values.insert(v.clone());
+                    if kids.len() > 1 {
+                        num_multi_depth_slots_lower += 1;
+                        max_multiplicity_per_value_lower =
+                            std::cmp::max(max_multiplicity_per_value_lower, kids.len());
+                    }
+                    for child in kids.values() {
+                        lower_edges += 1;
+                        *incoming_edges.entry(Arc::as_ptr(child) as usize).or_insert(0) += 1;
+                        lower_queue.push_back(child.clone());
+                    }
+                }
+            }
+        }
+
+        let total_unique_nodes = num_upperbranch_nodes + num_interface_nodes + num_lower_nodes;
+        let total_edges = upper_edges + interface_to_lower_edges + lower_edges;
+        let max_upper_depth = self.inner.max_depth();
+        let distinct_values_count = distinct_values.len();
+        let unique_accumulators_count = unique_accumulators.len();
+
+        let (max_in_degree, average_in_degree) = if !incoming_edges.is_empty() {
+            let max_val = *incoming_edges.values().max().unwrap_or(&0);
+            let sum: usize = incoming_edges.values().sum();
+            let avg = sum as f64 / incoming_edges.len() as f64;
+            (max_val, avg)
+        } else {
+            (0, 0.0)
+        };
+
+        let structural_sharing_factor = if total_unique_nodes > 1 {
+            total_edges as f64 / (total_unique_nodes - 1) as f64
+        } else {
+            total_edges as f64
+        };
+
+        LeveledGSSStats {
+            top_values,
+            num_upperbranch_nodes,
+            num_interface_nodes,
+            num_lower_nodes,
+            total_unique_nodes,
+            upper_edges,
+            interface_to_lower_edges,
+            lower_edges,
+            total_edges,
+            max_upper_depth,
+            max_lower_depth,
+            distinct_values_count,
+            distinct_values,
+            unique_accumulators_count,
+            unique_accumulators,
+            total_accumulator_instances,
+            num_upper_with_empty,
+            num_interfaces_with_empty,
+            num_lower_terminal_nodes,
+            num_interface_implicit_terminals,
+            num_multi_depth_slots_upper,
+            num_multi_depth_slots_lower,
+            max_multiplicity_per_value_upper,
+            max_multiplicity_per_value_lower,
+            average_in_degree,
+            max_in_degree,
+            structural_sharing_factor,
+            promotable_upper_nodes,
+        }
     }
 
     pub fn predecessors(&self) -> BTreeMap<T, BTreeMap<isize, Vec<Self>>>
