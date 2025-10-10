@@ -1573,6 +1573,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             accepted_out.push(parent_after_filter.clone());
                         }
 
+                        timeit!("GLRParserState::reduce_and_goto::HandleGotos::WhileLet::ForEachGoto::ProcessGoto", {});
                         if let Some(goto_state_id) = goto.state_id {
                             let actions = action_selector(goto_state_id);
                             if actions.len() == 1 {
