@@ -1541,10 +1541,18 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         where
             T: Clone + Eq + Hash,
         {
-            #[derive(Default)]
             struct TrieNode<T: Clone + Eq + Hash> {
                 term: bool,
                 children: StdHashMap<T, TrieNode<T>>,
+            }
+
+            impl<T: Clone + Eq + Hash> Default for TrieNode<T> {
+                fn default() -> Self {
+                    TrieNode {
+                        term: false,
+                        children: StdHashMap::new(),
+                    }
+                }
             }
 
             #[derive(Clone)]
