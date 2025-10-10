@@ -1725,7 +1725,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         // Merge results and return
-        let new_active = timeit!("GLRParserState::reduce_and_goto::MergeActive", GSSNode::merge_many_with_depth(MAX_MERGE_DEPTH, final_out));
+        let mut new_active = timeit!("GLRParserState::reduce_and_goto::MergeActive", GSSNode::merge_many_with_depth(MAX_MERGE_DEPTH, final_out));
+        Arc::make_mut(&mut new_active).inner = new_active.inner.normalize();
         let new_accepted = timeit!("GLRParserState::reduce_and_goto::MergeAccepted", GSSNode::merge_many_with_depth(MAX_MERGE_DEPTH, accepted_out));
         (new_active, new_accepted)
         })
