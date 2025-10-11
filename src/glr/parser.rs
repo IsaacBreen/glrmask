@@ -1420,7 +1420,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             })
                             .unwrap_or_else(|| Vec::new())
                     } else {
-                        parser.table[&state_id].shifts_and_reduces_full
+                        parser.table.get(&state_id).expect_else(|| format!("State ID {} not found in parse table during Phase 2", state_id.0)).shifts_and_reduces_without_default_reduce
                             .get(&token_id)
                             .map(|a| vec![(Action::Normal(a), None)])
                             .unwrap_or_default()
