@@ -488,28 +488,6 @@ impl LeveledGSS {
         })
     }
 
-    #[pyo3(signature = (upper_only = false))]
-    fn to_graph_string(&self, py: Python, upper_only: bool) -> PyResult<String> {
-        let mut fmt_t = |k: &PyKey| -> String {
-            k.0.as_ref(py)
-                .repr()
-                .and_then(|r| r.to_str())
-                .unwrap_or("<unprintable>")
-                .to_string()
-        };
-        let mut fmt_a = |a: &PyAcc| -> String {
-            a.0.as_ref(py)
-                .repr()
-                .and_then(|r| r.to_str())
-                .unwrap_or("<unprintable>")
-                .to_string()
-        };
-
-        Ok(self
-            .inner
-            .to_graph_string(upper_only, &mut fmt_t, &mut fmt_a))
-    }
-
     fn __str__(&self) -> PyResult<String> {
         let stacks = self.to_stacks()?;
         Ok(format!("LeveledGSS({})", stacks))
