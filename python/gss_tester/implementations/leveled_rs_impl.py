@@ -103,6 +103,10 @@ class LeveledRSGSS(GSS[T, Acc], Generic[T, Acc]):
     def stats(self) -> LeveledGSSStats:
         return self._inner.stats()
 
+    def to_graph_string(self, memo: Optional[Set[int]] = None, upper_only: bool = False) -> str:
+        # The Rust implementation handles its own memoization internally, so the memo arg is ignored.
+        return self._inner.to_graph_string(upper_only)
+
     def to_reference_impl(self) -> GSS[T, Acc]:
         return self._inner.to_reference_impl()
 
