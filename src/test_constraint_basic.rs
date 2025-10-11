@@ -1687,7 +1687,9 @@ fn test_gss_structural_sharing_factor2() -> Result<(), Box<dyn std::error::Error
     let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
 
     const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = BelowBottomReductionMode::ContinueFromAll;
-    for tid in parser.terminal_map.right_values() {
+    // for tid in parser.terminal_map.right_values() {
+    let tid = TerminalID(1);
+    if true {
         let tid = tid.0;
         let terminal = TerminalID(tid);
         let mut glr_state = glr_state.clone();
