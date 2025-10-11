@@ -1613,7 +1613,8 @@ fn test_gss_structural_sharing_factor() -> Result<(), Box<dyn std::error::Error>
 
     let trie3_god = crate::constraint::Trie3GodWrapper::new(); // Dummy 'god' object
     let acc = Acc::new_fresh();
-    let gss_stack = parser.get_combined_gss_with_acc(acc);
+    let gss_leaf = Arc::new(GSSNode::new(acc));
+    let gss_stack = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.combined_start_state_id }));
 
     let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
 
@@ -1680,7 +1681,8 @@ fn test_gss_structural_sharing_factor2() -> Result<(), Box<dyn std::error::Error
 
     let trie3_god = crate::constraint::Trie3GodWrapper::new(); // Dummy 'god' object
     let acc = Acc::new_fresh();
-    let gss_stack = parser.get_combined_gss_with_acc(acc);
+    let gss_leaf = Arc::new(GSSNode::new(acc));
+    let gss_stack = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.combined_start_state_id }));
 
     let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
 
@@ -1788,7 +1790,8 @@ fn test_gss_structural_sharing_factor3() -> Result<(), Box<dyn std::error::Error
 
     let trie3_god = crate::constraint::Trie3GodWrapper::new(); // Dummy 'god' object
     let acc = Acc::new_fresh();
-    let gss_stack = parser.get_combined_gss_with_acc(acc);
+    let gss_leaf = Arc::new(GSSNode::new(acc));
+    let gss_stack = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.combined_start_state_id }));
 
     let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
 
