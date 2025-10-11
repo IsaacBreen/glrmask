@@ -914,18 +914,12 @@ pub fn stage_11_create_hallucinated_row(table: &Table) -> HallucinatedRow {
     // Convert the intermediate maps to the final Vec format
     let final_shifts_and_reduces = shifts_and_reduces
         .into_iter()
-        .map(|(tid, actions)| {
-            let action_vec = actions.into_iter().collect::<Vec<_>>();
-            (tid, action_vec)
-        })
+        .map(|(tid, actions)| (tid, actions.into_iter().collect()))
         .collect();
 
     let final_gotos = gotos
         .into_iter()
-        .map(|(ntid, gotos_map)| {
-            let goto_vec = gotos_map.into_iter().collect::<Vec<_>>();
-            (ntid, goto_vec)
-        })
+        .map(|(ntid, gotos_map)| (ntid, gotos_map.into_iter().collect()))
         .collect();
 
     HallucinatedRow {
@@ -940,9 +934,46 @@ pub fn stage_11_create_hallucinated_row(table: &Table) -> HallucinatedRow {
 pub fn stage_12_build_combined_states(
     table: &Table,
 ) -> (BTreeMap<StateID, HallucinatedRow>, StateID) {
-    // Start with the legacy hallucinated behavior:
-    // aggregate actions/gotos across all individual states with origin filters.
-    let combined_start_row = stage_11_create_hallucinated_row(table);
+    let mut shifts_and_reduces: BTreeMap<TerminalID, BTreeMap<Stage7ShiftsAndReducesLookaheadValue, StateIDBV>> = BTreeMap::new();
+    let mut gotos: BTreeMap<NonTerminalID, BTreeMap<Goto, StateIDBV>> = BTreeMap::new();
+
+    for (&state_id, row) in table {
+        // Aggregate shifts and reduces
+        for (&terminal_id, action) in &row.shifts_and_reduces_full {
+            shifts_and_reduces
+                .entry(terminal_id)
+                .or_default()
+                .entry(action.clone())
+                .or_default()
+                .insert(state_id.0);
+        }
+
+        // Aggregate gotos
+        for (&nonterminal_id, goto) in &row.gotos {
+            gotos
+                .entry(nonterminal_id)
+                .or_default()
+                .entry(*goto)
+                .or_default()
+                .insert(state_id.0);
+        }
+    }
+
+    let final_shifts_and_reduces = shifts_and_reduces
+        .into_iter()
+        .map(|(tid, actions)| (tid, actions.into_iter().collect()))
+        .collect();
+
+    let final_gotos = gotos
+        .into_iter()
+        .map(|(ntid, gotos_map)| (ntid, gotos_map.into_iter().collect()))
+        .collect();
+
+    let combined_start_row = HallucinatedRow {
+        shifts_and_reduces: final_shifts_and_reduces,
+        gotos: final_gotos,
+        default_reduce: DefaultReduce { clone_and_merge: true, reduce: None },
+    };
 
     // Use a dedicated state ID for the combined start state.
     let combined_start_state_id = StateID(usize::MAX);
@@ -950,7 +981,6 @@ pub fn stage_12_build_combined_states(
     let mut combined_rows = BTreeMap::new();
     combined_rows.insert(combined_start_state_id, combined_start_row);
 
-    // In the future, we can grow this map with additional combined states (origin-set transitions).
     (combined_rows, combined_start_state_id)
 }
 
