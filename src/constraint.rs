@@ -1724,15 +1724,21 @@ impl GrammarConstraint {
         let it = tqdm!(precomputed1.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=true);
         #[cfg(rustrover)]
         let it = precomputed1.iter();
+
+        let gss_leaf = Arc::new(GSSNode::new(Acc::new_fresh()));
+        let gss_stack = gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id });
+
         for (tokenizer_state_id, trie1_root) in it {
             let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
             precomputed3.insert(*tokenizer_state_id, trie3_root.clone());
 
-            let mut acc = Acc::new_fresh();
-            // acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
-            let gss_leaf = Arc::new(GSSNode::new(acc));
-
-            let gss_stack = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id }));
+            let mut gss_stack = gss_stack.clone();
+            gss_stack.inner = gss_stack.inner.apply(|acc| {
+                let mut new_acc = acc.clone();
+                new_acc.stored_trie_nodes_mut().insert(trie3_root);
+                new_acc
+            });
+            let gss_stack = Arc::new(gss_stack);
 
             let glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
 
