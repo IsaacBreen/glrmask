@@ -199,6 +199,7 @@ mod tests {
         assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
     }
 
+    #[test]
     fn test_parallel_push_identity_one() {
         let gss0 = gss_from_str_stacks(&[(
             &["A"],
@@ -212,6 +213,7 @@ mod tests {
         assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
     }
 
+    #[test]
     fn test_parallel_push_identity_two() {
         let gss0 = gss_from_str_stacks(&[(
             &["A", "B"],
