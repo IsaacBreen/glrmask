@@ -1580,6 +1580,61 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_gss_structural_sharing_factor() -> Result<(), Box<dyn std::error::Error>> {
+    // This test verifies that for a grammar with a known ambiguity that can cause
+    // GSS explosion, the structural sharing remains effective. A low sharing factor
+    // indicates that many structurally identical sub-graphs are being correctly
+    // deduplicated.
+
+    // 1. Minimal grammar that causes GSS explosion without proper sharing.
+    //    See `test_js_if_statement_gss_explosion` for a detailed explanation.
+    let js_grammar_ebnf = indoc! {r#"
+        program ::= statement* EOF;
+        EOF ::= '<|EOF|>';
+
+        statement ::= if_statement | expression | block ;
+        block ::= '{' statement* '}' ;
+        if_statement ::= 'if' expression statement ;
+
+        expression ::= IDENTIFIER IDENTIFIER | IDENTIFIER ;
+        IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+    "#};
+    let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    let parser = compiled_grammar.glr_parser;
+
+    // 2. Replicate the GSS setup from `precompute3` to test a single token step.
+    //    We are interested in the terminal for 'if', which is TerminalID(1) in this compiled grammar.
+    use crate::datastructures::gss_leveled_adapter::{Acc, GSSNode};
+    use crate::glr::parser::{BelowBottomReductionMode, ParseStateEdgeContent, ProcessTokenAdvancedConfig};
+
+    let tid = 1; // Terminal ID for 'if'
+    let terminal = TerminalID(tid);
+
+    let trie3_god = crate::constraint::Trie3GodWrapper::new(); // Dummy 'god' object
+    let acc = Acc::new_fresh();
+    let gss_leaf = Arc::new(GSSNode::new(acc));
+    let gss_stack = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id }));
+
+    let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
+
+    const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = BelowBottomReductionMode::ContinueFromAll;
+    glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+
+    // 3. Get stats and assert on the structural sharing factor.
+    let stats = glr_state.active_state.stack.inner.stats();
+    println!("Stats for terminal ID {}: {:?}", tid, stats);
+
+    assert!(
+        stats.structural_sharing_factor < 0.4,
+        "Structural sharing factor ({}) was not less than 0.4, indicating poor GSS node sharing.",
+        stats.structural_sharing_factor
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar string
     let ebnf_grammar = indoc! {r#"
