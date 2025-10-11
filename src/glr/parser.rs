@@ -332,10 +332,9 @@ impl JSONConvertible for GLRParser {
                 let substring_gotos = stage_9(&table, &non_terminal_map);
                 let reduce_goto_map = crate::glr::table::stage_10(&table);
                 let hallucinated_row = crate::glr::table::stage_11_create_hallucinated_row(&table);
-                // Build combined states (start combined replaces hallucinated behavior)
-                let combined_rows = crate::glr::table::stage_11_build_combined_states(&table);
-                let combined_start_state_id = StateID(usize::MAX);
                 let hallucinated_state_id = StateID(usize::MAX);
+                // Build combined states (start combined replaces hallucinated behavior)
+                let (combined_rows, combined_start_state_id) = crate::glr::table::stage_11_build_combined_states(&table);
 
                 Ok(GLRParser {
                     table,
