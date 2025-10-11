@@ -936,8 +936,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     ) -> ParseState {
         crate::debug!(4, "Pushing new state with content: {:?}", new_content);
         timeit!("GLRParserState::push_state::push_on_parent GSS PUSH", {});
-        let mut new_gss_node_instance = peek.push_on_parent(new_content);
-        new_gss_node_instance.inner = peek.isolated_parent().inner.push(new_content);
+        let new_gss_node_instance = peek.push_on_parent(new_content);
         ParseState {
             stack: Arc::new(new_gss_node_instance),
             accepted_state: self.active_state.accepted_state.clone(),
@@ -1006,10 +1005,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
                     hit!("GLRParserState::handle_action::Shift");
                     crate::debug!(5, "Action: Shift to state {}", to.0);
-                    crate::debug!(5, "peek.isolated_parent() = {}", peek.isolated_parent().inner.to_graph_string(false));
                     let new_parse_state =
                         self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
-                    crate::debug!(5, "new_parse_state.stack = {}", new_parse_state.stack.inner.to_graph_string(false));
                     shifted_states_todo.push_back(new_parse_state);
                     found_shift = true;
                     if early_exit_on_shift {
