@@ -1688,30 +1688,27 @@ fn test_gss_structural_sharing_factor2() -> Result<(), Box<dyn std::error::Error
 
     const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = BelowBottomReductionMode::ContinueFromAll;
     // for tid in parser.terminal_map.right_values() {
-    let tid = TerminalID(1);
-    if true {
-        let tid = tid.0;
-        let terminal = TerminalID(tid);
-        let mut glr_state = glr_state.clone();
-        glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+    let terminal = Terminal::literal("p01");
+    let tid = *parser.terminal_map.get_by_left(&terminal).unwrap();
+    let mut glr_state = glr_state.clone();
+    glr_state.process_token_advanced(tid, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
 
-        // 3. Get stats and assert on the structural sharing factor.
-        let stats = glr_state.active_state.stack.inner.stats();
-        println!("Stats for terminal ID {}: {:?}", tid, stats);
+    // 3. Get stats and assert on the structural sharing factor.
+    let stats = glr_state.active_state.stack.inner.stats();
+    println!("Stats for terminal ID {}: {:?}", tid.0, stats);
 
-        let THRESHOLD = 0.49;
-        if !(stats.structural_sharing_factor > THRESHOLD) {
-            // Print the GSS structure before and after normalization.
-            println!("GSS before normalization:");
-            println!("{}", glr_state.active_state.stack.inner.to_graph_string(false));
-            println!("GSS after normalization (what it ideally should be):");
-            println!("{}", glr_state.active_state.stack.inner.normalize().to_graph_string(false));
-            assert!(
-                stats.structural_sharing_factor > 0.49,
-                "Structural sharing factor ({}) was not greater than 0.49, indicating poor GSS node sharing",
-                stats.structural_sharing_factor
-            );
-        }
+    let THRESHOLD = 0.49;
+    if !(stats.structural_sharing_factor > THRESHOLD) {
+        // Print the GSS structure before and after normalization.
+        println!("GSS before normalization:");
+        println!("{}", glr_state.active_state.stack.inner.to_graph_string(false));
+        println!("GSS after normalization (what it ideally should be):");
+        println!("{}", glr_state.active_state.stack.inner.normalize().to_graph_string(false));
+        assert!(
+            stats.structural_sharing_factor > 0.49,
+            "Structural sharing factor ({}) was not greater than 0.49, indicating poor GSS node sharing",
+            stats.structural_sharing_factor
+        );
     }
 
     Ok(())
