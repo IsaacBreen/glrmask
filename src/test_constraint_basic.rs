@@ -1625,11 +1625,19 @@ fn test_gss_structural_sharing_factor() -> Result<(), Box<dyn std::error::Error>
     let stats = glr_state.active_state.stack.inner.stats();
     println!("Stats for terminal ID {}: {:?}", tid, stats);
 
-    assert!(
-        stats.structural_sharing_factor > 0.49,
-        "Structural sharing factor ({}) was not greater than 0.49, indicating poor GSS node sharing",
-        stats.structural_sharing_factor
-    );
+    let THRESHOLD = 0.49;
+    if !(stats.structural_sharing_factor > THRESHOLD) {
+        // Print the GSS structure before and after normalization.
+        println!("GSS before normalization:");
+        println!("{}", glr_state.active_state.stack.inner.to_graph_string(false));
+        println!("GSS after normalization (what it ideally should be):");
+        println!("{}", glr_state.active_state.stack.inner.normalize().to_graph_string(false));
+        assert!(
+            stats.structural_sharing_factor > 0.49,
+            "Structural sharing factor ({}) was not greater than 0.49, indicating poor GSS node sharing",
+            stats.structural_sharing_factor
+        );
+    }
 
     Ok(())
 }
