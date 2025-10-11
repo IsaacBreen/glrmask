@@ -995,33 +995,39 @@ pub fn stage_12_build_combined_states(
         let mut shifts_and_reduces: BTreeMap<TerminalID, Vec<(Stage7ShiftsAndReducesLookaheadValue, StateIDBV)>> = BTreeMap::new();
 
         for tid in all_terminals {
-            // Group origins by the exact combination of actions they perform to create compact Split actions.
-            type ActionCombo = (bool, BTreeSet<CombinedReduceKey>);
-            let mut combo_to_mask: BTreeMap<ActionCombo, StateIDBV> = BTreeMap::new();
+            // Gather:
+            // - shift_pairs: the resulting origin set for shifting on `tid`
+            // - shift_mask: which origins actually perform a shift
+            // - reduce_masks: map from "equivalent reduce actions" to origin masks
             let mut shift_pairs: OriginSet = BTreeSet::new();
+            let mut shift_mask = StateIDBV::zeros();
 
-            // 1. Determine the exact action combo for each origin.
-            let mut origin_to_combo: BTreeMap<StateID, ActionCombo> = BTreeMap::new();
+            let mut reduce_masks: BTreeMap<CombinedReduceKey, StateIDBV> = BTreeMap::new();
+
             for &(origin, current) in &origin_set {
-                if let Some(action) = table[&current].shifts_and_reduces_full.get(&tid) {
-                    let combo = origin_to_combo.entry(origin).or_default();
+                let row = &table[&current];
+                if let Some(action) = row.shifts_and_reduces_full.get(&tid) {
                     match action {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(next_state) => {
-                            combo.0 = true;
+                            // Only a shift.
                             shift_pairs.insert((origin, *next_state));
+                            shift_mask.insert(origin.0);
                         }
                         Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                            // Only reduces (single).
                             let key = CombinedReduceKey {
                                 nt: *nonterminal_id,
                                 len: *len,
                                 production_ids: production_ids.clone(),
                             };
-                            combo.1.insert(key);
+                            reduce_masks.entry(key).or_insert_with(StateIDBV::zeros).insert(origin.0);
                         }
                         Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                            // Handle the shift part (if any) by adding shift_pairs/mask,
+                            // and also flatten all reduces into individual Reduce entries keyed by (nt,len,pids).
                             if let Some(next_state) = shift {
-                                combo.0 = true;
                                 shift_pairs.insert((origin, *next_state));
+                                shift_mask.insert(origin.0);
                             }
                             for (&len, nts) in reduces {
                                 for (&ntid, pids) in nts {
@@ -1030,7 +1036,7 @@ pub fn stage_12_build_combined_states(
                                         len,
                                         production_ids: pids.clone(),
                                     };
-                                    combo.1.insert(key);
+                                    reduce_masks.entry(key).or_insert_with(StateIDBV::zeros).insert(origin.0);
                                 }
                             }
                         }
@@ -1038,14 +1044,9 @@ pub fn stage_12_build_combined_states(
                 }
             }
 
-            // 2. Invert the map to group origins by common action combos.
-            for (origin, combo) in origin_to_combo {
-                combo_to_mask.entry(combo).or_default().insert(origin.0);
-            }
-
-            // 3. Determine the single next combined state for all shifts.
-            let maybe_next_cid = if !shift_pairs.is_empty() {
-                Some({
+            // Produce a single shift action to the next combined state (if any shift exists).
+            if !shift_pairs.is_empty() {
+                let next_cid = {
                     let mut now_states = shift_pairs.iter().map(|(_, now)| *now);
                     let first_now_state = now_states.next().unwrap(); // Not empty, so safe.
                     if now_states.all(|s| s == first_now_state) {
@@ -1063,39 +1064,21 @@ pub fn stage_12_build_combined_states(
                             sid
                         }
                     }
-                })
-            } else {
-                None
-            };
-
-            // 4. Create a compact action for each group.
-            let mut final_actions: Vec<(Stage7ShiftsAndReducesLookaheadValue, StateIDBV)> = Vec::new();
-            for ((has_shift, reduce_keys), mask) in combo_to_mask {
-                if mask.is_empty() { continue; }
-
-                let maybe_shift_for_action = if has_shift { maybe_next_cid } else { None };
-
-                let mut reduces_for_action: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
-                for key in reduce_keys {
-                    reduces_for_action
-                        .entry(key.len)
-                        .or_default()
-                        .entry(key.nt)
-                        .or_default()
-                        .extend(key.production_ids);
-                }
-
-                let mut final_action = Stage7ShiftsAndReducesLookaheadValue::Split {
-                    shift: maybe_shift_for_action,
-                    reduces: reduces_for_action,
                 };
-                final_action.simplify(); // This will turn it into Shift or Reduce if possible.
-
-                final_actions.push((final_action, mask));
+                shifts_and_reduces
+                    .entry(tid)
+                    .or_default()
+                    .push((Stage7ShiftsAndReducesLookaheadValue::Shift(next_cid), shift_mask));
             }
 
-            if !final_actions.is_empty() {
-                shifts_and_reduces.insert(tid, final_actions);
+            // Produce reduce actions (flattened).
+            for (key, mask) in reduce_masks {
+                let action = Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                    nonterminal_id: key.nt,
+                    len: key.len,
+                    production_ids: key.production_ids,
+                };
+                shifts_and_reduces.entry(tid).or_default().push((action, mask));
             }
         }
 
