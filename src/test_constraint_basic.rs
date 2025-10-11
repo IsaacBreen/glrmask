@@ -1688,7 +1688,7 @@ fn test_gss_structural_sharing_factor2() -> Result<(), Box<dyn std::error::Error
 
     const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = BelowBottomReductionMode::ContinueFromAll;
     // for tid in parser.terminal_map.right_values() {
-    let terminal = Terminal::literal(b"p01".to_vec());
+    let terminal = Terminal::terminal("VALUE");
     let tid = *parser.terminal_map.get_by_left(&terminal).unwrap();
     let mut glr_state = glr_state.clone();
     glr_state.process_token_advanced(tid, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
