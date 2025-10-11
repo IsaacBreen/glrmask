@@ -1185,25 +1185,27 @@ pub fn stage_12_build_combined_states(
         println!("\n--- Combined States Statistics ---");
         println!("Total combined states: {}", combined_rows.len());
 
-        let mut shift_counts = Vec::new();
-        let mut reduce_counts = Vec::new();
+        let mut sole_shift_counts = Vec::new();
+        let mut sole_reduce_counts = Vec::new();
+        let mut split_counts = Vec::new();
         let mut goto_counts = Vec::new();
 
         for row in combined_rows.values() {
-            let mut num_shifts = 0;
-            let mut num_reduces = 0;
+            let mut num_sole_shifts = 0;
+            let mut num_sole_reduces = 0;
+            let mut num_splits = 0;
             for actions in row.shifts_and_reduces.values() {
                 for (action, _) in actions {
                     match action {
-                        Stage7ShiftsAndReducesLookaheadValue::Shift(_) => num_shifts += 1,
-                        Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } => num_reduces += 1,
-                        // Splits carry reductions too; count them with reduces.
-                        Stage7ShiftsAndReducesLookaheadValue::Split { .. } => num_reduces += 1,
+                        Stage7ShiftsAndReducesLookaheadValue::Shift(_) => num_sole_shifts += 1,
+                        Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } => num_sole_reduces += 1,
+                        Stage7ShiftsAndReducesLookaheadValue::Split { .. } => num_splits += 1,
                     }
                 }
             }
-            shift_counts.push(num_shifts);
-            reduce_counts.push(num_reduces);
+            sole_shift_counts.push(num_sole_shifts);
+            sole_reduce_counts.push(num_sole_reduces);
+            split_counts.push(num_splits);
 
             let num_gotos = row.gotos.values().map(|v| v.len()).sum();
             goto_counts.push(num_gotos);
@@ -1242,8 +1244,9 @@ pub fn stage_12_build_combined_states(
             println!();
         }
 
-        print_stats("Shift actions", &shift_counts);
-        print_stats("Reduce actions", &reduce_counts);
+        print_stats("Sole Shift actions", &sole_shift_counts);
+        print_stats("Sole Reduce actions", &sole_reduce_counts);
+        print_stats("Split actions", &split_counts);
         print_stats("Goto actions", &goto_counts);
         println!("------------------------------------");
     }
