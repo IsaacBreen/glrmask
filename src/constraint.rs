@@ -1692,8 +1692,8 @@ impl GrammarConstraint {
         let trie3_god = Trie3GodWrapper::new();
 
         if true {
-            // let tid = 78;
-            for tid in tqdm!(0..=tokenizer.num_groups() as usize, desc = "Trie 3 temp", disable = !PROGRESS_BAR_ENABLED, leave=false) {
+            let tid = 78;
+            // for tid in tqdm!(0..=tokenizer.num_groups() as usize, desc = "Trie 3 temp", disable = !PROGRESS_BAR_ENABLED, leave=false) {
                 reset();
                 let parser = parser.unwrap();
                 let terminal = TerminalID(tid);
@@ -1717,7 +1717,7 @@ impl GrammarConstraint {
                 }
                 print_summary();
                 reset();
-            }
+            // }
 
             return (precomputed3, trie3_god); // TEMP
         }
