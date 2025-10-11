@@ -1159,8 +1159,70 @@ pub fn stage_12_build_combined_states(
         };
         combined_rows.insert(this_cid, row);
     }
+}
 
-    (combined_rows, combined_start_state_id)
+pub fn stage_12_build_combined_states(hallucinated_row: &HallucinatedRow, num_states: usize) {
+    crate::debug!(2, "--- Combined State Statistics (from Hallucinated Row) ---");
+    crate::debug!(2, "Total states: {}", num_states);
+
+    // Shifts and Reduces Stats
+    let mut sr_actions_per_terminal = Vec::new();
+    let mut sr_state_set_sizes = Vec::new();
+    let mut total_sr_entries = 0;
+    for (_, actions) in &hallucinated_row.shifts_and_reduces {
+        sr_actions_per_terminal.push(actions.len());
+        total_sr_entries += actions.len();
+        for (_, state_bv) in actions {
+            sr_state_set_sizes.push(state_bv.len());
+        }
+    }
+
+    crate::debug!(2, "\n[Shifts & Reduces]");
+    crate::debug!(2, "Total unique (action, state_set) entries: {}", total_sr_entries);
+    if !sr_actions_per_terminal.is_empty() {
+        let min = *sr_actions_per_terminal.iter().min().unwrap_or(&0);
+        let max = *sr_actions_per_terminal.iter().max().unwrap_or(&0);
+        let sum: usize = sr_actions_per_terminal.iter().sum();
+        let avg = sum as f64 / sr_actions_per_terminal.len() as f64;
+        crate::debug!(2, "Actions per terminal: min={}, max={}, avg={:.2}", min, max, avg);
+    }
+    if !sr_state_set_sizes.is_empty() {
+        let min = *sr_state_set_sizes.iter().min().unwrap_or(&0);
+        let max = *sr_state_set_sizes.iter().max().unwrap_or(&0);
+        let sum: usize = sr_state_set_sizes.iter().sum();
+        let avg = sum as f64 / sr_state_set_sizes.len() as f64;
+        crate::debug!(2, "States per action set: min={}, max={}, avg={:.2}", min, max, avg);
+    }
+
+    // Gotos Stats
+    let mut gotos_per_nt = Vec::new();
+    let mut goto_state_set_sizes = Vec::new();
+    let mut total_goto_entries = 0;
+    for (_, gotos) in &hallucinated_row.gotos {
+        gotos_per_nt.push(gotos.len());
+        total_goto_entries += gotos.len();
+        for (_, state_bv) in gotos {
+            goto_state_set_sizes.push(state_bv.len());
+        }
+    }
+
+    crate::debug!(2, "\n[Gotos]");
+    crate::debug!(2, "Total unique (goto, state_set) entries: {}", total_goto_entries);
+    if !gotos_per_nt.is_empty() {
+        let min = *gotos_per_nt.iter().min().unwrap_or(&0);
+        let max = *gotos_per_nt.iter().max().unwrap_or(&0);
+        let sum: usize = gotos_per_nt.iter().sum();
+        let avg = sum as f64 / gotos_per_nt.len() as f64;
+        crate::debug!(2, "Gotos per non-terminal: min={}, max={}, avg={:.2}", min, max, avg);
+    }
+    if !goto_state_set_sizes.is_empty() {
+        let min = *goto_state_set_sizes.iter().min().unwrap_or(&0);
+        let max = *goto_state_set_sizes.iter().max().unwrap_or(&0);
+        let sum: usize = goto_state_set_sizes.iter().sum();
+        let avg = sum as f64 / goto_state_set_sizes.len() as f64;
+        crate::debug!(2, "States per goto set: min={}, max={}, avg={:.2}", min, max, avg);
+    }
+    crate::debug!(2, "------------------------------------");
 }
 
 /// Helper for `stage_9`: Traces a chain of unit reductions from a given starting state and non-terminal.
@@ -1391,11 +1453,9 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     let final_table = stage_8_table;
 
     let hallucinated_row = stage_11_create_hallucinated_row(&final_table);
+    stage_12_build_combined_states(&hallucinated_row, final_table.len());
     let hallucinated_state_id = StateID(usize::MAX);
 
-    // Build combined-state rows (replaces hallucinated row).
-    let (combined_rows, combined_start_state_id) = stage_12_build_combined_states(&final_table);
-    println!("Number of combined states: {}", combined_rows.len());
     crate::debug!(2, "Done generating GLR parser");
     // crate::debug!(6, "Number of states: {}", final_table.len());
     // panic!("GLR parser generation complete. Number of states: {}", final_table.len());
