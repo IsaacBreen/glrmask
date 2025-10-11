@@ -2545,6 +2545,10 @@ impl GLRParser {
     }
 }
 
+impl GLRParser {
+    pub fn is_combined_state(&self, state_id: StateID) -> bool { self.combined_rows.contains_key(&state_id) }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateKey {
     stack_state_id: StateID,
