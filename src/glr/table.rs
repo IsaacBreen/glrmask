@@ -1046,14 +1046,24 @@ pub fn stage_12_build_combined_states(
 
             // Produce a single shift action to the next combined state (if any shift exists).
             if !shift_pairs.is_empty() {
-                let next_cid = if let Some(existing) = originset_to_id.get_by_left(&shift_pairs).copied() {
-                    existing
-                } else {
-                    let sid = StateID(next_combined_id);
-                    next_combined_id += 1;
-                    originset_to_id.insert(shift_pairs.clone(), sid);
-                    worklist.push_back(shift_pairs);
-                    sid
+                let next_cid = {
+                    let mut now_states = shift_pairs.iter().map(|(_, now)| *now);
+                    let first_now_state = now_states.next().unwrap(); // Not empty, so safe.
+                    if now_states.all(|s| s == first_now_state) {
+                        // Optimization: all 'now' states are the same, transition to that original state.
+                        first_now_state
+                    } else {
+                        // Otherwise, it's a true combined state.
+                        if let Some(existing) = originset_to_id.get_by_left(&shift_pairs).copied() {
+                            existing
+                        } else {
+                            let sid = StateID(next_combined_id);
+                            next_combined_id += 1;
+                            originset_to_id.insert(shift_pairs.clone(), sid);
+                            worklist.push_back(shift_pairs);
+                            sid
+                        }
+                    }
                 };
                 shifts_and_reduces
                     .entry(tid)
@@ -1100,14 +1110,24 @@ pub fn stage_12_build_combined_states(
             }
 
             if !goto_pairs.is_empty() {
-                let next_cid = if let Some(existing) = originset_to_id.get_by_left(&goto_pairs).copied() {
-                    existing
-                } else {
-                    let sid = StateID(next_combined_id);
-                    next_combined_id += 1;
-                    originset_to_id.insert(goto_pairs.clone(), sid);
-                    worklist.push_back(goto_pairs);
-                    sid
+                let next_cid = {
+                    let mut now_states = goto_pairs.iter().map(|(_, now)| *now);
+                    let first_now_state = now_states.next().unwrap(); // Not empty, so safe.
+                    if now_states.all(|s| s == first_now_state) {
+                        // Optimization: all 'now' states are the same, transition to that original state.
+                        first_now_state
+                    } else {
+                        // Otherwise, it's a true combined state.
+                        if let Some(existing) = originset_to_id.get_by_left(&goto_pairs).copied() {
+                            existing
+                        } else {
+                            let sid = StateID(next_combined_id);
+                            next_combined_id += 1;
+                            originset_to_id.insert(goto_pairs.clone(), sid);
+                            worklist.push_back(goto_pairs);
+                            sid
+                        }
+                    }
                 };
 
                 if saw_non_accept {
