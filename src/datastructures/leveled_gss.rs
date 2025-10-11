@@ -1642,12 +1642,22 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         if self.is_empty() {
             return self.clone();
         }
-        let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
-        new_children.insert(
-            value,
-            OrdMap::unit(self.inner.max_depth(), self.inner.clone()),
-        );
-        let new_inner = new_branch(new_children, None);
+        let new_inner = match &*self.inner {
+            Upper::Interface(i) => {
+                let lower_node = new_lower(i.children.clone(), i.empty.is_some());
+                let mut new_children: Children<T, Lower<T>> = IHashMap::new();
+                new_children.insert(value, OrdMap::unit(lower_node.max_depth, lower_node));
+                new_interface(new_children, i.acc.clone(), None)
+            }
+            Upper::Branch(_) => {
+                let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                new_children.insert(
+                    value,
+                    OrdMap::unit(self.inner.max_depth(), self.inner.clone()),
+                );
+                new_branch(new_children, None)
+            }
+        };
         LeveledGSS { inner: new_inner }
     }
 
