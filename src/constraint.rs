@@ -1709,8 +1709,8 @@ impl GrammarConstraint {
                 println!("--- Results for token ID {} ---", tid);
                 println!("stats: {:?}", glr_state.active_state.stack.inner.stats());
                 println!("GLR state stacks: {}", glr_state);
-                println!("GLR state graph structure before normalization:{}", glr_state.active_state.stack.inner.to_graph_string(false));
-                println!("GLR state graph structure after normalization:{}", glr_state.active_state.stack.inner.normalize().to_graph_string(false));
+                println!("GLR state graph structure before normalization:{}\n", glr_state.active_state.stack.inner.to_graph_string(false));
+                println!("GLR state graph structure after normalization:{}\n", glr_state.active_state.stack.inner.normalize().to_graph_string(false));
                 println!("---------------------------------");
             // }
 
