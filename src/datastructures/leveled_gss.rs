@@ -100,7 +100,7 @@ mod tests {
 
         // 1. Pop should be deterministic and memoized.
         assert!(
-            gss1.ptr_eq(&gss2),
+            gss1.inner_ptrs_eq(&gss2),
             "Popping the same GSS twice should yield pointer-equal results"
         );
 
@@ -110,7 +110,7 @@ mod tests {
             _ => panic!("Expected UpperBranch at root"),
         };
         assert!(
-            Arc::ptr_eq(&gss1.inner, &child_node),
+            Arc::inner_ptrs_eq(&gss1.inner, &child_node),
             "Popped GSS inner should be pointer-equal to original child node"
         );
     }
@@ -125,7 +125,7 @@ mod tests {
 
         // For a branch-rooted GSS, push().pop() should be a pointer-wise identity operation.
         assert!(
-            gss0.ptr_eq(&gss1),
+            gss0.inner_ptrs_eq(&gss1),
             "push followed by pop should return a pointer-equal GSS for branch-rooted GSS"
         );
     }
@@ -141,14 +141,14 @@ mod tests {
         // For an interface-rooted GSS, push() converts the interface to a lower node,
         // and pop() reconstructs an interface from that lower node. This means a new
         // Arc is allocated, so they won't be pointer-equal.
-        assert!(!gss0.ptr_eq(&gss1), "push.pop on interface root creates a new node, so should not be pointer-equal");
+        assert!(!gss0.inner_ptrs_eq(&gss1), "push.pop on interface root creates a new node, so should not be pointer-equal");
 
         // However, they should be structurally identical. We can verify this by
         // normalizing them, which produces a canonical, pointer-equal representation
         // for structurally identical GSSs.
         let norm0 = gss0.normalize();
         let norm1 = gss1.normalize();
-        assert!(norm0.ptr_eq(&norm1), "push.pop on interface root should be structurally identical");
+        assert!(norm0.inner_ptrs_eq(&norm1), "push.pop on interface root should be structurally identical");
     }
 
     #[test]
@@ -156,13 +156,13 @@ mod tests {
         let gss0 = GSS::empty();
         // push on empty is a no-op in the current implementation
         let gss_pushed = gss0.push("X");
-        assert!(gss_pushed.ptr_eq(&gss0));
+        assert!(gss_pushed.inner_ptrs_eq(&gss0));
 
         // pop on empty is also a no-op
         let gss1 = gss_pushed.pop();
-        assert!(gss1.ptr_eq(&gss0));
+        assert!(gss1.inner_ptrs_eq(&gss0));
 
-        assert!(gss0.ptr_eq(&gss1), "push followed by pop on an empty GSS should be a pointer-equal identity op");
+        assert!(gss0.inner_ptrs_eq(&gss1), "push followed by pop on an empty GSS should be a pointer-equal identity op");
     }
 }
 
@@ -1140,6 +1140,54 @@ pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub fn inner_ptrs_eq(&self, other: &Arc<Upper<T, A>>) -> bool {
+        match (&*self.inner, &**other) {
+            (Upper::Branch(b1), Upper::Branch(b2)) => {
+                if b1.empty != b2.empty || b1.children.len() != b2.children.len() || b1.max_depth != b2.max_depth {
+                    return false;
+                }
+                if b1.children.keys().ne(b2.children.keys()) {
+                    return false;
+                }
+                for (v, kids1) in b1.children.iter() {
+                    let kids2 = b2.children.get(v).unwrap();
+                    if kids1.len() != kids2.len() || kids1.keys().ne(kids2.keys()) {
+                        return false;
+                    }
+                    for (d, c1) in kids1.iter() {
+                        let c2 = kids2.get(d).unwrap();
+                        if !Arc::ptr_eq(c1, c2) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
+            (Upper::Interface(i1), Upper::Interface(i2)) => {
+                if i1.acc != i2.acc || i1.empty != i2.empty || i1.children.len() != i2.children.len() || i1.max_depth != i2.max_depth {
+                    return false;
+                }
+                if i1.children.keys().ne(i2.children.keys()) {
+                    return false;
+                }
+                for (v, kids1) in i1.children.iter() {
+                    let kids2 = i2.children.get(v).unwrap();
+                    if kids1.len() != kids2.len() || kids1.keys().ne(kids2.keys()) {
+                        return false;
+                    }
+                    for (d, c1) in kids1.iter() {
+                        let c2 = kids2.get(d).unwrap();
+                        if !Arc::ptr_eq(c1, c2) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn empty() -> Self {
