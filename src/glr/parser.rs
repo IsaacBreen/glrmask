@@ -1005,6 +1005,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Shift(to)) => {
                     hit!("GLRParserState::handle_action::Shift");
                     crate::debug!(5, "Action: Shift to state {}", to.0);
+                    println!("peek.isolated_parent() = {}", peek.isolated_parent().inner.to_graph_string(false));
                     let new_parse_state =
                         self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
                     shifted_states_todo.push_back(new_parse_state);
