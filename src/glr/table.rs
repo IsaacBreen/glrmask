@@ -1167,6 +1167,66 @@ pub fn stage_12_build_combined_states(
         combined_rows.insert(this_cid, row);
     }
 
+    // --- Optimization pass: group reduces into splits ---
+    for row in combined_rows.values_mut() {
+        for actions in row.shifts_and_reduces.values_mut() {
+            if actions.len() <= 1 {
+                continue;
+            }
+
+            let mut maybe_shift_action: Option<(Stage7ShiftsAndReducesLookaheadValue, StateIDBV)> = None;
+            let mut reduces_to_group: Vec<(Stage7ShiftsAndReducesLookaheadValue, StateIDBV)> = Vec::new();
+
+            for (action, mask) in actions.drain(..) {
+                if matches!(action, Stage7ShiftsAndReducesLookaheadValue::Shift(_)) {
+                    maybe_shift_action = Some((action, mask));
+                } else {
+                    // This will be a Reduce action, as per construction logic.
+                    reduces_to_group.push((action, mask));
+                }
+            }
+
+            // Rebuild original if we are not creating a split.
+            // A split is only useful if we have (1 shift + >=1 reduce) or (0 shifts + >1 reduce).
+            if (maybe_shift_action.is_none() && reduces_to_group.len() <= 1) || reduces_to_group.is_empty() {
+                if let Some(s) = maybe_shift_action {
+                    actions.push(s);
+                }
+                actions.extend(reduces_to_group);
+                continue;
+            }
+
+            let mut split_reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+            let mut combined_mask = StateIDBV::zeros();
+            let mut split_shift: Option<StateID> = None;
+
+            if let Some((Stage7ShiftsAndReducesLookaheadValue::Shift(sid), shift_mask)) = maybe_shift_action {
+                split_shift = Some(sid);
+                combined_mask.union_with(&shift_mask);
+            }
+
+            for (action, mask) in reduces_to_group {
+                if let Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } = action {
+                    split_reduces
+                        .entry(len)
+                        .or_default()
+                        .entry(nonterminal_id)
+                        .or_default()
+                        .extend(production_ids);
+                    combined_mask.union_with(&mask);
+                }
+            }
+
+            let mut new_action = Stage7ShiftsAndReducesLookaheadValue::Split {
+                shift: split_shift,
+                reduces: split_reduces,
+            };
+            new_action.simplify();
+
+            actions.push((new_action, combined_mask));
+        }
+    }
+
     if !combined_rows.is_empty() {
         println!("\n--- Combined States Statistics ---");
         println!("Total combined states: {}", combined_rows.len());
