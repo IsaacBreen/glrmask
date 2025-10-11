@@ -72,6 +72,100 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
+    struct Acc(usize);
+
+    impl Merge for Acc {
+        fn merge(&self, other: &Self) -> Self {
+            Acc(self.0 + other.0)
+        }
+    }
+
+    type T = &'static str;
+    type GSS = LeveledGSS<T, Acc>;
+
+    #[test]
+    fn pop_is_deterministic_and_reuses_nodes() {
+        // GSS for path A -> B -> C
+        let gss0 = GSS::from_stacks(&[(vec!["A", "B", "C"], Acc(1))]);
+
+        // Pop once
+        let gss1 = gss0.pop();
+        // Pop again
+        let gss2 = gss0.pop();
+
+        // 1. Pop should be deterministic and memoized.
+        assert!(
+            gss1.ptr_eq(&gss2),
+            "Popping the same GSS twice should yield pointer-equal results"
+        );
+
+        // 2. The result of pop should be a pointer to the child node, not a copy.
+        let child_node = match &*gss0.inner {
+            Upper::Branch(b) => b.children.get("A").unwrap().values().next().unwrap().clone(),
+            _ => panic!("Expected UpperBranch at root"),
+        };
+        assert!(
+            Arc::ptr_eq(&gss1.inner, &child_node),
+            "Popped GSS inner should be pointer-equal to original child node"
+        );
+    }
+
+    #[test]
+    fn push_pop_on_branch_is_identity() {
+        // GSS for path A -> B. This creates a branch root.
+        let gss0 = GSS::from_stacks(&[(vec!["A", "B"], Acc(1))]);
+        assert!(matches!(&*gss0.inner, Upper::Branch(_)));
+
+        let gss1 = gss0.push("X").pop();
+
+        // For a branch-rooted GSS, push().pop() should be a pointer-wise identity operation.
+        assert!(
+            gss0.ptr_eq(&gss1),
+            "push followed by pop should return a pointer-equal GSS for branch-rooted GSS"
+        );
+    }
+
+    #[test]
+    fn push_pop_on_interface_is_structurally_identity() {
+        // GSS for a path of length 0. This creates an interface root.
+        let gss0 = GSS::from_stacks(&[(vec![], Acc(1))]);
+        assert!(matches!(&*gss0.inner, Upper::Interface(_)));
+
+        let gss1 = gss0.push("X").pop();
+
+        // For an interface-rooted GSS, push() converts the interface to a lower node,
+        // and pop() reconstructs an interface from that lower node. This means a new
+        // Arc is allocated, so they won't be pointer-equal.
+        assert!(!gss0.ptr_eq(&gss1), "push.pop on interface root creates a new node, so should not be pointer-equal");
+
+        // However, they should be structurally identical. We can verify this by
+        // normalizing them, which produces a canonical, pointer-equal representation
+        // for structurally identical GSSs.
+        let norm0 = gss0.normalize();
+        let norm1 = gss1.normalize();
+        assert!(norm0.ptr_eq(&norm1), "push.pop on interface root should be structurally identical");
+    }
+
+    #[test]
+    fn push_pop_on_empty_is_identity() {
+        let gss0 = GSS::empty();
+        // push on empty is a no-op in the current implementation
+        let gss_pushed = gss0.push("X");
+        assert!(gss_pushed.ptr_eq(&gss0));
+
+        // pop on empty is also a no-op
+        let gss1 = gss_pushed.pop();
+        assert!(gss1.ptr_eq(&gss0));
+
+        assert!(gss0.ptr_eq(&gss1), "push followed by pop on an empty GSS should be a pointer-equal identity op");
+    }
+}
+
 // --------------------
 // Small, reusable helpers
 // --------------------
