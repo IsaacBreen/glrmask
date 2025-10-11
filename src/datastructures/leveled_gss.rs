@@ -2048,7 +2048,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     let new_empty_opt = b.empty.as_ref().and_then(|e| mutate_acc(e, memo, m));
                     let mut new_children: Children<T, Upper<T, B>> = IHashMap::new();
                     for (v, kids) in b.children.iter() {
-                        let mut new_kids: OrdMap<isize, Arc<Upper<T, B> = OrdMap::new();
+                        let mut new_kids: OrdMap<isize, Arc<Upper<T, B>>> = OrdMap::new();
                         for child in kids.values() {
                             if let Some(nc) = transform::<T, A, B, M>(child, memo, m) {
                                 new_kids.insert(nc.max_depth(), nc);
