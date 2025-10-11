@@ -1055,6 +1055,54 @@ local_system:
               Arc::ptr_eq(&self.inner, &other.inner)
           }
 
+          pub fn inner_ptrs_eq(&self, other: &Self) -> bool {
+              match (&*self.inner, &**other.inner) {
+                  (Upper::Branch(b1), Upper::Branch(b2)) => {
+                      if b1.empty != b2.empty || b1.children.len() != b2.children.len() || b1.max_depth != b2.max_depth {
+                          return false;
+                      }
+                      if b1.children.keys().ne(b2.children.keys()) {
+                          return false;
+                      }
+                      for (v, kids1) in b1.children.iter() {
+                          let kids2 = b2.children.get(v).unwrap();
+                          if kids1.len() != kids2.len() || kids1.keys().ne(kids2.keys()) {
+                              return false;
+                          }
+                          for (d, c1) in kids1.iter() {
+                              let c2 = kids2.get(d).unwrap();
+                              if !Arc::ptr_eq(c1, c2) {
+                                  return false;
+                              }
+                          }
+                      }
+                      true
+                  }
+                  (Upper::Interface(i1), Upper::Interface(i2)) => {
+                      if i1.acc != i2.acc || i1.empty != i2.empty || i1.children.len() != i2.children.len() || i1.max_depth != i2.max_depth {
+                          return false;
+                      }
+                      if i1.children.keys().ne(i2.children.keys()) {
+                          return false;
+                      }
+                      for (v, kids1) in i1.children.iter() {
+                          let kids2 = i2.children.get(v).unwrap();
+                          if kids1.len() != kids2.len() || kids1.keys().ne(kids2.keys()) {
+                              return false;
+                          }
+                          for (d, c1) in kids1.iter() {
+                              let c2 = kids2.get(d).unwrap();
+                              if !Arc::ptr_eq(c1, c2) {
+                                  return false;
+                              }
+                          }
+                      }
+                      true
+                  }
+                  _ => false,
+              }
+          }
+
           pub fn empty() -> Self {
               empty_upper()
           }
@@ -3082,94 +3130,113 @@ local_system:
       #[cfg(test)]
       mod tests {
           use super::*;
+          use std::sync::Arc;
 
+          // A simple accumulator that just collects integers.
           #[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
-          struct Acc(usize);
+          struct IntAcc(im::HashSet<i32>);
 
-          impl Merge for Acc {
+          impl Merge for IntAcc {
               fn merge(&self, other: &Self) -> Self {
-                  Acc(self.0 + other.0)
+                  IntAcc(self.0.clone().union(other.0.clone()))
               }
           }
 
-          type T = &'static str;
-          type GSS = LeveledGSS<T, Acc>;
+          impl IntAcc {
+              fn new(vals: &[i32]) -> Self {
+                  let mut set = im::HashSet::new();
+                  for &v in vals {
+                      set.insert(v);
+                  }
+                  IntAcc(set)
+              }
+          }
+
+          type TestGSS = LeveledGSS<String, IntAcc>;
+
+          fn gss_from_str_stacks(stacks: &[(&[&str], &[i32])]) -> TestGSS {
+              let stacks_vec: Vec<(Vec<String>, IntAcc)> = stacks
+                  .iter()
+                  .map(|(s, a)| {
+                      (
+                          s.iter().map(|&v| v.to_string()).collect(),
+                          IntAcc::new(a),
+                      )
+                  })
+                  .collect();
+              TestGSS::from_stacks(&stacks_vec)
+          }
 
           #[test]
-          fn pop_is_deterministic_and_reuses_nodes() {
-              // GSS for path A -> B -> C
-              let gss0 = GSS::from_stacks(&[(vec!["A", "B", "C"], Acc(1))]);
+          fn test_pop_sharing_and_determinism() {
+              let gss0 = gss_from_str_stacks(&[(
+                  &["A", "B", "C"],
+                  &[1],
+              )]);
 
-              // Pop once
               let gss1 = gss0.pop();
-              // Pop again
               let gss2 = gss0.pop();
 
-              // 1. Pop should be deterministic and memoized.
-              assert!(
-                  gss1.ptr_eq(&gss2),
-                  "Popping the same GSS twice should yield pointer-equal results"
-              );
-
-              // 2. The result of pop should be a pointer to the child node, not a copy.
-              let child_node = match &*gss0.inner {
-                  Upper::Branch(b) => b.children.get("A").unwrap().values().next().unwrap().clone(),
-                  _ => panic!("Expected UpperBranch at root"),
-              };
-              assert!(
-                  Arc::ptr_eq(&gss1.inner, &child_node),
-                  "Popped GSS inner should be pointer-equal to original child node"
-              );
+              // Popping is deterministic and should produce structurally identical GSS
+              // with maximum sharing.
+              assert!(gss1.inner_ptrs_eq(&gss2));
+              assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
           }
 
           #[test]
-          fn push_pop_on_branch_is_identity() {
-              // GSS for path A -> B. This creates a branch root.
-              let gss0 = GSS::from_stacks(&[(vec!["A", "B"], Acc(1))]);
-              assert!(matches!(&*gss0.inner, Upper::Branch(_)));
+          fn test_push_pop_identity() {
+              let gss0 = gss_from_str_stacks(&[(
+                  &["A", "B"],
+                  &[1],
+              )]);
 
-              let gss1 = gss0.push("X").pop();
+              let gss1 = gss0.push("X".to_string()).pop();
 
-              // For a branch-rooted GSS, push().pop() should be a pointer-wise identity operation.
-              assert!(
-                  gss0.ptr_eq(&gss1),
-                  "push followed by pop should return a pointer-equal GSS for branch-rooted GSS"
-              );
+              // push followed by pop should return the exact same GSS structure.
+              assert!(gss0.ptr_eq(&gss1), "push/pop should be an identity operation returning the same Arc");
           }
 
           #[test]
-          fn push_pop_on_interface_is_structurally_identity() {
-              // GSS for a path of length 0. This creates an interface root.
-              let gss0 = GSS::from_stacks(&[(vec![], Acc(1))]);
-              assert!(matches!(&*gss0.inner, Upper::Interface(_)));
+          fn test_push_pop_identity_from_empty() {
+              let gss0 = TestGSS::empty();
+              let gss1 = gss0.push("X".to_string()).pop();
 
-              let gss1 = gss0.push("X").pop();
-
-              // For an interface-rooted GSS, push() converts the interface to a lower node,
-              // and pop() reconstructs an interface from that lower node. This means a new
-              // Arc is allocated, so they won't be pointer-equal.
-              assert!(!gss0.ptr_eq(&gss1), "push.pop on interface root creates a new node, so should not be pointer-equal");
-
-              // However, they should be structurally identical. We can verify this by
-              // normalizing them, which produces a canonical, pointer-equal representation
-              // for structurally identical GSSs.
-              let norm0 = gss0.normalize();
-              let norm1 = gss1.normalize();
-              assert!(norm0.ptr_eq(&norm1), "push.pop on interface root should be structurally identical");
+              // On an empty GSS, push is a no-op, so pop is also a no-op on the result.
+              assert!(gss0.ptr_eq(&gss1));
           }
 
           #[test]
-          fn push_pop_on_empty_is_identity() {
-              let gss0 = GSS::empty();
-              // push on empty is a no-op in the current implementation
-              let gss_pushed = gss0.push("X");
-              assert!(gss_pushed.ptr_eq(&gss0));
+          fn test_pop_preserves_child_node_sharing() {
+              let gss_abc = gss_from_str_stacks(&[(
+                  &["A", "B", "C"],
+                  &[1],
+              )]);
 
-              // pop on empty is also a no-op
-              let gss1 = gss_pushed.pop();
-              assert!(gss1.ptr_eq(&gss0));
+              let gss_bc_from_pop = gss_abc.pop();
 
-              assert!(gss0.ptr_eq(&gss1), "push followed by pop on an empty GSS should be a pointer-equal identity op");
+              // Manually find the node for "B"->"C" in the original GSS
+              let preds = gss_abc.predecessors();
+              let children_of_a = preds.get(&"A".to_string()).unwrap();
+              let gss_bc_from_preds = children_of_a.values().next().unwrap().first().unwrap();
+
+              // The GSS resulting from pop should be structurally identical to the
+              // predecessor GSS found inside the original.
+              assert!(gss_bc_from_pop.inner_ptrs_eq(gss_bc_from_preds));
+
+              // And more strongly, the children of their roots should be the *same pointers*.
+              let inner_pop = &gss_bc_from_pop.inner;
+              let inner_preds = &gss_bc_from_preds.inner;
+
+              match (&**inner_pop, &**inner_preds) {
+                  (Upper::Interface(i_pop), Upper::Interface(i_preds)) => {
+                      let children_pop = i_pop.children.get(&"B".to_string()).unwrap();
+                      let children_preds = i_preds.children.get(&"B".to_string()).unwrap();
+                      let child_c_pop = children_pop.values().next().unwrap();
+                      let child_c_preds = children_preds.values().next().unwrap();
+                      assert!(Arc::ptr_eq(child_c_pop, child_c_preds));
+                  }
+                  _ => panic!("Expected Interface nodes"),
+              }
           }
       }
 
@@ -4147,6 +4214,58 @@ local_system:
       impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
           pub fn ptr_eq(&self, other: &Self) -> bool {
               Arc::ptr_eq(&self.inner, &other.inner)
+          }
+
+          pub fn inner_ptrs_eq(&self, other: &Self) -> bool {
+              match (&*self.inner, &*other.inner) {
+                  (Upper::Branch(b1), Upper::Branch(b2)) => {
+                      if b1.empty != b2.empty || b1.children.len() != b2.children.len() || b1.max_depth != b2.max_depth {
+                          return false;
+                      }
+                      let keys1: HashSet<_> = b1.children.keys().collect();
+                      let keys2: HashSet<_> = b2.children.keys().collect();
+                      if keys1 != keys2 {
+                          return false;
+                      }
+                      for (v, kids1) in b1.children.iter() {
+                          let kids2 = b2.children.get(v).unwrap();
+                          if kids1.len() != kids2.len() || !kids1.keys().eq(kids2.keys()) {
+                              return false;
+                          }
+                          for (d, c1) in kids1.iter() {
+                              let c2 = kids2.get(d).unwrap();
+                              if !Arc::ptr_eq(c1, c2) {
+                                  return false;
+                              }
+                          }
+                      }
+                      true
+                  }
+                  (Upper::Interface(i1), Upper::Interface(i2)) => {
+                      if i1.acc != i2.acc || i1.empty != i2.empty || i1.children.len() != i2.children.len() || i1.max_depth != i2.max_depth {
+                          return false;
+                      }
+                      let keys1: HashSet<_> = i1.children.keys().collect();
+                      let keys2: HashSet<_> = i2.children.keys().collect();
+                      if keys1 != keys2 {
+                          return false;
+                      }
+                      for (v, kids1) in i1.children.iter() {
+                          let kids2 = i2.children.get(v).unwrap();
+                          if kids1.len() != kids2.len() || !kids1.keys().eq(kids2.keys()) {
+                              return false;
+                          }
+                          for (d, c1) in kids1.iter() {
+                              let c2 = kids2.get(d).unwrap();
+                              if !Arc::ptr_eq(c1, c2) {
+                                  return false;
+                              }
+                          }
+                      }
+                      true
+                  }
+                  _ => false,
+              }
           }
 
           pub fn empty() -> Self {
@@ -7190,6 +7309,54 @@ messages:
               Arc::ptr_eq(&self.inner, &other.inner)
           }
 
+          pub fn inner_ptrs_eq(&self, other: &Self) -> bool {
+              match (&*self.inner, &**other.inner) {
+                  (Upper::Branch(b1), Upper::Branch(b2)) => {
+                      if b1.empty != b2.empty || b1.children.len() != b2.children.len() || b1.max_depth != b2.max_depth {
+                          return false;
+                      }
+                      if b1.children.keys().ne(b2.children.keys()) {
+                          return false;
+                      }
+                      for (v, kids1) in b1.children.iter() {
+                          let kids2 = b2.children.get(v).unwrap();
+                          if kids1.len() != kids2.len() || kids1.keys().ne(kids2.keys()) {
+                              return false;
+                          }
+                          for (d, c1) in kids1.iter() {
+                              let c2 = kids2.get(d).unwrap();
+                              if !Arc::ptr_eq(c1, c2) {
+                                  return false;
+                              }
+                          }
+                      }
+                      true
+                  }
+                  (Upper::Interface(i1), Upper::Interface(i2)) => {
+                      if i1.acc != i2.acc || i1.empty != i2.empty || i1.children.len() != i2.children.len() || i1.max_depth != i2.max_depth {
+                          return false;
+                      }
+                      if i1.children.keys().ne(i2.children.keys()) {
+                          return false;
+                      }
+                      for (v, kids1) in i1.children.iter() {
+                          let kids2 = i2.children.get(v).unwrap();
+                          if kids1.len() != kids2.len() || kids1.keys().ne(kids2.keys()) {
+                              return false;
+                          }
+                          for (d, c1) in kids1.iter() {
+                              let c2 = kids2.get(d).unwrap();
+                              if !Arc::ptr_eq(c1, c2) {
+                                  return false;
+                              }
+                          }
+                      }
+                      true
+                  }
+                  _ => false,
+              }
+          }
+
           pub fn empty() -> Self {
               empty_upper()
           }
@@ -9157,19 +9324,19 @@ messages:
       Start with gss0 A -> B -> C
       pop 1 from gss0 to get gss1
       pop 1 from gss0 to get gss2
-      assert LeveledGSS::ptr_eq(gss1, gss2)
+      assert LeveledGSS::inner_ptrs_eq(gss1, gss2)
 
       Another one:
       Start with A -> B
       push something
       pop 1
-      we should be back where we started, so assert ptr_eq
+      we should be back where we started, so assert inner_ptrs_eq
 
       And this:
       Start with empty node
       push
       pop 1
-      assert ptr eq
+      assert inner_ptrs_eq
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9188,128 +9355,238 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. Here are the step-by-step instructions to add tests for structural sharing, followed by the corresponding git diff.
+      Of course. Here are the step-by-step instructions to add tests for node sharing, followed by the corresponding git diff.
 
       ### Step-by-step Instructions
 
-      1.  **Open the file `src/datastructures/leveled_gss.rs`.**
-      2.  **Navigate to the end of the file.**
-      3.  **Append the following test module.** This code adds a new `tests` module with several test cases to verify that node sharing is preserved across `pop` and `push` operations, which is critical for the GSS's efficiency.
+      1.  **File: `src/datastructures/leveled_gss.rs`**
 
-      ```rust
-      #[cfg(test)]
-      mod tests {
-          use super::*;
+          a. **Correct the `inner_ptrs_eq` method:** The current implementation of `inner_ptrs_eq` uses `.ne()` on iterators from `im::HashMap` and `im::OrdMap`, which is not supported and will cause a compile error. You need to replace this with a correct way to compare the keys.
 
-          #[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
-          struct Acc(usize);
+          -   For the `IHashMap` (from `im::HashMap`), collect the keys into a `HashSet` and compare the sets.
+          -   For the `OrdMap`, the keys are ordered, so you can use `.keys().eq(other.keys())` to compare the iterators directly.
 
-          impl Merge for Acc {
-              fn merge(&self, other: &Self) -> Self {
-                  Acc(self.0 + other.0)
+          Replace the existing `inner_ptrs_eq` method with this corrected version:
+
+          ```rust
+          pub fn inner_ptrs_eq(&self, other: &Self) -> bool {
+              match (&*self.inner, &**other.inner) {
+                  (Upper::Branch(b1), Upper::Branch(b2)) => {
+                      if b1.empty != b2.empty || b1.children.len() != b2.children.len() || b1.max_depth != b2.max_depth {
+                          return false;
+                      }
+                      let keys1: HashSet<_> = b1.children.keys().collect();
+                      let keys2: HashSet<_> = b2.children.keys().collect();
+                      if keys1 != keys2 {
+                          return false;
+                      }
+                      for (v, kids1) in b1.children.iter() {
+                          let kids2 = b2.children.get(v).unwrap();
+                          if kids1.len() != kids2.len() || !kids1.keys().eq(kids2.keys()) {
+                              return false;
+                          }
+                          for (d, c1) in kids1.iter() {
+                              let c2 = kids2.get(d).unwrap();
+                              if !Arc::ptr_eq(c1, c2) {
+                                  return false;
+                              }
+                          }
+                      }
+                      true
+                  }
+                  (Upper::Interface(i1), Upper::Interface(i2)) => {
+                      if i1.acc != i2.acc || i1.empty != i2.empty || i1.children.len() != i2.children.len() || i1.max_depth != i2.max_depth {
+                          return false;
+                      }
+                      let keys1: HashSet<_> = i1.children.keys().collect();
+                      let keys2: HashSet<_> = i2.children.keys().collect();
+                      if keys1 != keys2 {
+                          return false;
+                      }
+                      for (v, kids1) in i1.children.iter() {
+                          let kids2 = i2.children.get(v).unwrap();
+                          if kids1.len() != kids2.len() || !kids1.keys().eq(kids2.keys()) {
+                              return false;
+                          }
+                          for (d, c1) in kids1.iter() {
+                              let c2 = kids2.get(d).unwrap();
+                              if !Arc::ptr_eq(c1, c2) {
+                                  return false;
+                              }
+                          }
+                      }
+                      true
+                  }
+                  _ => false,
               }
           }
+          ```
 
-          type T = &'static str;
-          type GSS = LeveledGSS<T, Acc>;
+          b. **Add a new test module:** At the very end of the file, append the following code to add a new test suite. This suite includes tests for determinism, identity operations (`push`/`pop`), and preservation of child node pointers after a `pop` operation.
 
-          #[test]
-          fn pop_is_deterministic_and_reuses_nodes() {
-              // GSS for path A -> B -> C
-              let gss0 = GSS::from_stacks(&[(vec!["A", "B", "C"], Acc(1))]);
+          ```rust
+          #[cfg(test)]
+          mod tests {
+              use super::*;
+              use std::sync::Arc;
 
-              // Pop once
-              let gss1 = gss0.pop();
-              // Pop again
-              let gss2 = gss0.pop();
+              // A simple accumulator that just collects integers.
+              #[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
+              struct IntAcc(im::HashSet<i32>);
 
-              // 1. Pop should be deterministic and memoized.
-              assert!(
-                  gss1.ptr_eq(&gss2),
-                  "Popping the same GSS twice should yield pointer-equal results"
-              );
+              impl Merge for IntAcc {
+                  fn merge(&self, other: &Self) -> Self {
+                      IntAcc(self.0.clone().union(other.0.clone()))
+                  }
+              }
 
-              // 2. The result of pop should be a pointer to the child node, not a copy.
-              let child_node = match &*gss0.inner {
-                  Upper::Branch(b) => b.children.get("A").unwrap().values().next().unwrap().clone(),
-                  _ => panic!("Expected UpperBranch at root"),
-              };
-              assert!(
-                  Arc::ptr_eq(&gss1.inner, &child_node),
-                  "Popped GSS inner should be pointer-equal to original child node"
-              );
+              impl IntAcc {
+                  fn new(vals: &[i32]) -> Self {
+                      let mut set = im::HashSet::new();
+                      for &v in vals {
+                          set.insert(v);
+                      }
+                      IntAcc(set)
+                  }
+              }
+
+              type TestGSS = LeveledGSS<String, IntAcc>;
+
+              fn gss_from_str_stacks(stacks: &[(&[&str], &[i32])]) -> TestGSS {
+                  let stacks_vec: Vec<(Vec<String>, IntAcc)> = stacks
+                      .iter()
+                      .map(|(s, a)| {
+                          (
+                              s.iter().map(|&v| v.to_string()).collect(),
+                              IntAcc::new(a),
+                          )
+                      })
+                      .collect();
+                  TestGSS::from_stacks(&stacks_vec)
+              }
+
+              #[test]
+              fn test_pop_sharing_and_determinism() {
+                  let gss0 = gss_from_str_stacks(&[(
+                      &["A", "B", "C"],
+                      &[1],
+                  )]);
+
+                  let gss1 = gss0.pop();
+                  let gss2 = gss0.pop();
+
+                  // Popping is deterministic and should produce structurally identical GSS
+                  // with maximum sharing.
+                  assert!(gss1.inner_ptrs_eq(&gss2));
+                  assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
+              }
+
+              #[test]
+              fn test_push_pop_identity() {
+                  let gss0 = gss_from_str_stacks(&[(
+                      &["A", "B"],
+                      &[1],
+                  )]);
+
+                  let gss1 = gss0.push("X".to_string()).pop();
+
+                  // push followed by pop should return the exact same GSS structure.
+                  assert!(gss0.ptr_eq(&gss1), "push/pop should be an identity operation returning the same Arc");
+              }
+
+              #[test]
+              fn test_push_pop_identity_from_empty() {
+                  let gss0 = TestGSS::empty();
+                  let gss1 = gss0.push("X".to_string()).pop();
+
+                  // On an empty GSS, push is a no-op, so pop is also a no-op on the result.
+                  assert!(gss0.ptr_eq(&gss1));
+              }
+
+              #[test]
+              fn test_pop_preserves_child_node_sharing() {
+                  let gss_abc = gss_from_str_stacks(&[(
+                      &["A", "B", "C"],
+                      &[1],
+                  )]);
+
+                  let gss_bc_from_pop = gss_abc.pop();
+
+                  // Manually find the node for "B"->"C" in the original GSS
+                  let preds = gss_abc.predecessors();
+                  let children_of_a = preds.get(&"A".to_string()).unwrap();
+                  let gss_bc_from_preds = children_of_a.values().next().unwrap().first().unwrap();
+
+                  // The GSS resulting from pop should be structurally identical to the
+                  // predecessor GSS found inside the original.
+                  assert!(gss_bc_from_pop.inner_ptrs_eq(gss_bc_from_preds));
+
+                  // And more strongly, the children of their roots should be the *same pointers*.
+                  let inner_pop = &gss_bc_from_pop.inner;
+                  let inner_preds = &gss_bc_from_preds.inner;
+
+                  match (&**inner_pop, &**inner_preds) {
+                      (Upper::Interface(i_pop), Upper::Interface(i_preds)) => {
+                          let children_pop = i_pop.children.get(&"B".to_string()).unwrap();
+                          let children_preds = i_preds.children.get(&"B".to_string()).unwrap();
+                          let child_c_pop = children_pop.values().next().unwrap();
+                          let child_c_preds = children_preds.values().next().unwrap();
+                          assert!(Arc::ptr_eq(child_c_pop, child_c_preds));
+                      }
+                      _ => panic!("Expected Interface nodes"),
+                  }
+              }
           }
-
-          #[test]
-          fn push_pop_on_branch_is_identity() {
-              // GSS for path A -> B. This creates a branch root.
-              let gss0 = GSS::from_stacks(&[(vec!["A", "B"], Acc(1))]);
-              assert!(matches!(&*gss0.inner, Upper::Branch(_)));
-
-              let gss1 = gss0.push("X").pop();
-
-              // For a branch-rooted GSS, push().pop() should be a pointer-wise identity operation.
-              assert!(
-                  gss0.ptr_eq(&gss1),
-                  "push followed by pop should return a pointer-equal GSS for branch-rooted GSS"
-              );
-          }
-
-          #[test]
-          fn push_pop_on_interface_is_structurally_identity() {
-              // GSS for a path of length 0. This creates an interface root.
-              let gss0 = GSS::from_stacks(&[(vec![], Acc(1))]);
-              assert!(matches!(&*gss0.inner, Upper::Interface(_)));
-
-              let gss1 = gss0.push("X").pop();
-
-              // For an interface-rooted GSS, push() converts the interface to a lower node,
-              // and pop() reconstructs an interface from that lower node. This means a new
-              // Arc is allocated, so they won't be pointer-equal.
-              assert!(
-                  !gss0.ptr_eq(&gss1),
-                  "push.pop on interface root creates a new node, so should not be pointer-equal"
-              );
-
-              // However, they should be structurally identical. We can verify this by
-              // normalizing them, which produces a canonical, pointer-equal representation
-              // for structurally identical GSSs.
-              let norm0 = gss0.normalize();
-              let norm1 = gss1.normalize();
-              assert!(
-                  norm0.ptr_eq(&norm1),
-                  "push.pop on interface root should be structurally identical"
-              );
-          }
-
-          #[test]
-          fn push_pop_on_empty_is_identity() {
-              let gss0 = GSS::empty();
-              // push on empty is a no-op in the current implementation
-              let gss_pushed = gss0.push("X");
-              assert!(gss_pushed.ptr_eq(&gss0));
-
-              // pop on empty is also a no-op
-              let gss1 = gss_pushed.pop();
-              assert!(gss1.ptr_eq(&gss0));
-
-              assert!(
-                  gss0.ptr_eq(&gss1),
-                  "push followed by pop on an empty GSS should be a pointer-equal identity op"
-              );
-          }
-      }
-      ```
+          ```
 
       ### Git Diff
 
-      Here is the git patch to apply these changes:
+      Here is the git diff to apply these changes.
 
       ```diff
       diff --git a/src/datastructures/leveled_gss.rs b/src/datastructures/leveled_gss.rs
+      index 211118c..1111111 100644
       --- a/src/datastructures/leveled_gss.rs
       +++ b/src/datastructures/leveled_gss.rs
-      @@ -2011,3 +2011,94 @@
+      @@ -1201,14 +1201,18 @@
+                       if b1.empty != b2.empty || b1.children.len() != b2.children.len() || b1.max_depth != b2.max_depth {
+                           return false;
+                       }
+      -                if b1.children.keys().ne(b2.children.keys()) {
+      +                let keys1: HashSet<_> = b1.children.keys().collect();
+      +                let keys2: HashSet<_> = b2.children.keys().collect();
+      +                if keys1 != keys2 {
+                           return false;
+                       }
+                       for (v, kids1) in b1.children.iter() {
+                           let kids2 = b2.children.get(v).unwrap();
+      -                    if kids1.len() != kids2.len() || kids1.keys().ne(kids2.keys()) {
+      +                    if kids1.len() != kids2.len() || !kids1.keys().eq(kids2.keys()) {
+                               return false;
+                           }
+                           for (d, c1) in kids1.iter() {
+                               let c2 = kids2.get(d).unwrap();
+                               if !Arc::ptr_eq(c1, c2) {
+                                   return false;
+                               }
+      @@ -1220,12 +1224,14 @@
+                       if i1.acc != i2.acc || i1.empty != i2.empty || i1.children.len() != i2.children.len() || i1.max_depth != i2.max_depth {
+                           return false;
+                       }
+      -                if i1.children.keys().ne(i2.children.keys()) {
+      +                let keys1: HashSet<_> = i1.children.keys().collect();
+      +                let keys2: HashSet<_> = i2.children.keys().collect();
+      +                if keys1 != keys2 {
+                           return false;
+                       }
+                       for (v, kids1) in i1.children.iter() {
+                           let kids2 = i2.children.get(v).unwrap();
+      -                    if kids1.len() != kids2.len() || kids1.keys().ne(kids2.keys()) {
+      +                    if kids1.len() != kids2.len() || !kids1.keys().eq(kids2.keys()) {
+                               return false;
+                           }
+                           for (d, c1) in kids1.iter() {
+      @@ -2103,3 +2109,111 @@
                }
            }
        }
@@ -9317,94 +9594,113 @@ messages:
       +#[cfg(test)]
       +mod tests {
       +    use super::*;
+      +    use std::sync::Arc;
       +
+      +    // A simple accumulator that just collects integers.
       +    #[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
-      +    struct Acc(usize);
+      +    struct IntAcc(im::HashSet<i32>);
       +
-      +    impl Merge for Acc {
+      +    impl Merge for IntAcc {
       +        fn merge(&self, other: &Self) -> Self {
-      +            Acc(self.0 + other.0)
+      +            IntAcc(self.0.clone().union(other.0.clone()))
       +        }
       +    }
       +
-      +    type T = &'static str;
-      +    type GSS = LeveledGSS<T, Acc>;
+      +    impl IntAcc {
+      +        fn new(vals: &[i32]) -> Self {
+      +            let mut set = im::HashSet::new();
+      +            for &v in vals {
+      +                set.insert(v);
+      +            }
+      +            IntAcc(set)
+      +        }
+      +    }
+      +
+      +    type TestGSS = LeveledGSS<String, IntAcc>;
+      +
+      +    fn gss_from_str_stacks(stacks: &[(&[&str], &[i32])]) -> TestGSS {
+      +        let stacks_vec: Vec<(Vec<String>, IntAcc)> = stacks
+      +            .iter()
+      +            .map(|(s, a)| {
+      +                (
+      +                    s.iter().map(|&v| v.to_string()).collect(),
+      +                    IntAcc::new(a),
+      +                )
+      +            })
+      +            .collect();
+      +        TestGSS::from_stacks(&stacks_vec)
+      +    }
       +
       +    #[test]
-      +    fn pop_is_deterministic_and_reuses_nodes() {
-      +        // GSS for path A -> B -> C
-      +        let gss0 = GSS::from_stacks(&[(vec!["A", "B", "C"], Acc(1))]);
+      +    fn test_pop_sharing_and_determinism() {
+      +        let gss0 = gss_from_str_stacks(&[(
+      +            &["A", "B", "C"],
+      +            &[1],
+      +        )]);
       +
-      +        // Pop once
       +        let gss1 = gss0.pop();
-      +        // Pop again
       +        let gss2 = gss0.pop();
       +
-      +        // 1. Pop should be deterministic and memoized.
-      +        assert!(
-      +            gss1.ptr_eq(&gss2),
-      +            "Popping the same GSS twice should yield pointer-equal results"
-      +        );
-      +
-      +        // 2. The result of pop should be a pointer to the child node, not a copy.
-      +        let child_node = match &*gss0.inner {
-      +            Upper::Branch(b) => b.children.get("A").unwrap().values().next().unwrap().clone(),
-      +            _ => panic!("Expected UpperBranch at root"),
-      +        };
-      +        assert!(
-      +            Arc::ptr_eq(&gss1.inner, &child_node),
-      +            "Popped GSS inner should be pointer-equal to original child node"
-      +        );
+      +        // Popping is deterministic and should produce structurally identical GSS
+      +        // with maximum sharing.
+      +        assert!(gss1.inner_ptrs_eq(&gss2));
+      +        assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
       +    }
       +
       +    #[test]
-      +    fn push_pop_on_branch_is_identity() {
-      +        // GSS for path A -> B. This creates a branch root.
-      +        let gss0 = GSS::from_stacks(&[(vec!["A", "B"], Acc(1))]);
-      +        assert!(matches!(&*gss0.inner, Upper::Branch(_)));
+      +    fn test_push_pop_identity() {
+      +        let gss0 = gss_from_str_stacks(&[(
+      +            &["A", "B"],
+      +            &[1],
+      +        )]);
       +
-      +        let gss1 = gss0.push("X").pop();
+      +        let gss1 = gss0.push("X".to_string()).pop();
       +
-      +        // For a branch-rooted GSS, push().pop() should be a pointer-wise identity operation.
-      +        assert!(
-      +            gss0.ptr_eq(&gss1),
-      +            "push followed by pop should return a pointer-equal GSS for branch-rooted GSS"
-      +        );
+      +        // push followed by pop should return the exact same GSS structure.
+      +        assert!(gss0.ptr_eq(&gss1), "push/pop should be an identity operation returning the same Arc");
       +    }
       +
       +    #[test]
-      +    fn push_pop_on_interface_is_structurally_identity() {
-      +        // GSS for a path of length 0. This creates an interface root.
-      +        let gss0 = GSS::from_stacks(&[(vec![], Acc(1))]);
-      +        assert!(matches!(&*gss0.inner, Upper::Interface(_)));
+      +    fn test_push_pop_identity_from_empty() {
+      +        let gss0 = TestGSS::empty();
+      +        let gss1 = gss0.push("X".to_string()).pop();
       +
-      +        let gss1 = gss0.push("X").pop();
-      +
-      +        // For an interface-rooted GSS, push() converts the interface to a lower node,
-      +        // and pop() reconstructs an interface from that lower node. This means a new
-      +        // Arc is allocated, so they won't be pointer-equal.
-      +        assert!(!gss0.ptr_eq(&gss1), "push.pop on interface root creates a new node, so should not be pointer-equal");
-      +
-      +        // However, they should be structurally identical. We can verify this by
-      +        // normalizing them, which produces a canonical, pointer-equal representation
-      +        // for structurally identical GSSs.
-      +        let norm0 = gss0.normalize();
-      +        let norm1 = gss1.normalize();
-      +        assert!(norm0.ptr_eq(&norm1), "push.pop on interface root should be structurally identical");
+      +        // On an empty GSS, push is a no-op, so pop is also a no-op on the result.
+      +        assert!(gss0.ptr_eq(&gss1));
       +    }
       +
       +    #[test]
-      +    fn push_pop_on_empty_is_identity() {
-      +        let gss0 = GSS::empty();
-      +        // push on empty is a no-op in the current implementation
-      +        let gss_pushed = gss0.push("X");
-      +        assert!(gss_pushed.ptr_eq(&gss0));
+      +    fn test_pop_preserves_child_node_sharing() {
+      +        let gss_abc = gss_from_str_stacks(&[(
+      +            &["A", "B", "C"],
+      +            &[1],
+      +        )]);
       +
-      +        // pop on empty is also a no-op
-      +        let gss1 = gss_pushed.pop();
-      +        assert!(gss1.ptr_eq(&gss0));
+      +        let gss_bc_from_pop = gss_abc.pop();
       +
-      +        assert!(gss0.ptr_eq(&gss1), "push followed by pop on an empty GSS should be a pointer-equal identity op");
+      +        // Manually find the node for "B"->"C" in the original GSS
+      +        let preds = gss_abc.predecessors();
+      +        let children_of_a = preds.get(&"A".to_string()).unwrap();
+      +        let gss_bc_from_preds = children_of_a.values().next().unwrap().first().unwrap();
+      +
+      +        // The GSS resulting from pop should be structurally identical to the
+      +        // predecessor GSS found inside the original.
+      +        assert!(gss_bc_from_pop.inner_ptrs_eq(gss_bc_from_preds));
+      +
+      +        // And more strongly, the children of their roots should be the *same pointers*.
+      +        let inner_pop = &gss_bc_from_pop.inner;
+      +        let inner_preds = &gss_bc_from_preds.inner;
+      +
+      +        match (&**inner_pop, &**inner_preds) {
+      +            (Upper::Interface(i_pop), Upper::Interface(i_preds)) => {
+      +                let children_pop = i_pop.children.get(&"B".to_string()).unwrap();
+      +                let children_preds = i_preds.children.get(&"B".to_string()).unwrap();
+      +                let child_c_pop = children_pop.values().next().unwrap();
+      +                let child_c_preds = children_preds.values().next().unwrap();
+      +                assert!(Arc::ptr_eq(child_c_pop, child_c_preds));
+      +            }
+      +            _ => panic!("Expected Interface nodes"),
+      +        }
       +    }
       +}
 
@@ -9419,7 +9715,7 @@ messages:
       Applying patch to 'src/datastructures/leveled_gss.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/leveled_gss.rs.
     metadata:
-  - user: 'Changes committed with message: "test: Add tests to verify structural sharing
-      and node pointer equality after pop/push"'
+  - user: 'Changes committed with message: "Fix inner_ptrs_eq and add tests for node
+      sharing preservation after pop/push"'
     metadata:
 ...

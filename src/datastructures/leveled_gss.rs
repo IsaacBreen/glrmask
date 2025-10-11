@@ -72,6 +72,119 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    // A simple accumulator that just collects integers.
+    #[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
+    struct IntAcc(im::HashSet<i32>);
+
+    impl Merge for IntAcc {
+        fn merge(&self, other: &Self) -> Self {
+            IntAcc(self.0.clone().union(other.0.clone()))
+        }
+    }
+
+    impl IntAcc {
+        fn new(vals: &[i32]) -> Self {
+            let mut set = im::HashSet::new();
+            for &v in vals {
+                set.insert(v);
+            }
+            IntAcc(set)
+        }
+    }
+
+    type TestGSS = LeveledGSS<String, IntAcc>;
+
+    fn gss_from_str_stacks(stacks: &[(&[&str], &[i32])]) -> TestGSS {
+        let stacks_vec: Vec<(Vec<String>, IntAcc)> = stacks
+            .iter()
+            .map(|(s, a)| {
+                (
+                    s.iter().map(|&v| v.to_string()).collect(),
+                    IntAcc::new(a),
+                )
+            })
+            .collect();
+        TestGSS::from_stacks(&stacks_vec)
+    }
+
+    #[test]
+    fn test_pop_sharing_and_determinism() {
+        let gss0 = gss_from_str_stacks(&[(
+            &["A", "B", "C"],
+            &[1],
+        )]);
+
+        let gss1 = gss0.pop();
+        let gss2 = gss0.pop();
+
+        // Popping is deterministic and should produce structurally identical GSS
+        // with maximum sharing.
+        assert!(gss1.inner_ptrs_eq(&gss2));
+        assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
+    }
+
+    #[test]
+    fn test_push_pop_identity() {
+        let gss0 = gss_from_str_stacks(&[(
+            &["A", "B"],
+            &[1],
+        )]);
+
+        let gss1 = gss0.push("X".to_string()).pop();
+
+        // push followed by pop should return the exact same GSS structure.
+        assert!(gss0.ptr_eq(&gss1), "push/pop should be an identity operation returning the same Arc");
+    }
+
+    #[test]
+    fn test_push_pop_identity_from_empty() {
+        let gss0 = TestGSS::empty();
+        let gss1 = gss0.push("X".to_string()).pop();
+
+        // On an empty GSS, push is a no-op, so pop is also a no-op on the result.
+        assert!(gss0.ptr_eq(&gss1));
+    }
+
+    #[test]
+    fn test_pop_preserves_child_node_sharing() {
+        let gss_abc = gss_from_str_stacks(&[(
+            &["A", "B", "C"],
+            &[1],
+        )]);
+
+        let gss_bc_from_pop = gss_abc.pop();
+
+        // Manually find the node for "B"->"C" in the original GSS
+        let preds = gss_abc.predecessors();
+        let children_of_a = preds.get(&"A".to_string()).unwrap();
+        let gss_bc_from_preds = children_of_a.values().next().unwrap().first().unwrap();
+
+        // The GSS resulting from pop should be structurally identical to the
+        // predecessor GSS found inside the original.
+        assert!(gss_bc_from_pop.inner_ptrs_eq(gss_bc_from_preds));
+
+        // And more strongly, the children of their roots should be the *same pointers*.
+        let inner_pop = &gss_bc_from_pop.inner;
+        let inner_preds = &gss_bc_from_preds.inner;
+
+        match (&**inner_pop, &**inner_preds) {
+            (Upper::Interface(i_pop), Upper::Interface(i_preds)) => {
+                let children_pop = i_pop.children.get(&"B".to_string()).unwrap();
+                let children_preds = i_preds.children.get(&"B".to_string()).unwrap();
+                let child_c_pop = children_pop.values().next().unwrap();
+                let child_c_preds = children_preds.values().next().unwrap();
+                assert!(Arc::ptr_eq(child_c_pop, child_c_preds));
+            }
+            _ => panic!("Expected Interface nodes"),
+        }
+    }
+}
+
 // --------------------
 // Small, reusable helpers
 // --------------------
@@ -1054,12 +1167,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 if b1.empty != b2.empty || b1.children.len() != b2.children.len() || b1.max_depth != b2.max_depth {
                     return false;
                 }
-                if b1.children.keys().ne(b2.children.keys()) {
+                let keys1: HashSet<_> = b1.children.keys().collect();
+                let keys2: HashSet<_> = b2.children.keys().collect();
+                if keys1 != keys2 {
                     return false;
                 }
                 for (v, kids1) in b1.children.iter() {
                     let kids2 = b2.children.get(v).unwrap();
-                    if kids1.len() != kids2.len() || kids1.keys().ne(kids2.keys()) {
+                    if kids1.len() != kids2.len() || !kids1.keys().eq(kids2.keys()) {
                         return false;
                     }
                     for (d, c1) in kids1.iter() {
@@ -1075,12 +1190,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 if i1.acc != i2.acc || i1.empty != i2.empty || i1.children.len() != i2.children.len() || i1.max_depth != i2.max_depth {
                     return false;
                 }
-                if i1.children.keys().ne(i2.children.keys()) {
+                let keys1: HashSet<_> = i1.children.keys().collect();
+                let keys2: HashSet<_> = i2.children.keys().collect();
+                if keys1 != keys2 {
                     return false;
                 }
                 for (v, kids1) in i1.children.iter() {
                     let kids2 = i2.children.get(v).unwrap();
-                    if kids1.len() != kids2.len() || kids1.keys().ne(kids2.keys()) {
+                    if kids1.len() != kids2.len() || !kids1.keys().eq(kids2.keys()) {
                         return false;
                     }
                     for (d, c1) in kids1.iter() {
