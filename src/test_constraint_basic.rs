@@ -1626,8 +1626,8 @@ fn test_gss_structural_sharing_factor() -> Result<(), Box<dyn std::error::Error>
     println!("Stats for terminal ID {}: {:?}", tid, stats);
 
     assert!(
-        stats.structural_sharing_factor < 0.4,
-        "Structural sharing factor ({}) was not less than 0.4, indicating poor GSS node sharing.",
+        stats.structural_sharing_factor > 0.49,
+        "Structural sharing factor ({}) was not greater than 0.49, indicating poor GSS node sharing",
         stats.structural_sharing_factor
     );
 
