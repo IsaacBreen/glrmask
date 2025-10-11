@@ -2392,6 +2392,254 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
+    pub fn to_graph_string(&self, upper_only: bool) -> String
+    where
+        T: std::fmt::Debug,
+        A: std::fmt::Debug,
+    {
+        let mut memo = HashSet::new();
+        self.to_graph_string_with_memo(&mut memo, upper_only)
+    }
+
+    pub fn to_graph_string_with_memo(&self, memo: &mut HashSet<usize>, upper_only: bool) -> String
+    where
+        T: std::fmt::Debug,
+        A: std::fmt::Debug,
+    {
+        let mut output_lines = Vec::new();
+        let root = &self.inner;
+        let root_id = Arc::as_ptr(root) as usize;
+
+        if memo.contains(&root_id) {
+            output_lines.push(format!("--- Root -> Ref to Node @ {:#x} ---", root_id));
+        } else {
+            output_lines.push(format!("--- Root {} ---", Self::get_node_info_upper(root)));
+            Self::format_recursive_upper(root, "", memo, &mut output_lines, upper_only);
+        }
+
+        output_lines.join("\n")
+    }
+
+    fn get_node_info_lower(node: &Arc<Lower<T>>) -> String
+    where
+        T: std::fmt::Debug,
+    {
+        let mut info = format!(
+            "Lower @ {:#x} (MaxDepth: {})",
+            Arc::as_ptr(node) as usize,
+            node.max_depth
+        );
+        if node.empty {
+            info.push_str(" [TERMINAL]");
+        }
+        info
+    }
+
+    fn get_node_info_upper(node: &Arc<Upper<T, A>>) -> String
+    where
+        T: std::fmt::Debug,
+        A: std::fmt::Debug,
+    {
+        match &**node {
+            Upper::Branch(b) => {
+                let mut info = format!(
+                    "UpperBranch @ {:#x} (MaxDepth: {})",
+                    Arc::as_ptr(b) as usize,
+                    b.max_depth
+                );
+                if let Some(e) = &b.empty {
+                    info.push_str(&format!(" [TERMINAL empty: {:?}]", e));
+                }
+                info
+            }
+            Upper::Interface(i) => {
+                let mut info = format!(
+                    "Interface @ {:#x} (MaxDepth: {}) | acc: {:?}",
+                    Arc::as_ptr(i) as usize,
+                    i.max_depth,
+                    i.acc
+                );
+                if let Some(e) = &i.empty {
+                    info.push_str(&format!(" [TERMINAL empty: {:?}]", e));
+                }
+                if i.children.is_empty() && i.empty.is_none() {
+                    info.push_str(&format!(" [IMPLICIT TERMINAL acc: {:?}]", i.acc));
+                }
+                info
+            }
+        }
+    }
+
+    fn format_recursive_lower(
+        node: &Arc<Lower<T>>,
+        current_prefix: &str,
+        printed_nodes: &mut HashSet<usize>,
+        output_lines: &mut Vec<String>,
+    ) where
+        T: std::fmt::Debug,
+    {
+        printed_nodes.insert(Arc::as_ptr(node) as usize);
+
+        let mut children_to_print = Vec::new();
+        let mut sorted_values: Vec<_> = node.children.keys().collect();
+        sorted_values.sort_by_key(|v| format!("{:?}", v));
+
+        for v in sorted_values {
+            if let Some(kids_at_depths) = node.children.get(v) {
+                for (depth, child) in kids_at_depths.iter() {
+                    let label = format!("Edge {:?} (d={})", v, depth);
+                    children_to_print.push((label, child.clone()));
+                }
+            }
+        }
+
+        let num_children = children_to_print.len();
+        for (i, (label, child)) in children_to_print.into_iter().enumerate() {
+            let is_last = i == num_children - 1;
+            let prefix_char = if is_last { "└── " } else { "├── " };
+            let child_id = Arc::as_ptr(&child) as usize;
+
+            if printed_nodes.contains(&child_id) {
+                let line = format!(
+                    "{}{}{} -> Ref to Node @ {:#x}",
+                    current_prefix, prefix_char, label, child_id
+                );
+                output_lines.push(line);
+            } else {
+                let line = format!(
+                    "{}{}{} -> {}",
+                    current_prefix,
+                    prefix_char,
+                    label,
+                    Self::get_node_info_lower(&child)
+                );
+                output_lines.push(line);
+
+                let child_prefix = format!("{}{}", current_prefix, if is_last { "    " } else { "│   " });
+                Self::format_recursive_lower(&child, &child_prefix, printed_nodes, output_lines);
+            }
+        }
+    }
+
+    fn format_recursive_upper(
+        node: &Arc<Upper<T, A>>,
+        current_prefix: &str,
+        printed_nodes: &mut HashSet<usize>,
+        output_lines: &mut Vec<String>,
+        upper_only: bool,
+    ) where
+        T: std::fmt::Debug,
+        A: std::fmt::Debug,
+    {
+        printed_nodes.insert(Arc::as_ptr(node) as usize);
+
+        match &**node {
+            Upper::Branch(b) => {
+                let mut children_to_print = Vec::new();
+                let mut sorted_values: Vec<_> = b.children.keys().collect();
+                sorted_values.sort_by_key(|v| format!("{:?}", v));
+
+                for v in sorted_values {
+                    if let Some(kids_at_depths) = b.children.get(v) {
+                        for (depth, child) in kids_at_depths.iter() {
+                            let label = format!("Edge {:?} (d={})", v, depth);
+                            children_to_print.push((label, child.clone()));
+                        }
+                    }
+                }
+
+                let num_children = children_to_print.len();
+                for (i, (label, child)) in children_to_print.into_iter().enumerate() {
+                    let is_last = i == num_children - 1;
+                    let prefix_char = if is_last { "└── " } else { "├── " };
+                    let child_id = Arc::as_ptr(&child) as usize;
+
+                    if printed_nodes.contains(&child_id) {
+                        let line = format!(
+                            "{}{}{} -> Ref to Node @ {:#x}",
+                            current_prefix, prefix_char, label, child_id
+                        );
+                        output_lines.push(line);
+                    } else {
+                        let line = format!(
+                            "{}{}{} -> {}",
+                            current_prefix,
+                            prefix_char,
+                            label,
+                            Self::get_node_info_upper(&child)
+                        );
+                        output_lines.push(line);
+
+                        let child_prefix =
+                            format!("{}{}", current_prefix, if is_last { "    " } else { "│   " });
+                        Self::format_recursive_upper(
+                            &child,
+                            &child_prefix,
+                            printed_nodes,
+                            output_lines,
+                            upper_only,
+                        );
+                    }
+                }
+            }
+            Upper::Interface(i) => {
+                if upper_only && !i.children.is_empty() {
+                    let prefix_char = "└── ";
+                    let num_lower_edges: usize = i.children.values().map(|kids| kids.len()).sum();
+                    let line = format!("{}[{} lower edges omitted]", prefix_char, num_lower_edges);
+                    output_lines.push(format!("{}{}", current_prefix, line));
+                    return;
+                }
+
+                let mut children_to_print = Vec::new();
+                let mut sorted_values: Vec<_> = i.children.keys().collect();
+                sorted_values.sort_by_key(|v| format!("{:?}", v));
+
+                for v in sorted_values {
+                    if let Some(kids_at_depths) = i.children.get(v) {
+                        for (depth, child) in kids_at_depths.iter() {
+                            let label = format!("Edge {:?} (d={})", v, depth);
+                            children_to_print.push((label, child.clone()));
+                        }
+                    }
+                }
+
+                let num_children = children_to_print.len();
+                for (i, (label, child)) in children_to_print.into_iter().enumerate() {
+                    let is_last = i == num_children - 1;
+                    let prefix_char = if is_last { "└── " } else { "├── " };
+                    let child_id = Arc::as_ptr(&child) as usize;
+
+                    if printed_nodes.contains(&child_id) {
+                        let line = format!(
+                            "{}{}{} -> Ref to Node @ {:#x}",
+                            current_prefix, prefix_char, label, child_id
+                        );
+                        output_lines.push(line);
+                    } else {
+                        let line = format!(
+                            "{}{}{} -> {}",
+                            current_prefix,
+                            prefix_char,
+                            label,
+                            Self::get_node_info_lower(&child)
+                        );
+                        output_lines.push(line);
+
+                        let child_prefix =
+                            format!("{}{}", current_prefix, if is_last { "    " } else { "│   " });
+                        Self::format_recursive_lower(
+                            &child,
+                            &child_prefix,
+                            printed_nodes,
+                            output_lines,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     pub fn predecessors(&self) -> BTreeMap<T, BTreeMap<isize, Vec<Self>>>
     where
         T: Clone + Eq + Hash + Ord,
