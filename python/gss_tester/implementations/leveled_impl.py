@@ -653,7 +653,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
             if depth < _max:
                 for v, kids in node.children.items():
-                    new_kids_for_v: Dict[int, Upper[T, Acc]]] = {}
+                    new_kids_for_v: Dict[int, Upper[T, Acc]] = {}
                     for d, child in kids.items():
                         new_child = _filter_upper(child, depth + 1)
                         if new_child:
@@ -698,7 +698,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             new_children: Dict[T, Dict[int, Upper[T, NewAcc]]] = {}
 
             for v, kids in node.children.items():
-                new_kids_for_v: Dict[int, Upper[T, NewAcc]]] = {}
+                new_kids_for_v: Dict[int, Upper[T, NewAcc]] = {}
                 for d, child in kids.items():
                     new_child = transform(child)
                     new_kids_for_v[new_child._max_depth] = new_child
@@ -735,7 +735,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
             new_children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
             for v, kids in node.children.items():
-                new_kids_for_v: Dict[int, Upper[T, Acc]]] = {}
+                new_kids_for_v: Dict[int, Upper[T, Acc]] = {}
                 child_map_changed = False
                 for d, child in kids.items():
                     new_child = transform(child)
@@ -819,7 +819,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             new_children: Dict[T, Dict[int, Upper[T, NewAcc]]] = {}
 
             for v, kids in node.children.items():
-                new_kids_for_v: Dict[int, Upper[T, NewAcc]]] = {}
+                new_kids_for_v: Dict[int, Upper[T, NewAcc]] = {}
                 for d, child in kids.items():
                     new_child = transform(child)
                     if new_child is not None:
@@ -1368,7 +1368,7 @@ def try_promote(node: Upper[T, AccPromote]) -> Upper[T, AccPromote]:
 def interface_to_upperbranch(it: Interface[T, Acc]) -> UpperBranch[T, Acc]:
     children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
     for v, kids in it.lower.children.items():
-        v_map: Dict[int, Upper[T, Acc]]] = {}
+        v_map: Dict[int, Upper[T, Acc]] = {}
         for lchild in kids.values():
             ci = Interface(
                 lower=lchild,
@@ -1425,7 +1425,7 @@ def lower_to_upper(l: Lower[T], acc: Acc) -> Upper[T, Acc]:
     # Convert a Lower subtree to an Upper subtree; the accumulator for all stacks is 'acc'.
     children: Dict[T, Dict[int, Upper[T, Acc]]] = {}
     for v, kids in l.children.items():
-        v_map: Dict[int, Upper[T, Acc]]] = {}
+        v_map: Dict[int, Upper[T, Acc]] = {}
         for lchild in kids.values():
             up_child = lower_to_upper(lchild, acc)
             v_map[up_child._max_depth] = up_child
