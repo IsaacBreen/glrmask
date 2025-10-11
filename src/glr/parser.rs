@@ -277,13 +277,15 @@ pub struct GLRParser {
     pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
     pub start_state_id: StateID,
     pub everything_state_id: StateID,
-	pub ignore_terminal_id: Option<TerminalID>,
-	// Precomputed tables for substring parsing reductions.
-	pub(crate) substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
-	pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
-	// New: support multiple combined states (including the "combined start" which replaces hallucinated semantics)
-	pub combined_rows: BTreeMap<StateID, HallucinatedRow>,
-	pub combined_start_state_id: StateID,
+    pub ignore_terminal_id: Option<TerminalID>,
+    // Precomputed tables for substring parsing reductions.
+    pub(crate) substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
+    pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+    pub hallucinated_row: HallucinatedRow,
+    pub hallucinated_state_id: StateID,
+    // New: support multiple combined states (including the "combined start" which replaces hallucinated semantics)
+    pub combined_rows: BTreeMap<StateID, HallucinatedRow>,
+    pub combined_start_state_id: StateID,
 }
 
 impl JSONConvertible for GLRParser {
@@ -327,12 +329,12 @@ impl JSONConvertible for GLRParser {
                     .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
 
-
-				let substring_gotos = stage_9(&table, &non_terminal_map);
-				let reduce_goto_map = crate::glr::table::stage_10(&table);
-				// Build combined states (start combined replaces hallucinated behavior)
-				let (combined_rows, combined_start_state_id) = crate::glr::table::stage_11_build_combined_states(&table);
-
+                let substring_gotos = stage_9(&table, &non_terminal_map);
+                let reduce_goto_map = crate::glr::table::stage_10(&table);
+                let hallucinated_row = crate::glr::table::stage_11_create_hallucinated_row(&table);
+                let hallucinated_state_id = StateID(usize::MAX);
+                // Build combined states (start combined replaces hallucinated behavior)
+                let (combined_rows, combined_start_state_id) = crate::glr::table::stage_11_build_combined_states(&table);
 
                 Ok(GLRParser {
                     table,
@@ -342,12 +344,14 @@ impl JSONConvertible for GLRParser {
                     item_set_map,
                     start_state_id,
                     everything_state_id,
-					ignore_terminal_id,
-					substring_gotos,
-					reduce_goto_map,
-					combined_rows,
-					combined_start_state_id,
-				})
+                    ignore_terminal_id,
+                    substring_gotos,
+                    reduce_goto_map,
+                    hallucinated_row,
+                    hallucinated_state_id,
+                    combined_rows,
+                    combined_start_state_id,
+                })
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
         }
@@ -366,13 +370,12 @@ impl Debug for GLRParser {
             .field("item_set_map", &self.item_set_map)
             .field("start_state_id", &self.start_state_id)
             .field("everything_state_id", &self.everything_state_id)
-			.field("ignore_terminal_id", &self.ignore_terminal_id)
-			.field("substring_gotos_size", &self.substring_gotos.len())
-			.field("reduce_goto_map_size", &self.reduce_goto_map.len())
-			.finish()
-	}
+            .field("ignore_terminal_id", &self.ignore_terminal_id)
+            .field("substring_gotos_size", &self.substring_gotos.len())
+            .field("reduce_goto_map_size", &self.reduce_goto_map.len())
+            .finish()
+    }
 }
-
 
 impl PartialEq for GLRParser {
     fn eq(&self, other: &Self) -> bool {
@@ -382,13 +385,15 @@ impl PartialEq for GLRParser {
         self.non_terminal_map == other.non_terminal_map &&
         self.item_set_map == other.item_set_map &&
         self.start_state_id == other.start_state_id &&
-		self.everything_state_id == other.everything_state_id &&
-		self.ignore_terminal_id == other.ignore_terminal_id &&
-		self.substring_gotos == other.substring_gotos &&
-		self.reduce_goto_map == other.reduce_goto_map &&
-		self.combined_rows == other.combined_rows &&
-		self.combined_start_state_id == other.combined_start_state_id
-	}
+        self.everything_state_id == other.everything_state_id &&
+        self.ignore_terminal_id == other.ignore_terminal_id &&
+        self.substring_gotos == other.substring_gotos &&
+        self.reduce_goto_map == other.reduce_goto_map &&
+        self.hallucinated_row == other.hallucinated_row &&
+        self.hallucinated_state_id == other.hallucinated_state_id &&
+        self.combined_rows == other.combined_rows &&
+        self.combined_start_state_id == other.combined_start_state_id
+    }
 }
 
 impl Eq for GLRParser {}
@@ -403,12 +408,14 @@ impl GLRParser {
         start_state_id: StateID,
         everything_state_id: StateID,
         actions: BTreeMap<NonTerminal, ActionFn>, // Parameter type
-		ignore_terminal_id: Option<TerminalID>,
-		substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
-		reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
-		combined_rows: BTreeMap<StateID, HallucinatedRow>,
-		combined_start_state_id: StateID,
-	) -> Self {
+        ignore_terminal_id: Option<TerminalID>,
+        substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
+        reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+        hallucinated_row: HallucinatedRow,
+        hallucinated_state_id: StateID,
+        combined_rows: BTreeMap<StateID, HallucinatedRow>,
+        combined_start_state_id: StateID,
+    ) -> Self {
         let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
             .into_iter()
             .map(|(nt, func)| {
@@ -426,12 +433,14 @@ impl GLRParser {
             item_set_map,
             start_state_id,
             everything_state_id,
-			ignore_terminal_id,
-			substring_gotos,
-			reduce_goto_map,
-			combined_rows,
-			combined_start_state_id,
-		}
+            ignore_terminal_id,
+            substring_gotos,
+            reduce_goto_map,
+            hallucinated_row,
+            hallucinated_state_id,
+            combined_rows,
+            combined_start_state_id,
+        }
     }
 
     pub fn init_glr_parser(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
@@ -601,20 +610,15 @@ impl GLRParser {
                     }
                     if item.dot_position == item.production.rhs.len() {
                         write!(f, " •")?;
-					}
-					writeln!(f, "]")?;
-				}
-			}
-		} else {
-			// Check if it's a combined state before declaring it not found.
-			if self.is_combined_state(state_id) {
-				writeln!(f, "{}Items: (Combined state)", indent)?;
-			} else {
-				writeln!(f, "{}Items: (State ID not found in item set map)", indent)?;
-			}
-		}
-
-		// --- Actions & Gotos ---
+                    }
+                    writeln!(f, "]")?;
+                }
+            }
+        } else if state_id == self.hallucinated_state_id {
+            writeln!(f, "{}Items: (Hallucinated state)", indent)?;
+        } else {
+            writeln!(f, "{}Items: (State ID not found in item set map)", indent)?;
+        }
 
         // --- Actions & Gotos ---
         if let Some(row) = self.table.get(&state_id) {
@@ -655,14 +659,107 @@ impl GLRParser {
                     } else {
                         "no-op".to_string()
                     };
-					writeln!(f, "{}  - {} -> {}", indent, non_terminal.0, goto_str)?;
-				}
-			}
-		} else { // Not a regular state ID
-			if self.is_combined_state(state_id) {
-				writeln!(f, "{}Actions (combined):", indent)?;
-				let row = self.combined_rows.get(&state_id).unwrap();
-				if row.shifts_and_reduces.is_empty() {
+                    writeln!(f, "{}  - {} -> {}", indent, non_terminal.0, goto_str)?;
+                }
+            }
+        } else if state_id == self.hallucinated_state_id {
+            writeln!(f, "{}Actions (hallucinated):", indent)?;
+            if self.hallucinated_row.shifts_and_reduces.is_empty() {
+                writeln!(f, "{}  (none)", indent)?;
+            } else {
+                // Sort by terminal for deterministic output
+                let mut keys: Vec<_> = self.hallucinated_row.shifts_and_reduces.keys().cloned().collect();
+                keys.sort_by_key(|tid| self.terminal_map.get_by_right(tid).unwrap());
+                for tid in keys {
+                    let terminal = self.terminal_map.get_by_right(&tid).unwrap();
+                    let actions = &self.hallucinated_row.shifts_and_reduces[&tid];
+                    for (action, bv) in actions {
+                        let action_str = match action {
+                            Stage7ShiftsAndReducesLookaheadValue::Shift(next_state_id) => {
+                                format!("Shift {} [states: {:?}]", next_state_id.0, bv)
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                                let nt_name = self.non_terminal_map.get_by_right(nonterminal_id).unwrap();
+                                let pids: Vec<String> = production_ids.iter().map(|p| p.0.to_string()).collect();
+                                format!("Reduce {} (len {}) via rules [{}] [states: {:?}]", nt_name.0, len, pids.join(", "), bv)
+                            }
+                            Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                let has_shift = shift.is_some();
+                                let num_reduces: usize = reduces.values().map(|nts| nts.values().map(|pids| pids.len()).sum::<usize>()).sum();
+                                let conflict_type = if has_shift && num_reduces > 0 {
+                                    "Shift-Reduce Conflict"
+                                } else if !has_shift && num_reduces > 1 {
+                                    "Reduce-Reduce Conflict"
+                                } else {
+                                    "Conflict"
+                                };
+                                let mut s = format!("{} [states: {:?}]:", conflict_type, bv);
+                                let inner_indent = format!("\n{}        ", indent);
+                                if let Some(shift_state) = shift {
+                                    let _ = write!(s, "{}  - Shift {}", inner_indent, shift_state.0);
+                                }
+                                for (_len, nts) in reduces {
+                                    for (_nt_id, prod_ids) in nts {
+                                        for prod_id_val in prod_ids {
+                                            let prod = self.productions.get(prod_id_val.0).unwrap();
+                                            let _ = write!(s, "{}  - Reduce by rule #{} ({})", inner_indent, prod_id_val.0, prod);
+                                        }
+                                    }
+                                }
+                                s
+                            }
+                        };
+                        writeln!(f, "{}- On {}: {}", indent, terminal, action_str)?;
+                    }
+                }
+            }
+
+            writeln!(f, "{}Default Action:", indent)?;
+            let def = &self.hallucinated_row.default_reduce;
+            if let Some(reduce_action) = &def.reduce {
+                let nt_name = self.non_terminal_map.get_by_right(&reduce_action.0.nonterminal_id).unwrap();
+                let pids: Vec<String> = reduce_action.0.production_ids.iter().map(|p| p.0.to_string()).collect();
+                writeln!(f, "{}  - Default Reduce {} (len {}) via rules [{}]", indent, nt_name.0, reduce_action.0.len, pids.join(", "))?;
+            } else {
+                writeln!(f, "{}  - No default reduce", indent)?;
+            }
+            if def.clone_and_merge {
+                writeln!(f, "{}  - Clone and merge", indent)?;
+            }
+
+            writeln!(f, "{}Gotos (hallucinated):", indent)?;
+            if self.hallucinated_row.gotos.is_empty() {
+                writeln!(f, "{}  (No goto actions)", indent)?;
+            } else {
+                let mut gotos_sorted: Vec<_> = self.hallucinated_row.gotos.keys().cloned().collect();
+                gotos_sorted.sort_by_key(|ntid| self.non_terminal_map.get_by_right(ntid).unwrap());
+                for ntid in gotos_sorted {
+                    let non_terminal = self.non_terminal_map.get_by_right(&ntid).unwrap();
+                    let entries = &self.hallucinated_row.gotos[&ntid];
+                    for (goto, bv) in entries {
+                        let goto_str = if let Some(state_id_val) = goto.state_id {
+                            if goto.accept {
+                                format!("{} or accept [states: {:?}]", state_id_val.0, bv)
+                            } else {
+                                format!("{} [states: {:?}]", state_id_val.0, bv)
+                            }
+                        } else if goto.accept {
+                            format!("accept [states: {:?}]", bv)
+                        } else {
+                            format!("no-op [states: {:?}]", bv)
+                        };
+                        writeln!(f, "{}  - {} -> {}", indent, non_terminal.0, goto_str)?;
+                    }
+                }
+            }
+        } else {
+            // Combined state?
+            if self.is_combined_state(state_id) {
+                writeln!(f, "{}Items: (Combined state)", indent)?;
+
+                writeln!(f, "{}Actions (combined):", indent)?;
+                let row = self.combined_rows.get(&state_id).unwrap();
+                if row.shifts_and_reduces.is_empty() {
                     writeln!(f, "{}  (none)", indent)?;
                 } else {
                     let mut keys: Vec<_> = row.shifts_and_reduces.keys().cloned().collect();
@@ -2015,20 +2112,20 @@ impl<'a> GLRParserState<'a> { // No longer generic
     /// Some(false) otherwise. (Uses the row action map immediately, does not simulate.)
     pub fn has_immediate_action_for_terminal(&self, token_id: TerminalID) -> Option<bool> {
         let mut any = false;
-		for peek in GSSNode::peek_iter(&self.active_state.stack) {
-			let sid = peek.edge_value().state_id;
-			let has = if self.phase == ParserPhase::ReadyForToken {
-				if self.parser.is_combined_state(sid) {
-					self.parser.combined_rows.get(&sid).unwrap().shifts_and_reduces.get(&token_id).map(|v| !v.is_empty()).unwrap_or(false)
-				} else {
-					self.parser.table[&sid].shifts_and_reduces_without_default_reduce.contains_key(&token_id)
-				}
-			} else {
-				if self.parser.is_combined_state(sid) {
-					self.parser.combined_rows.get(&sid).unwrap().shifts_and_reduces.get(&token_id).map(|v| !v.is_empty()).unwrap_or(false)
-				} else {
-					self.parser.table[&sid].shifts_and_reduces_full.contains_key(&token_id)
-				}
+        for peek in GSSNode::peek_iter(&self.active_state.stack) {
+            let sid = peek.edge_value().state_id;
+            let has = if self.phase == ParserPhase::ReadyForToken {
+                if sid == self.parser.hallucinated_state_id {
+                    self.parser.hallucinated_row.shifts_and_reduces.get(&token_id).map(|v| !v.is_empty()).unwrap_or(false)
+                } else {
+                    self.parser.table[&sid].shifts_and_reduces_without_default_reduce.contains_key(&token_id)
+                }
+            } else {
+                if sid == self.parser.hallucinated_state_id {
+                    self.parser.hallucinated_row.shifts_and_reduces.get(&token_id).map(|v| !v.is_empty()).unwrap_or(false)
+                } else {
+                    self.parser.table[&sid].shifts_and_reduces_full.contains_key(&token_id)
+                }
             };
             if has {
                 any = true;
