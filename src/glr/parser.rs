@@ -90,7 +90,7 @@ impl UserDataTrait for () {}
 pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct ParseStateEdgeContent { 
     pub state_id: StateID,
 }
