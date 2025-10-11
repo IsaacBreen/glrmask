@@ -1049,7 +1049,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     pub fn inner_ptrs_eq(&self, other: &Self) -> bool {
-        match (&*self.inner, &**other.inner) {
+        match (&*self.inner, &*other.inner) {
             (Upper::Branch(b1), Upper::Branch(b2)) => {
                 if b1.empty != b2.empty || b1.children.len() != b2.children.len() || b1.max_depth != b2.max_depth {
                     return false;
