@@ -416,7 +416,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def pop(self) -> LeveledGSS[T, Acc]:
         if isinstance(self.inner, Interface):
             all_children = list(self.inner._all_children())
-            merged = reduce(merge_lower, all_children[1:], all_children[0]) if all_children else Lower(children={}, empty=False)
+            merged: Lower[T] = reduce(merge_lower, all_children[1:], all_children[0]) if all_children else Lower(children={}, empty=False)
             merged_empty = self.inner.acc if merged.empty else None
             if merged_empty is None and not merged.children:
                 return LeveledGSS(UpperBranch(children={}, empty=merged_empty))
@@ -424,7 +424,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 return LeveledGSS(Interface(children=merged.children, acc=self.inner.acc, empty=merged_empty))
         else:
             all_children = list(self.inner._all_children())
-            merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
+            merged: UpperBranch[T, Acc] | Interface[T, Acc] = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
             return LeveledGSS(try_promote(merged))
 
     def popn(self, n: int) -> LeveledGSS[T, Acc]:
@@ -476,6 +476,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
             if isinstance(node, Interface):
                 # For an Interface, we pop k-1 levels from its Lower children
+                all_children: List[Lower[T]]
                 popped_lower_children = [_popn_lower(child, k - 1) for child in all_children]
                 merged = reduce(merge_lower, popped_lower_children[1:], popped_lower_children[0])
 
@@ -487,6 +488,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     res = Interface(children=merged.children, acc=node.acc, empty=new_empty)
             else:  # UpperBranch
                 # For an UpperBranch, we pop k-1 levels from its Upper children
+                all_children: List[Upper[T, Acc]]
                 popped_upper_children = [_popn_upper(child, k - 1) for child in all_children]
                 merged = reduce(merge_upper, popped_upper_children[1:], popped_upper_children[0])
                 res = try_promote(merged)
