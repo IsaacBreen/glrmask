@@ -377,20 +377,42 @@ fn filter_lower<T: Clone + Eq + Hash>(
     let keep_empty = node.empty && current_depth >= min_d;
 
     let mut new_children: Children<T, Lower<T>> = IHashMap::new();
+    let mut children_identical = true;
+
     if current_depth < max_d {
         for (v, kids) in node.children.iter() {
             let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-            for child in kids.values() {
+            let mut same_kids = true;
+            let mut count = 0usize;
+            for (orig_depth, child) in kids.iter() {
                 if let Some(new_child) =
                     filter_lower(child, current_depth + 1, min_len, max_len)
                 {
+                    // Preserve identicality if pointer and depth key match
+                    if !Arc::ptr_eq(&new_child, child) || new_child.max_depth != *orig_depth {
+                        same_kids = false;
+                    }
                     new_kids.insert(new_child.max_depth, new_child);
+                    count += 1;
+                } else {
+                    same_kids = false;
                 }
             }
-            if !new_kids.is_empty() {
+            if count > 0 {
                 new_children.insert(v.clone(), new_kids);
+            } else {
+                children_identical = false;
             }
+            children_identical &= same_kids;
         }
+    } else {
+        // We cannot descend; identical only if there were no children to begin with
+        children_identical = node.children.is_empty();
+    }
+
+    // If nothing changed at this node, return the original pointer for maximal sharing.
+    if keep_empty == node.empty && children_identical {
+        return Some(node.clone());
     }
 
     if !keep_empty && new_children.is_empty() {
@@ -423,20 +445,42 @@ where
             let new_empty = if keep_empty { b.empty.clone() } else { None };
 
             let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+            let mut children_identical = true;
             if current_depth < max_d {
                 for (v, kids) in b.children.iter() {
                     let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-                    for child in kids.values() {
+                    let mut same_kids = true;
+                    let mut count = 0usize;
+                    for (orig_depth, child) in kids.iter() {
                         if let Some(new_child) =
                             filter_upper(child, current_depth + 1, min_len, max_len)
                         {
+                            if !Arc::ptr_eq(&new_child, child)
+                                || new_child.max_depth() != *orig_depth
+                            {
+                                same_kids = false;
+                            }
                             new_kids.insert(new_child.max_depth(), new_child);
+                            count += 1;
+                        } else {
+                            same_kids = false;
                         }
                     }
-                    if !new_kids.is_empty() {
+                    if count > 0 {
                         new_children.insert(v.clone(), new_kids);
+                    } else {
+                        children_identical = false;
                     }
+                    children_identical &= same_kids;
                 }
+            } else {
+                // We cannot descend; identical only if there were no children to begin with
+                children_identical = b.children.is_empty();
+            }
+
+            // If nothing changed at this node, return original pointer for maximal sharing.
+            if new_empty == b.empty && children_identical {
+                return Some(node.clone());
             }
 
             if new_children.is_empty() && new_empty.is_none() {
@@ -451,20 +495,37 @@ where
             let new_empty = if keep_empty { i.empty.clone() } else { None };
 
             let mut new_l_children: Children<T, Lower<T>> = IHashMap::new();
+            let mut children_identical = true;
             if current_depth < max_d {
                 for (v, kids) in i.children.iter() {
                     let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-                    for child in kids.values() {
+                    let mut same_kids = true;
+                    let mut count = 0usize;
+                    for (orig_depth, child) in kids.iter() {
                         if let Some(new_child) =
                             filter_lower(child, current_depth + 1, min_len, max_len)
                         {
+                            if !Arc::ptr_eq(&new_child, child)
+                                || new_child.max_depth != *orig_depth
+                            {
+                                same_kids = false;
+                            }
                             new_kids.insert(new_child.max_depth, new_child);
+                            count += 1;
+                        } else {
+                            same_kids = false;
                         }
                     }
-                    if !new_kids.is_empty() {
+                    if count > 0 {
                         new_l_children.insert(v.clone(), new_kids);
+                    } else {
+                        children_identical = false;
                     }
+                    children_identical &= same_kids;
                 }
+            } else {
+                // We cannot descend; identical only if there were no children to begin with
+                children_identical = i.children.is_empty();
             }
 
             let is_leaf_interface = i.children.is_empty() && i.empty.is_none();
@@ -473,6 +534,13 @@ where
             if new_l_children.is_empty() && new_empty.is_none() && !keep_leaf_interface {
                 None
             } else {
+                // If nothing changed at this node, return original pointer for maximal sharing.
+                if new_empty == i.empty
+                    && ((is_leaf_interface && keep_leaf_interface)
+                        || (!is_leaf_interface && children_identical))
+                {
+                    return Some(node.clone());
+                }
                 let new_i = new_interface(new_l_children, i.acc.clone(), new_empty);
                 Some(try_promote(&new_i))
             }
@@ -807,7 +875,7 @@ impl<T: Clone + Eq + Hash> Default for NormalizationLowerInterner<T> {
 struct NormalizationUpperInterner<
     T: Clone + Eq + Hash,
     A: Merge + Clone + Eq + Hash,
-> {
+ {
     // hash -> bucket of (signature, canonical id, canonical node)
     map: StdHashMap<u64, Vec<(UpperSig<T, A>, usize, Arc<Upper<T, A>>)>>,
     next_id: usize,
@@ -1621,6 +1689,35 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     pub fn isolate(&self, value: Option<T>) -> Self {
+        // Fast-path: if the isolation would yield an identical structure, return self.
+        if let Some(ref v) = value {
+            match &*self.inner {
+                Upper::Branch(b) => {
+                    if b.empty.is_none() && b.children.len() == 1 && b.children.contains_key(v) {
+                        return self.clone();
+                    }
+                }
+                Upper::Interface(i) => {
+                    if i.empty.is_none() && i.children.len() == 1 && i.children.contains_key(v) {
+                        return self.clone();
+                    }
+                }
+            }
+        } else {
+            match &*self.inner {
+                Upper::Branch(b) => {
+                    if b.children.is_empty() {
+                        return self.clone();
+                    }
+                }
+                Upper::Interface(i) => {
+                    if i.children.is_empty() && i.empty.is_some() {
+                        return self.clone();
+                    }
+                }
+            }
+        }
+
         let new_inner = if let Some(val) = value {
             match &*self.inner {
                 Upper::Branch(b) => {
@@ -1654,6 +1751,30 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn isolate_many<I: IntoIterator<Item = Option<T>>>(&self, values: I) -> Self {
         let values_set: HashSet<Option<T>> = values.into_iter().collect();
+
+        // Fast-path: if the selection keeps everything exactly as-is, return self.
+        match &*self.inner {
+            Upper::Branch(b) => {
+                let all_children_kept = b
+                    .children
+                    .keys()
+                    .all(|k| values_set.contains(&Some(k.clone())));
+                let empty_kept_ok = !b.empty.is_some() || values_set.contains(&None);
+                if all_children_kept && empty_kept_ok {
+                    return self.clone();
+                }
+            }
+            Upper::Interface(i) => {
+                let all_children_kept = i
+                    .children
+                    .keys()
+                    .all(|k| values_set.contains(&Some(k.clone())));
+                let empty_kept_ok = !i.empty.is_some() || values_set.contains(&None);
+                if all_children_kept && empty_kept_ok {
+                    return self.clone();
+                }
+            }
+        }
 
         let new_empty: Option<A> = if values_set.contains(&None) {
             match &*self.inner {
@@ -1801,12 +1922,23 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     if !keep_acc && !keep_empty {
                         None
                     } else if !keep_acc && keep_empty {
-                        let new_b = new_branch(IHashMap::new(), i.empty.clone());
-                        Some(try_promote(&new_b))
+                        // If the original node is already a leaf interface with empty,
+                        // nothing changes; preserve pointer.
+                        if i.children.is_empty() && i.empty.is_some() {
+                            Some(node.clone())
+                        } else {
+                            let new_b = new_branch(IHashMap::new(), i.empty.clone());
+                            Some(try_promote(&new_b))
+                        }
                     } else {
                         let new_empty = if keep_empty { i.empty.clone() } else { None };
-                        let new_i = new_interface(i.children.clone(), i.acc.clone(), new_empty);
-                        Some(try_promote(&new_i))
+                        // If we keep acc and empty presence is unchanged, preserve pointer.
+                        if new_empty == i.empty {
+                            Some(node.clone())
+                        } else {
+                            let new_i = new_interface(i.children.clone(), i.acc.clone(), new_empty);
+                            Some(try_promote(&new_i))
+                        }
                     }
                 }
                 Upper::Branch(b) => {
@@ -1816,16 +1948,33 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         .and_then(|e| if test_acc(e, acc_memo, p) { Some(e.clone()) } else { None });
 
                     let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                    let mut children_identical = true;
                     for (v, kids) in b.children.iter() {
                         let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-                        for child in kids.values() {
+                        let mut same_kids = true;
+                        let mut count = 0usize;
+                        for (orig_depth, child) in kids.iter() {
                             if let Some(nc) = transform::<T, A, P>(child, acc_memo, p) {
+                                if !Arc::ptr_eq(&nc, child) || nc.max_depth() != *orig_depth {
+                                    same_kids = false;
+                                }
                                 new_kids.insert(nc.max_depth(), nc);
+                                count += 1;
+                            } else {
+                                same_kids = false;
                             }
                         }
-                        if !new_kids.is_empty() {
+                        if count > 0 {
                             new_children.insert(v.clone(), new_kids);
+                        } else {
+                            children_identical = false;
                         }
+                        children_identical &= same_kids;
+                    }
+
+                    // If nothing changed, preserve pointer.
+                    if new_empty == b.empty && children_identical {
+                        return Some(node.clone());
                     }
 
                     if new_children.is_empty() && new_empty.is_none() {
