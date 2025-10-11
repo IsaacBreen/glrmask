@@ -1692,8 +1692,8 @@ impl GrammarConstraint {
         let trie3_god = Trie3GodWrapper::new();
 
         if true {
-            // let tid = 3;
-            for tid in tqdm!(0..=tokenizer.num_groups() as usize, desc = "Trie 3 temp", disable = !PROGRESS_BAR_ENABLED, leave=false) {
+            let tid = 78;
+            // for tid in tqdm!(0..=tokenizer.num_groups() as usize, desc = "Trie 3 temp", disable = !PROGRESS_BAR_ENABLED, leave=false) {
                 let parser = parser.unwrap();
                 let terminal = TerminalID(tid);
 
@@ -1714,7 +1714,7 @@ impl GrammarConstraint {
                     println!("GLR state graph structure after normalization:{}\n", glr_state.active_state.stack.inner.normalize().to_graph_string(false));
                     println!("---------------------------------");
                 }
-            }
+            // }
 
             return (precomputed3, trie3_god); // TEMP
         }
