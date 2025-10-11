@@ -1007,8 +1007,11 @@ pub fn stage_12_build_combined_states(
             for mask in masks {
                 let mut next_partition = Vec::new();
                 for block in partition {
-                    let intersection = block & *mask;
-                    let difference = block - intersection;
+                    // `HybridBitset` is not `Copy`, and the bitwise operators consume their operands.
+                    // We clone to preserve the original `block` and to satisfy the operator signatures.
+                    let intersection = block.clone() & mask.clone();
+                    // `block` is consumed here by `Sub`. We clone `intersection` as it's used below.
+                    let difference = block - intersection.clone();
 
                     if !intersection.is_empty() {
                         next_partition.push(intersection);
@@ -1067,7 +1070,7 @@ pub fn stage_12_build_combined_states(
                         let sid = StateID(next_combined_id);
                         next_combined_id += 1;
                         originset_to_id.insert(shift_pairs.clone(), sid);
-                        worklist.push_back(shift_pairs);
+                        worklist.push_back(shift_pairs.clone());
                         sid
                     })
                 }
@@ -1084,7 +1087,7 @@ pub fn stage_12_build_combined_states(
             for block in partition {
                 let sample_origin = block.iter().next().unwrap();
                 let has_shift = shift_mask.contains(sample_origin);
-                let mut reduces = BTreeMap::new();
+                let mut reduces: ReducesMap = BTreeMap::new();
                 for (key, reduce_mask) in &reduce_to_origins {
                     if reduce_mask.contains(sample_origin) {
                         reduces.entry(key.len).or_default().entry(key.nt).or_default().extend(key.production_ids.iter().cloned());

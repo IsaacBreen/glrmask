@@ -2549,8 +2549,11 @@ local_system:
                   for mask in masks {
                       let mut next_partition = Vec::new();
                       for block in partition {
-                          let intersection = block & *mask;
-                          let difference = block - intersection;
+                          // `HybridBitset` is not `Copy`, and the bitwise operators consume their operands.
+                          // We clone to preserve the original `block` and to satisfy the operator signatures.
+                          let intersection = block.clone() & mask.clone();
+                          // `block` is consumed here by `Sub`. We clone `intersection` as it's used below.
+                          let difference = block - intersection.clone();
 
                           if !intersection.is_empty() {
                               next_partition.push(intersection);
@@ -2626,7 +2629,7 @@ local_system:
                   for block in partition {
                       let sample_origin = block.iter().next().unwrap();
                       let has_shift = shift_mask.contains(sample_origin);
-                      let mut reduces = BTreeMap::new();
+                      let mut reduces: ReducesMap = BTreeMap::new();
                       for (key, reduce_mask) in &reduce_to_origins {
                           if reduce_mask.contains(sample_origin) {
                               reduces.entry(key.len).or_default().entry(key.nt).or_default().extend(key.production_ids.iter().cloned());
@@ -5320,6 +5323,180 @@ messages:
                    }
                }
        
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
+    metadata:
+  - user: 'Changes committed with message: "Refactor combined state terminal actions
+      using origin partitioning for maximal compactness"'
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      python scripts/compile.py \
+          --grammar src/js_simplified0_5.ebnf \
+          --output .cache/test_vocabs/js_constraint.json.gz \
+          --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \
+          --from-precompute0 .cache/pc0/js_simplified0_5_gpt2.json.gz
+      Loading vocabulary from cache: .cache/vocabs/vocab.json
+      Temporary vocabulary saved to: /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/tmpz1zf6l_l.json
+      Building compiler with 'cargo build --release'...
+         Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+      error[E0282]: type annotations needed for `BTreeMap<usize, _>`
+          --> src/glr/table.rs:1087:21
+           |
+      1087 |                 let mut reduces = BTreeMap::new();
+           |                     ^^^^^^^^^^^
+      ...
+      1090 |                         reduces.entry(key.len).or_default().entry(key.nt).or_default().extend(key.production_ids.iter().cloned());
+           |                                                             ----- type must be known at this point
+           |
+      help: consider giving `reduces` an explicit type, where the type for type parameter `V` is specified
+           |
+      1087 |                 let mut reduces: BTreeMap<_, V> = BTreeMap::new();
+           |                                ++++++++++++++++
+
+      error[E0507]: cannot move out of `*mask` which is behind a shared reference
+          --> src/glr/table.rs:1010:48
+           |
+      1010 |                     let intersection = block & *mask;
+           |                                                ^^^^^ move occurs because `*mask` has type `HybridBitset`, which does not implement the `Copy` trait
+           |
+      help: consider cloning the value if the performance cost is acceptable
+           |
+      1010 -                     let intersection = block & *mask;
+      1010 +                     let intersection = block & mask.clone();
+           |
+
+      error[E0382]: use of moved value: `block`
+          --> src/glr/table.rs:1011:38
+           |
+      1009 |                 for block in partition {
+           |                     ----- move occurs because `block` has type `HybridBitset`, which does not implement the `Copy` trait
+      1010 |                     let intersection = block & *mask;
+           |                                        ------------- `block` moved due to usage in operator
+      1011 |                     let difference = block - intersection;
+           |                                      ^^^^^ value used here after move
+           |
+      note: calling this operator moves the left-hand side
+          --> /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/bit.rs:169:15
+           |
+       169 |     fn bitand(self, rhs: Rhs) -> Self::Output;
+           |               ^^^^
+      help: consider cloning the value if the performance cost is acceptable
+           |
+      1010 |                     let intersection = block.clone() & *mask;
+           |                                             ++++++++
+
+      error[E0382]: borrow of moved value: `intersection`
+          --> src/glr/table.rs:1013:25
+           |
+      1010 |                     let intersection = block & *mask;
+           |                         ------------ move occurs because `intersection` has type `HybridBitset`, which does not implement the `Copy` trait
+      1011 |                     let difference = block - intersection;
+           |                                              ------------ value moved here
+      1012 |
+      1013 |                     if !intersection.is_empty() {
+           |                         ^^^^^^^^^^^^ value borrowed here after move
+           |
+      help: consider cloning the value if the performance cost is acceptable
+           |
+      1011 |                     let difference = block - intersection.clone();
+           |                                                          ++++++++
+
+      Some errors have detailed explanations: E0282, E0382, E0507.
+      For more information about an error, try `rustc --explain E0282`.
+      error: could not compile `sep1` (lib) due to 4 previous errors
+      Cargo build failed.
+      Cleaned up temporary vocabulary file.
+    metadata:
+  - assistant: |-
+      Of course. The compiler is pointing out a few issues related to type inference and ownership, which are common in Rust when dealing with non-`Copy` types and complex data structures. Here are the step-by-step instructions to fix the compilation errors.
+
+      ### Step-by-Step Instructions
+
+      1.  **Fix Ownership and Move Errors in `partition_by_masks`:**
+          The errors `E0507` and `E0382` occur because the `HybridBitset` type (aliased as `StateIDBV`) is not `Copy`. When you use it with operators like `&` (BitAnd) and `-` (Sub), the value is moved (consumed). The loop needs to calculate both the intersection and the difference from the original `block`, but the first operation moves it, making it unavailable for the second. The `*mask` also causes a move from behind a reference.
+
+          -   **File:** `src/glr/table.rs`
+          -   **Function:** `partition_by_masks`
+          -   **Action:** Modify the inside of the `for block in partition` loop to clone the values before they are consumed by the operators.
+
+          Replace this code:
+          ```rust
+                          let intersection = block & *mask;
+                          let difference = block - intersection;
+          ```
+          with this corrected version:
+          ```rust
+                          // `HybridBitset` is not `Copy`, and the bitwise operators consume their operands.
+                          // We clone to preserve the original `block` and to satisfy the operator signatures.
+                          let intersection = block.clone() & mask.clone();
+                          // `block` is consumed here by `Sub`. We clone `intersection` as it's used below.
+                          let difference = block - intersection.clone();
+          ```
+
+      2.  **Fix Type Inference Error for `reduces` map:**
+          The error `E0282` happens because the compiler cannot figure out the complete type of the `reduces` `BTreeMap` just from `BTreeMap::new()`. Its value is another `BTreeMap`, and this nesting makes inference fail.
+
+          -   **File:** `src/glr/table.rs`
+          -   **Function:** `stage_12_build_combined_states`
+          -   **Action:** Add an explicit type annotation to the `reduces` variable declaration using the existing `ReducesMap` type alias.
+
+          Change this line:
+          ```rust
+                      let mut reduces = BTreeMap::new();
+          ```
+          to this:
+          ```rust
+                      let mut reduces: ReducesMap = BTreeMap::new();
+          ```
+
+      These changes will resolve all four compilation errors.
+
+      ### Git Diff
+
+      Here is the corresponding git diff that applies these fixes.
+
+      ```diff
+      diff --git a/src/glr/table.rs b/src/glr/table.rs
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -1007,8 +1007,11 @@
+                   for mask in masks {
+                       let mut next_partition = Vec::new();
+                       for block in partition {
+      -                    let intersection = block & *mask;
+      -                    let difference = block - intersection;
+      +                    // `HybridBitset` is not `Copy`, and the bitwise operators consume their operands.
+      +                    // We clone to preserve the original `block` and to satisfy the operator signatures.
+      +                    let intersection = block.clone() & mask.clone();
+      +                    // `block` is consumed here by `Sub`. We clone `intersection` as it's used below.
+      +                    let difference = block - intersection.clone();
+       
+                           if !intersection.is_empty() {
+                               next_partition.push(intersection);
+      @@ -1084,7 +1087,7 @@
+                   for block in partition {
+                       let sample_origin = block.iter().next().unwrap();
+                       let has_shift = shift_mask.contains(sample_origin);
+      -                let mut reduces = BTreeMap::new();
+      +                let mut reduces: ReducesMap = BTreeMap::new();
+                       for (key, reduce_mask) in &reduce_to_origins {
+                           if reduce_mask.contains(sample_origin) {
+                               reduces.entry(key.len).or_default().entry(key.nt).or_default().extend(key.production_ids.iter().cloned());
+
       ```
     metadata:
   - user: |
