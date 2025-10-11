@@ -261,6 +261,13 @@ pub struct HallucinatedRow {
     pub default_reduce: DefaultReduce,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CombinedRow {
+    pub shifts_and_reduces: BTreeMap<TerminalID, Vec<(Stage7ShiftsAndReducesLookaheadValue, StateIDBV)>>,
+    pub gotos: BTreeMap<NonTerminalID, Vec<(Goto, StateIDBV)>>,
+    pub default_reduce: DefaultReduce,
+}
+
 // Manual impl for Row (could be derived)
 impl JSONConvertible for Row {
     fn to_json(&self) -> JSONNode {
@@ -941,7 +948,7 @@ struct CombinedReduceKey {
 
 pub fn stage_12_build_combined_states(
     table: &Table,
-) -> (BTreeMap<StateID, HallucinatedRow>, StateID) {
+) -> (BTreeMap<StateID, CombinedRow>, StateID) {
     // A "combined" state is represented by an origin set:
     // a set of pairs (x -> y), where x is the original "origin" state,
     // and y is the current original state we are at (for that origin) in the base automaton.
@@ -972,7 +979,7 @@ pub fn stage_12_build_combined_states(
     let mut worklist: VecDeque<OriginSet> = VecDeque::new();
     worklist.push_back(initial_origin_set);
 
-    let mut combined_rows: BTreeMap<StateID, HallucinatedRow> = BTreeMap::new();
+    let mut combined_rows: BTreeMap<StateID, CombinedRow> = BTreeMap::new();
 
     while let Some(origin_set) = worklist.pop_front() {
         let this_cid = *originset_to_id.get_by_left(&origin_set).unwrap();
@@ -1152,7 +1159,7 @@ pub fn stage_12_build_combined_states(
         }
 
         // Build the final combined row. We don't attempt "default reduce" promotion here.
-        let row = HallucinatedRow {
+        let row = CombinedRow {
             shifts_and_reduces,
             gotos,
             default_reduce: DefaultReduce { clone_and_merge: true, reduce: None },

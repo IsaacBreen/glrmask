@@ -3,7 +3,7 @@ use crate::datastructures::gss_leveled_adapter::{find_longest_path, gather_gss_s
 use crate::datastructures::gss_leveled_adapter::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
+use crate::glr::table::{CombinedRow, Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
 use crate::tokenizer::LLMTokenID;
 use std::any::Any;
 use std::cmp::Ordering;
@@ -284,7 +284,7 @@ pub struct GLRParser {
     pub hallucinated_row: HallucinatedRow,
     pub hallucinated_state_id: StateID,
     // New: support multiple combined states (including the "combined start" which replaces hallucinated semantics)
-    pub combined_rows: BTreeMap<StateID, HallucinatedRow>,
+    pub combined_rows: BTreeMap<StateID, CombinedRow>,
     pub combined_start_state_id: StateID,
     pub combined_gss: Arc<GSSNode>,
 }
@@ -421,7 +421,7 @@ impl GLRParser {
         reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
         hallucinated_row: HallucinatedRow,
         hallucinated_state_id: StateID,
-        combined_rows: BTreeMap<StateID, HallucinatedRow>,
+        combined_rows: BTreeMap<StateID, CombinedRow>,
         combined_start_state_id: StateID,
     ) -> Self {
         let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
