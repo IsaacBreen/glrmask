@@ -227,6 +227,115 @@ mod tests {
         assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
     }
 
+    #[test]
+    fn test_isolate_preserves_ptr_on_noop() {
+        // Case 1: Isolate single child, no empty. Should be a no-op.
+        let gss0 = gss_from_str_stacks(&[(&["A"], &[1])]);
+        let gss1 = gss0.isolate(Some("A".to_string()));
+        assert!(gss0.ptr_eq(&gss1));
+
+        // Case 2: Isolate None on a GSS that is only an empty path. Should be a no-op.
+        let gss2 = gss_from_str_stacks(&[(&[], &[1])]);
+        let gss3 = gss2.isolate(None);
+        assert!(gss2.ptr_eq(&gss3));
+
+        // Case 3: Isolate single child from multiple. Should NOT be a no-op.
+        let gss4 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
+        let gss5 = gss4.isolate(Some("A".to_string()));
+        assert!(!gss4.ptr_eq(&gss5));
+
+        // Case 4: Isolate None from a GSS with children. Should NOT be a no-op.
+        let gss6 = gss_from_str_stacks(&[(&["A"], &[1]), (&[], &[2])]);
+        let gss7 = gss6.isolate(None);
+        assert!(!gss6.ptr_eq(&gss7));
+    }
+
+    #[test]
+    fn test_isolate_many_preserves_ptr_on_noop() {
+        let gss0 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2]), (&[], &[3])]);
+
+        // Case 1: Select all children and empty. Should be a no-op.
+        let gss1 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
+        assert!(gss0.ptr_eq(&gss1));
+
+        // Case 2: Select a superset of children. Should be a no-op.
+        let gss2 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), Some("C".to_string()), None]);
+        assert!(gss0.ptr_eq(&gss2));
+
+        // Case 3: Select a subset of children. Should NOT be a no-op.
+        let gss3 = gss0.isolate_many(vec![Some("A".to_string()), None]);
+        assert!(!gss0.ptr_eq(&gss3));
+
+        // Case 4: Select all children but forget empty. Should NOT be a no-op.
+        let gss4 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string())]);
+        assert!(!gss0.ptr_eq(&gss4));
+
+        // Case 5: GSS with no empty, select all children and None. Should NOT be a no-op.
+        let gss5 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
+        let gss6 = gss5.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
+        assert!(!gss5.ptr_eq(&gss6));
+    }
+
+    #[test]
+    fn test_filter_by_length_preserves_ptr_on_noop() {
+        let gss0 = gss_from_str_stacks(&[
+            (&["A", "B", "C"], &[1]),
+            (&["X", "Y"], &[2]),
+            (&["Z"], &[3]),
+            (&[], &[4]),
+        ]);
+
+        // Case 1: No filter applied. Should be a no-op.
+        let gss1 = gss0.filter_by_length(None, None);
+        assert!(gss0.ptr_eq(&gss1));
+
+        // Case 2: Filter range includes all paths. Should be a no-op.
+        // Paths have lengths 0, 1, 2, 3.
+        let gss2 = gss0.filter_by_length(Some(0), Some(3));
+        assert!(gss0.ptr_eq(&gss2));
+        let gss3 = gss0.filter_by_length(Some(-1), Some(10));
+        assert!(gss0.ptr_eq(&gss3));
+
+        // Case 3: Filter prunes some paths. Should NOT be a no-op.
+        let gss4 = gss0.filter_by_length(Some(1), Some(2));
+        assert!(!gss0.ptr_eq(&gss4));
+        assert_eq!(gss4.to_stacks().len(), 2);
+
+        // Case 4: Filter on empty GSS.
+        let gss_empty = TestGSS::empty();
+        let gss_empty_filtered = gss_empty.filter_by_length(Some(1), Some(2));
+        assert!(gss_empty.ptr_eq(&gss_empty_filtered));
+    }
+
+    #[test]
+    fn test_prune_preserves_ptr_on_noop() {
+        // GSS with two different accumulators.
+        let gss0 = gss_from_str_stacks(&[
+            (&["A", "B"], &[1, 2]), // acc IntAcc({1, 2})
+            (&["X"], &[3]),       // acc IntAcc({3})
+            (&[], &[1, 3]),       // acc IntAcc({1, 3})
+        ]);
+
+        // Case 1: Predicate keeps everything. Should be a no-op.
+        let gss1 = gss0.prune(|_acc| true);
+        assert!(gss0.ptr_eq(&gss1));
+
+        // Case 2: Predicate prunes something. Should NOT be a no-op.
+        let gss2 = gss0.prune(|acc| acc.0.contains(&1));
+        assert!(!gss0.ptr_eq(&gss2));
+        // The path ["X"] with acc {3} should be pruned.
+        assert_eq!(gss2.to_stacks().len(), 2);
+
+        // Case 3: Predicate prunes everything. Result should be empty.
+        let gss3 = gss0.prune(|_acc| false);
+        assert!(gss3.is_empty());
+        assert!(!gss0.ptr_eq(&gss3));
+
+        // Case 4: Prune on empty GSS.
+        let gss_empty = TestGSS::empty();
+        let gss_empty_pruned = gss_empty.prune(|_acc| true);
+        assert!(gss_empty.ptr_eq(&gss_empty_pruned));
+    }
 }
 
 // --------------------
