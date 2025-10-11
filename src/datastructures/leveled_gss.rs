@@ -139,7 +139,7 @@ mod tests {
 
         // push followed by pop should return the exact same GSS structure.
         assert!(gss0.inner_ptrs_eq(&gss1));
-        // assert!(gss0.ptr_eq(&gss1), "push/pop should be an identity operation returning the same Arc");
+        assert!(!gss0.ptr_eq(&gss1)); // The top-level Arc will be different.
     }
 
     #[test]
@@ -184,6 +184,47 @@ mod tests {
             _ => panic!("Expected Interface nodes"),
         }
     }
+
+    #[test]
+    fn test_parallel_push_identity_empty() {
+        let gss0 = gss_from_str_stacks(&[(
+            &[],
+            &[1],
+        )]);
+
+        let gss1 = gss0.push("X".to_string()).pop();
+        let gss2 = gss0.push("X".to_string()).pop();
+
+        assert!(gss1.inner_ptrs_eq(&gss2));
+        assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
+    }
+
+    fn test_parallel_push_identity_one() {
+        let gss0 = gss_from_str_stacks(&[(
+            &["A"],
+            &[1],
+        )]);
+
+        let gss1 = gss0.push("X".to_string()).pop();
+        let gss2 = gss0.push("X".to_string()).pop();
+
+        assert!(gss1.inner_ptrs_eq(&gss2));
+        assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
+    }
+
+    fn test_parallel_push_identity_two() {
+        let gss0 = gss_from_str_stacks(&[(
+            &["A", "B"],
+            &[1],
+        )]);
+
+        let gss1 = gss0.push("X".to_string()).pop();
+        let gss2 = gss0.push("X".to_string()).pop();
+
+        assert!(gss1.inner_ptrs_eq(&gss2));
+        assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
+    }
+
 }
 
 // --------------------
