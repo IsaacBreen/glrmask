@@ -209,9 +209,8 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def _validate_no_promotions(self) -> None:
         """
         Recursively validates that no UpperBranch nodes can be promoted to an Interface.
-        Under the new rule, an UpperBranch can be promoted if all its children are Interfaces
-        and the set of accumulators across U.empty (if present) and all children's accs
-        has at most one unique value.
+        An UpperBranch can be promoted if it's a leaf with a non-None empty accumulator,
+        or if all its children are Interfaces and share a single accumulator.
         """
         if isinstance(self.inner, UpperBranch):
             self._validate_promotion_node(self.inner)
@@ -228,15 +227,26 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 self._validate_promotion_node(child)
 
         # Now, check for promotion condition on the current node
-        # All children are Interfaces. Gather all accumulators including U.empty.
-        accs: Set[Acc] = set()
-        if node.empty is not None:
-            accs.add(node.empty)
-        for child in node._all_children():
-            interface_child: Interface[T, Acc] = child  # type: ignore[assignment]
-            accs.add(interface_child.acc)
+        all_children = list(node._all_children())
+        if not all_children:
+            # A leaf UpperBranch with an empty acc is promotable.
+            if node.empty is not None:
+                raise ValueError(
+                    "LeveledGSS validation failed: a leaf UpperBranch can be promoted to an Interface, "
+                    f"indicating a non-canonical structure. Node: {node}"
+                )
+            return
 
-        if len(accs) == 1:
+        if not all(isinstance(c, Interface) for c in all_children):
+            return
+
+        # All children are Interfaces. Gather accumulators from children.
+        child_accs: Set[Acc] = set()
+        for child in all_children:
+            interface_child: Interface[T, Acc] = child  # type: ignore[assignment]
+            child_accs.add(interface_child.acc)
+
+        if len(child_accs) <= 1:
             raise ValueError(
                 "LeveledGSS validation failed: an UpperBranch can be promoted to an Interface, "
                 f"indicating a non-canonical structure. Node: {node}"
@@ -323,17 +333,20 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     children[v] = {n._max_depth: n for n in nodes_for_v}
                     all_child_nodes.extend(nodes_for_v)
 
-            # Check for promotion (new rule: include root_empty among accs)
+            # Check for promotion
             if all(isinstance(child, Interface) for child in all_child_nodes):
-                accs: Set[Acc] = set()
-                if root_empty is not None:
-                    accs.add(root_empty)
+                child_accs: Set[Acc] = set()
                 for c in all_child_nodes:
                     ic: Interface[T, Acc] = c  # type: ignore[assignment]
-                    accs.add(ic.acc)
+                    child_accs.add(ic.acc)
 
-                if len(accs) <= 1:
-                    the_acc = next(iter(accs)) if accs else None
+                if len(child_accs) <= 1:
+                    the_acc = next(iter(child_accs), None)
+                    if the_acc is None:
+                        # No children to provide an accumulator. If there's a root_empty,
+                        # this is a leaf promotion case.
+                        the_acc = root_empty
+
                     if the_acc is None:
                         # This is a truly empty GSS.
                         return UpperBranch(children={}, empty=None)
@@ -1014,13 +1027,11 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 return node.empty is not None
             if not all(isinstance(c, Interface) for c in all_children):
                 return False
-            accs: Set[Acc] = set()
-            if node.empty is not None:
-                accs.add(node.empty)
+            child_accs: Set[Acc] = set()
             for c in all_children:
                 ic: Interface[T, Acc] = c  # type: ignore[assignment]
-                accs.add(ic.acc)
-            return len(accs) == 1
+                child_accs.add(ic.acc)
+            return len(child_accs) <= 1
 
         # Traverse graph collecting the structural stats
         # Use queues to ensure we visit each UNIQUE node once for node-level data,
@@ -1293,17 +1304,14 @@ def try_promote(node: Upper[T, AccPromote]) -> Upper[T, AccPromote]:
     if not all(isinstance(c, Interface) for c in all_children):
         return node
 
-    accs: Set[AccPromote] = set()
-    if node.empty is not None:
-        accs.add(node.empty)
+    child_accs: Set[AccPromote] = set()
     for c in all_children:
         ic: Interface[T, AccPromote] = c  # type: ignore[assignment]
-        accs.add(ic.acc)
+        child_accs.add(ic.acc)
 
-    if len(accs) <= 1:
-        the_acc: Optional[AccPromote] = next(iter(accs)) if accs else None
-        if the_acc is None:
-            return UpperBranch(children={}, empty=None)
+    if len(child_accs) <= 1:
+        # Since all_children is non-empty, child_accs has one element.
+        the_acc: AccPromote = next(iter(child_accs))
         l_children: Dict[T, Dict[int, Lower[T]]] = {}
         for v, kids in node.children.items():
             v_map: Dict[int, Lower[T]] = {}
