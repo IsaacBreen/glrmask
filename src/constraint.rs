@@ -1737,7 +1737,7 @@ impl GrammarConstraint {
         let it = trie1_roots_to_tokenizer_states.iter();
 
         let gss_leaf = Arc::new(GSSNode::new(Acc::new_fresh()));
-        let gss_stack_base = gss_leaf.push(ParseStateEdgeContent { state_id: parser.combined_start_state_id });
+        let gss_stack_base = gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id });
 
         for (trie1_root, tokenizer_state_ids) in it {
             let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
