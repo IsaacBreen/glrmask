@@ -1706,14 +1706,14 @@ impl GrammarConstraint {
 
                 let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
                 glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
-                if glr_state.active_state.stack.inner.stats().structural_sharing_factor < 0.2 {
+                // if glr_state.active_state.stack.inner.stats().structural_sharing_factor < 0.2 {
                     println!("--- Results for token ID {} ---", tid);
                     println!("stats: {:?}", glr_state.active_state.stack.inner.stats());
                     println!("GLR state stacks: {}", glr_state);
                     println!("GLR state graph structure before normalization:{}\n", glr_state.active_state.stack.inner.to_graph_string(false));
                     println!("GLR state graph structure after normalization:{}\n", glr_state.active_state.stack.inner.normalize().to_graph_string(false));
                     println!("---------------------------------");
-                }
+                // }
                 print_summary();
                 reset();
             // }
