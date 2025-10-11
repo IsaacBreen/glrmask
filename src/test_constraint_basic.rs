@@ -1753,6 +1753,116 @@ fn test_gss_structural_sharing_factor2() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
+fn test_gss_structural_sharing_factor3() -> Result<(), Box<dyn std::error::Error>> {
+    // This test verifies that for a grammar with a known ambiguity that can cause
+    // GSS explosion, the structural sharing remains effective. A low sharing factor
+    // indicates that many structurally identical sub-graphs are being correctly
+    // deduplicated.
+
+    // 1. Minimal grammar that causes GSS explosion without proper sharing.
+    //    See `test_js_if_statement_gss_explosion` for a detailed explanation.
+    let js_grammar_ebnf = indoc! {r#"
+        program ::= (statement ';')* EOF;
+
+        statement ::=
+            'p01' VALUE POST
+          | 'p02' VALUE POST
+          | 'p03' VALUE POST
+          | 'p04' VALUE POST
+          | 'p05' VALUE POST
+          | 'p06' VALUE POST
+          | 'p07' VALUE POST
+          | 'p08' VALUE POST
+          | 'p09' VALUE POST
+          | 'p10' VALUE POST
+          | 'p11' VALUE POST
+          | 'p12' VALUE POST
+          | 'p13' VALUE POST
+          | 'p14' VALUE POST
+          | 'p15' VALUE POST
+          | 'p16' VALUE POST
+          | 'p17' VALUE POST
+          | 'p18' VALUE POST
+          | 'p19' VALUE POST
+          | 'p20' VALUE POST
+          | 'p21' VALUE POST
+          | 'p22' VALUE POST
+          | 'p23' VALUE POST
+          | 'p24' VALUE POST
+          | 'p25' VALUE POST
+          | 'p26' VALUE POST
+          | 'p27' VALUE POST
+          | 'p28' VALUE POST
+          | 'p29' VALUE POST
+          | 'p30' VALUE POST
+          | 'p31' VALUE POST
+          | 'p32' VALUE POST
+        ;
+
+        VALUE ::= IDENTIFIER;
+
+        POST ::=
+            't01' | 't02' | 't03' | 't04' | 't05' | 't06' | 't07' | 't08'
+          | 't09' | 't10' | 't11' | 't12' | 't13' | 't14' | 't15' | 't16'
+          | 't17' | 't18' | 't19' | 't20' | 't21' | 't22' | 't23' | 't24'
+          | 't25' | 't26' | 't27' | 't28' | 't29' | 't30' | 't31' | 't32'
+          | 't33' | 't34' | 't35' | 't36' | 't37' | 't38' | 't39' | 't40'
+          | 't41' | 't42' | 't43' | 't44' | 't45' | 't46' | 't47' | 't48'
+          | 't49' | 't50'
+        ;
+
+        EOF ::= '$';
+
+        IDENTIFIER ::= 'a';
+    "#};
+    let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
+    let parser = compiled_grammar.glr_parser;
+    println!("Parser: {}", parser);
+
+    // 2. Replicate the GSS setup from `precompute3` to test a single token step.
+    //    We are interested in the terminal for 'if', which is TerminalID(1) in this compiled grammar.
+    use crate::datastructures::gss_leveled_adapter::{Acc, GSSNode};
+    use crate::glr::parser::{BelowBottomReductionMode, ParseStateEdgeContent, ProcessTokenAdvancedConfig};
+
+
+    let trie3_god = crate::constraint::Trie3GodWrapper::new(); // Dummy 'god' object
+    let acc = Acc::new_fresh();
+    let gss_leaf = Arc::new(GSSNode::new(acc));
+    let gss_stack = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id }));
+
+    let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
+
+    const BELOW_BOTTOM_REDUCE_MODE: BelowBottomReductionMode = BelowBottomReductionMode::ContinueFromAll;
+    for tid in parser.terminal_map.right_values() {
+        let tid = tid.0;
+        let terminal = TerminalID(tid);
+        let mut glr_state = glr_state.clone();
+        glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+
+        // 3. Get stats and assert on the structural sharing factor.
+        let stats = glr_state.active_state.stack.inner.stats();
+        println!("Stats for terminal ID {}: {:?}", tid, stats);
+
+        let THRESHOLD = 0.49;
+        if !(stats.structural_sharing_factor > THRESHOLD) {
+            // Print the GSS structure before and after normalization.
+            println!("GSS before normalization:");
+            println!("{}", glr_state.active_state.stack.inner.to_graph_string(false));
+            println!("GSS after normalization (what it ideally should be):");
+            println!("{}", glr_state.active_state.stack.inner.normalize().to_graph_string(false));
+            assert!(
+                stats.structural_sharing_factor > 0.49,
+                "Structural sharing factor ({}) was not greater than 0.49, indicating poor GSS node sharing",
+                stats.structural_sharing_factor
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar string
     let ebnf_grammar = indoc! {r#"
