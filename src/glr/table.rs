@@ -1297,24 +1297,24 @@ pub fn stage_12_build_combined_states(
         println!("------------------------------------");
     }
 
-    // Print it all
-    println!("\n--- Combined States Table ---");
-    for (cid, row) in &combined_rows {
-        println!("Combined State ID: {}", cid.0);
-        println!("  Shifts and Reduces:");
-        for (tid, actions) in &row.shifts_and_reduces {
-            for (action, mask) in actions {
-                println!("    Terminal {}: {:?} with origins {:?}", tid.0, action, mask);
-            }
-        }
-        println!("  Gotos:");
-        for (ntid, gotos) in &row.gotos {
-            for (goto, mask) in gotos {
-                println!("    NonTerminal {}: {:?} with origins {:?}", ntid.0, goto, mask);
-            }
-        }
-        println!();
-    }
+    // // Print it all
+    // println!("\n--- Combined States Table ---");
+    // for (cid, row) in &combined_rows {
+    //     println!("Combined State ID: {}", cid.0);
+    //     println!("  Shifts and Reduces:");
+    //     for (tid, actions) in &row.shifts_and_reduces {
+    //         for (action, mask) in actions {
+    //             println!("    Terminal {}: {:?} with origins {:?}", tid.0, action, mask);
+    //         }
+    //     }
+    //     println!("  Gotos:");
+    //     for (ntid, gotos) in &row.gotos {
+    //         for (goto, mask) in gotos {
+    //             println!("    NonTerminal {}: {:?} with origins {:?}", ntid.0, goto, mask);
+    //         }
+    //     }
+    //     println!();
+    // }
 
     (combined_rows, combined_start_state_id)
 }
