@@ -1167,74 +1167,6 @@ local_system:
               combined_rows.insert(this_cid, row);
           }
 
-          if !combined_rows.is_empty() {
-              println!("\n--- Combined States Statistics ---");
-              println!("Total combined states: {}", combined_rows.len());
-
-              let mut shift_counts = Vec::new();
-              let mut reduce_counts = Vec::new();
-              let mut goto_counts = Vec::new();
-
-              for row in combined_rows.values() {
-                  let mut num_shifts = 0;
-                  let mut num_reduces = 0;
-                  for actions in row.shifts_and_reduces.values() {
-                      for (action, _) in actions {
-                          match action {
-                              Stage7ShiftsAndReducesLookaheadValue::Shift(_) => num_shifts += 1,
-                              Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } => num_reduces += 1,
-                              Stage7ShiftsAndReducesLookaheadValue::Split { .. } => {
-                                  // This shouldn't happen as splits are flattened
-                              }
-                          }
-                      }
-                  }
-                  shift_counts.push(num_shifts);
-                  reduce_counts.push(num_reduces);
-
-                  let num_gotos = row.gotos.values().map(|v| v.len()).sum();
-                  goto_counts.push(num_gotos);
-              }
-
-              fn print_stats(name: &str, counts: &[usize]) {
-                  if counts.is_empty() {
-                      println!("{}: N/A (no data)", name);
-                      return;
-                  }
-                  let total_states = counts.len();
-                  let total_actions: usize = counts.iter().sum();
-                  let min = *counts.iter().min().unwrap();
-                  let max = *counts.iter().max().unwrap();
-                  let avg = total_actions as f64 / total_states as f64;
-
-                  println!(
-                      "{}: Total: {}, Min/Max per state: {}/{}, Avg per state: {:.2}",
-                      name, total_actions, min, max, avg
-                  );
-
-                  let mut distribution = BTreeMap::new();
-                  for &count in counts {
-                      *distribution.entry(count).or_insert(0) += 1;
-                  }
-
-                  print!("  Distribution (count -> #states): ");
-                  let mut first = true;
-                  for (count, num_states) in distribution {
-                      if !first {
-                          print!(", ");
-                      }
-                      print!("{}: {}", count, num_states);
-                      first = false;
-                  }
-                  println!();
-              }
-
-              print_stats("Shift actions", &shift_counts);
-              print_stats("Reduce actions", &reduce_counts);
-              print_stats("Goto actions", &goto_counts);
-              println!("------------------------------------");
-          }
-
           (combined_rows, combined_start_state_id)
       }
 
@@ -1540,1621 +1472,6 @@ local_system:
 
   prev_file_contents:
     src/glr/table.rs: |+
-      use super::items::{Item, LRMode, LR_MODE};
-      use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
-      use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
-      use crate::constraint::StateIDBV;
-      use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-      use bimap::BiBTreeMap;
-      use std::collections::{BTreeMap, BTreeSet, VecDeque};
-      use std::fmt::Display;
-      use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
-      pub use crate::types::TerminalID;
-      use crate::json_serialization::{JSONConvertible, JSONNode};
-      use std::collections::BTreeMap as StdMap;
-      use profiler_macro::time_it;
-      use std::sync::Arc;
-      use crate::interface::display_productions;
-      // Added for derive macro pattern
-
-
-      const EVERYTHING: bool = false;
-
-
-      type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
-      type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
-      type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
-      type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
-      type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
-      pub(crate) type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
-      type Stage7Table = BTreeMap<StateID, Stage7Row>;
-      type Stage8Table = BTreeMap<StateID, Row>;
-      pub type Table = BTreeMap<StateID, Row>;
-
-
-      type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
-      #[derive(Debug, Default, Clone, PartialEq, Eq)]
-      struct Stage2Row {
-          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeSet<Item>,
-      }
-      #[derive(Debug, Default, Clone, PartialEq, Eq)]
-      struct Stage3Row {
-          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>>,
-      }
-      #[derive(Debug, Default, Clone, PartialEq, Eq)]
-      struct Stage4Row {
-          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
-      }
-      #[derive(Debug, Default, Clone, PartialEq, Eq)]
-      struct Stage5Row {
-          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
-          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-          reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
-      }
-      #[derive(Debug, Default, Clone, PartialEq, Eq)]
-      pub(crate) struct Stage6Row {
-          pub(crate) shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
-          pub(crate) gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
-      }
-
-      #[derive(Debug, Default, Clone, PartialEq, Eq)]
-      pub(crate) struct Stage6ShiftsAndReduces {
-          pub(crate) shift: Option<BTreeSet<Item>>,
-          pub(crate) reduces: BTreeSet<ProductionID>,
-      }
-
-      #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
-      pub enum Stage7ShiftsAndReducesLookaheadValue {
-          Shift(StateID),
-          Reduce {
-              nonterminal_id: NonTerminalID,
-              len: usize,
-              production_ids: BTreeSet<ProductionID>,
-          },
-          Split {
-              shift: Option<StateID>,
-              reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,
-          },
-      }
-
-      impl Stage7ShiftsAndReducesLookaheadValue {
-          /// Simplifies a `Split` action into a `Shift` or `Reduce` if possible.
-          /// - A `Split` with a shift and no reduces becomes a `Shift`.
-          /// - A `Split` with no shift and exactly one reduce action becomes a `Reduce`.
-          pub fn simplify(&mut self) {
-              if let Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } = self {
-                  if reduces.is_empty() {
-                      if let Some(shift_id) = *shift {
-                          *self = Stage7ShiftsAndReducesLookaheadValue::Shift(shift_id);
-                      }
-                  } else if shift.is_none() && reduces.len() == 1 && reduces.values().next().unwrap().len() == 1 {
-                      // No shift, and only one kind of reduce (one len, one nt).
-                      let temp_self = std::mem::replace(self, Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::new() }); // dummy
-                      if let Stage7ShiftsAndReducesLookaheadValue::Split { mut reduces, .. } = temp_self {
-                          let (len, mut nts) = reduces.into_iter().next().unwrap();
-                          let (nt_id, pids) = nts.into_iter().next().unwrap();
-                          *self = Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt_id, len, production_ids: pids };
-                      }
-                  }
-              }
-          }
-      }
-
-      impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
-          fn to_json(&self) -> JSONNode {
-              let mut obj = StdMap::new();
-              match self {
-                  Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
-                      obj.insert("variant".to_string(), JSONNode::String("Shift".to_string()));
-                      obj.insert("state_id".to_string(), state_id.to_json());
-                  }
-                  Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-                      obj.insert("variant".to_string(), JSONNode::String("Reduce".to_string()));
-                      obj.insert("nonterminal_id".to_string(), nonterminal_id.to_json());
-                      obj.insert("len".to_string(), len.to_json());
-                      obj.insert("production_ids".to_string(), production_ids.to_json());
-                  }
-                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                      obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
-                      obj.insert("shift".to_string(), shift.to_json());
-                      obj.insert("reduces".to_string(), reduces.to_json());
-                  }
-              }
-              JSONNode::Object(obj)
-          }
-
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Object(mut obj) => {
-                      let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Stage7ShiftsAndReducesLookaheadValue".to_string())
-                                         .and_then(String::from_json)?;
-                      match variant.as_str() {
-                          "Shift" => {
-                              let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for Shift".to_string())
-                                                .and_then(StateID::from_json)?;
-                              Ok(Stage7ShiftsAndReducesLookaheadValue::Shift(state_id))
-                          }
-                          "Reduce" => {
-                              let nonterminal_id = obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for Reduce".to_string())
-                                                      .and_then(NonTerminalID::from_json)?;
-                              let len = obj.remove("len").ok_or_else(|| "Missing field len for Reduce".to_string())
-                                           .and_then(usize::from_json)?;
-                              let production_ids = obj.remove("production_ids").ok_or_else(|| "Missing field production_ids for Reduce".to_string())
-                                                      .and_then(|n| BTreeSet::<ProductionID>::from_json(n))?;
-                              Ok(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids })
-                          }
-                          "Split" => {
-                              let shift = obj.remove("shift").ok_or_else(|| "Missing field shift for Split".to_string())
-                                             .and_then(Option::<StateID>::from_json)?;
-                              let reduces = obj.remove("reduces").ok_or_else(|| "Missing field reduces for Split".to_string())
-                                               .and_then(|n| BTreeMap::<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>::from_json(n))?;
-                              Ok(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces })
-                          }
-                          _ => Err(format!("Unknown variant {} for Stage7ShiftsAndReducesLookaheadValue", variant)),
-                      }
-                  }
-                  _ => Err("Expected JSONNode::Object for Stage7ShiftsAndReducesLookaheadValue".to_string()),
-              }
-          }
-      }
-
-      #[derive(Debug, Default, Clone, Eq, Ord, PartialEq, PartialOrd)]
-      pub struct SubstringGoto {
-          pub accepting_sources: BTreeSet<StateID>,
-          pub gotos: BTreeMap<StateID, BTreeSet<StateID>>,
-      }
-
-      impl JSONConvertible for SubstringGoto {
-          fn to_json(&self) -> JSONNode {
-              let mut obj = StdMap::new();
-              obj.insert("accepting_sources".to_string(), self.accepting_sources.to_json());
-              obj.insert("gotos".to_string(), self.gotos.to_json());
-              JSONNode::Object(obj)
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Object(mut obj) => Ok(SubstringGoto {
-                      accepting_sources: BTreeSet::<StateID>::from_json(obj.remove("accepting_sources").ok_or_else(|| "Missing field accepting_sources for SubstringGoto".to_string())?)?,
-                      gotos: BTreeMap::<StateID, BTreeSet<StateID>>::from_json(obj.remove("gotos").ok_or_else(|| "Missing field gotos for SubstringGoto".to_string())?)?,
-                  }),
-                  _ => Err("Expected JSONNode::Object for SubstringGoto".to_string()),
-              }
-          }
-      }
-
-      pub type ShiftsAndReducesWithoutDefaultReduce = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
-      pub type ShiftsAndReducesFull = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
-
-      #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
-      pub struct Reduce {
-          pub nonterminal_id: NonTerminalID,
-          pub len: usize,
-          pub production_ids: BTreeSet<ProductionID>,
-      }
-
-      impl JSONConvertible for Reduce {
-          fn to_json(&self) -> JSONNode {
-              let mut obj = StdMap::new();
-              obj.insert("nonterminal_id".to_string(), self.nonterminal_id.to_json());
-              obj.insert("len".to_string(), self.len.to_json());
-              obj.insert("production_ids".to_string(), self.production_ids.to_json());
-              JSONNode::Object(obj)
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Object(mut obj) => Ok(Reduce {
-                      nonterminal_id: NonTerminalID::from_json(obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for Reduce".to_string())?)?,
-                      len: usize::from_json(obj.remove("len").ok_or_else(|| "Missing field len for Reduce".to_string())?)?,
-                      production_ids: BTreeSet::<ProductionID>::from_json(obj.remove("production_ids").ok_or_else(|| "Missing field production_ids for Reduce".to_string())?)?,
-                  }),
-                  _ => Err("Expected JSONNode::Object for Reduce".to_string()),
-              }
-          }
-      }
-
-      #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
-      pub struct DefaultReduce {
-          pub clone_and_merge: bool, // Indicates that there are phase 1 actions to be performed here.
-          pub reduce: Option<(Reduce, TerminalBV)>,
-      }
-
-      impl JSONConvertible for DefaultReduce {
-          fn to_json(&self) -> JSONNode {
-              let mut obj = StdMap::new();
-              obj.insert("clone_and_merge".to_string(), self.clone_and_merge.to_json());
-              obj.insert("reduce".to_string(), self.reduce.to_json());
-              JSONNode::Object(obj)
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Object(mut obj) => Ok(DefaultReduce {
-                      clone_and_merge: bool::from_json(obj.remove("clone_and_merge").ok_or_else(|| "Missing field clone_and_merge for DefaultReduce".to_string())?)?,
-                      reduce: Option::<(Reduce, TerminalBV)>::from_json(obj.remove("reduce").ok_or_else(|| "Missing field reduce for DefaultReduce".to_string())?)?,
-                  }),
-                  _ => Err("Expected JSONNode::Object for DefaultReduce".to_string()),
-              }
-          }
-      }
-
-      #[derive(Debug, Default, Clone, PartialEq, Eq)]
-      struct Stage7Row {
-          pub shifts_and_reduces_full: ShiftsAndReducesFull,
-          pub gotos: BTreeMap<NonTerminalID, Goto>,
-      }
-
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub struct Row {
-          pub shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce,
-          pub shifts_and_reduces_full: ShiftsAndReducesFull,
-          pub default_reduce: DefaultReduce,
-          pub gotos: BTreeMap<NonTerminalID, Goto>,
-      }
-
-      #[derive(Debug, Clone, PartialEq, Eq)]
-      pub struct HallucinatedRow {
-          pub shifts_and_reduces: BTreeMap<TerminalID, Vec<(Stage7ShiftsAndReducesLookaheadValue, StateIDBV)>>,
-          pub gotos: BTreeMap<NonTerminalID, Vec<(Goto, StateIDBV)>>,
-          pub default_reduce: DefaultReduce,
-      }
-
-      // Manual impl for Row (could be derived)
-      impl JSONConvertible for Row {
-          fn to_json(&self) -> JSONNode {
-              let mut obj = StdMap::new();
-              obj.insert("shifts_and_reduces_without_default_reduce".to_string(), self.shifts_and_reduces_without_default_reduce.to_json());
-              obj.insert("shifts_and_reduces_full".to_string(), self.shifts_and_reduces_full.to_json());
-              obj.insert("default_reduce".to_string(), self.default_reduce.to_json());
-              obj.insert("gotos".to_string(), self.gotos.to_json());
-              JSONNode::Object(obj)
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Object(mut obj) => Ok(Row {
-                      shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce::from_json(obj.remove("shifts_and_reduces_without_default_reduce").ok_or_else(|| "Missing field shifts_and_reduces_without_default_reduce for Row".to_string())?)?,
-                      shifts_and_reduces_full: ShiftsAndReducesFull::from_json(obj.remove("shifts_and_reduces_full").ok_or_else(|| "Missing field shifts_and_reduces_full for Row".to_string())?)?,
-                      default_reduce: DefaultReduce::from_json(obj.remove("default_reduce").ok_or_else(|| "Missing field default_reduce for Row".to_string())?)?,
-                      gotos: BTreeMap::<NonTerminalID, Goto>::from_json(obj.remove("gotos").ok_or_else(|| "Missing field gotos for Row".to_string())?)?,
-                  }),
-                  _ => Err("Expected JSONNode::Object for Row".to_string()),
-              }
-          }
-      }
-
-      #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct Goto {
-          pub state_id: Option<StateID>,
-          pub accept: bool,
-      }
-
-      impl JSONConvertible for Goto {
-          fn to_json(&self) -> JSONNode {
-              let mut obj = StdMap::new();
-              obj.insert("state_id".to_string(), self.state_id.to_json());
-              obj.insert("accept".to_string(), self.accept.to_json());
-              JSONNode::Object(obj)
-          }
-          fn from_json(node: JSONNode) -> Result<Self, String> {
-              match node {
-                  JSONNode::Object(mut obj) => Ok(Goto {
-                      state_id: obj
-                          .remove("state_id")
-                          .ok_or_else(|| "Missing field 'state_id' for Goto".to_string())
-                          .and_then(Option::<StateID>::from_json)?,
-                      accept: obj
-                          .remove("accept")
-                          .ok_or_else(|| "Missing field 'accept' for Goto".to_string())
-                          .and_then(bool::from_json)?,
-                  }),
-                  _ => Err("Expected JSONNode::Object for Goto".to_string()),
-              }
-          }
-      }
-
-      #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct StateID(pub usize);
-
-      impl JSONConvertible for StateID {
-          fn to_json(&self) -> JSONNode { self.0.to_json() }
-          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(StateID) }
-      }
-
-      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct ProductionID(pub usize);
-
-      impl JSONConvertible for ProductionID {
-          fn to_json(&self) -> JSONNode { self.0.to_json() }
-          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(ProductionID) }
-      }
-
-      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-      pub struct NonTerminalID(pub usize);
-
-      impl JSONConvertible for NonTerminalID {
-          fn to_json(&self) -> JSONNode { self.0.to_json() }
-          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(NonTerminalID) }
-      }
-
-
-      type Stage1Result = Stage1Table;
-      type Stage2Result = Stage2Table;
-      type Stage3Result = Stage3Table;
-      type Stage4Result = Stage4Table;
-      type Stage5Result = Stage5Table;
-      type Stage6Result = Stage6Table;
-      type Stage7Result = (
-          Stage7Table,
-          BiBTreeMap<BTreeSet<Item>, StateID>,
-          StateID,
-          StateID,
-      );
-
-      fn stage_1_row(worklist: &mut VecDeque<BTreeSet<Item>>, visited_kernels: &mut BTreeSet<BTreeSet<Item>>, splits: BTreeMap<Option<Symbol>, BTreeSet<Item>>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
-          let mut row = BTreeMap::new();
-          for (symbol, items_in_split) in &splits {
-              row.insert(symbol.clone(), items_in_split.clone());
-              if symbol.is_some() {
-                  let goto_set = compute_goto(items_in_split);
-                  if visited_kernels.insert(goto_set.clone()) {
-                      worklist.push_back(goto_set);
-                  }
-              }
-          }
-          row
-      }
-
-      #[time_it]
-      fn stage_1(productions: &[Production]) -> Stage1Result {
-          assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
-          let start_production_id = 0;
-          let initial_item = Item {
-              production: Arc::new(productions[start_production_id].clone()),
-              dot_position: 0,
-          };
-          let initial_item_set = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
-
-          // Pre-computation for compute_closure: group productions by their LHS non-terminal.
-          let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
-          for p in productions {
-              prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
-          }
-
-          let mut worklist = VecDeque::from([initial_item_set.clone()]);
-          let mut transitions: Stage1Table = BTreeMap::new();
-          let mut visited_kernels = BTreeSet::from([initial_item_set.clone()]);
-
-          // --- Create the 'everything' item set ---
-          if EVERYTHING {
-              let mut everything_item_set = BTreeSet::new();
-              for prod in productions {
-                  for dot_position in 0..=prod.rhs.len() {
-                      let item = Item {
-                          production: Arc::new(prod.clone()),
-                          dot_position,
-                      };
-                      everything_item_set.insert(item);
-                  }
-              }
-              // Add the everything set to the worklist if it's not already there
-              if visited_kernels.insert(everything_item_set.clone()) {
-                  worklist.push_back(everything_item_set);
-              }
-          }
-
-          while let Some(item_set) = worklist.pop_front() {
-              assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
-              let closure = compute_closure(&item_set, &prods_by_lhs);
-              let splits = split_on_dot(&closure);
-              let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
-              transitions.insert(item_set, row);
-          }
-
-          transitions
-      }
-
-      fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
-          let mut stage_2_table = BTreeMap::new();
-          for (item_set, transitions) in stage_1_table {
-              let mut shifts = BTreeMap::new();
-              let mut gotos = BTreeMap::new();
-              let mut reduces = BTreeSet::new();
-
-              for (symbol_opt, item_set) in &transitions {
-                  match symbol_opt {
-                      Some(Symbol::Terminal(t)) => {
-                          shifts.insert(t.clone(), compute_goto(item_set));
-                      }
-                      Some(Symbol::NonTerminal(nt)) => {
-                          gotos.insert(nt.clone(), compute_goto(item_set));
-                      }
-                      None => {
-                          for item in item_set {
-                              assert_eq!(item.dot_position, item.production.rhs.len());
-                              reduces.insert(item.clone());
-                          }
-                      }
-                  }
-              }
-
-              stage_2_table.insert(
-                  item_set,
-                  Stage2Row {
-                      shifts,
-                      gotos,
-                      reduces,
-                  },
-              );
-          }
-          stage_2_table
-      }
-
-      fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-          // Compute FOLLOW sets (including EOF as None)
-          let first_sets = compute_first_sets_for_nonterminals(productions);
-          let nullable_nonterminals = compute_nullable_nonterminals(productions);
-          let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
-
-          let mut stage_3_table = BTreeMap::new();
-
-          for (item_set, row) in stage_2_table {
-              let mut reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>> = BTreeMap::new();
-
-              for item in &row.reduces {
-                  let lhs = &item.production.lhs;
-                  if let Some(follows) = follow_sets.get(lhs) {
-                      for look in follows {
-                          reduces.entry(look.clone()).or_default().insert(item.clone());
-                      }
-                  }
-              }
-
-              stage_3_table.insert(
-                  item_set,
-                  Stage3Row {
-                      shifts: row.shifts,
-                      gotos: row.gotos,
-                      reduces,
-                  },
-              );
-          }
-          stage_3_table
-      }
-
-      fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
-          let production_ids: BTreeMap<Production, ProductionID> = productions
-              .iter()
-              .enumerate()
-              .map(|(i, p)| (p.clone(), ProductionID(i)))
-              .collect();
-
-          let mut stage_4_table = BTreeMap::new();
-
-          for (item_set, row) in stage_3_table {
-              let mut reduces = BTreeMap::new();
-
-              for (terminal, item_set) in row.reduces {
-                  let mut prod_ids = BTreeSet::new();
-                  for item in item_set {
-                      let prod_id = production_ids.get(&*item.production).unwrap();
-                      prod_ids.insert(*prod_id);
-                  }
-                  reduces.insert(terminal.clone(), prod_ids);
-              }
-
-              stage_4_table.insert(
-                  item_set,
-                  Stage4Row {
-                      shifts: row.shifts,
-                      gotos: row.gotos,
-                      reduces,
-                  },
-              );
-          }
-
-          stage_4_table
-      }
-
-      fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> Stage5Result {
-          // Stage 5 turns
-          //     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
-          // into
-          //     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
-          // ie it removes the None entries, which represent EOF.
-          // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
-          // merging with any existing production ID sets in the reduces map.
-          let mut stage_5_table = BTreeMap::new();
-          let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
-
-          for (item_set, row) in stage_4_table {
-              let Stage4Row { shifts, gotos, reduces } = row;
-
-              // 2. Start building the new reduces map keyed by concrete terminals.
-              let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
-
-
-              // 2a. Copy over entries that already have a concrete terminal key.
-              for (opt_term, prod_ids) in reduces {
-                  if let Some(term) = opt_term {
-                      new_reduces
-                          .entry(term)
-                          .or_default()
-                          .extend(prod_ids.into_iter());
-                  } else {
-                      // 2b. For None entries, copy the production IDs to all terminals.
-                      for terminal in &all_terminals {
-                          new_reduces
-                              .entry(terminal.clone())
-                              .or_default()
-                              .extend(prod_ids.iter().cloned());
-                      }
-                  }
-              }
-
-              stage_5_table.insert(
-                  item_set,
-                  Stage5Row {
-                      shifts,
-                      gotos,
-                      reduces: new_reduces,
-                  },
-              );
-          }
-
-          stage_5_table
-      }
-
-      fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
-          let mut stage_6_table = BTreeMap::new();
-
-          for (item_set, row) in stage_5_table {
-              let mut shifts_and_reduces = BTreeMap::new();
-
-              // Get all terminals that appear in either shifts or reduces
-              let all_terminals: BTreeSet<_> = row.shifts.keys()
-                  .chain(row.reduces.keys())
-                  .cloned()
-                  .collect();
-
-              for terminal in all_terminals {
-                  let shift = row.shifts.get(&terminal).cloned();
-                  let reduces = row.reduces.get(&terminal).cloned().unwrap_or_default();
-
-                  let action = Stage6ShiftsAndReduces {
-                      shift,
-                      reduces,
-                  };
-                  shifts_and_reduces.insert(terminal, action);
-              }
-
-              stage_6_table.insert(
-                  item_set,
-                  Stage6Row {
-                      shifts_and_reduces,
-                      gotos: row.gotos,
-                  },
-              );
-          }
-
-          stage_6_table
-      }
-
-      fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
-          let start_production_id = 0;
-          let mut item_set_map = BiBTreeMap::new();
-          let mut next_state_id = 0;
-
-          for item_set in stage_6_table.keys() {
-              item_set_map.insert(item_set.clone(), StateID(next_state_id));
-              next_state_id += 1;
-          }
-
-          let mut stage_7_table = BTreeMap::new();
-
-          for (item_set, row) in stage_6_table {
-              let state_id = *item_set_map.get_by_left(&item_set).unwrap();
-
-              // Phase 2 map contains all possible actions for a state.
-              let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
-
-              for (terminal, action) in &row.shifts_and_reduces {
-                  let terminal_id = *terminal_map.get_by_left(terminal).expect_else(|| format!("Terminal {} not found in terminal map", terminal));
-
-                  // 1. Get the potential shift action.
-                  let maybe_shift: Option<StateID> = action.shift.as_ref().map(|shift_item_set| {
-                      *item_set_map.get_by_left(shift_item_set).unwrap()
-                  });
-
-                  // 2. Group all reduce actions.
-                  let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
-                  for &production_id in &action.reduces {
-                      let production = &productions[production_id.0];
-                      let len = production.rhs.len();
-                      let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
-                      reduces
-                          .entry(len)
-                          .or_default()
-                          .entry(nonterminal_id)
-                          .or_default()
-                          .insert(production_id);
-                  }
-
-                  // 3. Create a combined action and simplify it.
-                  if maybe_shift.is_none() && reduces.is_empty() {
-                      // This should not happen because we iterate over terminals that have actions from stage 6.
-                      // panic!("Action without shift or reduce for terminal {:?}", terminal);
-                      continue;
-                  }
-
-                  let mut final_action = Stage7ShiftsAndReducesLookaheadValue::Split {
-                      shift: maybe_shift,
-                      reduces,
-                  };
-                  final_action.simplify();
-                  shifts_and_reduces_full.insert(terminal_id, final_action);
-              }
-
-              let mut gotos = BTreeMap::new();
-              for (nonterminal, next_item_set) in row.gotos {
-                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
-                  let goto = Goto {
-                      state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
-                      accept: false,
-                  };
-                  gotos.insert(non_terminal_id, goto);
-              }
-
-              stage_7_table.insert(state_id, Stage7Row {
-                  shifts_and_reduces_full,
-                  gotos,
-              });
-          }
-
-          let initial_item = Item {
-              production: Arc::new(productions[start_production_id].clone()),
-              dot_position: 0,
-          };
-          let initial_item_set = BTreeSet::from([initial_item]);
-          let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
-
-          // Goto for initial production
-          let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
-          stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
-
-          // --- Find and configure the 'everything' state ---
-          let everything_state_id;
-          if EVERYTHING {
-              let mut everything_item_set = BTreeSet::new();
-              for prod in productions {
-                  for dot_position in 0..=prod.rhs.len() {
-                      let item = Item {
-                          production: Arc::new(prod.clone()),
-                          dot_position,
-                      };
-                      everything_item_set.insert(item);
-                  }
-              }
-              everything_state_id = *item_set_map.get_by_left(&everything_item_set).expect("Everything item set not found in state map");
-              stage_7_table.get_mut(&everything_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
-          } else {
-              everything_state_id = start_state_id; // Dummy value, won't be used
-          }
-
-          (stage_7_table, item_set_map, start_state_id, everything_state_id)
-      }
-
-      fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
-          let mut stage_8_table = BTreeMap::new();
-
-          for (state_id, row) in stage_7_table {
-              let Stage7Row { shifts_and_reduces_full, gotos } = row;
-
-              // --- Promotion Logic ---
-              let mut reduce_counts: BTreeMap<(NonTerminalID, usize), (usize, BTreeSet<ProductionID>)> = BTreeMap::new();
-              for action in shifts_and_reduces_full.values() {
-                  let mut process_reduces = |reduces: &BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>| {
-                      for (&len, nts) in reduces {
-                          for (&nt_id, pids) in nts {
-                              let entry = reduce_counts.entry((nt_id, len)).or_default();
-                              entry.0 += 1; // Count how many terminals trigger this kind of reduce
-                              entry.1.extend(pids.iter().cloned());
-                          }
-                      }
-                  };
-                  match action {
-                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, production_ids } => {
-                          let entry = reduce_counts.entry((*action_nt_id, *action_len)).or_default();
-                          entry.0 += 1;
-                          entry.1.extend(production_ids.iter().cloned());
-                      },
-                      Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => process_reduces(reduces),
-                      _ => {}
-                  }
-              }
-
-              // First, check for a reduction of the initial production (ID 0). If it exists, it's always promoted.
-              let promoted_reduce_key = reduce_counts.iter().find_map(|(key, (_, pids))| {
-                  if pids.contains(&ProductionID(0)) {
-                      Some(*key)
-                  } else {
-                      None
-                  }
-              }).or_else(|| {
-                  // Otherwise, use the original logic: promote the most common reduction.
-                  reduce_counts.iter().max_by_key(|(_, (count, _))| *count).map(|(key, _)| *key)
-              });
-
-              let (shifts_and_reduces_without_default_reduce, default_reduce) = if let Some((nonterminal_id, len)) = promoted_reduce_key {
-                  let (_, production_ids) = reduce_counts.remove(&(nonterminal_id, len)).unwrap();
-                  
-                  // NEW: Find all terminals that trigger this reduction.
-                  let mut eligible_terminals = TerminalBV::zeros();
-                  for (&tid, action) in &shifts_and_reduces_full {
-                      let is_eligible = match action {
-                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. } => {
-                              *action_nt_id == nonterminal_id && *action_len == len
-                          },
-                          Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
-                              reduces.get(&len).map_or(false, |nts| nts.contains_key(&nonterminal_id))
-                          },
-                          _ => false,
-                      };
-                      if is_eligible {
-                          eligible_terminals.insert(tid.0);
-                      }
-                  }
-
-                  let shifts_and_reduces_without_default = shifts_and_reduces_full.iter().filter_map(|(&tid, action)| {
-                      let mut new_action = action.clone();
-                      let mut was_modified = false;
-
-                      match &mut new_action {
-                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
-                              if *action_nt_id == nonterminal_id && *action_len == len => {
-                              // This whole action is the promoted one, so we remove it from phase1.
-                              return None;
-                          }
-                          Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
-                              // Check if the promoted reduce is part of this split.
-                              if let Some(nts) = reduces.get_mut(&len) {
-                                  if nts.remove(&nonterminal_id).is_some() {
-                                      was_modified = true;
-                                      // If this was the last NT for this length, remove the length entry.
-                                      if nts.is_empty() {
-                                          reduces.remove(&len);
-                                      }
-                                  }
-                              }
-                          }
-                          _ => {} // Shift or non-matching Reduce, keep as is.
-                      }
-
-                      if was_modified {
-                          // We modified a Split, now simplify it.
-                          new_action.simplify();
-                      }
-                      Some((tid, new_action))
-                  }).collect::<ShiftsAndReducesWithoutDefaultReduce>();
-
-                  let default_reduce = DefaultReduce {
-                      clone_and_merge: !shifts_and_reduces_without_default.is_empty(),
-                      reduce: Some((Reduce { nonterminal_id, len, production_ids }, eligible_terminals)),
-                  };
-                  (shifts_and_reduces_without_default, default_reduce)
-              } else {
-                  let shifts_and_reduces_without_default = shifts_and_reduces_full.clone();
-                  let default_reduce = DefaultReduce {
-                      clone_and_merge: true,
-                      reduce: None,
-                  };
-                  (shifts_and_reduces_without_default, default_reduce)
-              };
-
-              stage_8_table.insert(state_id, Row {
-                  shifts_and_reduces_without_default_reduce,
-                  shifts_and_reduces_full,
-                  default_reduce,
-                  gotos,
-              });
-          }
-          stage_8_table
-      }
-
-      /// Pre-computes the complex GOTO logic for substring parsing reductions that pop below the stack.
-      ///
-      /// This function calculates, for each (NonTerminal, Lookahead) pair, what the resulting
-      /// states would be if a reduction for that non-terminal occurred, and we could start
-      /// from *any* state in the automaton (as is the case for substring parsing).
-      ///
-      /// This avoids a very expensive runtime loop over all table states.
-      pub fn stage_9(
-          table: &Table,
-          non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
-      ) -> BTreeMap<NonTerminalID, SubstringGoto> {
-          let mut substring_gotos = BTreeMap::new();
-
-          let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
-
-          for &nt_id in &all_nt_ids {
-              let mut accepting_sources = BTreeSet::new();
-              let mut gotos: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
-
-              for (&source_state_id, row) in table {
-                  if let Some(goto) = row.gotos.get(&nt_id) {
-                      if goto.accept {
-                          accepting_sources.insert(source_state_id);
-                      }
-                      if let Some(goto_state_id) = goto.state_id {
-                          gotos.entry(goto_state_id).or_default().insert(source_state_id);
-                      }
-                  }
-              }
-
-              if !accepting_sources.is_empty() || !gotos.is_empty() {
-                  substring_gotos.insert(nt_id, SubstringGoto {
-                      accepting_sources,
-                      gotos,
-                  });
-              }
-          }
-
-          substring_gotos
-      }
-
-      /// Pre-computes a map from (reduce non-terminal, goto state) to the set of states
-      /// that perform that goto. This is an inverted index of the GOTO table.
-      pub fn stage_10(
-          table: &Table,
-      ) -> BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> {
-          let mut reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> = BTreeMap::new();
-
-          for (&source_state_id, row) in table {
-              for (&nt_id, goto) in &row.gotos {
-                  if let Some(goto_state_id) = goto.state_id {
-                      reduce_goto_map
-                          .entry(nt_id)
-                          .or_default()
-                          .entry(goto_state_id)
-                          .or_default()
-                          .insert(source_state_id.0);
-                  }
-              }
-          }
-          reduce_goto_map
-      }
-
-      pub fn stage_11_create_hallucinated_row(table: &Table) -> HallucinatedRow {
-          let mut shifts_and_reduces: BTreeMap<TerminalID, BTreeMap<Stage7ShiftsAndReducesLookaheadValue, StateIDBV>> = BTreeMap::new();
-          let mut gotos: BTreeMap<NonTerminalID, BTreeMap<Goto, StateIDBV>> = BTreeMap::new();
-
-          for (&state_id, row) in table {
-              // Aggregate shifts and reduces
-              for (&terminal_id, action) in &row.shifts_and_reduces_full {
-                  shifts_and_reduces
-                      .entry(terminal_id)
-                      .or_default()
-                      .entry(action.clone())
-                      .or_default()
-                      .insert(state_id.0);
-              }
-
-              // Aggregate gotos
-              for (&nonterminal_id, goto) in &row.gotos {
-                  gotos
-                      .entry(nonterminal_id)
-                      .or_default()
-                      .entry(*goto)
-                      .or_default()
-                      .insert(state_id.0);
-              }
-          }
-
-          // Convert the intermediate maps to the final Vec format
-          let final_shifts_and_reduces = shifts_and_reduces
-              .into_iter()
-              .map(|(tid, actions)| (tid, actions.into_iter().collect()))
-              .collect();
-
-          let final_gotos = gotos
-              .into_iter()
-              .map(|(ntid, gotos_map)| (ntid, gotos_map.into_iter().collect()))
-              .collect();
-
-          HallucinatedRow {
-              shifts_and_reduces: final_shifts_and_reduces,
-              gotos: final_gotos,
-              default_reduce: DefaultReduce { clone_and_merge: true, reduce: None },
-          }
-      }
-
-      // Internal key for grouping equivalent reduce actions while building combined states.
-      // Two reduce actions are considered the "same" if they share the same reduced non-terminal,
-      // length, and the exact same set of production IDs.
-      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-      struct CombinedReduceKey {
-          nt: NonTerminalID,
-          len: usize,
-          production_ids: BTreeSet<ProductionID>,
-      }
-
-      pub fn stage_12_build_combined_states(
-          table: &Table,
-      ) -> (BTreeMap<StateID, HallucinatedRow>, StateID) {
-          // A "combined" state is represented by an origin set:
-          // a set of pairs (x -> y), where x is the original "origin" state,
-          // and y is the current original state we are at (for that origin) in the base automaton.
-          //
-          // We create a graph whose nodes are such origin sets. Edges are induced by:
-          // - Shifts on terminals: for each terminal T, build a new origin set using the original table's shifts.
-          // - Gotos on non-terminals: for each non-terminal A, build a new origin set using the original table's gotos.
-          //
-          // Each combined state's row is represented using the same structure as HallucinatedRow:
-          // per terminal: a vector of (action, mask-of-origins), and
-          // per non-terminal: a vector of (goto, mask-of-origins).
-          // The masks indicate for which origin states the action/goto applies.
-
-          type OriginSet = BTreeSet<(StateID, StateID)>;
-
-          // 1) Seed combined-state space with the initial origin set: { s -> s | for all original states s }.
-          let mut initial_origin_set: OriginSet = BTreeSet::new();
-          for &sid in table.keys() {
-              initial_origin_set.insert((sid, sid));
-          }
-
-          let mut originset_to_id: BiBTreeMap<OriginSet, StateID> = BiBTreeMap::new();
-          let mut next_combined_id = table.keys().max().unwrap().0 + 1;
-          originset_to_id.insert(initial_origin_set.clone(), StateID(next_combined_id));
-          next_combined_id += 1;
-          let combined_start_state_id = *originset_to_id.get_by_left(&initial_origin_set).unwrap();
-
-          let mut worklist: VecDeque<OriginSet> = VecDeque::new();
-          worklist.push_back(initial_origin_set);
-
-          let mut combined_rows: BTreeMap<StateID, HallucinatedRow> = BTreeMap::new();
-
-          while let Some(origin_set) = worklist.pop_front() {
-              let this_cid = *originset_to_id.get_by_left(&origin_set).unwrap();
-
-              // Collect all terminals/non-terminals that are relevant in any current state.
-              let mut all_terminals: BTreeSet<TerminalID> = BTreeSet::new();
-              let mut all_nonterminals: BTreeSet<NonTerminalID> = BTreeSet::new();
-              for &(_origin, current) in &origin_set {
-                  if let Some(row) = table.get(&current) {
-                      for &tid in row.shifts_and_reduces_full.keys() {
-                          all_terminals.insert(tid);
-                      }
-                      for &ntid in row.gotos.keys() {
-                          all_nonterminals.insert(ntid);
-                      }
-                  }
-              }
-
-              // --- Build per-terminal actions: Shift and Reduce(Split flattened) with origin masks.
-              let mut shifts_and_reduces: BTreeMap<TerminalID, Vec<(Stage7ShiftsAndReducesLookaheadValue, StateIDBV)>> = BTreeMap::new();
-
-              for tid in all_terminals {
-                  // New compaction strategy:
-                  // - Compute shift_pairs and set of origins that shift.
-                  // - Compute per-origin full reduce sets.
-                  // - Build a single next_cid for all shift origins (as before).
-                  // - Group origins by the pattern: (has_shift, full reduces set).
-                  // - Emit one action per pattern: Split { optional shift, reduces } (simplified when possible).
-
-                  let mut shift_pairs: OriginSet = BTreeSet::new();
-                  let mut origins_with_shift: BTreeSet<StateID> = BTreeSet::new();
-                  let mut origins_with_action: BTreeSet<StateID> = BTreeSet::new();
-                  let mut origin_reduces: BTreeMap<StateID, BTreeSet<CombinedReduceKey>> = BTreeMap::new();
-
-                  for &(origin, current) in &origin_set {
-                      let row = &table[&current];
-                      if let Some(action) = row.shifts_and_reduces_full.get(&tid) {
-                          match action {
-                              Stage7ShiftsAndReducesLookaheadValue::Shift(next_state) => {
-                                  origins_with_action.insert(origin);
-                                  origins_with_shift.insert(origin);
-                                  shift_pairs.insert((origin, *next_state));
-                              }
-                              Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-                                  origins_with_action.insert(origin);
-                                  origin_reduces
-                                      .entry(origin)
-                                      .or_default()
-                                      .insert(CombinedReduceKey {
-                                          nt: *nonterminal_id,
-                                          len: *len,
-                                          production_ids: production_ids.clone(),
-                                      });
-                              }
-                              Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                                  origins_with_action.insert(origin);
-                                  if let Some(next_state) = shift {
-                                      origins_with_shift.insert(origin);
-                                      shift_pairs.insert((origin, *next_state));
-                                  }
-                                  for (&len, nts) in reduces {
-                                      for (&ntid, pids) in nts {
-                                          origin_reduces
-                                              .entry(origin)
-                                              .or_default()
-                                              .insert(CombinedReduceKey {
-                                                  nt: ntid,
-                                                  len,
-                                                  production_ids: pids.clone(),
-                                              });
-                                      }
-                                  }
-                              }
-                          }
-                      }
-                  }
-
-                  if origins_with_action.is_empty() {
-                      continue; // No actions for this terminal across the current origin set.
-                  }
-
-                  // Build a single next_cid for all shift origins (same as before).
-                  let maybe_next_cid = if !shift_pairs.is_empty() {
-                      let mut now_states = shift_pairs.iter().map(|(_, now)| *now);
-                      let first_now_state = now_states.next().unwrap(); // Not empty if shift_pairs isn't.
-                      let next_cid = if now_states.all(|s| s == first_now_state) {
-                          // All 'now' states are the same -> return that original state.
-                          first_now_state
-                      } else {
-                          // Otherwise, transition to a true combined state.
-                          if let Some(existing) = originset_to_id.get_by_left(&shift_pairs).copied() {
-                              existing
-                          } else {
-                              let sid = StateID(next_combined_id);
-                              next_combined_id += 1;
-                              originset_to_id.insert(shift_pairs.clone(), sid);
-                              worklist.push_back(shift_pairs);
-                              sid
-                          }
-                      };
-                      Some(next_cid)
-                  } else {
-                      None
-                  };
-
-                  // Group origins by compact pattern: (has_shift, full reduces set).
-                  let mut pattern_groups: BTreeMap<(bool, BTreeSet<CombinedReduceKey>), StateIDBV> = BTreeMap::new();
-                  for &(origin, _) in &origin_set {
-                      if !origins_with_action.contains(&origin) {
-                          continue;
-                      }
-                      let has_shift = origins_with_shift.contains(&origin);
-                      let reduces_set = origin_reduces.remove(&origin).unwrap_or_default();
-                      pattern_groups
-                          .entry((has_shift, reduces_set))
-                          .or_insert_with(StateIDBV::zeros)
-                          .insert(origin.0);
-                  }
-
-                  // Emit one action per pattern (Split with optional shift and aggregated reduces).
-                  for ((has_shift, reduces_keys), mask) in pattern_groups {
-                      // Aggregate reduces by len -> nt -> union of pids.
-                      let mut reduces_map: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
-                      for key in &reduces_keys {
-                          reduces_map
-                              .entry(key.len)
-                              .or_default()
-                              .entry(key.nt)
-                              .or_default()
-                              .extend(key.production_ids.iter().cloned());
-                      }
-
-                      let mut action = if has_shift && reduces_map.is_empty() {
-                          // Pure shift for this origin-group
-                          Stage7ShiftsAndReducesLookaheadValue::Shift(
-                              maybe_next_cid.expect("Shift present in pattern but no next_cid computed"),
-                          )
-                      } else {
-                          Stage7ShiftsAndReducesLookaheadValue::Split {
-                              shift: if has_shift { maybe_next_cid } else { None },
-                              reduces: reduces_map,
-                          }
-                      };
-                      action.simplify();
-                      shifts_and_reduces.entry(tid).or_default().push((action, mask));
-                  }
-              }
-
-              // --- Build per-nonterminal gotos with origin masks:
-              // We split them into two entries if necessary (accept=false vs accept=true).
-              let mut gotos: BTreeMap<NonTerminalID, Vec<(Goto, StateIDBV)>> = BTreeMap::new();
-
-              for ntid in all_nonterminals {
-                  let mut goto_pairs: OriginSet = BTreeSet::new();
-                  let mut accept_mask = StateIDBV::zeros();
-                  let mut non_accept_mask = StateIDBV::zeros();
-                  let mut saw_accept = false;
-                  let mut saw_non_accept = false;
-
-                  for &(origin, current) in &origin_set {
-                      let row = &table[&current];
-                      if let Some(goto) = row.gotos.get(&ntid) {
-                          if let Some(next_state) = goto.state_id {
-                              goto_pairs.insert((origin, next_state));
-                              if goto.accept {
-                                  accept_mask.insert(origin.0);
-                                  saw_accept = true;
-                              } else {
-                                  non_accept_mask.insert(origin.0);
-                                  saw_non_accept = true;
-                              }
-                          }
-                      }
-                  }
-
-                  if !goto_pairs.is_empty() {
-                      let next_cid = {
-                          let mut now_states = goto_pairs.iter().map(|(_, now)| *now);
-                          let first_now_state = now_states.next().unwrap(); // Not empty, so safe.
-                          if now_states.all(|s| s == first_now_state) {
-                              // Optimization: all 'now' states are the same, transition to that original state.
-                              first_now_state
-                          } else {
-                              // Otherwise, it's a true combined state.
-                              if let Some(existing) = originset_to_id.get_by_left(&goto_pairs).copied() {
-                                  existing
-                              } else {
-                                  let sid = StateID(next_combined_id);
-                                  next_combined_id += 1;
-                                  originset_to_id.insert(goto_pairs.clone(), sid);
-                                  worklist.push_back(goto_pairs);
-                                  sid
-                              }
-                          }
-                      };
-
-                      if saw_non_accept {
-                          gotos
-                              .entry(ntid)
-                              .or_default()
-                              .push((
-                                  Goto { state_id: Some(next_cid), accept: false },
-                                  non_accept_mask,
-                              ));
-                      }
-                      if saw_accept {
-                          gotos
-                              .entry(ntid)
-                              .or_default()
-                              .push((
-                                  Goto { state_id: Some(next_cid), accept: true },
-                                  accept_mask,
-                              ));
-                      }
-                  }
-              }
-
-              // Build the final combined row. We don't attempt "default reduce" promotion here.
-              let row = HallucinatedRow {
-                  shifts_and_reduces,
-                  gotos,
-                  default_reduce: DefaultReduce { clone_and_merge: true, reduce: None },
-              };
-              combined_rows.insert(this_cid, row);
-          }
-
-          if !combined_rows.is_empty() {
-              println!("\n--- Combined States Statistics ---");
-              println!("Total combined states: {}", combined_rows.len());
-
-              let mut shift_counts = Vec::new();
-              let mut reduce_counts = Vec::new();
-              let mut goto_counts = Vec::new();
-
-              for row in combined_rows.values() {
-                  let mut num_shifts = 0;
-                  let mut num_reduces = 0;
-                  for actions in row.shifts_and_reduces.values() {
-                      for (action, _) in actions {
-                          match action {
-                              Stage7ShiftsAndReducesLookaheadValue::Shift(_) => num_shifts += 1,
-                              Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } => num_reduces += 1,
-                              Stage7ShiftsAndReducesLookaheadValue::Split { .. } => {
-                                  // This shouldn't happen as splits are flattened
-                              }
-                          }
-                      }
-                  }
-                  shift_counts.push(num_shifts);
-                  reduce_counts.push(num_reduces);
-
-                  let num_gotos = row.gotos.values().map(|v| v.len()).sum();
-                  goto_counts.push(num_gotos);
-              }
-
-              fn print_stats(name: &str, counts: &[usize]) {
-                  if counts.is_empty() {
-                      println!("{}: N/A (no data)", name);
-                      return;
-                  }
-                  let total_states = counts.len();
-                  let total_actions: usize = counts.iter().sum();
-                  let min = *counts.iter().min().unwrap();
-                  let max = *counts.iter().max().unwrap();
-                  let avg = total_actions as f64 / total_states as f64;
-
-                  println!(
-                      "{}: Total: {}, Min/Max per state: {}/{}, Avg per state: {:.2}",
-                      name, total_actions, min, max, avg
-                  );
-
-                  let mut distribution = BTreeMap::new();
-                  for &count in counts {
-                      *distribution.entry(count).or_insert(0) += 1;
-                  }
-
-                  print!("  Distribution (count -> #states): ");
-                  let mut first = true;
-                  for (count, num_states) in distribution {
-                      if !first {
-                          print!(", ");
-                      }
-                      print!("{}: {}", count, num_states);
-                      first = false;
-                  }
-                  println!();
-              }
-
-              print_stats("Shift actions", &shift_counts);
-              print_stats("Reduce actions", &reduce_counts);
-              print_stats("Goto actions", &goto_counts);
-              println!("------------------------------------");
-          }
-
-          (combined_rows, combined_start_state_id)
-      }
-
-      /// Helper for `stage_9`: Traces a chain of unit reductions from a given starting state and non-terminal.
-      fn compute_unit_reduction_chain<'a, F>(
-          table: &'a Table,
-          source_state_id: StateID,
-          initial_nt: NonTerminalID,
-          token_id: TerminalID,
-          action_selector: F,
-      ) -> (BTreeSet<StateID>, bool)
-      where
-          F: Fn(StateID) -> &'a BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
-      {
-          let mut final_goto_state_ids_for_source = BTreeSet::new();
-          let mut accepted = false;
-          let mut current_nt_local = initial_nt;
-          let row = &table[&source_state_id];
-
-          loop {
-              if let Some(goto) = row.gotos.get(&current_nt_local) {
-                  if goto.accept {
-                      accepted = true;
-                  }
-                  if let Some(goto_state_id) = goto.state_id {
-                      if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(goto_state_id).get(&token_id) {
-                          current_nt_local = *next_nt;
-                          continue; // Follow the unit-reduction chain.
-                      }
-                      // Not a unit reduction, this is a final state for this chain.
-                      final_goto_state_ids_for_source.insert(goto_state_id);
-                  }
-              }
-              // End of chain (no GOTO, no further state, or not a unit reduction).
-              break;
-          }
-          (final_goto_state_ids_for_source, accepted)
-      }
-
-      /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
-      ///
-      /// This function takes a table and a list of compatible state pairs. It merges these
-      /// pairs and transitively merges states. For example, if (s1, s2) and (s2, s3) are
-      /// compatible, all three states will be merged into one.
-      ///
-      /// The process involves:
-      /// 1.  Finding the canonical representative for each state using a disjoint-set union (DSU) approach.
-      /// 2.  Creating a new, smaller parse table where each row corresponds to a representative state.
-      /// 3.  Merging the goto maps of the merged states.
-      /// 4.  Updating all StateID references (in shifts and gotos) throughout the new table to point
-      ///     to the new representative state IDs.
-      ///
-      /// # Arguments
-      /// * `table` - The `Stage7Table` to be compacted.
-      /// * `item_set_map` - The mapping from item sets to their `StateID`s.
-      /// * `start_state_id` - The initial state ID of the parser.
-      /// * `compatible_pairs` - A list of state pairs that have been identified as compatible for merging.
-      ///
-      /// # Returns
-      /// A tuple containing:
-      /// * The new, compacted `Stage7Table`.
-      /// * The new `BiBTreeMap` mapping merged item sets to the new `StateID`s.
-      /// * The new start state ID.
-      fn merge_compatible_states(
-          table: &Table,
-          item_set_map: &BiBTreeMap<BTreeSet<Item>, StateID>,
-          start_state_id: StateID,
-          compatible_pairs: &[(StateID, StateID)],
-      ) -> (Table, BiBTreeMap<BTreeSet<Item>, StateID>, StateID) {
-          if compatible_pairs.is_empty() {
-              return (table.clone(), item_set_map.clone(), start_state_id);
-          }
-
-          crate::debug!(2, "Merging {} compatible state pairs.", compatible_pairs.len());
-
-          // 1. DSU structure to manage state merging.
-          let mut parent: BTreeMap<StateID, StateID> = table.keys().map(|&id| (id, id)).collect();
-          fn find_set(parent: &mut BTreeMap<StateID, StateID>, i: StateID) -> StateID {
-              if parent[&i] == i {
-                  i
-              } else {
-                  let root = find_set(parent, parent[&i]);
-                  parent.insert(i, root); // Path compression
-                  root
-              }
-          }
-          fn unite_sets(parent: &mut BTreeMap<StateID, StateID>, mut a: StateID, mut b: StateID) {
-              a = find_set(parent, a);
-              b = find_set(parent, b);
-              if a != b {
-                  // A simple union, could be optimized by rank/size
-                  parent.insert(b, a);
-              }
-          }
-
-          for &(s1, s2) in compatible_pairs {
-              unite_sets(&mut parent, s1, s2);
-          }
-
-          // Create final mapping from old state ID to its representative.
-          let mut state_map: BTreeMap<StateID, StateID> = BTreeMap::new();
-          for &old_id in table.keys() {
-              state_map.insert(old_id, find_set(&mut parent, old_id));
-          }
-
-          // 2. Create the new merged table.
-          let mut new_table: Table = BTreeMap::new();
-          let mut new_item_sets: BTreeMap<StateID, BTreeSet<Item>> = BTreeMap::new();
-
-          let state_to_items: BTreeMap<StateID, &BTreeSet<Item>> = item_set_map.iter().map(|(k, v)| (*v, k)).collect();
-
-          for (&old_id, row) in table.iter() {
-              let new_id = state_map[&old_id];
-              new_item_sets.entry(new_id).or_default().extend(state_to_items[&old_id].iter().cloned());
-
-              let new_row = new_table.entry(new_id).or_insert_with(|| Row {
-                  shifts_and_reduces_without_default_reduce: row.shifts_and_reduces_without_default_reduce.clone(),
-                  shifts_and_reduces_full: row.shifts_and_reduces_full.clone(),
-                  default_reduce: row.default_reduce.clone(),
-                  gotos: BTreeMap::new(),
-              });
-
-              for (nt_id, goto) in &row.gotos {
-                  new_row.gotos.insert(*nt_id, *goto);
-              }
-          }
-
-          fn remap_action_state_ids(action: &mut Stage7ShiftsAndReducesLookaheadValue, map: &BTreeMap<StateID, StateID>) {
-              match action {
-                  Stage7ShiftsAndReducesLookaheadValue::Shift(ref mut sid) => *sid = map[sid],
-                  Stage7ShiftsAndReducesLookaheadValue::Split { ref mut shift, .. } => {
-                      if let Some(ref mut sid) = shift { *sid = map[sid]; }
-                  }
-                  _ => {}
-              }
-          }
-
-          for row in new_table.values_mut() {
-              row.shifts_and_reduces_without_default_reduce.values_mut().for_each(|a| remap_action_state_ids(a, &state_map));
-              row.shifts_and_reduces_full.values_mut().for_each(|a| remap_action_state_ids(a, &state_map));
-              row.gotos.values_mut().for_each(|g| { if let Some(ref mut sid) = g.state_id { *sid = state_map[sid]; } });
-          }
-
-          let new_item_set_map: BiBTreeMap<BTreeSet<Item>, StateID> = new_item_sets.into_iter().map(|(state_id, item_set)| (item_set, state_id)).collect();
-          let new_start_state_id = state_map[&start_state_id];
-
-          crate::debug!(2, "Merged states. Original: {}, New: {}", table.len(), new_table.len());
-
-          (new_table, new_item_set_map, new_start_state_id)
-      }
-
-      #[time_it]
-      pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
-          assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
-          crate::debug!(2, "Validating initial grammar");
-          validate(productions).expect("Initial grammar validation failed");
-
-          let original_productions = productions.to_vec();
-          let start_production_id = 0;
-
-          crate::debug!(2, "Removing productions with undefined non-terminals");
-          // println!("Before removing undefined non-terminals:\n{}", display_productions(&productions));
-          let mut productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
-          // productions = simplify_grammar(&mut productions);
-
-          // Resolve right-recursion
-          let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
-          let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
-          // println!("Before recursion resolution:\n{}", display_productions(&productions));
-          // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
-          crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
-          // println!("After direct right recursion:\n{}", display_productions(&productions));
-
-          if true {
-              // println!("Before inlining nullable productions:\n{}", display_productions(&productions));
-              // println!("Before inlining nullable productions: Number of productions: {}", productions.len());
-              productions = inline_null_productions(&productions);
-              // println!("After inlining nullable productions:\n{}", display_productions(&productions));
-              // println!("After inlining nullable productions: Number of productions: {}", productions.len());
-          }
-          if false {
-              // println!("Before inlining unit productions:\n{}", display_productions(&productions));
-              productions = inline_unit_productions(&productions);
-              // println!("After inlining unit productions:\n{}", display_productions(&productions));
-          }
-
-          // After recursion resolution, new non-terminals may have been added.
-          // We need to update the non_terminal_map.
-          let mut next_non_terminal_id = non_terminal_map.len();
-          for p in &productions {
-              if !non_terminal_map.contains_left(&p.lhs) {
-                  non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
-                  next_non_terminal_id += 1;
-              }
-          }
-
-          crate::debug!(2, "Stage 1");
-          let stage_1_table = stage_1(&productions);
-          crate::debug!(6, &stage_1_table);
-          crate::debug!(2, "Stage 2");
-          let stage_2_table = stage_2(stage_1_table, &productions);
-          crate::debug!(6, &stage_2_table);
-          crate::debug!(2, "Stage 3");
-          let stage_3_table = stage_3(stage_2_table, &productions);
-          crate::debug!(6, &stage_3_table);
-          crate::debug!(2, "Stage 4");
-          let stage_4_table = stage_4(stage_3_table, &productions);
-          crate::debug!(6, &stage_4_table);
-          crate::debug!(2, "Stage 5");
-          let stage_5_table = stage_5(stage_4_table, &productions, &terminal_map);
-          crate::debug!(6, &stage_5_table);
-          crate::debug!(2, "Stage 6");
-          let stage_6_table = stage_6(stage_5_table);
-          crate::debug!(6, &stage_6_table);
-          crate::debug!(2, "Stage 7");
-          let (mut stage_7_table, mut item_set_map, mut start_state_id, everything_state_id) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
-          crate::debug!(6, &stage_7_table);
-          crate::debug!(2, "Stage 8");
-          let stage_8_table = stage_8(stage_7_table);
-          crate::debug!(6, &stage_8_table);
-
-          crate::debug!(2, "Stage 9: Precomputing substring gotos");
-          let substring_gotos = stage_9(&stage_8_table, &non_terminal_map);
-
-          crate::debug!(2, "Stage 10: Precomputing reduce goto map");
-          let reduce_goto_map = stage_10(&stage_8_table);
-
-          crate::debug!(2, "Finalizing table");
-          let final_table = stage_8_table;
-
-          let hallucinated_row = stage_11_create_hallucinated_row(&final_table);
-          let hallucinated_state_id = StateID(usize::MAX);
-
-          // Build combined-state rows (replaces hallucinated row).
-          let (combined_rows, combined_start_state_id) = stage_12_build_combined_states(&final_table);
-          println!("Number of combined states: {}", combined_rows.len());
-          crate::debug!(2, "Done generating GLR parser");
-          // crate::debug!(6, "Number of states: {}", final_table.len());
-          // panic!("GLR parser generation complete. Number of states: {}", final_table.len());
-
-          print_summary();
-          print_summary_flat();
-          crate::glr::parser::GLRParser::new(
-              final_table,
-              productions,
-              terminal_map,
-              non_terminal_map,
-              item_set_map,
-              start_state_id,
-              everything_state_id,
-              actions,
-              ignore_terminal_id,
-              substring_gotos,
-              reduce_goto_map,
-              hallucinated_row,
-              hallucinated_state_id,
-              combined_rows,
-              combined_start_state_id,
-          )
-      }
-      pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
-          let terminal_map = assign_terminal_ids(productions);
-          generate_glr_parser_with_terminal_map(productions, terminal_map, ignore_terminal_id)
-      }
-
-      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
-          let non_terminal_map = assign_non_terminal_ids(productions);
-          generate_glr_parser_with_maps(productions, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id)
-      }
-
-      pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
-          let mut terminal_map = BiBTreeMap::new();
-          let mut next_terminal_id = 0;
-
-          for p in productions {
-              for symbol in &p.rhs {
-                  if let Symbol::Terminal(t) = symbol {
-                      if !terminal_map.contains_left(t) {
-                          terminal_map.insert(t.clone(), TerminalID(next_terminal_id));
-                          next_terminal_id += 1;
-                      }
-                  }
-              }
-          }
-
-          terminal_map
-      }
-
-      pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerminal, NonTerminalID> {
-          let mut non_terminal_map = BiBTreeMap::new();
-          let mut next_non_terminal_id = 0;
-
-          for p in productions {
-              if !non_terminal_map.contains_left(&p.lhs) {
-                  non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
-                  next_non_terminal_id += 1;
-              }
-          }
-          non_terminal_map
-      }
-      use crate::glr::parser::{GLRParser, ActionFn, ExpectElse};
-      use crate::profiler::{print_summary, print_summary_flat};
-
-  diffs_applied_this_send: true
-  core_guidance_inserted: true
-  prev_apply_mode: git-llm
-system:
-  message: |-
-    You are a helpful assistant.
-    Respond in markdown format.
-    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
-    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
-  model:
-    - gpt-5
-  code_completion_model:
-    - cp
-  commit_message_model:
-    - gemini/gemini-flash-lite-latest
-  diff_correction_model:
-    - gf
-  max_completion_tokens:
-  temperature: 0.0
-  apply_mode: git-llm
-  llm_context_mode: full
-messages:
-  - user: |-
-      Developer note (core guidance):
-      - Respond in markdown format.
-      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
-      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
-      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
-      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
-        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
-      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
-      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
-      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
-      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
-
-
-      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
-    metadata:
-      kind: core-guidance
-      role: developer
-      ephemeral: false
-  - user: |-
-      ```rust 'src/glr/table.rs'
       use super::items::{Item, LRMode, LR_MODE};
       use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
       use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
@@ -4688,25 +3005,1521 @@ messages:
       use crate::glr::parser::{GLRParser, ActionFn, ExpectElse};
       use crate::profiler::{print_summary, print_summary_flat};
 
+  diffs_applied_this_send: true
+  core_guidance_inserted: true
+  prev_apply_mode: git-llm
+system:
+  message: |-
+    You are a helpful assistant.
+    Respond in markdown format.
+    Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
+    Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
+  model:
+    - gp
+  code_completion_model:
+    - cp
+  commit_message_model:
+    - gemini/gemini-flash-lite-latest
+  diff_correction_model:
+    - gf
+  max_completion_tokens:
+  temperature: 0.0
+  apply_mode: git-llm
+  llm_context_mode: full
+messages:
+  - user: |-
+      Developer note (core guidance):
+      - Respond in markdown format.
+      - Produce exactly one single reply per turn (do not split a turn across multiple messages).
+      - Avoid suggesting users clear caches or tweak local configs; that's rarely the cause of errors.
+      - If you asked for a change and the user shares a compile or runtime error next, assume they've tried obvious steps and move directly to actual fixes.
+      - Only include git diff markers (‘+’/‘-’ at the start of lines) inside a fenced ```diff block intended as a patch.
+        Outside of a diff block, avoid starting lines with ‘+’ or ‘-’ unless it’s clearly incidental (e.g., inside code strings).
+      - Mode instructions can appear anywhere in the conversation; the most recent such instruction should control your output format for the current turn.
+      - If asked for a full code, provide it as instructed by the active mode. Otherwise, give detailed, step-by-step instructions.
+      - Never stop or hand back to the user when you encounter uncertainty — deduce the most reasonable approach and continue.
+      - Do not ask the human to confirm or clarify assumptions, as you can always adjust later — decide what the most reasonable assumption is, proceed with it, and document it for the user's reference after you finish acting
+
+
+      The conversation may switch modes (e.g., instructions-only, full code blocks, or git diffs). When it does, a new “Mode instruction” message will be appended near the end of the conversation to preserve the cache prefix.
+    metadata:
+      kind: core-guidance
+      role: developer
+      ephemeral: false
+  - user: |-
+      ```rust 'src/glr/table.rs'
+      use super::items::{Item, LRMode, LR_MODE};
+      use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
+      use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
+      use crate::constraint::StateIDBV;
+      use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      use bimap::BiBTreeMap;
+      use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      use std::fmt::Display;
+      use crate::glr::analyze::{create_unique_name_generator, remove_productions_with_undefined_nonterminals, simplify_grammar, validate, inline_unit_productions, inline_null_productions};
+      pub use crate::types::TerminalID;
+      use crate::json_serialization::{JSONConvertible, JSONNode};
+      use std::collections::BTreeMap as StdMap;
+      use profiler_macro::time_it;
+      use std::sync::Arc;
+      use crate::interface::display_productions;
+      // Added for derive macro pattern
+
+
+      const EVERYTHING: bool = false;
+
+
+      type Stage1Table = BTreeMap<BTreeSet<Item>, Stage1Row>;
+      type Stage2Table = BTreeMap<BTreeSet<Item>, Stage2Row>;
+      type Stage3Table = BTreeMap<BTreeSet<Item>, Stage3Row>;
+      type Stage4Table = BTreeMap<BTreeSet<Item>, Stage4Row>;
+      type Stage5Table = BTreeMap<BTreeSet<Item>, Stage5Row>;
+      pub(crate) type Stage6Table = BTreeMap<BTreeSet<Item>, Stage6Row>;
+      type Stage7Table = BTreeMap<StateID, Stage7Row>;
+      type Stage8Table = BTreeMap<StateID, Row>;
+      pub type Table = BTreeMap<StateID, Row>;
+
+
+      type Stage1Row = BTreeMap<Option<Symbol>, BTreeSet<Item>>;
+      #[derive(Debug, Default, Clone, PartialEq, Eq)]
+      struct Stage2Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeSet<Item>,
+      }
+      #[derive(Debug, Default, Clone, PartialEq, Eq)]
+      struct Stage3Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>>,
+      }
+      #[derive(Debug, Default, Clone, PartialEq, Eq)]
+      struct Stage4Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
+      }
+      #[derive(Debug, Default, Clone, PartialEq, Eq)]
+      struct Stage5Row {
+          shifts: BTreeMap<Terminal, BTreeSet<Item>>,
+          gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+          reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+      }
+      #[derive(Debug, Default, Clone, PartialEq, Eq)]
+      pub(crate) struct Stage6Row {
+          pub(crate) shifts_and_reduces: BTreeMap<Terminal, Stage6ShiftsAndReduces>,
+          pub(crate) gotos: BTreeMap<NonTerminal, BTreeSet<Item>>,
+      }
+
+      #[derive(Debug, Default, Clone, PartialEq, Eq)]
+      pub(crate) struct Stage6ShiftsAndReduces {
+          pub(crate) shift: Option<BTreeSet<Item>>,
+          pub(crate) reduces: BTreeSet<ProductionID>,
+      }
+
+      #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+      pub enum Stage7ShiftsAndReducesLookaheadValue {
+          Shift(StateID),
+          Reduce {
+              nonterminal_id: NonTerminalID,
+              len: usize,
+              production_ids: BTreeSet<ProductionID>,
+          },
+          Split {
+              shift: Option<StateID>,
+              reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,
+          },
+      }
+
+      impl Stage7ShiftsAndReducesLookaheadValue {
+          /// Simplifies a `Split` action into a `Shift` or `Reduce` if possible.
+          /// - A `Split` with a shift and no reduces becomes a `Shift`.
+          /// - A `Split` with no shift and exactly one reduce action becomes a `Reduce`.
+          pub fn simplify(&mut self) {
+              if let Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } = self {
+                  if reduces.is_empty() {
+                      if let Some(shift_id) = *shift {
+                          *self = Stage7ShiftsAndReducesLookaheadValue::Shift(shift_id);
+                      }
+                  } else if shift.is_none() && reduces.len() == 1 && reduces.values().next().unwrap().len() == 1 {
+                      // No shift, and only one kind of reduce (one len, one nt).
+                      let temp_self = std::mem::replace(self, Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, reduces: BTreeMap::new() }); // dummy
+                      if let Stage7ShiftsAndReducesLookaheadValue::Split { mut reduces, .. } = temp_self {
+                          let (len, mut nts) = reduces.into_iter().next().unwrap();
+                          let (nt_id, pids) = nts.into_iter().next().unwrap();
+                          *self = Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt_id, len, production_ids: pids };
+                      }
+                  }
+              }
+          }
+      }
+
+      impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              match self {
+                  Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
+                      obj.insert("variant".to_string(), JSONNode::String("Shift".to_string()));
+                      obj.insert("state_id".to_string(), state_id.to_json());
+                  }
+                  Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                      obj.insert("variant".to_string(), JSONNode::String("Reduce".to_string()));
+                      obj.insert("nonterminal_id".to_string(), nonterminal_id.to_json());
+                      obj.insert("len".to_string(), len.to_json());
+                      obj.insert("production_ids".to_string(), production_ids.to_json());
+                  }
+                  Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                      obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
+                      obj.insert("shift".to_string(), shift.to_json());
+                      obj.insert("reduces".to_string(), reduces.to_json());
+                  }
+              }
+              JSONNode::Object(obj)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let variant = obj.remove("variant").ok_or_else(|| "Missing field variant for Stage7ShiftsAndReducesLookaheadValue".to_string())
+                                         .and_then(String::from_json)?;
+                      match variant.as_str() {
+                          "Shift" => {
+                              let state_id = obj.remove("state_id").ok_or_else(|| "Missing field state_id for Shift".to_string())
+                                                .and_then(StateID::from_json)?;
+                              Ok(Stage7ShiftsAndReducesLookaheadValue::Shift(state_id))
+                          }
+                          "Reduce" => {
+                              let nonterminal_id = obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for Reduce".to_string())
+                                                      .and_then(NonTerminalID::from_json)?;
+                              let len = obj.remove("len").ok_or_else(|| "Missing field len for Reduce".to_string())
+                                           .and_then(usize::from_json)?;
+                              let production_ids = obj.remove("production_ids").ok_or_else(|| "Missing field production_ids for Reduce".to_string())
+                                                      .and_then(|n| BTreeSet::<ProductionID>::from_json(n))?;
+                              Ok(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids })
+                          }
+                          "Split" => {
+                              let shift = obj.remove("shift").ok_or_else(|| "Missing field shift for Split".to_string())
+                                             .and_then(Option::<StateID>::from_json)?;
+                              let reduces = obj.remove("reduces").ok_or_else(|| "Missing field reduces for Split".to_string())
+                                               .and_then(|n| BTreeMap::<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>::from_json(n))?;
+                              Ok(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces })
+                          }
+                          _ => Err(format!("Unknown variant {} for Stage7ShiftsAndReducesLookaheadValue", variant)),
+                      }
+                  }
+                  _ => Err("Expected JSONNode::Object for Stage7ShiftsAndReducesLookaheadValue".to_string()),
+              }
+          }
+      }
+
+      #[derive(Debug, Default, Clone, Eq, Ord, PartialEq, PartialOrd)]
+      pub struct SubstringGoto {
+          pub accepting_sources: BTreeSet<StateID>,
+          pub gotos: BTreeMap<StateID, BTreeSet<StateID>>,
+      }
+
+      impl JSONConvertible for SubstringGoto {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("accepting_sources".to_string(), self.accepting_sources.to_json());
+              obj.insert("gotos".to_string(), self.gotos.to_json());
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => Ok(SubstringGoto {
+                      accepting_sources: BTreeSet::<StateID>::from_json(obj.remove("accepting_sources").ok_or_else(|| "Missing field accepting_sources for SubstringGoto".to_string())?)?,
+                      gotos: BTreeMap::<StateID, BTreeSet<StateID>>::from_json(obj.remove("gotos").ok_or_else(|| "Missing field gotos for SubstringGoto".to_string())?)?,
+                  }),
+                  _ => Err("Expected JSONNode::Object for SubstringGoto".to_string()),
+              }
+          }
+      }
+
+      pub type ShiftsAndReducesWithoutDefaultReduce = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
+      pub type ShiftsAndReducesFull = BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>;
+
+      #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+      pub struct Reduce {
+          pub nonterminal_id: NonTerminalID,
+          pub len: usize,
+          pub production_ids: BTreeSet<ProductionID>,
+      }
+
+      impl JSONConvertible for Reduce {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("nonterminal_id".to_string(), self.nonterminal_id.to_json());
+              obj.insert("len".to_string(), self.len.to_json());
+              obj.insert("production_ids".to_string(), self.production_ids.to_json());
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => Ok(Reduce {
+                      nonterminal_id: NonTerminalID::from_json(obj.remove("nonterminal_id").ok_or_else(|| "Missing field nonterminal_id for Reduce".to_string())?)?,
+                      len: usize::from_json(obj.remove("len").ok_or_else(|| "Missing field len for Reduce".to_string())?)?,
+                      production_ids: BTreeSet::<ProductionID>::from_json(obj.remove("production_ids").ok_or_else(|| "Missing field production_ids for Reduce".to_string())?)?,
+                  }),
+                  _ => Err("Expected JSONNode::Object for Reduce".to_string()),
+              }
+          }
+      }
+
+      #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+      pub struct DefaultReduce {
+          pub clone_and_merge: bool, // Indicates that there are phase 1 actions to be performed here.
+          pub reduce: Option<(Reduce, TerminalBV)>,
+      }
+
+      impl JSONConvertible for DefaultReduce {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("clone_and_merge".to_string(), self.clone_and_merge.to_json());
+              obj.insert("reduce".to_string(), self.reduce.to_json());
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => Ok(DefaultReduce {
+                      clone_and_merge: bool::from_json(obj.remove("clone_and_merge").ok_or_else(|| "Missing field clone_and_merge for DefaultReduce".to_string())?)?,
+                      reduce: Option::<(Reduce, TerminalBV)>::from_json(obj.remove("reduce").ok_or_else(|| "Missing field reduce for DefaultReduce".to_string())?)?,
+                  }),
+                  _ => Err("Expected JSONNode::Object for DefaultReduce".to_string()),
+              }
+          }
+      }
+
+      #[derive(Debug, Default, Clone, PartialEq, Eq)]
+      struct Stage7Row {
+          pub shifts_and_reduces_full: ShiftsAndReducesFull,
+          pub gotos: BTreeMap<NonTerminalID, Goto>,
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub struct Row {
+          pub shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce,
+          pub shifts_and_reduces_full: ShiftsAndReducesFull,
+          pub default_reduce: DefaultReduce,
+          pub gotos: BTreeMap<NonTerminalID, Goto>,
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub struct HallucinatedRow {
+          pub shifts_and_reduces: BTreeMap<TerminalID, Vec<(Stage7ShiftsAndReducesLookaheadValue, StateIDBV)>>,
+          pub gotos: BTreeMap<NonTerminalID, Vec<(Goto, StateIDBV)>>,
+          pub default_reduce: DefaultReduce,
+      }
+
+      // Manual impl for Row (could be derived)
+      impl JSONConvertible for Row {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("shifts_and_reduces_without_default_reduce".to_string(), self.shifts_and_reduces_without_default_reduce.to_json());
+              obj.insert("shifts_and_reduces_full".to_string(), self.shifts_and_reduces_full.to_json());
+              obj.insert("default_reduce".to_string(), self.default_reduce.to_json());
+              obj.insert("gotos".to_string(), self.gotos.to_json());
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => Ok(Row {
+                      shifts_and_reduces_without_default_reduce: ShiftsAndReducesWithoutDefaultReduce::from_json(obj.remove("shifts_and_reduces_without_default_reduce").ok_or_else(|| "Missing field shifts_and_reduces_without_default_reduce for Row".to_string())?)?,
+                      shifts_and_reduces_full: ShiftsAndReducesFull::from_json(obj.remove("shifts_and_reduces_full").ok_or_else(|| "Missing field shifts_and_reduces_full for Row".to_string())?)?,
+                      default_reduce: DefaultReduce::from_json(obj.remove("default_reduce").ok_or_else(|| "Missing field default_reduce for Row".to_string())?)?,
+                      gotos: BTreeMap::<NonTerminalID, Goto>::from_json(obj.remove("gotos").ok_or_else(|| "Missing field gotos for Row".to_string())?)?,
+                  }),
+                  _ => Err("Expected JSONNode::Object for Row".to_string()),
+              }
+          }
+      }
+
+      #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct Goto {
+          pub state_id: Option<StateID>,
+          pub accept: bool,
+      }
+
+      impl JSONConvertible for Goto {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("state_id".to_string(), self.state_id.to_json());
+              obj.insert("accept".to_string(), self.accept.to_json());
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => Ok(Goto {
+                      state_id: obj
+                          .remove("state_id")
+                          .ok_or_else(|| "Missing field 'state_id' for Goto".to_string())
+                          .and_then(Option::<StateID>::from_json)?,
+                      accept: obj
+                          .remove("accept")
+                          .ok_or_else(|| "Missing field 'accept' for Goto".to_string())
+                          .and_then(bool::from_json)?,
+                  }),
+                  _ => Err("Expected JSONNode::Object for Goto".to_string()),
+              }
+          }
+      }
+
+      #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct StateID(pub usize);
+
+      impl JSONConvertible for StateID {
+          fn to_json(&self) -> JSONNode { self.0.to_json() }
+          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(StateID) }
+      }
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct ProductionID(pub usize);
+
+      impl JSONConvertible for ProductionID {
+          fn to_json(&self) -> JSONNode { self.0.to_json() }
+          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(ProductionID) }
+      }
+
+      #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+      pub struct NonTerminalID(pub usize);
+
+      impl JSONConvertible for NonTerminalID {
+          fn to_json(&self) -> JSONNode { self.0.to_json() }
+          fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(NonTerminalID) }
+      }
+
+
+      type Stage1Result = Stage1Table;
+      type Stage2Result = Stage2Table;
+      type Stage3Result = Stage3Table;
+      type Stage4Result = Stage4Table;
+      type Stage5Result = Stage5Table;
+      type Stage6Result = Stage6Table;
+      type Stage7Result = (
+          Stage7Table,
+          BiBTreeMap<BTreeSet<Item>, StateID>,
+          StateID,
+          StateID,
+      );
+
+      fn stage_1_row(worklist: &mut VecDeque<BTreeSet<Item>>, visited_kernels: &mut BTreeSet<BTreeSet<Item>>, splits: BTreeMap<Option<Symbol>, BTreeSet<Item>>) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
+          let mut row = BTreeMap::new();
+          for (symbol, items_in_split) in &splits {
+              row.insert(symbol.clone(), items_in_split.clone());
+              if symbol.is_some() {
+                  let goto_set = compute_goto(items_in_split);
+                  if visited_kernels.insert(goto_set.clone()) {
+                      worklist.push_back(goto_set);
+                  }
+              }
+          }
+          row
+      }
+
+      #[time_it]
+      fn stage_1(productions: &[Production]) -> Stage1Result {
+          assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
+          let start_production_id = 0;
+          let initial_item = Item {
+              production: Arc::new(productions[start_production_id].clone()),
+              dot_position: 0,
+          };
+          let initial_item_set = BTreeSet::from([initial_item.clone()]); // Clone initial_item here
+
+          // Pre-computation for compute_closure: group productions by their LHS non-terminal.
+          let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+          for p in productions {
+              prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+          }
+
+          let mut worklist = VecDeque::from([initial_item_set.clone()]);
+          let mut transitions: Stage1Table = BTreeMap::new();
+          let mut visited_kernels = BTreeSet::from([initial_item_set.clone()]);
+
+          // --- Create the 'everything' item set ---
+          if EVERYTHING {
+              let mut everything_item_set = BTreeSet::new();
+              for prod in productions {
+                  for dot_position in 0..=prod.rhs.len() {
+                      let item = Item {
+                          production: Arc::new(prod.clone()),
+                          dot_position,
+                      };
+                      everything_item_set.insert(item);
+                  }
+              }
+              // Add the everything set to the worklist if it's not already there
+              if visited_kernels.insert(everything_item_set.clone()) {
+                  worklist.push_back(everything_item_set);
+              }
+          }
+
+          while let Some(item_set) = worklist.pop_front() {
+              assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
+              let closure = compute_closure(&item_set, &prods_by_lhs);
+              let splits = split_on_dot(&closure);
+              let row = stage_1_row(&mut worklist, &mut visited_kernels, splits);
+              transitions.insert(item_set, row);
+          }
+
+          transitions
+      }
+
+      fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
+          let mut stage_2_table = BTreeMap::new();
+          for (item_set, transitions) in stage_1_table {
+              let mut shifts = BTreeMap::new();
+              let mut gotos = BTreeMap::new();
+              let mut reduces = BTreeSet::new();
+
+              for (symbol_opt, item_set) in &transitions {
+                  match symbol_opt {
+                      Some(Symbol::Terminal(t)) => {
+                          shifts.insert(t.clone(), compute_goto(item_set));
+                      }
+                      Some(Symbol::NonTerminal(nt)) => {
+                          gotos.insert(nt.clone(), compute_goto(item_set));
+                      }
+                      None => {
+                          for item in item_set {
+                              assert_eq!(item.dot_position, item.production.rhs.len());
+                              reduces.insert(item.clone());
+                          }
+                      }
+                  }
+              }
+
+              stage_2_table.insert(
+                  item_set,
+                  Stage2Row {
+                      shifts,
+                      gotos,
+                      reduces,
+                  },
+              );
+          }
+          stage_2_table
+      }
+
+      fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
+          // Compute FOLLOW sets (including EOF as None)
+          let first_sets = compute_first_sets_for_nonterminals(productions);
+          let nullable_nonterminals = compute_nullable_nonterminals(productions);
+          let follow_sets = compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
+
+          let mut stage_3_table = BTreeMap::new();
+
+          for (item_set, row) in stage_2_table {
+              let mut reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>> = BTreeMap::new();
+
+              for item in &row.reduces {
+                  let lhs = &item.production.lhs;
+                  if let Some(follows) = follow_sets.get(lhs) {
+                      for look in follows {
+                          reduces.entry(look.clone()).or_default().insert(item.clone());
+                      }
+                  }
+              }
+
+              stage_3_table.insert(
+                  item_set,
+                  Stage3Row {
+                      shifts: row.shifts,
+                      gotos: row.gotos,
+                      reduces,
+                  },
+              );
+          }
+          stage_3_table
+      }
+
+      fn stage_4(stage_3_table: Stage3Table, productions: &[Production]) -> Stage4Result {
+          let production_ids: BTreeMap<Production, ProductionID> = productions
+              .iter()
+              .enumerate()
+              .map(|(i, p)| (p.clone(), ProductionID(i)))
+              .collect();
+
+          let mut stage_4_table = BTreeMap::new();
+
+          for (item_set, row) in stage_3_table {
+              let mut reduces = BTreeMap::new();
+
+              for (terminal, item_set) in row.reduces {
+                  let mut prod_ids = BTreeSet::new();
+                  for item in item_set {
+                      let prod_id = production_ids.get(&*item.production).unwrap();
+                      prod_ids.insert(*prod_id);
+                  }
+                  reduces.insert(terminal.clone(), prod_ids);
+              }
+
+              stage_4_table.insert(
+                  item_set,
+                  Stage4Row {
+                      shifts: row.shifts,
+                      gotos: row.gotos,
+                      reduces,
+                  },
+              );
+          }
+
+          stage_4_table
+      }
+
+      fn stage_5(stage_4_table: Stage4Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>) -> Stage5Result {
+          // Stage 5 turns
+          //     reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
+          // into
+          //     reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+          // ie it removes the None entries, which represent EOF.
+          // It does this by copying the values for None entries across to all other possible terminals (determined by the terminal_map),
+          // merging with any existing production ID sets in the reduces map.
+          let mut stage_5_table = BTreeMap::new();
+          let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
+
+          for (item_set, row) in stage_4_table {
+              let Stage4Row { shifts, gotos, reduces } = row;
+
+              // 2. Start building the new reduces map keyed by concrete terminals.
+              let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
+
+
+              // 2a. Copy over entries that already have a concrete terminal key.
+              for (opt_term, prod_ids) in reduces {
+                  if let Some(term) = opt_term {
+                      new_reduces
+                          .entry(term)
+                          .or_default()
+                          .extend(prod_ids.into_iter());
+                  } else {
+                      // 2b. For None entries, copy the production IDs to all terminals.
+                      for terminal in &all_terminals {
+                          new_reduces
+                              .entry(terminal.clone())
+                              .or_default()
+                              .extend(prod_ids.iter().cloned());
+                      }
+                  }
+              }
+
+              stage_5_table.insert(
+                  item_set,
+                  Stage5Row {
+                      shifts,
+                      gotos,
+                      reduces: new_reduces,
+                  },
+              );
+          }
+
+          stage_5_table
+      }
+
+      fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
+          let mut stage_6_table = BTreeMap::new();
+
+          for (item_set, row) in stage_5_table {
+              let mut shifts_and_reduces = BTreeMap::new();
+
+              // Get all terminals that appear in either shifts or reduces
+              let all_terminals: BTreeSet<_> = row.shifts.keys()
+                  .chain(row.reduces.keys())
+                  .cloned()
+                  .collect();
+
+              for terminal in all_terminals {
+                  let shift = row.shifts.get(&terminal).cloned();
+                  let reduces = row.reduces.get(&terminal).cloned().unwrap_or_default();
+
+                  let action = Stage6ShiftsAndReduces {
+                      shift,
+                      reduces,
+                  };
+                  shifts_and_reduces.insert(terminal, action);
+              }
+
+              stage_6_table.insert(
+                  item_set,
+                  Stage6Row {
+                      shifts_and_reduces,
+                      gotos: row.gotos,
+                  },
+              );
+          }
+
+          stage_6_table
+      }
+
+      fn stage_7(stage_6_table: Stage6Table, productions: &[Production], terminal_map: &BiBTreeMap<Terminal, TerminalID>, non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>) -> Stage7Result {
+          let start_production_id = 0;
+          let mut item_set_map = BiBTreeMap::new();
+          let mut next_state_id = 0;
+
+          for item_set in stage_6_table.keys() {
+              item_set_map.insert(item_set.clone(), StateID(next_state_id));
+              next_state_id += 1;
+          }
+
+          let mut stage_7_table = BTreeMap::new();
+
+          for (item_set, row) in stage_6_table {
+              let state_id = *item_set_map.get_by_left(&item_set).unwrap();
+
+              // Phase 2 map contains all possible actions for a state.
+              let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
+
+              for (terminal, action) in &row.shifts_and_reduces {
+                  let terminal_id = *terminal_map.get_by_left(terminal).expect_else(|| format!("Terminal {} not found in terminal map", terminal));
+
+                  // 1. Get the potential shift action.
+                  let maybe_shift: Option<StateID> = action.shift.as_ref().map(|shift_item_set| {
+                      *item_set_map.get_by_left(shift_item_set).unwrap()
+                  });
+
+                  // 2. Group all reduce actions.
+                  let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+                  for &production_id in &action.reduces {
+                      let production = &productions[production_id.0];
+                      let len = production.rhs.len();
+                      let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
+                      reduces
+                          .entry(len)
+                          .or_default()
+                          .entry(nonterminal_id)
+                          .or_default()
+                          .insert(production_id);
+                  }
+
+                  // 3. Create a combined action and simplify it.
+                  if maybe_shift.is_none() && reduces.is_empty() {
+                      // This should not happen because we iterate over terminals that have actions from stage 6.
+                      // panic!("Action without shift or reduce for terminal {:?}", terminal);
+                      continue;
+                  }
+
+                  let mut final_action = Stage7ShiftsAndReducesLookaheadValue::Split {
+                      shift: maybe_shift,
+                      reduces,
+                  };
+                  final_action.simplify();
+                  shifts_and_reduces_full.insert(terminal_id, final_action);
+              }
+
+              let mut gotos = BTreeMap::new();
+              for (nonterminal, next_item_set) in row.gotos {
+                  let non_terminal_id = *non_terminal_map.get_by_left(&nonterminal).expect(&format!("Non-terminal '{}' not found in map", nonterminal));
+                  let goto = Goto {
+                      state_id: Some(*item_set_map.get_by_left(&next_item_set).unwrap()),
+                      accept: false,
+                  };
+                  gotos.insert(non_terminal_id, goto);
+              }
+
+              stage_7_table.insert(state_id, Stage7Row {
+                  shifts_and_reduces_full,
+                  gotos,
+              });
+          }
+
+          let initial_item = Item {
+              production: Arc::new(productions[start_production_id].clone()),
+              dot_position: 0,
+          };
+          let initial_item_set = BTreeSet::from([initial_item]);
+          let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
+
+          // Goto for initial production
+          let start_non_terminal_id = *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
+          stage_7_table.get_mut(&start_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
+
+          // --- Find and configure the 'everything' state ---
+          let everything_state_id;
+          if EVERYTHING {
+              let mut everything_item_set = BTreeSet::new();
+              for prod in productions {
+                  for dot_position in 0..=prod.rhs.len() {
+                      let item = Item {
+                          production: Arc::new(prod.clone()),
+                          dot_position,
+                      };
+                      everything_item_set.insert(item);
+                  }
+              }
+              everything_state_id = *item_set_map.get_by_left(&everything_item_set).expect("Everything item set not found in state map");
+              stage_7_table.get_mut(&everything_state_id).unwrap().gotos.entry(start_non_terminal_id).or_default().accept = true;
+          } else {
+              everything_state_id = start_state_id; // Dummy value, won't be used
+          }
+
+          (stage_7_table, item_set_map, start_state_id, everything_state_id)
+      }
+
+      fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
+          let mut stage_8_table = BTreeMap::new();
+
+          for (state_id, row) in stage_7_table {
+              let Stage7Row { shifts_and_reduces_full, gotos } = row;
+
+              // --- Promotion Logic ---
+              let mut reduce_counts: BTreeMap<(NonTerminalID, usize), (usize, BTreeSet<ProductionID>)> = BTreeMap::new();
+              for action in shifts_and_reduces_full.values() {
+                  let mut process_reduces = |reduces: &BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>| {
+                      for (&len, nts) in reduces {
+                          for (&nt_id, pids) in nts {
+                              let entry = reduce_counts.entry((nt_id, len)).or_default();
+                              entry.0 += 1; // Count how many terminals trigger this kind of reduce
+                              entry.1.extend(pids.iter().cloned());
+                          }
+                      }
+                  };
+                  match action {
+                      Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, production_ids } => {
+                          let entry = reduce_counts.entry((*action_nt_id, *action_len)).or_default();
+                          entry.0 += 1;
+                          entry.1.extend(production_ids.iter().cloned());
+                      },
+                      Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => process_reduces(reduces),
+                      _ => {}
+                  }
+              }
+
+              // First, check for a reduction of the initial production (ID 0). If it exists, it's always promoted.
+              let promoted_reduce_key = reduce_counts.iter().find_map(|(key, (_, pids))| {
+                  if pids.contains(&ProductionID(0)) {
+                      Some(*key)
+                  } else {
+                      None
+                  }
+              }).or_else(|| {
+                  // Otherwise, use the original logic: promote the most common reduction.
+                  reduce_counts.iter().max_by_key(|(_, (count, _))| *count).map(|(key, _)| *key)
+              });
+
+              let (shifts_and_reduces_without_default_reduce, default_reduce) = if let Some((nonterminal_id, len)) = promoted_reduce_key {
+                  let (_, production_ids) = reduce_counts.remove(&(nonterminal_id, len)).unwrap();
+                  
+                  // NEW: Find all terminals that trigger this reduction.
+                  let mut eligible_terminals = TerminalBV::zeros();
+                  for (&tid, action) in &shifts_and_reduces_full {
+                      let is_eligible = match action {
+                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. } => {
+                              *action_nt_id == nonterminal_id && *action_len == len
+                          },
+                          Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
+                              reduces.get(&len).map_or(false, |nts| nts.contains_key(&nonterminal_id))
+                          },
+                          _ => false,
+                      };
+                      if is_eligible {
+                          eligible_terminals.insert(tid.0);
+                      }
+                  }
+
+                  let shifts_and_reduces_without_default = shifts_and_reduces_full.iter().filter_map(|(&tid, action)| {
+                      let mut new_action = action.clone();
+                      let mut was_modified = false;
+
+                      match &mut new_action {
+                          Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: action_nt_id, len: action_len, .. }
+                              if *action_nt_id == nonterminal_id && *action_len == len => {
+                              // This whole action is the promoted one, so we remove it from phase1.
+                              return None;
+                          }
+                          Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
+                              // Check if the promoted reduce is part of this split.
+                              if let Some(nts) = reduces.get_mut(&len) {
+                                  if nts.remove(&nonterminal_id).is_some() {
+                                      was_modified = true;
+                                      // If this was the last NT for this length, remove the length entry.
+                                      if nts.is_empty() {
+                                          reduces.remove(&len);
+                                      }
+                                  }
+                              }
+                          }
+                          _ => {} // Shift or non-matching Reduce, keep as is.
+                      }
+
+                      if was_modified {
+                          // We modified a Split, now simplify it.
+                          new_action.simplify();
+                      }
+                      Some((tid, new_action))
+                  }).collect::<ShiftsAndReducesWithoutDefaultReduce>();
+
+                  let default_reduce = DefaultReduce {
+                      clone_and_merge: !shifts_and_reduces_without_default.is_empty(),
+                      reduce: Some((Reduce { nonterminal_id, len, production_ids }, eligible_terminals)),
+                  };
+                  (shifts_and_reduces_without_default, default_reduce)
+              } else {
+                  let shifts_and_reduces_without_default = shifts_and_reduces_full.clone();
+                  let default_reduce = DefaultReduce {
+                      clone_and_merge: true,
+                      reduce: None,
+                  };
+                  (shifts_and_reduces_without_default, default_reduce)
+              };
+
+              stage_8_table.insert(state_id, Row {
+                  shifts_and_reduces_without_default_reduce,
+                  shifts_and_reduces_full,
+                  default_reduce,
+                  gotos,
+              });
+          }
+          stage_8_table
+      }
+
+      /// Pre-computes the complex GOTO logic for substring parsing reductions that pop below the stack.
+      ///
+      /// This function calculates, for each (NonTerminal, Lookahead) pair, what the resulting
+      /// states would be if a reduction for that non-terminal occurred, and we could start
+      /// from *any* state in the automaton (as is the case for substring parsing).
+      ///
+      /// This avoids a very expensive runtime loop over all table states.
+      pub fn stage_9(
+          table: &Table,
+          non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
+      ) -> BTreeMap<NonTerminalID, SubstringGoto> {
+          let mut substring_gotos = BTreeMap::new();
+
+          let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
+
+          for &nt_id in &all_nt_ids {
+              let mut accepting_sources = BTreeSet::new();
+              let mut gotos: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
+
+              for (&source_state_id, row) in table {
+                  if let Some(goto) = row.gotos.get(&nt_id) {
+                      if goto.accept {
+                          accepting_sources.insert(source_state_id);
+                      }
+                      if let Some(goto_state_id) = goto.state_id {
+                          gotos.entry(goto_state_id).or_default().insert(source_state_id);
+                      }
+                  }
+              }
+
+              if !accepting_sources.is_empty() || !gotos.is_empty() {
+                  substring_gotos.insert(nt_id, SubstringGoto {
+                      accepting_sources,
+                      gotos,
+                  });
+              }
+          }
+
+          substring_gotos
+      }
+
+      /// Pre-computes a map from (reduce non-terminal, goto state) to the set of states
+      /// that perform that goto. This is an inverted index of the GOTO table.
+      pub fn stage_10(
+          table: &Table,
+      ) -> BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> {
+          let mut reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> = BTreeMap::new();
+
+          for (&source_state_id, row) in table {
+              for (&nt_id, goto) in &row.gotos {
+                  if let Some(goto_state_id) = goto.state_id {
+                      reduce_goto_map
+                          .entry(nt_id)
+                          .or_default()
+                          .entry(goto_state_id)
+                          .or_default()
+                          .insert(source_state_id.0);
+                  }
+              }
+          }
+          reduce_goto_map
+      }
+
+      pub fn stage_11_create_hallucinated_row(table: &Table) -> HallucinatedRow {
+          let mut shifts_and_reduces: BTreeMap<TerminalID, BTreeMap<Stage7ShiftsAndReducesLookaheadValue, StateIDBV>> = BTreeMap::new();
+          let mut gotos: BTreeMap<NonTerminalID, BTreeMap<Goto, StateIDBV>> = BTreeMap::new();
+
+          for (&state_id, row) in table {
+              // Aggregate shifts and reduces
+              for (&terminal_id, action) in &row.shifts_and_reduces_full {
+                  shifts_and_reduces
+                      .entry(terminal_id)
+                      .or_default()
+                      .entry(action.clone())
+                      .or_default()
+                      .insert(state_id.0);
+              }
+
+              // Aggregate gotos
+              for (&nonterminal_id, goto) in &row.gotos {
+                  gotos
+                      .entry(nonterminal_id)
+                      .or_default()
+                      .entry(*goto)
+                      .or_default()
+                      .insert(state_id.0);
+              }
+          }
+
+          // Convert the intermediate maps to the final Vec format
+          let final_shifts_and_reduces = shifts_and_reduces
+              .into_iter()
+              .map(|(tid, actions)| (tid, actions.into_iter().collect()))
+              .collect();
+
+          let final_gotos = gotos
+              .into_iter()
+              .map(|(ntid, gotos_map)| (ntid, gotos_map.into_iter().collect()))
+              .collect();
+
+          HallucinatedRow {
+              shifts_and_reduces: final_shifts_and_reduces,
+              gotos: final_gotos,
+              default_reduce: DefaultReduce { clone_and_merge: true, reduce: None },
+          }
+      }
+
+      // Internal key for grouping equivalent reduce actions while building combined states.
+      // Two reduce actions are considered the "same" if they share the same reduced non-terminal,
+      // length, and the exact same set of production IDs.
+      #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+      struct CombinedReduceKey {
+          nt: NonTerminalID,
+          len: usize,
+          production_ids: BTreeSet<ProductionID>,
+      }
+
+      pub fn stage_12_build_combined_states(
+          table: &Table,
+      ) -> (BTreeMap<StateID, HallucinatedRow>, StateID) {
+          // A "combined" state is represented by an origin set:
+          // a set of pairs (x -> y), where x is the original "origin" state,
+          // and y is the current original state we are at (for that origin) in the base automaton.
+          //
+          // We create a graph whose nodes are such origin sets. Edges are induced by:
+          // - Shifts on terminals: for each terminal T, build a new origin set using the original table's shifts.
+          // - Gotos on non-terminals: for each non-terminal A, build a new origin set using the original table's gotos.
+          //
+          // Each combined state's row is represented using the same structure as HallucinatedRow:
+          // per terminal: a vector of (action, mask-of-origins), and
+          // per non-terminal: a vector of (goto, mask-of-origins).
+          // The masks indicate for which origin states the action/goto applies.
+
+          type OriginSet = BTreeSet<(StateID, StateID)>;
+
+          // 1) Seed combined-state space with the initial origin set: { s -> s | for all original states s }.
+          let mut initial_origin_set: OriginSet = BTreeSet::new();
+          for &sid in table.keys() {
+              initial_origin_set.insert((sid, sid));
+          }
+
+          let mut originset_to_id: BiBTreeMap<OriginSet, StateID> = BiBTreeMap::new();
+          let mut next_combined_id = table.keys().max().unwrap().0 + 1;
+          originset_to_id.insert(initial_origin_set.clone(), StateID(next_combined_id));
+          next_combined_id += 1;
+          let combined_start_state_id = *originset_to_id.get_by_left(&initial_origin_set).unwrap();
+
+          let mut worklist: VecDeque<OriginSet> = VecDeque::new();
+          worklist.push_back(initial_origin_set);
+
+          let mut combined_rows: BTreeMap<StateID, HallucinatedRow> = BTreeMap::new();
+
+          while let Some(origin_set) = worklist.pop_front() {
+              let this_cid = *originset_to_id.get_by_left(&origin_set).unwrap();
+
+              // Collect all terminals/non-terminals that are relevant in any current state.
+              let mut all_terminals: BTreeSet<TerminalID> = BTreeSet::new();
+              let mut all_nonterminals: BTreeSet<NonTerminalID> = BTreeSet::new();
+              for &(_origin, current) in &origin_set {
+                  if let Some(row) = table.get(&current) {
+                      for &tid in row.shifts_and_reduces_full.keys() {
+                          all_terminals.insert(tid);
+                      }
+                      for &ntid in row.gotos.keys() {
+                          all_nonterminals.insert(ntid);
+                      }
+                  }
+              }
+
+              // --- Build per-terminal actions: Shift and Reduce(Split flattened) with origin masks.
+              let mut shifts_and_reduces: BTreeMap<TerminalID, Vec<(Stage7ShiftsAndReducesLookaheadValue, StateIDBV)>> = BTreeMap::new();
+
+              for tid in all_terminals {
+                  // Gather:
+                  // - shift_pairs: the resulting origin set for shifting on `tid`
+                  // - shift_mask: which origins actually perform a shift
+                  // - reduce_masks: map from "equivalent reduce actions" to origin masks
+                  let mut shift_pairs: OriginSet = BTreeSet::new();
+                  let mut shift_mask = StateIDBV::zeros();
+
+                  let mut reduce_masks: BTreeMap<CombinedReduceKey, StateIDBV> = BTreeMap::new();
+
+                  for &(origin, current) in &origin_set {
+                      let row = &table[&current];
+                      if let Some(action) = row.shifts_and_reduces_full.get(&tid) {
+                          match action {
+                              Stage7ShiftsAndReducesLookaheadValue::Shift(next_state) => {
+                                  // Only a shift.
+                                  shift_pairs.insert((origin, *next_state));
+                                  shift_mask.insert(origin.0);
+                              }
+                              Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                                  // Only reduces (single).
+                                  let key = CombinedReduceKey {
+                                      nt: *nonterminal_id,
+                                      len: *len,
+                                      production_ids: production_ids.clone(),
+                                  };
+                                  reduce_masks.entry(key).or_insert_with(StateIDBV::zeros).insert(origin.0);
+                              }
+                              Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                  // Handle the shift part (if any) by adding shift_pairs/mask,
+                                  // and also flatten all reduces into individual Reduce entries keyed by (nt,len,pids).
+                                  if let Some(next_state) = shift {
+                                      shift_pairs.insert((origin, *next_state));
+                                      shift_mask.insert(origin.0);
+                                  }
+                                  for (&len, nts) in reduces {
+                                      for (&ntid, pids) in nts {
+                                          let key = CombinedReduceKey {
+                                              nt: ntid,
+                                              len,
+                                              production_ids: pids.clone(),
+                                          };
+                                          reduce_masks.entry(key).or_insert_with(StateIDBV::zeros).insert(origin.0);
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  // Produce a single shift action to the next combined state (if any shift exists).
+                  if !shift_pairs.is_empty() {
+                      let next_cid = {
+                          let mut now_states = shift_pairs.iter().map(|(_, now)| *now);
+                          let first_now_state = now_states.next().unwrap(); // Not empty, so safe.
+                          if now_states.all(|s| s == first_now_state) {
+                              // Optimization: all 'now' states are the same, transition to that original state.
+                              first_now_state
+                          } else {
+                              // Otherwise, it's a true combined state.
+                              if let Some(existing) = originset_to_id.get_by_left(&shift_pairs).copied() {
+                                  existing
+                              } else {
+                                  let sid = StateID(next_combined_id);
+                                  next_combined_id += 1;
+                                  originset_to_id.insert(shift_pairs.clone(), sid);
+                                  worklist.push_back(shift_pairs);
+                                  sid
+                              }
+                          }
+                      };
+                      shifts_and_reduces
+                          .entry(tid)
+                          .or_default()
+                          .push((Stage7ShiftsAndReducesLookaheadValue::Shift(next_cid), shift_mask));
+                  }
+
+                  // Produce reduce actions (flattened).
+                  for (key, mask) in reduce_masks {
+                      let action = Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                          nonterminal_id: key.nt,
+                          len: key.len,
+                          production_ids: key.production_ids,
+                      };
+                      shifts_and_reduces.entry(tid).or_default().push((action, mask));
+                  }
+              }
+
+              // --- Build per-nonterminal gotos with origin masks:
+              // We split them into two entries if necessary (accept=false vs accept=true).
+              let mut gotos: BTreeMap<NonTerminalID, Vec<(Goto, StateIDBV)>> = BTreeMap::new();
+
+              for ntid in all_nonterminals {
+                  let mut goto_pairs: OriginSet = BTreeSet::new();
+                  let mut accept_mask = StateIDBV::zeros();
+                  let mut non_accept_mask = StateIDBV::zeros();
+                  let mut saw_accept = false;
+                  let mut saw_non_accept = false;
+
+                  for &(origin, current) in &origin_set {
+                      let row = &table[&current];
+                      if let Some(goto) = row.gotos.get(&ntid) {
+                          if let Some(next_state) = goto.state_id {
+                              goto_pairs.insert((origin, next_state));
+                              if goto.accept {
+                                  accept_mask.insert(origin.0);
+                                  saw_accept = true;
+                              } else {
+                                  non_accept_mask.insert(origin.0);
+                                  saw_non_accept = true;
+                              }
+                          }
+                      }
+                  }
+
+                  if !goto_pairs.is_empty() {
+                      let next_cid = {
+                          let mut now_states = goto_pairs.iter().map(|(_, now)| *now);
+                          let first_now_state = now_states.next().unwrap(); // Not empty, so safe.
+                          if now_states.all(|s| s == first_now_state) {
+                              // Optimization: all 'now' states are the same, transition to that original state.
+                              first_now_state
+                          } else {
+                              // Otherwise, it's a true combined state.
+                              if let Some(existing) = originset_to_id.get_by_left(&goto_pairs).copied() {
+                                  existing
+                              } else {
+                                  let sid = StateID(next_combined_id);
+                                  next_combined_id += 1;
+                                  originset_to_id.insert(goto_pairs.clone(), sid);
+                                  worklist.push_back(goto_pairs);
+                                  sid
+                              }
+                          }
+                      };
+
+                      if saw_non_accept {
+                          gotos
+                              .entry(ntid)
+                              .or_default()
+                              .push((
+                                  Goto { state_id: Some(next_cid), accept: false },
+                                  non_accept_mask,
+                              ));
+                      }
+                      if saw_accept {
+                          gotos
+                              .entry(ntid)
+                              .or_default()
+                              .push((
+                                  Goto { state_id: Some(next_cid), accept: true },
+                                  accept_mask,
+                              ));
+                      }
+                  }
+              }
+
+              // Build the final combined row. We don't attempt "default reduce" promotion here.
+              let row = HallucinatedRow {
+                  shifts_and_reduces,
+                  gotos,
+                  default_reduce: DefaultReduce { clone_and_merge: true, reduce: None },
+              };
+              combined_rows.insert(this_cid, row);
+          }
+
+          (combined_rows, combined_start_state_id)
+      }
+
+      /// Helper for `stage_9`: Traces a chain of unit reductions from a given starting state and non-terminal.
+      fn compute_unit_reduction_chain<'a, F>(
+          table: &'a Table,
+          source_state_id: StateID,
+          initial_nt: NonTerminalID,
+          token_id: TerminalID,
+          action_selector: F,
+      ) -> (BTreeSet<StateID>, bool)
+      where
+          F: Fn(StateID) -> &'a BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>,
+      {
+          let mut final_goto_state_ids_for_source = BTreeSet::new();
+          let mut accepted = false;
+          let mut current_nt_local = initial_nt;
+          let row = &table[&source_state_id];
+
+          loop {
+              if let Some(goto) = row.gotos.get(&current_nt_local) {
+                  if goto.accept {
+                      accepted = true;
+                  }
+                  if let Some(goto_state_id) = goto.state_id {
+                      if let Some(Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: next_nt, len: 1, .. }) = action_selector(goto_state_id).get(&token_id) {
+                          current_nt_local = *next_nt;
+                          continue; // Follow the unit-reduction chain.
+                      }
+                      // Not a unit reduction, this is a final state for this chain.
+                      final_goto_state_ids_for_source.insert(goto_state_id);
+                  }
+              }
+              // End of chain (no GOTO, no further state, or not a unit reduction).
+              break;
+          }
+          (final_goto_state_ids_for_source, accepted)
+      }
+
+      /// Merges compatible states in a parse table to reduce its size (LALR(1) optimization).
+      ///
+      /// This function takes a table and a list of compatible state pairs. It merges these
+      /// pairs and transitively merges states. For example, if (s1, s2) and (s2, s3) are
+      /// compatible, all three states will be merged into one.
+      ///
+      /// The process involves:
+      /// 1.  Finding the canonical representative for each state using a disjoint-set union (DSU) approach.
+      /// 2.  Creating a new, smaller parse table where each row corresponds to a representative state.
+      /// 3.  Merging the goto maps of the merged states.
+      /// 4.  Updating all StateID references (in shifts and gotos) throughout the new table to point
+      ///     to the new representative state IDs.
+      ///
+      /// # Arguments
+      /// * `table` - The `Stage7Table` to be compacted.
+      /// * `item_set_map` - The mapping from item sets to their `StateID`s.
+      /// * `start_state_id` - The initial state ID of the parser.
+      /// * `compatible_pairs` - A list of state pairs that have been identified as compatible for merging.
+      ///
+      /// # Returns
+      /// A tuple containing:
+      /// * The new, compacted `Stage7Table`.
+      /// * The new `BiBTreeMap` mapping merged item sets to the new `StateID`s.
+      /// * The new start state ID.
+      fn merge_compatible_states(
+          table: &Table,
+          item_set_map: &BiBTreeMap<BTreeSet<Item>, StateID>,
+          start_state_id: StateID,
+          compatible_pairs: &[(StateID, StateID)],
+      ) -> (Table, BiBTreeMap<BTreeSet<Item>, StateID>, StateID) {
+          if compatible_pairs.is_empty() {
+              return (table.clone(), item_set_map.clone(), start_state_id);
+          }
+
+          crate::debug!(2, "Merging {} compatible state pairs.", compatible_pairs.len());
+
+          // 1. DSU structure to manage state merging.
+          let mut parent: BTreeMap<StateID, StateID> = table.keys().map(|&id| (id, id)).collect();
+          fn find_set(parent: &mut BTreeMap<StateID, StateID>, i: StateID) -> StateID {
+              if parent[&i] == i {
+                  i
+              } else {
+                  let root = find_set(parent, parent[&i]);
+                  parent.insert(i, root); // Path compression
+                  root
+              }
+          }
+          fn unite_sets(parent: &mut BTreeMap<StateID, StateID>, mut a: StateID, mut b: StateID) {
+              a = find_set(parent, a);
+              b = find_set(parent, b);
+              if a != b {
+                  // A simple union, could be optimized by rank/size
+                  parent.insert(b, a);
+              }
+          }
+
+          for &(s1, s2) in compatible_pairs {
+              unite_sets(&mut parent, s1, s2);
+          }
+
+          // Create final mapping from old state ID to its representative.
+          let mut state_map: BTreeMap<StateID, StateID> = BTreeMap::new();
+          for &old_id in table.keys() {
+              state_map.insert(old_id, find_set(&mut parent, old_id));
+          }
+
+          // 2. Create the new merged table.
+          let mut new_table: Table = BTreeMap::new();
+          let mut new_item_sets: BTreeMap<StateID, BTreeSet<Item>> = BTreeMap::new();
+
+          let state_to_items: BTreeMap<StateID, &BTreeSet<Item>> = item_set_map.iter().map(|(k, v)| (*v, k)).collect();
+
+          for (&old_id, row) in table.iter() {
+              let new_id = state_map[&old_id];
+              new_item_sets.entry(new_id).or_default().extend(state_to_items[&old_id].iter().cloned());
+
+              let new_row = new_table.entry(new_id).or_insert_with(|| Row {
+                  shifts_and_reduces_without_default_reduce: row.shifts_and_reduces_without_default_reduce.clone(),
+                  shifts_and_reduces_full: row.shifts_and_reduces_full.clone(),
+                  default_reduce: row.default_reduce.clone(),
+                  gotos: BTreeMap::new(),
+              });
+
+              for (nt_id, goto) in &row.gotos {
+                  new_row.gotos.insert(*nt_id, *goto);
+              }
+          }
+
+          fn remap_action_state_ids(action: &mut Stage7ShiftsAndReducesLookaheadValue, map: &BTreeMap<StateID, StateID>) {
+              match action {
+                  Stage7ShiftsAndReducesLookaheadValue::Shift(ref mut sid) => *sid = map[sid],
+                  Stage7ShiftsAndReducesLookaheadValue::Split { ref mut shift, .. } => {
+                      if let Some(ref mut sid) = shift { *sid = map[sid]; }
+                  }
+                  _ => {}
+              }
+          }
+
+          for row in new_table.values_mut() {
+              row.shifts_and_reduces_without_default_reduce.values_mut().for_each(|a| remap_action_state_ids(a, &state_map));
+              row.shifts_and_reduces_full.values_mut().for_each(|a| remap_action_state_ids(a, &state_map));
+              row.gotos.values_mut().for_each(|g| { if let Some(ref mut sid) = g.state_id { *sid = state_map[sid]; } });
+          }
+
+          let new_item_set_map: BiBTreeMap<BTreeSet<Item>, StateID> = new_item_sets.into_iter().map(|(state_id, item_set)| (item_set, state_id)).collect();
+          let new_start_state_id = state_map[&start_state_id];
+
+          crate::debug!(2, "Merged states. Original: {}, New: {}", table.len(), new_table.len());
+
+          (new_table, new_item_set_map, new_start_state_id)
+      }
+
+      #[time_it]
+      pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>, actions: BTreeMap<NonTerminal, ActionFn>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
+          assert!(matches!(LR_MODE, LRMode::LALR), "Only LALR mode is supported by the table builder");
+          crate::debug!(2, "Validating initial grammar");
+          validate(productions).expect("Initial grammar validation failed");
+
+          let original_productions = productions.to_vec();
+          let start_production_id = 0;
+
+          crate::debug!(2, "Removing productions with undefined non-terminals");
+          // println!("Before removing undefined non-terminals:\n{}", display_productions(&productions));
+          let mut productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
+          // productions = simplify_grammar(&mut productions);
+
+          // Resolve right-recursion
+          let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
+          let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
+          // println!("Before recursion resolution:\n{}", display_productions(&productions));
+          // crate::glr::analyze::resolve_right_recursion(&mut productions, &mut unqiue_name_generator);
+          crate::glr::analyze::resolve_direct_right_recursion(&mut productions, &mut unqiue_name_generator);
+          // println!("After direct right recursion:\n{}", display_productions(&productions));
+
+          if true {
+              // println!("Before inlining nullable productions:\n{}", display_productions(&productions));
+              // println!("Before inlining nullable productions: Number of productions: {}", productions.len());
+              productions = inline_null_productions(&productions);
+              // println!("After inlining nullable productions:\n{}", display_productions(&productions));
+              // println!("After inlining nullable productions: Number of productions: {}", productions.len());
+          }
+          if false {
+              // println!("Before inlining unit productions:\n{}", display_productions(&productions));
+              productions = inline_unit_productions(&productions);
+              // println!("After inlining unit productions:\n{}", display_productions(&productions));
+          }
+
+          // After recursion resolution, new non-terminals may have been added.
+          // We need to update the non_terminal_map.
+          let mut next_non_terminal_id = non_terminal_map.len();
+          for p in &productions {
+              if !non_terminal_map.contains_left(&p.lhs) {
+                  non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
+                  next_non_terminal_id += 1;
+              }
+          }
+
+          crate::debug!(2, "Stage 1");
+          let stage_1_table = stage_1(&productions);
+          crate::debug!(6, &stage_1_table);
+          crate::debug!(2, "Stage 2");
+          let stage_2_table = stage_2(stage_1_table, &productions);
+          crate::debug!(6, &stage_2_table);
+          crate::debug!(2, "Stage 3");
+          let stage_3_table = stage_3(stage_2_table, &productions);
+          crate::debug!(6, &stage_3_table);
+          crate::debug!(2, "Stage 4");
+          let stage_4_table = stage_4(stage_3_table, &productions);
+          crate::debug!(6, &stage_4_table);
+          crate::debug!(2, "Stage 5");
+          let stage_5_table = stage_5(stage_4_table, &productions, &terminal_map);
+          crate::debug!(6, &stage_5_table);
+          crate::debug!(2, "Stage 6");
+          let stage_6_table = stage_6(stage_5_table);
+          crate::debug!(6, &stage_6_table);
+          crate::debug!(2, "Stage 7");
+          let (mut stage_7_table, mut item_set_map, mut start_state_id, everything_state_id) = stage_7(stage_6_table, &productions, &terminal_map, &non_terminal_map);
+          crate::debug!(6, &stage_7_table);
+          crate::debug!(2, "Stage 8");
+          let stage_8_table = stage_8(stage_7_table);
+          crate::debug!(6, &stage_8_table);
+
+          crate::debug!(2, "Stage 9: Precomputing substring gotos");
+          let substring_gotos = stage_9(&stage_8_table, &non_terminal_map);
+
+          crate::debug!(2, "Stage 10: Precomputing reduce goto map");
+          let reduce_goto_map = stage_10(&stage_8_table);
+
+          crate::debug!(2, "Finalizing table");
+          let final_table = stage_8_table;
+
+          let hallucinated_row = stage_11_create_hallucinated_row(&final_table);
+          let hallucinated_state_id = StateID(usize::MAX);
+
+          // Build combined-state rows (replaces hallucinated row).
+          let (combined_rows, combined_start_state_id) = stage_12_build_combined_states(&final_table);
+          println!("Number of combined states: {}", combined_rows.len());
+          crate::debug!(2, "Done generating GLR parser");
+          // crate::debug!(6, "Number of states: {}", final_table.len());
+          // panic!("GLR parser generation complete. Number of states: {}", final_table.len());
+
+          print_summary();
+          print_summary_flat();
+          crate::glr::parser::GLRParser::new(
+              final_table,
+              productions,
+              terminal_map,
+              non_terminal_map,
+              item_set_map,
+              start_state_id,
+              everything_state_id,
+              actions,
+              ignore_terminal_id,
+              substring_gotos,
+              reduce_goto_map,
+              hallucinated_row,
+              hallucinated_state_id,
+              combined_rows,
+              combined_start_state_id,
+          )
+      }
+      pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
+          let terminal_map = assign_terminal_ids(productions);
+          generate_glr_parser_with_terminal_map(productions, terminal_map, ignore_terminal_id)
+      }
+
+      pub fn generate_glr_parser_with_terminal_map(productions: &[Production], terminal_map: BiBTreeMap<Terminal, TerminalID>, ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
+          let non_terminal_map = assign_non_terminal_ids(productions);
+          generate_glr_parser_with_maps(productions, terminal_map, non_terminal_map, BTreeMap::new(), ignore_terminal_id)
+      }
+
+      pub fn assign_terminal_ids(productions: &[Production]) -> BiBTreeMap<Terminal, TerminalID> {
+          let mut terminal_map = BiBTreeMap::new();
+          let mut next_terminal_id = 0;
+
+          for p in productions {
+              for symbol in &p.rhs {
+                  if let Symbol::Terminal(t) = symbol {
+                      if !terminal_map.contains_left(t) {
+                          terminal_map.insert(t.clone(), TerminalID(next_terminal_id));
+                          next_terminal_id += 1;
+                      }
+                  }
+              }
+          }
+
+          terminal_map
+      }
+
+      pub fn assign_non_terminal_ids(productions: &[Production]) -> BiBTreeMap<NonTerminal, NonTerminalID> {
+          let mut non_terminal_map = BiBTreeMap::new();
+          let mut next_non_terminal_id = 0;
+
+          for p in productions {
+              if !non_terminal_map.contains_left(&p.lhs) {
+                  non_terminal_map.insert(p.lhs.clone(), NonTerminalID(next_non_terminal_id));
+                  next_non_terminal_id += 1;
+              }
+          }
+          non_terminal_map
+      }
+      use crate::glr::parser::{GLRParser, ActionFn, ExpectElse};
+      use crate::profiler::{print_summary, print_summary_flat};
+
 
       ```
     metadata:
       filename: src/glr/table.rs
-  - user: |-
-      ```
-      --- Combined States Statistics ---
-      Total combined states: 257
-      Shift actions: Total: 1957, Min/Max per state: 0/79, Avg per state: 7.61
-        Distribution (count -> #states): 0: 117, 1: 52, 2: 13, 3: 3, 4: 5, 5: 2, 6: 1, 7: 5, 9: 1, 23: 15, 24: 5, 25: 1, 26: 10, 29: 1, 36: 13, 37: 6, 39: 2, 41: 4, 79: 1
-      Reduce actions: Total: 26794, Min/Max per state: 0/10346, Avg per state: 104.26
-        Distribution (count -> #states): 0: 81, 1: 3, 2: 15, 3: 9, 4: 6, 5: 11, 6: 3, 7: 1, 8: 1, 9: 3, 10: 1, 11: 1, 23: 3, 42: 1, 45: 3, 46: 7, 49: 1, 53: 1, 63: 1, 71: 2, 72: 13, 75: 2, 77: 2, 82: 13, 86: 3, 87: 1, 89: 1, 92: 2, 96: 3, 98: 1, 106: 1, 118: 2, 119: 11, 120: 4, 124: 1, 125: 1, 126: 1, 128: 1, 141: 1, 142: 7, 143: 3, 144: 1, 146: 1, 155: 1, 160: 1, 164: 4, 171: 1, 177: 1, 185: 3, 188: 1, 192: 1, 213: 1, 216: 1, 233: 1, 245: 1, 248: 1, 268: 1, 274: 1, 417: 1, 492: 1, 588: 1, 617: 1, 619: 1, 871: 1, 10346: 1
-      Goto actions: Total: 2186, Min/Max per state: 0/134, Avg per state: 8.51
-        Distribution (count -> #states): 0: 158, 1: 21, 2: 9, 3: 3, 4: 1, 7: 6, 8: 1, 14: 1, 15: 1, 16: 1, 17: 1, 18: 1, 19: 1, 26: 9, 27: 3, 28: 2, 30: 4, 35: 6, 36: 1, 40: 16, 42: 2, 43: 1, 46: 2, 49: 1, 50: 3, 56: 1, 134: 1
-      ```
-
-      In `stage_12_build_combined_states`, we can do a much, much better job of making the `shifts_and_reduces` as compact as possible. Think about how to do it.
-      Consider reductions. We end up with a lot of them. Way too many.
-      And there's probably opportunities to make 'split' states that we're missing. Split states with or without shifts, either one.
+  - user: At the end of stage_12_build_combined_states, print useful stats about the
+      combined states. eg I'd like to know how many entries there are in states on
+      average, the distribution, min max etc. by shift, reduce, goto, etc.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -4725,260 +4538,188 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are targeted, actionable edits to compact combined-state actions in stage_12 by aggressively grouping origins into minimal “patterns” per terminal, and emitting one Split (with optional shift) per pattern. This dramatically reduces the number of per-terminal actions:
+      Of course! Here are the step-by-step instructions to add statistics about the combined states, followed by the corresponding git diff.
 
-      - We group origins by the pair (has_shift, full set of reduces), instead of emitting one Reduce per distinct production set.
-      - For each group, we build a single action:
-        - If the group has shift and no reduces, emit Shift(next_cid).
-        - Otherwise, emit Split { shift: Option(next_cid), reduces: … } and call simplify() so it degenerates to Shift or Reduce when appropriate.
-      - We re-use the single next_cid constructed from all shift origins for the current combined state and terminal. This preserves existing semantics while improving action compaction.
-      - We avoid emitting actions for origins that do not have any action on that terminal.
+      ### Step-by-step Instructions
 
-      Step-by-step instructions
+      1.  **Open the file:** `src/glr/table.rs`
 
-      1) Edit src/glr/table.rs, in function stage_12_build_combined_states:
-         - Find the block starting at the comment:
-           // --- Build per-terminal actions: Shift and Reduce(Split flattened) with origin masks.
-         - Replace the entire per-terminal loop (for tid in all_terminals { ... }) with the new logic:
-           - Compute shift_pairs across all origins and the set of origins that have shifts.
-           - Compute per-origin full reduce set as a BTreeSet of CombinedReduceKey.
-           - Determine next_cid once (as in current code).
-           - Group origins by a pattern key: (has_shift, reduces_set).
-           - For each pattern:
-             - Build a single action: Split with optional shift and aggregated reduces (grouped by len -> nonterminal -> union of pids).
-             - Call simplify() on the action.
-             - Push a single (action, mask) entry per group.
+      2.  **Locate the function:** Find the `stage_12_build_combined_states` function.
 
-      2) Do not change any surrounding logic in stage_12 (gotos with masks and stats remain as-is). The code compiles under current types and makes no API changes.
+      3.  **Insert the code:** At the very end of the function, just before the final return statement `(combined_rows, combined_start_state_id)`, insert the new code block for calculating and printing statistics.
 
-      3) Rebuild and run to observe the Combined States Statistics; you should see a dramatic drop in the number of “Reduce actions” due to consolidation into Splits and simplified actions.
+      The end of the function currently looks like this:
+      ```rust
+      // ... inside stage_12_build_combined_states
+              let row = HallucinatedRow {
+                  shifts_and_reduces,
+                  gotos,
+                  default_reduce: DefaultReduce { clone_and_merge: true, reduce: None },
+              };
+              combined_rows.insert(this_cid, row);
+          }
 
-      Git diff
+          (combined_rows, combined_start_state_id)
+      }
+      ```
+
+      You will add the new code right before the `(combined_rows, combined_start_state_id)` line. Here is the code to insert:
+
+      ```rust
+          if !combined_rows.is_empty() {
+              println!("\n--- Combined States Statistics ---");
+              println!("Total combined states: {}", combined_rows.len());
+
+              let mut shift_counts = Vec::new();
+              let mut reduce_counts = Vec::new();
+              let mut goto_counts = Vec::new();
+
+              for row in combined_rows.values() {
+                  let mut num_shifts = 0;
+                  let mut num_reduces = 0;
+                  for actions in row.shifts_and_reduces.values() {
+                      for (action, _) in actions {
+                          match action {
+                              Stage7ShiftsAndReducesLookaheadValue::Shift(_) => num_shifts += 1,
+                              Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } => num_reduces += 1,
+                              Stage7ShiftsAndReducesLookaheadValue::Split { .. } => {
+                                  // This shouldn't happen as splits are flattened
+                              }
+                          }
+                      }
+                  }
+                  shift_counts.push(num_shifts);
+                  reduce_counts.push(num_reduces);
+
+                  let num_gotos = row.gotos.values().map(|v| v.len()).sum();
+                  goto_counts.push(num_gotos);
+              }
+
+              fn print_stats(name: &str, counts: &[usize]) {
+                  if counts.is_empty() {
+                      println!("{}: N/A (no data)", name);
+                      return;
+                  }
+                  let total_states = counts.len();
+                  let total_actions: usize = counts.iter().sum();
+                  let min = *counts.iter().min().unwrap();
+                  let max = *counts.iter().max().unwrap();
+                  let avg = total_actions as f64 / total_states as f64;
+
+                  println!(
+                      "{}: Total: {}, Min/Max per state: {}/{}, Avg per state: {:.2}",
+                      name, total_actions, min, max, avg
+                  );
+
+                  let mut distribution = BTreeMap::new();
+                  for &count in counts {
+                      *distribution.entry(count).or_insert(0) += 1;
+                  }
+
+                  print!("  Distribution (count -> #states): ");
+                  let mut first = true;
+                  for (count, num_states) in distribution {
+                      if !first {
+                          print!(", ");
+                      }
+                      print!("{}: {}", count, num_states);
+                      first = false;
+                  }
+                  println!();
+              }
+
+              print_stats("Shift actions", &shift_counts);
+              print_stats("Reduce actions", &reduce_counts);
+              print_stats("Goto actions", &goto_counts);
+              println!("------------------------------------");
+          }
+      ```
+
+      ### Git Diff
+
+      Here is the git patch that applies the changes described above.
 
       ```diff
       diff --git a/src/glr/table.rs b/src/glr/table.rs
+      index 7385966..28646b9 100644
       --- a/src/glr/table.rs
       +++ b/src/glr/table.rs
-      @@ -681,62 +681,88 @@
+      @@ -1300,6 +1300,56 @@
+               combined_rows.insert(this_cid, row);
+           }
        
-               // --- Build per-terminal actions: Shift and Reduce(Split flattened) with origin masks.
-               let mut shifts_and_reduces: BTreeMap<TerminalID, Vec<(Stage7ShiftsAndReducesLookaheadValue, StateIDBV)>> = BTreeMap::new();
-       
-               for tid in all_terminals {
-      -            // Gather:
-      -            // - shift_pairs: the resulting origin set for shifting on `tid`
-      -            // - shift_mask: which origins actually perform a shift
-      -            // - reduce_masks: map from "equivalent reduce actions" to origin masks
-      -            let mut shift_pairs: OriginSet = BTreeSet::new();
-      -            let mut shift_mask = StateIDBV::zeros();
-      -
-      -            let mut reduce_masks: BTreeMap<CombinedReduceKey, StateIDBV> = BTreeMap::new();
-      -
-      -            for &(origin, current) in &origin_set {
-      -                let row = &table[&current];
-      -                if let Some(action) = row.shifts_and_reduces_full.get(&tid) {
-      -                    match action {
-      -                        Stage7ShiftsAndReducesLookaheadValue::Shift(next_state) => {
-      -                            // Only a shift.
-      -                            shift_pairs.insert((origin, *next_state));
-      -                            shift_mask.insert(origin.0);
-      -                        }
-      -                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-      -                            // Only reduces (single).
-      -                            let key = CombinedReduceKey {
-      -                                nt: *nonterminal_id,
-      -                                len: *len,
-      -                                production_ids: production_ids.clone(),
-      -                            };
-      -                            reduce_masks.entry(key).or_insert_with(StateIDBV::zeros).insert(origin.0);
-      -                        }
-      -                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-      -                            // Handle the shift part (if any) by adding shift_pairs/mask,
-      -                            // and also flatten all reduces into individual Reduce entries keyed by (nt,len,pids).
-      -                            if let Some(next_state) = shift {
-      -                                shift_pairs.insert((origin, *next_state));
-      -                                shift_mask.insert(origin.0);
-      -                            }
-      -                            for (&len, nts) in reduces {
-      -                                for (&ntid, pids) in nts {
-      -                                    let key = CombinedReduceKey {
-      -                                        nt: ntid,
-      -                                        len,
-      -                                        production_ids: pids.clone(),
-      -                                    };
-      -                                    reduce_masks.entry(key).or_insert_with(StateIDBV::zeros).insert(origin.0);
-      -                                }
-      -                            }
-      -                        }
-      -                    }
-      -                }
-      -            }
-      -
-      -            // Produce a single shift action to the next combined state (if any shift exists).
-      -            if !shift_pairs.is_empty() {
-      -                let next_cid = {
-      -                    let mut now_states = shift_pairs.iter().map(|(_, now)| *now);
-      -                    let first_now_state = now_states.next().unwrap(); // Not empty, so safe.
-      -                    if now_states.all(|s| s == first_now_state) {
-      -                        // Optimization: all 'now' states are the same, transition to that original state.
-      -                        first_now_state
-      -                    } else {
-      -                        // Otherwise, it's a true combined state.
-      -                        if let Some(existing) = originset_to_id.get_by_left(&shift_pairs).copied() {
-      -                            existing
-      -                        } else {
-      -                            let sid = StateID(next_combined_id);
-      -                            next_combined_id += 1;
-      -                            originset_to_id.insert(shift_pairs.clone(), sid);
-      -                            worklist.push_back(shift_pairs);
-      -                            sid
-      -                        }
-      -                    }
-      -                };
-      -                shifts_and_reduces
-      -                    .entry(tid)
-      -                    .or_default()
-      -                    .push((Stage7ShiftsAndReducesLookaheadValue::Shift(next_cid), shift_mask));
-      -            }
-      -
-      -            // Produce reduce actions (flattened).
-      -            for (key, mask) in reduce_masks {
-      -                let action = Stage7ShiftsAndReducesLookaheadValue::Reduce {
-      -                    nonterminal_id: key.nt,
-      -                    len: key.len,
-      -                    production_ids: key.production_ids,
-      -                };
-      -                shifts_and_reduces.entry(tid).or_default().push((action, mask));
-      -            }
-      +            // New compaction strategy:
-      +            // - Compute shift_pairs and set of origins that shift.
-      +            // - Compute per-origin full reduce sets.
-      +            // - Build a single next_cid for all shift origins (as before).
-      +            // - Group origins by the pattern: (has_shift, full reduces set).
-      +            // - Emit one action per pattern: Split { optional shift, reduces } (simplified when possible).
+      +    if !combined_rows.is_empty() {
+      +        println!("\n--- Combined States Statistics ---");
+      +        println!("Total combined states: {}", combined_rows.len());
       +
-      +            let mut shift_pairs: OriginSet = BTreeSet::new();
-      +            let mut origins_with_shift: BTreeSet<StateID> = BTreeSet::new();
-      +            let mut origins_with_action: BTreeSet<StateID> = BTreeSet::new();
-      +            let mut origin_reduces: BTreeMap<StateID, BTreeSet<CombinedReduceKey>> = BTreeMap::new();
+      +        let mut shift_counts = Vec::new();
+      +        let mut reduce_counts = Vec::new();
+      +        let mut goto_counts = Vec::new();
       +
-      +            for &(origin, current) in &origin_set {
-      +                let row = &table[&current];
-      +                if let Some(action) = row.shifts_and_reduces_full.get(&tid) {
+      +        for row in combined_rows.values() {
+      +            let mut num_shifts = 0;
+      +            let mut num_reduces = 0;
+      +            for actions in row.shifts_and_reduces.values() {
+      +                for (action, _) in actions {
       +                    match action {
-      +                        Stage7ShiftsAndReducesLookaheadValue::Shift(next_state) => {
-      +                            origins_with_action.insert(origin);
-      +                            origins_with_shift.insert(origin);
-      +                            shift_pairs.insert((origin, *next_state));
-      +                        }
-      +                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-      +                            origins_with_action.insert(origin);
-      +                            origin_reduces
-      +                                .entry(origin)
-      +                                .or_default()
-      +                                .insert(CombinedReduceKey {
-      +                                    nt: *nonterminal_id,
-      +                                    len: *len,
-      +                                    production_ids: production_ids.clone(),
-      +                                });
-      +                        }
-      +                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-      +                            origins_with_action.insert(origin);
-      +                            if let Some(next_state) = shift {
-      +                                origins_with_shift.insert(origin);
-      +                                shift_pairs.insert((origin, *next_state));
-      +                            }
-      +                            for (&len, nts) in reduces {
-      +                                for (&ntid, pids) in nts {
-      +                                    origin_reduces
-      +                                        .entry(origin)
-      +                                        .or_default()
-      +                                        .insert(CombinedReduceKey {
-      +                                            nt: ntid,
-      +                                            len,
-      +                                            production_ids: pids.clone(),
-      +                                        });
-      +                                }
-      +                            }
+      +                        Stage7ShiftsAndReducesLookaheadValue::Shift(_) => num_shifts += 1,
+      +                        Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } => num_reduces += 1,
+      +                        Stage7ShiftsAndReducesLookaheadValue::Split { .. } => {
+      +                            // This shouldn't happen as splits are flattened
       +                        }
       +                    }
       +                }
       +            }
+      +            shift_counts.push(num_shifts);
+      +            reduce_counts.push(num_reduces);
       +
-      +            if origins_with_action.is_empty() {
-      +                continue; // No actions for this terminal across the current origin set.
+      +            let num_gotos = row.gotos.values().map(|v| v.len()).sum();
+      +            goto_counts.push(num_gotos);
+      +        }
+      +
+      +        fn print_stats(name: &str, counts: &[usize]) {
+      +            if counts.is_empty() {
+      +                println!("{}: N/A (no data)", name);
+      +                return;
+      +            }
+      +            let total_states = counts.len();
+      +            let total_actions: usize = counts.iter().sum();
+      +            let min = *counts.iter().min().unwrap();
+      +            let max = *counts.iter().max().unwrap();
+      +            let avg = total_actions as f64 / total_states as f64;
+      +
+      +            println!(
+      +                "{}: Total: {}, Min/Max per state: {}/{}, Avg per state: {:.2}",
+      +                name, total_actions, min, max, avg
+      +            );
+      +
+      +            let mut distribution = BTreeMap::new();
+      +            for &count in counts {
+      +                *distribution.entry(count).or_insert(0) += 1;
       +            }
       +
-      +            // Build a single next_cid for all shift origins (same as before).
-      +            let maybe_next_cid = if !shift_pairs.is_empty() {
-      +                let mut now_states = shift_pairs.iter().map(|(_, now)| *now);
-      +                let first_now_state = now_states.next().unwrap(); // Not empty if shift_pairs isn't.
-      +                let next_cid = if now_states.all(|s| s == first_now_state) {
-      +                    // All 'now' states are the same -> return that original state.
-      +                    first_now_state
-      +                } else {
-      +                    // Otherwise, transition to a true combined state.
-      +                    if let Some(existing) = originset_to_id.get_by_left(&shift_pairs).copied() {
-      +                        existing
-      +                    } else {
-      +                        let sid = StateID(next_combined_id);
-      +                        next_combined_id += 1;
-      +                        originset_to_id.insert(shift_pairs.clone(), sid);
-      +                        worklist.push_back(shift_pairs);
-      +                        sid
-      +                    }
-      +                };
-      +                Some(next_cid)
-      +            } else {
-      +                None
-      +            };
-      +
-      +            // Group origins by compact pattern: (has_shift, full reduces set).
-      +            let mut pattern_groups: BTreeMap<(bool, BTreeSet<CombinedReduceKey>), StateIDBV> = BTreeMap::new();
-      +            for &(origin, _) in &origin_set {
-      +                if !origins_with_action.contains(&origin) {
-      +                    continue;
+      +            print!("  Distribution (count -> #states): ");
+      +            let mut first = true;
+      +            for (count, num_states) in distribution {
+      +                if !first {
+      +                    print!(", ");
       +                }
-      +                let has_shift = origins_with_shift.contains(&origin);
-      +                let reduces_set = origin_reduces.remove(&origin).unwrap_or_default();
-      +                pattern_groups
-      +                    .entry((has_shift, reduces_set))
-      +                    .or_insert_with(StateIDBV::zeros)
-      +                    .insert(origin.0);
+      +                print!("{}: {}", count, num_states);
+      +                first = false;
       +            }
+      +            println!();
+      +        }
       +
-      +            // Emit one action per pattern (Split with optional shift and aggregated reduces).
-      +            for ((has_shift, reduces_keys), mask) in pattern_groups {
-      +                // Aggregate reduces by len -> nt -> union of pids.
-      +                let mut reduces_map: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
-      +                for key in &reduces_keys {
-      +                    reduces_map
-      +                        .entry(key.len)
-      +                        .or_default()
-      +                        .entry(key.nt)
-      +                        .or_default()
-      +                        .extend(key.production_ids.iter().cloned());
-      +                }
+      +        print_stats("Shift actions", &shift_counts);
+      +        print_stats("Reduce actions", &reduce_counts);
+      +        print_stats("Goto actions", &goto_counts);
+      +        println!("------------------------------------");
+      +    }
       +
-      +                let mut action = if has_shift && reduces_map.is_empty() {
-      +                    // Pure shift for this origin-group
-      +                    Stage7ShiftsAndReducesLookaheadValue::Shift(
-      +                        maybe_next_cid.expect("Shift present in pattern but no next_cid computed"),
-      +                    )
-      +                } else {
-      +                    Stage7ShiftsAndReducesLookaheadValue::Split {
-      +                        shift: if has_shift { maybe_next_cid } else { None },
-      +                        reduces: reduces_map,
-      +                    }
-      +                };
-      +                action.simplify();
-      +                shifts_and_reduces.entry(tid).or_default().push((action, mask));
-      +            }
-               }
+           (combined_rows, combined_start_state_id)
+       }
        
-               // --- Build per-nonterminal gotos with origin masks:
-               // We split them into two entries if necessary (accept=false vs accept=true).
-               let mut gotos: BTreeMap<NonTerminalID, Vec<(Goto, StateIDBV)>> = BTreeMap::new();
+
       ```
     metadata:
   - user: |
@@ -4990,7 +4731,7 @@ messages:
       Applying patch to 'src/glr/table.rs' using custom patcher...
       Successfully applied patch and wrote to src/glr/table.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor terminal action building in stage_12
-      to group origins by action pattern for more compact Split actions"'
+  - user: 'Changes committed with message: "feat(glr): Print statistics for combined
+      states after stage 12 build"'
     metadata:
 ...
