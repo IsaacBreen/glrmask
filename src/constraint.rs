@@ -1691,9 +1691,9 @@ impl GrammarConstraint {
         let mut precomputed3 = BTreeMap::new();
         let trie3_god = Trie3GodWrapper::new();
 
-        if false {
-            let tid = 78;
-            // for tid in tqdm!(0..=tokenizer.num_groups() as usize, desc = "Trie 3 temp", disable = !PROGRESS_BAR_ENABLED, leave=false) {
+        if true {
+            // let tid = 78;
+            for tid in tqdm!(0..=tokenizer.num_groups() as usize, desc = "Trie 3 temp", disable = !PROGRESS_BAR_ENABLED, leave=false) {
                 reset();
                 let parser = parser.unwrap();
                 let terminal = TerminalID(tid);
@@ -1707,17 +1707,17 @@ impl GrammarConstraint {
 
                 let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
                 glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
-                if glr_state.active_state.stack.inner.stats().structural_sharing_factor < 0.2 {
+                // if glr_state.active_state.stack.inner.stats().structural_sharing_factor < 0.2 {
                     println!("--- Results for token ID {} ---", tid);
                     println!("stats: {:?}", glr_state.active_state.stack.inner.stats());
                     println!("GLR state stacks: {}", glr_state);
                     println!("GLR state graph structure before normalization:{}\n", glr_state.active_state.stack.inner.to_graph_string(false));
                     println!("GLR state graph structure after normalization:{}\n", glr_state.active_state.stack.inner.normalize().to_graph_string(false));
                     println!("---------------------------------");
-                }
+                // }
                 print_summary();
                 reset();
-            // }
+            }
 
             return (precomputed3, trie3_god); // TEMP
         }
