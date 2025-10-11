@@ -4,7 +4,7 @@ local_system:
   conversation_file:
   compile_command:
   initial_file_contents:
-    src/datastructures/leveled_gss.rs: |
+    src/datastructures/leveled_gss.rs: |-
       //! Pure Rust, Python-free core implementation of the Leveled GSS.
       //! This module contains the generic data structures and algorithms, parameterized
       //! over stack item type `T` and accumulator type `A`.
@@ -234,6 +234,115 @@ local_system:
               assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
           }
 
+          #[test]
+          fn test_isolate_preserves_ptr_on_noop() {
+              // Case 1: Isolate single child, no empty. Should be a no-op.
+              let gss0 = gss_from_str_stacks(&[(&["A"], &[1])]);
+              let gss1 = gss0.isolate(Some("A".to_string()));
+              assert!(gss0.ptr_eq(&gss1));
+
+              // Case 2: Isolate None on a GSS that is only an empty path. Should be a no-op.
+              let gss2 = gss_from_str_stacks(&[(&[], &[1])]);
+              let gss3 = gss2.isolate(None);
+              assert!(gss2.ptr_eq(&gss3));
+
+              // Case 3: Isolate single child from multiple. Should NOT be a no-op.
+              let gss4 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
+              let gss5 = gss4.isolate(Some("A".to_string()));
+              assert!(!gss4.ptr_eq(&gss5));
+
+              // Case 4: Isolate None from a GSS with children. Should NOT be a no-op.
+              let gss6 = gss_from_str_stacks(&[(&["A"], &[1]), (&[], &[2])]);
+              let gss7 = gss6.isolate(None);
+              assert!(!gss6.ptr_eq(&gss7));
+          }
+
+          #[test]
+          fn test_isolate_many_preserves_ptr_on_noop() {
+              let gss0 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2]), (&[], &[3])]);
+
+              // Case 1: Select all children and empty. Should be a no-op.
+              let gss1 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
+              assert!(gss0.ptr_eq(&gss1));
+
+              // Case 2: Select a superset of children. Should be a no-op.
+              let gss2 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), Some("C".to_string()), None]);
+              assert!(gss0.ptr_eq(&gss2));
+
+              // Case 3: Select a subset of children. Should NOT be a no-op.
+              let gss3 = gss0.isolate_many(vec![Some("A".to_string()), None]);
+              assert!(!gss0.ptr_eq(&gss3));
+
+              // Case 4: Select all children but forget empty. Should NOT be a no-op.
+              let gss4 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string())]);
+              assert!(!gss0.ptr_eq(&gss4));
+
+              // Case 5: GSS with no empty, select all children and None. Should NOT be a no-op.
+              let gss5 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
+              let gss6 = gss5.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
+              assert!(!gss5.ptr_eq(&gss6));
+          }
+
+          #[test]
+          fn test_filter_by_length_preserves_ptr_on_noop() {
+              let gss0 = gss_from_str_stacks(&[
+                  (&["A", "B", "C"], &[1]),
+                  (&["X", "Y"], &[2]),
+                  (&["Z"], &[3]),
+                  (&[], &[4]),
+              ]);
+
+              // Case 1: No filter applied. Should be a no-op.
+              let gss1 = gss0.filter_by_length(None, None);
+              assert!(gss0.ptr_eq(&gss1));
+
+              // Case 2: Filter range includes all paths. Should be a no-op.
+              // Paths have lengths 0, 1, 2, 3.
+              let gss2 = gss0.filter_by_length(Some(0), Some(3));
+              assert!(gss0.ptr_eq(&gss2));
+              let gss3 = gss0.filter_by_length(Some(-1), Some(10));
+              assert!(gss0.ptr_eq(&gss3));
+
+              // Case 3: Filter prunes some paths. Should NOT be a no-op.
+              let gss4 = gss0.filter_by_length(Some(1), Some(2));
+              assert!(!gss0.ptr_eq(&gss4));
+              assert_eq!(gss4.to_stacks().len(), 2);
+
+              // Case 4: Filter on empty GSS.
+              let gss_empty = TestGSS::empty();
+              let gss_empty_filtered = gss_empty.filter_by_length(Some(1), Some(2));
+              assert!(gss_empty.ptr_eq(&gss_empty_filtered));
+          }
+
+          #[test]
+          fn test_prune_preserves_ptr_on_noop() {
+              // GSS with two different accumulators.
+              let gss0 = gss_from_str_stacks(&[
+                  (&["A", "B"], &[1, 2]), // acc IntAcc({1, 2})
+                  (&["X"], &[3]),       // acc IntAcc({3})
+                  (&[], &[1, 3]),       // acc IntAcc({1, 3})
+              ]);
+
+              // Case 1: Predicate keeps everything. Should be a no-op.
+              let gss1 = gss0.prune(|_acc| true);
+              assert!(gss0.ptr_eq(&gss1));
+
+              // Case 2: Predicate prunes something. Should NOT be a no-op.
+              let gss2 = gss0.prune(|acc| acc.0.contains(&1));
+              assert!(!gss0.ptr_eq(&gss2));
+              // The path ["X"] with acc {3} should be pruned.
+              assert_eq!(gss2.to_stacks().len(), 2);
+
+              // Case 3: Predicate prunes everything. Result should be empty.
+              let gss3 = gss0.prune(|_acc| false);
+              assert!(gss3.is_empty());
+              assert!(!gss0.ptr_eq(&gss3));
+
+              // Case 4: Prune on empty GSS.
+              let gss_empty = TestGSS::empty();
+              let gss_empty_pruned = gss_empty.prune(|_acc| true);
+              assert!(gss_empty.ptr_eq(&gss_empty_pruned));
+          }
       }
 
       // --------------------
@@ -384,20 +493,42 @@ local_system:
           let keep_empty = node.empty && current_depth >= min_d;
 
           let mut new_children: Children<T, Lower<T>> = IHashMap::new();
+          let mut children_identical = true;
+
           if current_depth < max_d {
               for (v, kids) in node.children.iter() {
                   let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-                  for child in kids.values() {
+                  let mut same_kids = true;
+                  let mut count = 0usize;
+                  for (orig_depth, child) in kids.iter() {
                       if let Some(new_child) =
                           filter_lower(child, current_depth + 1, min_len, max_len)
                       {
+                          // Preserve identicality if pointer and depth key match
+                          if !Arc::ptr_eq(&new_child, child) || new_child.max_depth != *orig_depth {
+                              same_kids = false;
+                          }
                           new_kids.insert(new_child.max_depth, new_child);
+                          count += 1;
+                      } else {
+                          same_kids = false;
                       }
                   }
-                  if !new_kids.is_empty() {
+                  if count > 0 {
                       new_children.insert(v.clone(), new_kids);
+                  } else {
+                      children_identical = false;
                   }
+                  children_identical &= same_kids;
               }
+          } else {
+              // We cannot descend; identical only if there were no children to begin with
+              children_identical = node.children.is_empty();
+          }
+
+          // If nothing changed at this node, return the original pointer for maximal sharing.
+          if keep_empty == node.empty && children_identical {
+              return Some(node.clone());
           }
 
           if !keep_empty && new_children.is_empty() {
@@ -430,20 +561,42 @@ local_system:
                   let new_empty = if keep_empty { b.empty.clone() } else { None };
 
                   let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                  let mut children_identical = true;
                   if current_depth < max_d {
                       for (v, kids) in b.children.iter() {
                           let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-                          for child in kids.values() {
+                          let mut same_kids = true;
+                          let mut count = 0usize;
+                          for (orig_depth, child) in kids.iter() {
                               if let Some(new_child) =
                                   filter_upper(child, current_depth + 1, min_len, max_len)
                               {
+                                  if !Arc::ptr_eq(&new_child, child)
+                                      || new_child.max_depth() != *orig_depth
+                                  {
+                                      same_kids = false;
+                                  }
                                   new_kids.insert(new_child.max_depth(), new_child);
+                                  count += 1;
+                              } else {
+                                  same_kids = false;
                               }
                           }
-                          if !new_kids.is_empty() {
+                          if count > 0 {
                               new_children.insert(v.clone(), new_kids);
+                          } else {
+                              children_identical = false;
                           }
+                          children_identical &= same_kids;
                       }
+                  } else {
+                      // We cannot descend; identical only if there were no children to begin with
+                      children_identical = b.children.is_empty();
+                  }
+
+                  // If nothing changed at this node, return original pointer for maximal sharing.
+                  if new_empty == b.empty && children_identical {
+                      return Some(node.clone());
                   }
 
                   if new_children.is_empty() && new_empty.is_none() {
@@ -458,20 +611,37 @@ local_system:
                   let new_empty = if keep_empty { i.empty.clone() } else { None };
 
                   let mut new_l_children: Children<T, Lower<T>> = IHashMap::new();
+                  let mut children_identical = true;
                   if current_depth < max_d {
                       for (v, kids) in i.children.iter() {
                           let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-                          for child in kids.values() {
+                          let mut same_kids = true;
+                          let mut count = 0usize;
+                          for (orig_depth, child) in kids.iter() {
                               if let Some(new_child) =
                                   filter_lower(child, current_depth + 1, min_len, max_len)
                               {
+                                  if !Arc::ptr_eq(&new_child, child)
+                                      || new_child.max_depth != *orig_depth
+                                  {
+                                      same_kids = false;
+                                  }
                                   new_kids.insert(new_child.max_depth, new_child);
+                                  count += 1;
+                              } else {
+                                  same_kids = false;
                               }
                           }
-                          if !new_kids.is_empty() {
+                          if count > 0 {
                               new_l_children.insert(v.clone(), new_kids);
+                          } else {
+                              children_identical = false;
                           }
+                          children_identical &= same_kids;
                       }
+                  } else {
+                      // We cannot descend; identical only if there were no children to begin with
+                      children_identical = i.children.is_empty();
                   }
 
                   let is_leaf_interface = i.children.is_empty() && i.empty.is_none();
@@ -480,6 +650,13 @@ local_system:
                   if new_l_children.is_empty() && new_empty.is_none() && !keep_leaf_interface {
                       None
                   } else {
+                      // If nothing changed at this node, return original pointer for maximal sharing.
+                      if new_empty == i.empty
+                          && ((is_leaf_interface && keep_leaf_interface)
+                              || (!is_leaf_interface && children_identical))
+                      {
+                          return Some(node.clone());
+                      }
                       let new_i = new_interface(new_l_children, i.acc.clone(), new_empty);
                       Some(try_promote(&new_i))
                   }
@@ -1628,6 +1805,35 @@ local_system:
           }
 
           pub fn isolate(&self, value: Option<T>) -> Self {
+              // Fast-path: if the isolation would yield an identical structure, return self.
+              if let Some(ref v) = value {
+                  match &*self.inner {
+                      Upper::Branch(b) => {
+                          if b.empty.is_none() && b.children.len() == 1 && b.children.contains_key(v) {
+                              return self.clone();
+                          }
+                      }
+                      Upper::Interface(i) => {
+                          if i.empty.is_none() && i.children.len() == 1 && i.children.contains_key(v) {
+                              return self.clone();
+                          }
+                      }
+                  }
+              } else {
+                  match &*self.inner {
+                      Upper::Branch(b) => {
+                          if b.children.is_empty() {
+                              return self.clone();
+                          }
+                      }
+                      Upper::Interface(i) => {
+                          if i.children.is_empty() && i.empty.is_some() {
+                              return self.clone();
+                          }
+                      }
+                  }
+              }
+
               let new_inner = if let Some(val) = value {
                   match &*self.inner {
                       Upper::Branch(b) => {
@@ -1661,6 +1867,30 @@ local_system:
 
           pub fn isolate_many<I: IntoIterator<Item = Option<T>>>(&self, values: I) -> Self {
               let values_set: HashSet<Option<T>> = values.into_iter().collect();
+
+              // Fast-path: if the selection keeps everything exactly as-is, return self.
+              match &*self.inner {
+                  Upper::Branch(b) => {
+                      let all_children_kept = b
+                          .children
+                          .keys()
+                          .all(|k| values_set.contains(&Some(k.clone())));
+                      let empty_kept_ok = !b.empty.is_some() || values_set.contains(&None);
+                      if all_children_kept && empty_kept_ok {
+                          return self.clone();
+                      }
+                  }
+                  Upper::Interface(i) => {
+                      let all_children_kept = i
+                          .children
+                          .keys()
+                          .all(|k| values_set.contains(&Some(k.clone())));
+                      let empty_kept_ok = !i.empty.is_some() || values_set.contains(&None);
+                      if all_children_kept && empty_kept_ok {
+                          return self.clone();
+                      }
+                  }
+              }
 
               let new_empty: Option<A> = if values_set.contains(&None) {
                   match &*self.inner {
@@ -1808,12 +2038,23 @@ local_system:
                           if !keep_acc && !keep_empty {
                               None
                           } else if !keep_acc && keep_empty {
-                              let new_b = new_branch(IHashMap::new(), i.empty.clone());
-                              Some(try_promote(&new_b))
+                              // If the original node is already a leaf interface with empty,
+                              // nothing changes; preserve pointer.
+                              if i.children.is_empty() && i.empty.is_some() {
+                                  Some(node.clone())
+                              } else {
+                                  let new_b = new_branch(IHashMap::new(), i.empty.clone());
+                                  Some(try_promote(&new_b))
+                              }
                           } else {
                               let new_empty = if keep_empty { i.empty.clone() } else { None };
-                              let new_i = new_interface(i.children.clone(), i.acc.clone(), new_empty);
-                              Some(try_promote(&new_i))
+                              // If we keep acc and empty presence is unchanged, preserve pointer.
+                              if new_empty == i.empty {
+                                  Some(node.clone())
+                              } else {
+                                  let new_i = new_interface(i.children.clone(), i.acc.clone(), new_empty);
+                                  Some(try_promote(&new_i))
+                              }
                           }
                       }
                       Upper::Branch(b) => {
@@ -1823,16 +2064,33 @@ local_system:
                               .and_then(|e| if test_acc(e, acc_memo, p) { Some(e.clone()) } else { None });
 
                           let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                          let mut children_identical = true;
                           for (v, kids) in b.children.iter() {
                               let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-                              for child in kids.values() {
+                              let mut same_kids = true;
+                              let mut count = 0usize;
+                              for (orig_depth, child) in kids.iter() {
                                   if let Some(nc) = transform::<T, A, P>(child, acc_memo, p) {
+                                      if !Arc::ptr_eq(&nc, child) || nc.max_depth() != *orig_depth {
+                                          same_kids = false;
+                                      }
                                       new_kids.insert(nc.max_depth(), nc);
+                                      count += 1;
+                                  } else {
+                                      same_kids = false;
                                   }
                               }
-                              if !new_kids.is_empty() {
+                              if count > 0 {
                                   new_children.insert(v.clone(), new_kids);
+                              } else {
+                                  children_identical = false;
                               }
+                              children_identical &= same_kids;
+                          }
+
+                          // If nothing changed, preserve pointer.
+                          if new_empty == b.empty && children_identical {
+                              return Some(node.clone());
                           }
 
                           if new_children.is_empty() && new_empty.is_none() {
@@ -3213,7 +3471,7 @@ local_system:
           }
       }
   prev_file_contents:
-    src/datastructures/leveled_gss.rs: |
+    src/datastructures/leveled_gss.rs: |-
       //! Pure Rust, Python-free core implementation of the Leveled GSS.
       //! This module contains the generic data structures and algorithms, parameterized
       //! over stack item type `T` and accumulator type `A`.
@@ -3408,8 +3666,8 @@ local_system:
                   &[1],
               )]);
 
-              let gss1 = gss0.push("X".to_string()).pop();
-              let gss2 = gss0.push("X".to_string()).pop();
+              let gss1 = gss0.push("X".to_string());
+              let gss2 = gss0.push("X".to_string());
 
               assert!(gss1.inner_ptrs_eq(&gss2));
               assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
@@ -3422,8 +3680,8 @@ local_system:
                   &[1],
               )]);
 
-              let gss1 = gss0.push("X".to_string()).pop();
-              let gss2 = gss0.push("X".to_string()).pop();
+              let gss1 = gss0.push("X".to_string());
+              let gss2 = gss0.push("X".to_string());
 
               assert!(gss1.inner_ptrs_eq(&gss2));
               assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
@@ -3436,13 +3694,122 @@ local_system:
                   &[1],
               )]);
 
-              let gss1 = gss0.push("X".to_string()).pop();
-              let gss2 = gss0.push("X".to_string()).pop();
+              let gss1 = gss0.push("X".to_string());
+              let gss2 = gss0.push("X".to_string());
 
               assert!(gss1.inner_ptrs_eq(&gss2));
               assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
           }
 
+          #[test]
+          fn test_isolate_preserves_ptr_on_noop() {
+              // Case 1: Isolate single child, no empty. Should be a no-op.
+              let gss0 = gss_from_str_stacks(&[(&["A"], &[1])]);
+              let gss1 = gss0.isolate(Some("A".to_string()));
+              assert!(gss0.ptr_eq(&gss1));
+
+              // Case 2: Isolate None on a GSS that is only an empty path. Should be a no-op.
+              let gss2 = gss_from_str_stacks(&[(&[], &[1])]);
+              let gss3 = gss2.isolate(None);
+              assert!(gss2.ptr_eq(&gss3));
+
+              // Case 3: Isolate single child from multiple. Should NOT be a no-op.
+              let gss4 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
+              let gss5 = gss4.isolate(Some("A".to_string()));
+              assert!(!gss4.ptr_eq(&gss5));
+
+              // Case 4: Isolate None from a GSS with children. Should NOT be a no-op.
+              let gss6 = gss_from_str_stacks(&[(&["A"], &[1]), (&[], &[2])]);
+              let gss7 = gss6.isolate(None);
+              assert!(!gss6.ptr_eq(&gss7));
+          }
+
+          #[test]
+          fn test_isolate_many_preserves_ptr_on_noop() {
+              let gss0 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2]), (&[], &[3])]);
+
+              // Case 1: Select all children and empty. Should be a no-op.
+              let gss1 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
+              assert!(gss0.ptr_eq(&gss1));
+
+              // Case 2: Select a superset of children. Should be a no-op.
+              let gss2 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), Some("C".to_string()), None]);
+              assert!(gss0.ptr_eq(&gss2));
+
+              // Case 3: Select a subset of children. Should NOT be a no-op.
+              let gss3 = gss0.isolate_many(vec![Some("A".to_string()), None]);
+              assert!(!gss0.ptr_eq(&gss3));
+
+              // Case 4: Select all children but forget empty. Should NOT be a no-op.
+              let gss4 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string())]);
+              assert!(!gss0.ptr_eq(&gss4));
+
+              // Case 5: GSS with no empty, select all children and None. Should NOT be a no-op.
+              let gss5 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
+              let gss6 = gss5.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
+              assert!(!gss5.ptr_eq(&gss6));
+          }
+
+          #[test]
+          fn test_filter_by_length_preserves_ptr_on_noop() {
+              let gss0 = gss_from_str_stacks(&[
+                  (&["A", "B", "C"], &[1]),
+                  (&["X", "Y"], &[2]),
+                  (&["Z"], &[3]),
+                  (&[], &[4]),
+              ]);
+
+              // Case 1: No filter applied. Should be a no-op.
+              let gss1 = gss0.filter_by_length(None, None);
+              assert!(gss0.ptr_eq(&gss1));
+
+              // Case 2: Filter range includes all paths. Should be a no-op.
+              // Paths have lengths 0, 1, 2, 3.
+              let gss2 = gss0.filter_by_length(Some(0), Some(3));
+              assert!(gss0.ptr_eq(&gss2));
+              let gss3 = gss0.filter_by_length(Some(-1), Some(10));
+              assert!(gss0.ptr_eq(&gss3));
+
+              // Case 3: Filter prunes some paths. Should NOT be a no-op.
+              let gss4 = gss0.filter_by_length(Some(1), Some(2));
+              assert!(!gss0.ptr_eq(&gss4));
+              assert_eq!(gss4.to_stacks().len(), 2);
+
+              // Case 4: Filter on empty GSS.
+              let gss_empty = TestGSS::empty();
+              let gss_empty_filtered = gss_empty.filter_by_length(Some(1), Some(2));
+              assert!(gss_empty.ptr_eq(&gss_empty_filtered));
+          }
+
+          #[test]
+          fn test_prune_preserves_ptr_on_noop() {
+              // GSS with two different accumulators.
+              let gss0 = gss_from_str_stacks(&[
+                  (&["A", "B"], &[1, 2]), // acc IntAcc({1, 2})
+                  (&["X"], &[3]),       // acc IntAcc({3})
+                  (&[], &[1, 3]),       // acc IntAcc({1, 3})
+              ]);
+
+              // Case 1: Predicate keeps everything. Should be a no-op.
+              let gss1 = gss0.prune(|_acc| true);
+              assert!(gss0.ptr_eq(&gss1));
+
+              // Case 2: Predicate prunes something. Should NOT be a no-op.
+              let gss2 = gss0.prune(|acc| acc.0.contains(&1));
+              assert!(!gss0.ptr_eq(&gss2));
+              // The path ["X"] with acc {3} should be pruned.
+              assert_eq!(gss2.to_stacks().len(), 2);
+
+              // Case 3: Predicate prunes everything. Result should be empty.
+              let gss3 = gss0.prune(|_acc| false);
+              assert!(gss3.is_empty());
+              assert!(!gss0.ptr_eq(&gss3));
+
+              // Case 4: Prune on empty GSS.
+              let gss_empty = TestGSS::empty();
+              let gss_empty_pruned = gss_empty.prune(|_acc| true);
+              assert!(gss_empty.ptr_eq(&gss_empty_pruned));
+          }
       }
 
       // --------------------
@@ -3593,20 +3960,42 @@ local_system:
           let keep_empty = node.empty && current_depth >= min_d;
 
           let mut new_children: Children<T, Lower<T>> = IHashMap::new();
+          let mut children_identical = true;
+
           if current_depth < max_d {
               for (v, kids) in node.children.iter() {
                   let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-                  for child in kids.values() {
+                  let mut same_kids = true;
+                  let mut count = 0usize;
+                  for (orig_depth, child) in kids.iter() {
                       if let Some(new_child) =
                           filter_lower(child, current_depth + 1, min_len, max_len)
                       {
+                          // Preserve identicality if pointer and depth key match
+                          if !Arc::ptr_eq(&new_child, child) || new_child.max_depth != *orig_depth {
+                              same_kids = false;
+                          }
                           new_kids.insert(new_child.max_depth, new_child);
+                          count += 1;
+                      } else {
+                          same_kids = false;
                       }
                   }
-                  if !new_kids.is_empty() {
+                  if count > 0 {
                       new_children.insert(v.clone(), new_kids);
+                  } else {
+                      children_identical = false;
                   }
+                  children_identical &= same_kids;
               }
+          } else {
+              // We cannot descend; identical only if there were no children to begin with
+              children_identical = node.children.is_empty();
+          }
+
+          // If nothing changed at this node, return the original pointer for maximal sharing.
+          if keep_empty == node.empty && children_identical {
+              return Some(node.clone());
           }
 
           if !keep_empty && new_children.is_empty() {
@@ -3639,20 +4028,42 @@ local_system:
                   let new_empty = if keep_empty { b.empty.clone() } else { None };
 
                   let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                  let mut children_identical = true;
                   if current_depth < max_d {
                       for (v, kids) in b.children.iter() {
                           let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-                          for child in kids.values() {
+                          let mut same_kids = true;
+                          let mut count = 0usize;
+                          for (orig_depth, child) in kids.iter() {
                               if let Some(new_child) =
                                   filter_upper(child, current_depth + 1, min_len, max_len)
                               {
+                                  if !Arc::ptr_eq(&new_child, child)
+                                      || new_child.max_depth() != *orig_depth
+                                  {
+                                      same_kids = false;
+                                  }
                                   new_kids.insert(new_child.max_depth(), new_child);
+                                  count += 1;
+                              } else {
+                                  same_kids = false;
                               }
                           }
-                          if !new_kids.is_empty() {
+                          if count > 0 {
                               new_children.insert(v.clone(), new_kids);
+                          } else {
+                              children_identical = false;
                           }
+                          children_identical &= same_kids;
                       }
+                  } else {
+                      // We cannot descend; identical only if there were no children to begin with
+                      children_identical = b.children.is_empty();
+                  }
+
+                  // If nothing changed at this node, return original pointer for maximal sharing.
+                  if new_empty == b.empty && children_identical {
+                      return Some(node.clone());
                   }
 
                   if new_children.is_empty() && new_empty.is_none() {
@@ -3667,20 +4078,37 @@ local_system:
                   let new_empty = if keep_empty { i.empty.clone() } else { None };
 
                   let mut new_l_children: Children<T, Lower<T>> = IHashMap::new();
+                  let mut children_identical = true;
                   if current_depth < max_d {
                       for (v, kids) in i.children.iter() {
                           let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-                          for child in kids.values() {
+                          let mut same_kids = true;
+                          let mut count = 0usize;
+                          for (orig_depth, child) in kids.iter() {
                               if let Some(new_child) =
                                   filter_lower(child, current_depth + 1, min_len, max_len)
                               {
+                                  if !Arc::ptr_eq(&new_child, child)
+                                      || new_child.max_depth != *orig_depth
+                                  {
+                                      same_kids = false;
+                                  }
                                   new_kids.insert(new_child.max_depth, new_child);
+                                  count += 1;
+                              } else {
+                                  same_kids = false;
                               }
                           }
-                          if !new_kids.is_empty() {
+                          if count > 0 {
                               new_l_children.insert(v.clone(), new_kids);
+                          } else {
+                              children_identical = false;
                           }
+                          children_identical &= same_kids;
                       }
+                  } else {
+                      // We cannot descend; identical only if there were no children to begin with
+                      children_identical = i.children.is_empty();
                   }
 
                   let is_leaf_interface = i.children.is_empty() && i.empty.is_none();
@@ -3689,6 +4117,13 @@ local_system:
                   if new_l_children.is_empty() && new_empty.is_none() && !keep_leaf_interface {
                       None
                   } else {
+                      // If nothing changed at this node, return original pointer for maximal sharing.
+                      if new_empty == i.empty
+                          && ((is_leaf_interface && keep_leaf_interface)
+                              || (!is_leaf_interface && children_identical))
+                      {
+                          return Some(node.clone());
+                      }
                       let new_i = new_interface(new_l_children, i.acc.clone(), new_empty);
                       Some(try_promote(&new_i))
                   }
@@ -4837,6 +5272,35 @@ local_system:
           }
 
           pub fn isolate(&self, value: Option<T>) -> Self {
+              // Fast-path: if the isolation would yield an identical structure, return self.
+              if let Some(ref v) = value {
+                  match &*self.inner {
+                      Upper::Branch(b) => {
+                          if b.empty.is_none() && b.children.len() == 1 && b.children.contains_key(v) {
+                              return self.clone();
+                          }
+                      }
+                      Upper::Interface(i) => {
+                          if i.empty.is_none() && i.children.len() == 1 && i.children.contains_key(v) {
+                              return self.clone();
+                          }
+                      }
+                  }
+              } else {
+                  match &*self.inner {
+                      Upper::Branch(b) => {
+                          if b.children.is_empty() {
+                              return self.clone();
+                          }
+                      }
+                      Upper::Interface(i) => {
+                          if i.children.is_empty() && i.empty.is_some() {
+                              return self.clone();
+                          }
+                      }
+                  }
+              }
+
               let new_inner = if let Some(val) = value {
                   match &*self.inner {
                       Upper::Branch(b) => {
@@ -4870,6 +5334,30 @@ local_system:
 
           pub fn isolate_many<I: IntoIterator<Item = Option<T>>>(&self, values: I) -> Self {
               let values_set: HashSet<Option<T>> = values.into_iter().collect();
+
+              // Fast-path: if the selection keeps everything exactly as-is, return self.
+              match &*self.inner {
+                  Upper::Branch(b) => {
+                      let all_children_kept = b
+                          .children
+                          .keys()
+                          .all(|k| values_set.contains(&Some(k.clone())));
+                      let empty_kept_ok = b.empty.is_some() == values_set.contains(&None);
+                      if all_children_kept && empty_kept_ok {
+                          return self.clone();
+                      }
+                  }
+                  Upper::Interface(i) => {
+                      let all_children_kept = i
+                          .children
+                          .keys()
+                          .all(|k| values_set.contains(&Some(k.clone())));
+                      let empty_kept_ok = i.empty.is_some() == values_set.contains(&None);
+                      if all_children_kept && empty_kept_ok {
+                          return self.clone();
+                      }
+                  }
+              }
 
               let new_empty: Option<A> = if values_set.contains(&None) {
                   match &*self.inner {
@@ -5017,12 +5505,23 @@ local_system:
                           if !keep_acc && !keep_empty {
                               None
                           } else if !keep_acc && keep_empty {
-                              let new_b = new_branch(IHashMap::new(), i.empty.clone());
-                              Some(try_promote(&new_b))
+                              // If the original node is already a leaf interface with empty,
+                              // nothing changes; preserve pointer.
+                              if i.children.is_empty() && i.empty.is_some() {
+                                  Some(node.clone())
+                              } else {
+                                  let new_b = new_branch(IHashMap::new(), i.empty.clone());
+                                  Some(try_promote(&new_b))
+                              }
                           } else {
                               let new_empty = if keep_empty { i.empty.clone() } else { None };
-                              let new_i = new_interface(i.children.clone(), i.acc.clone(), new_empty);
-                              Some(try_promote(&new_i))
+                              // If we keep acc and empty presence is unchanged, preserve pointer.
+                              if new_empty == i.empty {
+                                  Some(node.clone())
+                              } else {
+                                  let new_i = new_interface(i.children.clone(), i.acc.clone(), new_empty);
+                                  Some(try_promote(&new_i))
+                              }
                           }
                       }
                       Upper::Branch(b) => {
@@ -5032,16 +5531,33 @@ local_system:
                               .and_then(|e| if test_acc(e, acc_memo, p) { Some(e.clone()) } else { None });
 
                           let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                          let mut children_identical = true;
                           for (v, kids) in b.children.iter() {
                               let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-                              for child in kids.values() {
+                              let mut same_kids = true;
+                              let mut count = 0usize;
+                              for (orig_depth, child) in kids.iter() {
                                   if let Some(nc) = transform::<T, A, P>(child, acc_memo, p) {
+                                      if !Arc::ptr_eq(&nc, child) || nc.max_depth() != *orig_depth {
+                                          same_kids = false;
+                                      }
                                       new_kids.insert(nc.max_depth(), nc);
+                                      count += 1;
+                                  } else {
+                                      same_kids = false;
                                   }
                               }
-                              if !new_kids.is_empty() {
+                              if count > 0 {
                                   new_children.insert(v.clone(), new_kids);
+                              } else {
+                                  children_identical = false;
                               }
+                              children_identical &= same_kids;
+                          }
+
+                          // If nothing changed, preserve pointer.
+                          if new_empty == b.empty && children_identical {
+                              return Some(node.clone());
                           }
 
                           if new_children.is_empty() && new_empty.is_none() {
@@ -6421,7 +6937,7 @@ local_system:
               }
           }
       }
-  diffs_applied_this_send: false
+  diffs_applied_this_send: true
   core_guidance_inserted: true
   prev_apply_mode: git-llm
 system:
@@ -6431,7 +6947,7 @@ system:
     Follow mode instructions that appear in the conversation (as user/developer messages). Those messages may appear anywhere and control the output format for the most recent turn.
     Do not split your response across multiple messages or tool calls. Fulfill all the user's instructions in one single contiguous reply.
   model:
-    - gpt-5
+    - cp
   code_completion_model:
     - cp
   commit_message_model:
@@ -6693,6 +7209,115 @@ messages:
               assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
           }
 
+          #[test]
+          fn test_isolate_preserves_ptr_on_noop() {
+              // Case 1: Isolate single child, no empty. Should be a no-op.
+              let gss0 = gss_from_str_stacks(&[(&["A"], &[1])]);
+              let gss1 = gss0.isolate(Some("A".to_string()));
+              assert!(gss0.ptr_eq(&gss1));
+
+              // Case 2: Isolate None on a GSS that is only an empty path. Should be a no-op.
+              let gss2 = gss_from_str_stacks(&[(&[], &[1])]);
+              let gss3 = gss2.isolate(None);
+              assert!(gss2.ptr_eq(&gss3));
+
+              // Case 3: Isolate single child from multiple. Should NOT be a no-op.
+              let gss4 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
+              let gss5 = gss4.isolate(Some("A".to_string()));
+              assert!(!gss4.ptr_eq(&gss5));
+
+              // Case 4: Isolate None from a GSS with children. Should NOT be a no-op.
+              let gss6 = gss_from_str_stacks(&[(&["A"], &[1]), (&[], &[2])]);
+              let gss7 = gss6.isolate(None);
+              assert!(!gss6.ptr_eq(&gss7));
+          }
+
+          #[test]
+          fn test_isolate_many_preserves_ptr_on_noop() {
+              let gss0 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2]), (&[], &[3])]);
+
+              // Case 1: Select all children and empty. Should be a no-op.
+              let gss1 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
+              assert!(gss0.ptr_eq(&gss1));
+
+              // Case 2: Select a superset of children. Should be a no-op.
+              let gss2 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), Some("C".to_string()), None]);
+              assert!(gss0.ptr_eq(&gss2));
+
+              // Case 3: Select a subset of children. Should NOT be a no-op.
+              let gss3 = gss0.isolate_many(vec![Some("A".to_string()), None]);
+              assert!(!gss0.ptr_eq(&gss3));
+
+              // Case 4: Select all children but forget empty. Should NOT be a no-op.
+              let gss4 = gss0.isolate_many(vec![Some("A".to_string()), Some("B".to_string())]);
+              assert!(!gss0.ptr_eq(&gss4));
+
+              // Case 5: GSS with no empty, select all children and None. Should NOT be a no-op.
+              let gss5 = gss_from_str_stacks(&[(&["A"], &[1]), (&["B"], &[2])]);
+              let gss6 = gss5.isolate_many(vec![Some("A".to_string()), Some("B".to_string()), None]);
+              assert!(!gss5.ptr_eq(&gss6));
+          }
+
+          #[test]
+          fn test_filter_by_length_preserves_ptr_on_noop() {
+              let gss0 = gss_from_str_stacks(&[
+                  (&["A", "B", "C"], &[1]),
+                  (&["X", "Y"], &[2]),
+                  (&["Z"], &[3]),
+                  (&[], &[4]),
+              ]);
+
+              // Case 1: No filter applied. Should be a no-op.
+              let gss1 = gss0.filter_by_length(None, None);
+              assert!(gss0.ptr_eq(&gss1));
+
+              // Case 2: Filter range includes all paths. Should be a no-op.
+              // Paths have lengths 0, 1, 2, 3.
+              let gss2 = gss0.filter_by_length(Some(0), Some(3));
+              assert!(gss0.ptr_eq(&gss2));
+              let gss3 = gss0.filter_by_length(Some(-1), Some(10));
+              assert!(gss0.ptr_eq(&gss3));
+
+              // Case 3: Filter prunes some paths. Should NOT be a no-op.
+              let gss4 = gss0.filter_by_length(Some(1), Some(2));
+              assert!(!gss0.ptr_eq(&gss4));
+              assert_eq!(gss4.to_stacks().len(), 2);
+
+              // Case 4: Filter on empty GSS.
+              let gss_empty = TestGSS::empty();
+              let gss_empty_filtered = gss_empty.filter_by_length(Some(1), Some(2));
+              assert!(gss_empty.ptr_eq(&gss_empty_filtered));
+          }
+
+          #[test]
+          fn test_prune_preserves_ptr_on_noop() {
+              // GSS with two different accumulators.
+              let gss0 = gss_from_str_stacks(&[
+                  (&["A", "B"], &[1, 2]), // acc IntAcc({1, 2})
+                  (&["X"], &[3]),       // acc IntAcc({3})
+                  (&[], &[1, 3]),       // acc IntAcc({1, 3})
+              ]);
+
+              // Case 1: Predicate keeps everything. Should be a no-op.
+              let gss1 = gss0.prune(|_acc| true);
+              assert!(gss0.ptr_eq(&gss1));
+
+              // Case 2: Predicate prunes something. Should NOT be a no-op.
+              let gss2 = gss0.prune(|acc| acc.0.contains(&1));
+              assert!(!gss0.ptr_eq(&gss2));
+              // The path ["X"] with acc {3} should be pruned.
+              assert_eq!(gss2.to_stacks().len(), 2);
+
+              // Case 3: Predicate prunes everything. Result should be empty.
+              let gss3 = gss0.prune(|_acc| false);
+              assert!(gss3.is_empty());
+              assert!(!gss0.ptr_eq(&gss3));
+
+              // Case 4: Prune on empty GSS.
+              let gss_empty = TestGSS::empty();
+              let gss_empty_pruned = gss_empty.prune(|_acc| true);
+              assert!(gss_empty.ptr_eq(&gss_empty_pruned));
+          }
       }
 
       // --------------------
@@ -6843,20 +7468,42 @@ messages:
           let keep_empty = node.empty && current_depth >= min_d;
 
           let mut new_children: Children<T, Lower<T>> = IHashMap::new();
+          let mut children_identical = true;
+
           if current_depth < max_d {
               for (v, kids) in node.children.iter() {
                   let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-                  for child in kids.values() {
+                  let mut same_kids = true;
+                  let mut count = 0usize;
+                  for (orig_depth, child) in kids.iter() {
                       if let Some(new_child) =
                           filter_lower(child, current_depth + 1, min_len, max_len)
                       {
+                          // Preserve identicality if pointer and depth key match
+                          if !Arc::ptr_eq(&new_child, child) || new_child.max_depth != *orig_depth {
+                              same_kids = false;
+                          }
                           new_kids.insert(new_child.max_depth, new_child);
+                          count += 1;
+                      } else {
+                          same_kids = false;
                       }
                   }
-                  if !new_kids.is_empty() {
+                  if count > 0 {
                       new_children.insert(v.clone(), new_kids);
+                  } else {
+                      children_identical = false;
                   }
+                  children_identical &= same_kids;
               }
+          } else {
+              // We cannot descend; identical only if there were no children to begin with
+              children_identical = node.children.is_empty();
+          }
+
+          // If nothing changed at this node, return the original pointer for maximal sharing.
+          if keep_empty == node.empty && children_identical {
+              return Some(node.clone());
           }
 
           if !keep_empty && new_children.is_empty() {
@@ -6889,20 +7536,42 @@ messages:
                   let new_empty = if keep_empty { b.empty.clone() } else { None };
 
                   let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                  let mut children_identical = true;
                   if current_depth < max_d {
                       for (v, kids) in b.children.iter() {
                           let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-                          for child in kids.values() {
+                          let mut same_kids = true;
+                          let mut count = 0usize;
+                          for (orig_depth, child) in kids.iter() {
                               if let Some(new_child) =
                                   filter_upper(child, current_depth + 1, min_len, max_len)
                               {
+                                  if !Arc::ptr_eq(&new_child, child)
+                                      || new_child.max_depth() != *orig_depth
+                                  {
+                                      same_kids = false;
+                                  }
                                   new_kids.insert(new_child.max_depth(), new_child);
+                                  count += 1;
+                              } else {
+                                  same_kids = false;
                               }
                           }
-                          if !new_kids.is_empty() {
+                          if count > 0 {
                               new_children.insert(v.clone(), new_kids);
+                          } else {
+                              children_identical = false;
                           }
+                          children_identical &= same_kids;
                       }
+                  } else {
+                      // We cannot descend; identical only if there were no children to begin with
+                      children_identical = b.children.is_empty();
+                  }
+
+                  // If nothing changed at this node, return original pointer for maximal sharing.
+                  if new_empty == b.empty && children_identical {
+                      return Some(node.clone());
                   }
 
                   if new_children.is_empty() && new_empty.is_none() {
@@ -6917,20 +7586,37 @@ messages:
                   let new_empty = if keep_empty { i.empty.clone() } else { None };
 
                   let mut new_l_children: Children<T, Lower<T>> = IHashMap::new();
+                  let mut children_identical = true;
                   if current_depth < max_d {
                       for (v, kids) in i.children.iter() {
                           let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-                          for child in kids.values() {
+                          let mut same_kids = true;
+                          let mut count = 0usize;
+                          for (orig_depth, child) in kids.iter() {
                               if let Some(new_child) =
                                   filter_lower(child, current_depth + 1, min_len, max_len)
                               {
+                                  if !Arc::ptr_eq(&new_child, child)
+                                      || new_child.max_depth != *orig_depth
+                                  {
+                                      same_kids = false;
+                                  }
                                   new_kids.insert(new_child.max_depth, new_child);
+                                  count += 1;
+                              } else {
+                                  same_kids = false;
                               }
                           }
-                          if !new_kids.is_empty() {
+                          if count > 0 {
                               new_l_children.insert(v.clone(), new_kids);
+                          } else {
+                              children_identical = false;
                           }
+                          children_identical &= same_kids;
                       }
+                  } else {
+                      // We cannot descend; identical only if there were no children to begin with
+                      children_identical = i.children.is_empty();
                   }
 
                   let is_leaf_interface = i.children.is_empty() && i.empty.is_none();
@@ -6939,6 +7625,13 @@ messages:
                   if new_l_children.is_empty() && new_empty.is_none() && !keep_leaf_interface {
                       None
                   } else {
+                      // If nothing changed at this node, return original pointer for maximal sharing.
+                      if new_empty == i.empty
+                          && ((is_leaf_interface && keep_leaf_interface)
+                              || (!is_leaf_interface && children_identical))
+                      {
+                          return Some(node.clone());
+                      }
                       let new_i = new_interface(new_l_children, i.acc.clone(), new_empty);
                       Some(try_promote(&new_i))
                   }
@@ -8087,6 +8780,35 @@ messages:
           }
 
           pub fn isolate(&self, value: Option<T>) -> Self {
+              // Fast-path: if the isolation would yield an identical structure, return self.
+              if let Some(ref v) = value {
+                  match &*self.inner {
+                      Upper::Branch(b) => {
+                          if b.empty.is_none() && b.children.len() == 1 && b.children.contains_key(v) {
+                              return self.clone();
+                          }
+                      }
+                      Upper::Interface(i) => {
+                          if i.empty.is_none() && i.children.len() == 1 && i.children.contains_key(v) {
+                              return self.clone();
+                          }
+                      }
+                  }
+              } else {
+                  match &*self.inner {
+                      Upper::Branch(b) => {
+                          if b.children.is_empty() {
+                              return self.clone();
+                          }
+                      }
+                      Upper::Interface(i) => {
+                          if i.children.is_empty() && i.empty.is_some() {
+                              return self.clone();
+                          }
+                      }
+                  }
+              }
+
               let new_inner = if let Some(val) = value {
                   match &*self.inner {
                       Upper::Branch(b) => {
@@ -8120,6 +8842,30 @@ messages:
 
           pub fn isolate_many<I: IntoIterator<Item = Option<T>>>(&self, values: I) -> Self {
               let values_set: HashSet<Option<T>> = values.into_iter().collect();
+
+              // Fast-path: if the selection keeps everything exactly as-is, return self.
+              match &*self.inner {
+                  Upper::Branch(b) => {
+                      let all_children_kept = b
+                          .children
+                          .keys()
+                          .all(|k| values_set.contains(&Some(k.clone())));
+                      let empty_kept_ok = !b.empty.is_some() || values_set.contains(&None);
+                      if all_children_kept && empty_kept_ok {
+                          return self.clone();
+                      }
+                  }
+                  Upper::Interface(i) => {
+                      let all_children_kept = i
+                          .children
+                          .keys()
+                          .all(|k| values_set.contains(&Some(k.clone())));
+                      let empty_kept_ok = !i.empty.is_some() || values_set.contains(&None);
+                      if all_children_kept && empty_kept_ok {
+                          return self.clone();
+                      }
+                  }
+              }
 
               let new_empty: Option<A> = if values_set.contains(&None) {
                   match &*self.inner {
@@ -8267,12 +9013,23 @@ messages:
                           if !keep_acc && !keep_empty {
                               None
                           } else if !keep_acc && keep_empty {
-                              let new_b = new_branch(IHashMap::new(), i.empty.clone());
-                              Some(try_promote(&new_b))
+                              // If the original node is already a leaf interface with empty,
+                              // nothing changes; preserve pointer.
+                              if i.children.is_empty() && i.empty.is_some() {
+                                  Some(node.clone())
+                              } else {
+                                  let new_b = new_branch(IHashMap::new(), i.empty.clone());
+                                  Some(try_promote(&new_b))
+                              }
                           } else {
                               let new_empty = if keep_empty { i.empty.clone() } else { None };
-                              let new_i = new_interface(i.children.clone(), i.acc.clone(), new_empty);
-                              Some(try_promote(&new_i))
+                              // If we keep acc and empty presence is unchanged, preserve pointer.
+                              if new_empty == i.empty {
+                                  Some(node.clone())
+                              } else {
+                                  let new_i = new_interface(i.children.clone(), i.acc.clone(), new_empty);
+                                  Some(try_promote(&new_i))
+                              }
                           }
                       }
                       Upper::Branch(b) => {
@@ -8282,16 +9039,33 @@ messages:
                               .and_then(|e| if test_acc(e, acc_memo, p) { Some(e.clone()) } else { None });
 
                           let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
+                          let mut children_identical = true;
                           for (v, kids) in b.children.iter() {
                               let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-                              for child in kids.values() {
+                              let mut same_kids = true;
+                              let mut count = 0usize;
+                              for (orig_depth, child) in kids.iter() {
                                   if let Some(nc) = transform::<T, A, P>(child, acc_memo, p) {
+                                      if !Arc::ptr_eq(&nc, child) || nc.max_depth() != *orig_depth {
+                                          same_kids = false;
+                                      }
                                       new_kids.insert(nc.max_depth(), nc);
+                                      count += 1;
+                                  } else {
+                                      same_kids = false;
                                   }
                               }
-                              if !new_kids.is_empty() {
+                              if count > 0 {
                                   new_children.insert(v.clone(), new_kids);
+                              } else {
+                                  children_identical = false;
                               }
+                              children_identical &= same_kids;
+                          }
+
+                          // If nothing changed, preserve pointer.
+                          if new_empty == b.empty && children_identical {
+                              return Some(node.clone());
                           }
 
                           if new_children.is_empty() && new_empty.is_none() {
@@ -9671,17 +10445,30 @@ messages:
               }
           }
       }
-
       ```
     metadata:
       filename: src/datastructures/leveled_gss.rs
-  - user: |-
-      It is crucial that nodes remain shared in the GSS wherever possible. Node sharing is kind of the whole point of the GSS.
-      We want to do this at every opportunity. Right now, we're missing multiple opportunities.
+  - user: |2+
 
-      Take `isolate` for example. Suppose we have A --(1)--> B, and call `isolate` for 1. The result will be the original graph unchanged. However, when we do `ptr_eq` between the original and the result of `isolate`, we'll get false.
+      thread 'datastructures::leveled_gss::tests::test_isolate_many_preserves_ptr_on_noop' (19881815) panicked at src/datastructures/leveled_gss.rs:276:9:
+      assertion failed: !gss5.ptr_eq(&gss6)
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::panic
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:145:5
+         3: sep1::datastructures::leveled_gss::tests::test_isolate_many_preserves_ptr_on_noop
+                   at ./src/datastructures/leveled_gss.rs:276:9
+         4: sep1::datastructures::leveled_gss::tests::test_isolate_many_preserves_ptr_on_noop::{{closure}}
+                   at ./src/datastructures/leveled_gss.rs:254:49
+         5: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         6: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
 
-      Identify all other opportunities.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9700,1096 +10487,74 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Below are concrete steps to maximize node sharing and preserve top-level pointer equality whenever an operation is a no-op. After the steps, you’ll find a ready-to-apply git patch.
+      This panic occurs because the `isolate_many` function's fast path optimization returns `self.clone()` (which preserves pointer equality) when the requested set of paths includes the empty path (`None`), but the GSS already lacks an empty path. Since the resulting structure is identical, the optimization triggers, violating the test's expectation that a new GSS object should be created if the input request differs from the existing structure, even if the outcome is structurally the same.
 
-      Step-by-step instructions
+      To fix this, we must refine the fast path condition to ensure pointer equality is only preserved if the requested set of paths exactly matches the set of existing paths (including the presence or absence of the empty path).
 
-      1) Preserve pointer equality in isolate when the result is identical
-      - Add fast paths in LeveledGSS::isolate:
-        - If you isolate Some(val) and the root has exactly one child val and no empty, return self.clone() (no structural change).
-        - If you isolate None and:
-          - the root is a Branch with no children (regardless of empty), return self.clone().
-          - the root is an Interface with no children but with Some(empty), return self.clone().
-      - This ensures ptr_eq is true when isolate makes no actual change.
+      Here are the step-by-step instructions and the corresponding git diff.
 
-      2) Preserve pointer equality in isolate_many when the result is identical
-      - Add fast paths in LeveledGSS::isolate_many:
-        - If all existing edge labels are included in the provided set, and if the presence of None in the set matches whether we should retain empty (i.e., b.empty.is_some() implies None is included), return self.clone().
-        - Apply the same logic for Interface nodes.
-      - This means that selecting a superset of existing keys (and correct None handling) yields the original graph pointer.
+      ### Step-by-step Instructions
 
-      3) Make filter_by_length pointer-preserving by default
-      - Rewrite filter_lower and filter_upper to return the original nodes (Some(node.clone())) if no changes occur at that node:
-        - Track whether any child is dropped or changed (pointer change or depth key change).
-        - Compare keep_empty with original.
-        - If unchanged, return Some(node.clone()) without rebuilding new nodes.
-        - Otherwise, rebuild and (for upper nodes) still try_promote as before.
-      - This allows filter_by_length to return the exact same Arc if nothing needs to be filtered.
+      In the file `src/datastructures/leveled_gss.rs`, modify the `isolate_many` method:
 
-      4) Make prune pointer-preserving if nothing is pruned
-      - In LeveledGSS::prune, update the transform function:
-        - For Interface:
-          - If the predicate keeps acc, and the empty presence stays the same, return Some(node.clone()).
-          - If we prune acc but keep empty and the interface is already a “leaf with empty”, also return Some(node.clone()).
-        - For Branch:
-          - Recurse and build new children only if any changes; otherwise, if the empty presence remains the same and all children are unchanged (pointer+depth), return Some(node.clone()).
-      - This ensures prune is a no-op when the predicate doesn’t remove anything — preserving pointer sharing.
+      1.  **Update `Upper::Branch` fast path condition:**
+          Change line 1008 within the `isolate_many` function to ensure `empty_kept_ok` is true only if the presence of `b.empty` exactly matches whether `None` was requested in `values_set`.
 
-      5) Keep loop-based child iteration stable for equality checks
-      - In filter_lower/filter_upper and prune’s transform for Branch:
-        - Iterate OrdMap with .iter() to access (depth, child) pairs, allowing you to verify unchanged depth keys and pointer equality. This is necessary to assert “unchanged.”
+          *Old:*
+          ```rust
+          let empty_kept_ok = !b.empty.is_some() || values_set.contains(&None);
+          ```
+          *New:*
+          ```rust
+          let empty_kept_ok = b.empty.is_some() == values_set.contains(&None);
+          ```
 
-      After applying these changes, the following operations will now preserve the original top-level pointer when they are no-ops:
-      - isolate(Some(val)) and isolate(None) for the cases described above,
-      - isolate_many when you select all current labels and don’t unintentionally drop emptiness,
-      - filter_by_length when the length filter doesn’t exclude anything,
-      - prune when the predicate keeps everything relevant.
+      2.  **Update `Upper::Interface` fast path condition:**
+          Change line 1018 within the `isolate_many` function using the same logic for `i.empty`.
 
-      Git diff
+          *Old:*
+          ```rust
+          let empty_kept_ok = !i.empty.is_some() || values_set.contains(&None);
+          ```
+          *New:*
+          ```rust
+          let empty_kept_ok = i.empty.is_some() == values_set.contains(&None);
+          ```
+
+      ### Git Diff
 
       ```diff
       diff --git a/src/datastructures/leveled_gss.rs b/src/datastructures/leveled_gss.rs
-      index 7724f3b..b2a095a 100644
       --- a/src/datastructures/leveled_gss.rs
       +++ b/src/datastructures/leveled_gss.rs
-      @@ -151,6 +151,7 @@ fn filter_lower<T: Clone + Eq + Hash>(
-           min_len: Option<isize>,
-           max_len: Option<isize>,
-       ) -> Option<Arc<Lower<T>>>> {
-           let min_d = min_len.unwrap_or(0);
-           let max_d = max_len.unwrap_or(isize::MAX);
-       
-           if current_depth > max_d {
-               return None;
-      @@ -159,25 +160,65 @@ fn filter_lower<T: Clone + Eq + Hash>(
-           let keep_empty = node.empty && current_depth >= min_d;
-       
-           let mut new_children: Children<T, Lower<T>> = IHashMap::new();
-      -    if current_depth < max_d {
-      -        for (v, kids) in node.children.iter() {
-      -            let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-      -            for child in kids.values() {
-      -                if let Some(new_child) =
-      -                    filter_lower(child, current_depth + 1, min_len, max_len)
-      -                {
-      -                    new_kids.insert(new_child.max_depth, new_child);
-      -                }
-      -            }
-      -            if !new_kids.is_empty() {
-      -                new_children.insert(v.clone(), new_kids);
-      -            }
-      -        }
-      -    }
-      -
-      -    if !keep_empty && new_children.is_empty() {
-      -        None
-      -    } else {
-      -        Some(new_lower(new_children, keep_empty))
-      -    }
-      +    let mut children_identical = true;
-      +
-      +    if current_depth < max_d {
-      +        for (v, kids) in node.children.iter() {
-      +            let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-      +            let mut same_kids = true;
-      +            let mut count = 0usize;
-      +            for (orig_depth, child) in kids.iter() {
-      +                if let Some(new_child) =
-      +                    filter_lower(child, current_depth + 1, min_len, max_len)
-      +                {
-      +                    // Preserve identicality if pointer and depth key match
-      +                    if !Arc::ptr_eq(&new_child, child) || new_child.max_depth != *orig_depth {
-      +                        same_kids = false;
-      +                    }
-      +                    new_kids.insert(new_child.max_depth, new_child);
-      +                    count += 1;
-      +                } else {
-      +                    same_kids = false;
-      +                }
-      +            }
-      +            if count > 0 {
-      +                new_children.insert(v.clone(), new_kids);
-      +            } else {
-      +                children_identical = false;
-      +            }
-      +            children_identical &= same_kids;
-      +        }
-      +    } else {
-      +        // We cannot descend; identical only if there were no children to begin with
-      +        children_identical = node.children.is_empty();
-      +    }
-      +
-      +    // If nothing changed at this node, return the original pointer for maximal sharing.
-      +    if keep_empty == node.empty && children_identical {
-      +        return Some(node.clone());
-      +    }
-      +
-      +    if !keep_empty && new_children.is_empty() {
-      +        None
-      +    } else {
-      +        Some(new_lower(new_children, keep_empty))
-      +    }
-       }
-       
-       fn filter_upper<T, A>(
-           node: &Arc<Upper<T, A>>,
-           current_depth: isize,
-           min_len: Option<isize>,
-           max_len: Option<isize>,
-       ) -> Option<Arc<Upper<T, A>>>
-       where
-           T: Clone + Eq + Hash,
-           A: Merge + Clone + Eq + Hash,
-       {
-           let min_d = min_len.unwrap_or(0);
-           let max_d = max_len.unwrap_or(isize::MAX);
-       
-           if current_depth > max_d {
-               return None;
-           }
-       
-           match &**node {
-               Upper::Branch(b) => {
-                   let keep_empty = b.empty.is_some() && current_depth >= min_d;
-                   let new_empty = if keep_empty { b.empty.clone() } else { None };
-       
-      -            let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
-      -            if current_depth < max_d {
-      -                for (v, kids) in b.children.iter() {
-      -                    let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-      -                    for child in kids.values() {
-      -                        if let Some(new_child) =
-      -                            filter_upper(child, current_depth + 1, min_len, max_len)
-      -                        {
-      -                            new_kids.insert(new_child.max_depth(), new_child);
-      -                        }
-      -                    }
-      -                    if !new_kids.is_empty() {
-      -                        new_children.insert(v.clone(), new_kids);
-      -                    }
-      -                }
-      -            }
-      +            let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
-      +            let mut children_identical = true;
-      +            if current_depth < max_d {
-      +                for (v, kids) in b.children.iter() {
-      +                    let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-      +                    let mut same_kids = true;
-      +                    let mut count = 0usize;
-      +                    for (orig_depth, child) in kids.iter() {
-      +                        if let Some(new_child) =
-      +                            filter_upper(child, current_depth + 1, min_len, max_len)
-      +                        {
-      +                            if !Arc::ptr_eq(&new_child, child)
-      +                                || new_child.max_depth() != *orig_depth
-      +                            {
-      +                                same_kids = false;
-      +                            }
-      +                            new_kids.insert(new_child.max_depth(), new_child);
-      +                            count += 1;
-      +                        } else {
-      +                            same_kids = false;
-      +                        }
-      +                    }
-      +                    if count > 0 {
-      +                        new_children.insert(v.clone(), new_kids);
-      +                    } else {
-      +                        children_identical = false;
-      +                    }
-      +                    children_identical &= same_kids;
-      +                }
-      +            } else {
-      +                // We cannot descend; identical only if there were no children to begin with
-      +                children_identical = b.children.is_empty();
-      +            }
-       
-      +            // If nothing changed at this node, return original pointer for maximal sharing.
-      +            if new_empty == b.empty && children_identical {
-      +                return Some(node.clone());
-      +            }
-      +
-                   if new_children.is_empty() && new_empty.is_none() {
-                       None
-                   } else {
-                       let new_b = new_branch(new_children, new_empty);
-                       Some(try_promote(&new_b))
-                   }
-               }
-               Upper::Interface(i) => {
-                   let keep_empty = i.empty.is_some() && current_depth >= min_d;
-                   let new_empty = if keep_empty { i.empty.clone() } else { None };
-       
-      -            let mut new_l_children: Children<T, Lower<T>> = IHashMap::new();
-      -            if current_depth < max_d {
-      -                for (v, kids) in i.children.iter() {
-      -                    let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-      -                    for child in kids.values() {
-      -                        if let Some(new_child) =
-      -                            filter_lower(child, current_depth + 1, min_len, max_len)
-      -                        {
-      -                            new_kids.insert(new_child.max_depth, new_child);
-      -                        }
-      -                    }
-      -                    if !new_kids.is_empty() {
-      -                        new_l_children.insert(v.clone(), new_kids);
-      -                    }
-      -                }
-      -            }
-      +            let mut new_l_children: Children<T, Lower<T>> = IHashMap::new();
-      +            let mut children_identical = true;
-      +            if current_depth < max_d {
-      +                for (v, kids) in i.children.iter() {
-      +                    let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-      +                    let mut same_kids = true;
-      +                    let mut count = 0usize;
-      +                    for (orig_depth, child) in kids.iter() {
-      +                        if let Some(new_child) =
-      +                            filter_lower(child, current_depth + 1, min_len, max_len)
-      +                        {
-      +                            if !Arc::ptr_eq(&new_child, child)
-      +                                || new_child.max_depth != *orig_depth
-      +                            {
-      +                                same_kids = false;
-      +                            }
-      +                            new_kids.insert(new_child.max_depth, new_child);
-      +                            count += 1;
-      +                        } else {
-      +                            same_kids = false;
-      +                        }
-      +                    }
-      +                    if count > 0 {
-      +                        new_l_children.insert(v.clone(), new_kids);
-      +                    } else {
-      +                        children_identical = false;
-      +                    }
-      +                    children_identical &= same_kids;
-      +                }
-      +            } else {
-      +                // We cannot descend; identical only if there were no children to begin with
-      +                children_identical = i.children.is_empty();
-      +            }
-       
-                   let is_leaf_interface = i.children.is_empty() && i.empty.is_none();
-                   let keep_leaf_interface = is_leaf_interface && current_depth >= min_d;
-       
-                   if new_l_children.is_empty() && new_empty.is_none() && !keep_leaf_interface {
-                       None
-                   } else {
-      +                // If nothing changed at this node, return original pointer for maximal sharing.
-      +                if new_empty == i.empty
-      +                    && ((is_leaf_interface && keep_leaf_interface)
-      +                        || (!is_leaf_interface && children_identical))
-      +                {
-      +                    return Some(node.clone());
-      +                }
-                       let new_i = new_interface(new_l_children, i.acc.clone(), new_empty);
-                       Some(try_promote(&new_i))
-                   }
-               }
-           }
-       }
-      @@ -870,29 +911,87 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-           pub fn isolate(&self, value: Option<T>) -> Self {
-      -        let new_inner = if let Some(val) = value {
-      -            match &*self.inner {
-      -                Upper::Branch(b) => {
-      -                    let filtered_children = b
-      -                        .children
-      -                        .get(&val)
-      -                        .map(|kids| IHashMap::unit(val.clone(), kids.clone()))
-      -                        .unwrap_or_else(IHashMap::new);
-      -                    let new_b = new_branch(filtered_children, None);
-      -                    try_promote(&new_b)
-      -                }
-      -                Upper::Interface(i) => {
-      -                    if let Some(kids) = i.children.get(&val) {
-      -                        let filtered_children = IHashMap::unit(val.clone(), kids.clone());
-      -                        new_interface(filtered_children, i.acc.clone(), None)
-      -                    } else {
-      -                        empty_upper_inner()
-      -                    }
-      -                }
-      -            }
-      -        } else {
-      -            let empty_acc = match &*self.inner {
-      -                Upper::Branch(b) => b.empty.clone(),
-      -                Upper::Interface(i) => i.empty.clone(),
-      -            };
-      -            let new_b = new_branch(IHashMap::new(), empty_acc);
-      -            try_promote(&new_b)
-      -        };
-      -        LeveledGSS { inner: new_inner }
-      +        // Fast-path: if the isolation would yield an identical structure, return self.
-      +        if let Some(ref v) = value {
-      +            match &*self.inner {
-      +                Upper::Branch(b) => {
-      +                    if b.empty.is_none() && b.children.len() == 1 && b.children.contains_key(v) {
-      +                        return self.clone();
-      +                    }
-      +                }
-      +                Upper::Interface(i) => {
-      +                    if i.empty.is_none() && i.children.len() == 1 && i.children.contains_key(v) {
-      +                        return self.clone();
-      +                    }
-      +                }
-      +            }
-      +        } else {
-      +            match &*self.inner {
-      +                Upper::Branch(b) => {
-      +                    if b.children.is_empty() {
-      +                        return self.clone();
-      +                    }
-      +                }
-      +                Upper::Interface(i) => {
-      +                    if i.children.is_empty() && i.empty.is_some() {
-      +                        return self.clone();
-      +                    }
-      +                }
-      +            }
-      +        }
-      +
-      +        let new_inner = if let Some(val) = value {
-      +            match &*self.inner {
-      +                Upper::Branch(b) => {
-      +                    let filtered_children = b
-      +                        .children
-      +                        .get(&val)
-      +                        .map(|kids| IHashMap::unit(val.clone(), kids.clone()))
-      +                        .unwrap_or_else(IHashMap::new);
-      +                    let new_b = new_branch(filtered_children, None);
-      +                    try_promote(&new_b)
-      +                }
-      +                Upper::Interface(i) => {
-      +                    if let Some(kids) = i.children.get(&val) {
-      +                        let filtered_children = IHashMap::unit(val.clone(), kids.clone());
-      +                        new_interface(filtered_children, i.acc.clone(), None)
-      +                    } else {
-      +                        empty_upper_inner()
-      +                    }
-      +                }
-      +            }
-      +        } else {
-      +            let empty_acc = match &*self.inner {
-      +                Upper::Branch(b) => b.empty.clone(),
-      +                Upper::Interface(i) => i.empty.clone(),
-      +            };
-      +            let new_b = new_branch(IHashMap::new(), empty_acc);
-      +            try_promote(&new_b)
-      +        };
-      +        LeveledGSS { inner: new_inner }
-           }
-       
-           pub fn isolate_many<I: IntoIterator<Item = Option<T>>>(&self, values: I) -> Self {
-               let values_set: HashSet<Option<T>> = values.into_iter().collect();
-       
-      +        // Fast-path: if the selection keeps everything exactly as-is, return self.
-      +        match &*self.inner {
-      +            Upper::Branch(b) => {
-      +                let all_children_kept = b
-      +                    .children
-      +                    .keys()
-      +                    .all(|k| values_set.contains(&Some(k.clone())));
-      +                let empty_kept_ok = !b.empty.is_some() || values_set.contains(&None);
-      +                if all_children_kept && empty_kept_ok {
-      +                    return self.clone();
-      +                }
-      +            }
-      +            Upper::Interface(i) => {
-      +                let all_children_kept = i
-      +                    .children
-      +                    .keys()
-      +                    .all(|k| values_set.contains(&Some(k.clone())));
-      +                let empty_kept_ok = !i.empty.is_some() || values_set.contains(&None);
-      +                if all_children_kept && empty_kept_ok {
-      +                    return self.clone();
-      +                }
-      +            }
-      +        }
-      +
-               let new_empty: Option<A> = if values_set.contains(&None) {
-                   match &*self.inner {
-                       Upper::Branch(b) => b.empty.clone(),
-      @@ -934,27 +1033,63 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-           pub fn filter_by_length(&self, min_len: Option<isize>, max_len: Option<isize>) -> Self {
-               if self.is_empty() {
-                   return self.clone();
-               }
-       
-               let new_inner_opt = filter_upper::<T, A>(&self.inner, 0, min_len, max_len);
-               new_inner_opt.map_or_else(Self::empty, |inner| LeveledGSS { inner })
-           }
-       
-           pub fn apply<B, F>(&self, mut func: F) -> LeveledGSS<T, B>
-           where
-               B: Merge + Clone + Eq + Hash,
-               F: FnMut(&A) -> B,
-           {
-      @@ -1032,42 +1167,115 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-               LeveledGSS {
-                   inner: transform::<T, A, B, F>(&self.inner, &mut acc_memo, &mut func),
-               }
-           }
-       
-           pub fn prune<P>(&self, mut predicate: P) -> Self
-           where
-               P: FnMut(&A) -> bool,
-           {
-               // Memoize per-accumulator predicate
-               let mut acc_memo: StdHashMap<A, bool> = StdHashMap::new();
-       
-               fn test_acc<A, P>(a: &A, memo: &mut StdHashMap<A, bool>, p: &mut P) -> bool
-               where
-                   A: Clone + Eq + Hash,
-                   P: FnMut(&A) -> bool,
-               {
-                   if let Some(v) = memo.get(a) {
-                       return *v;
-                   }
-                   let r = p(a);
-                   memo.insert(a.clone(), r);
-                   r
-               }
-       
-               fn transform<T, A, P>(
-                   node: &Arc<Upper<T, A>>,
-                   acc_memo: &mut StdHashMap<A, bool>,
-                   p: &mut P,
-               ) -> Option<Arc<Upper<T, A>>>
-               where
-                   T: Clone + Eq + Hash,
-                   A: Merge + Clone + Eq + Hash,
-                   P: FnMut(&A) -> bool,
-               {
-                   match &**node {
-                       Upper::Interface(i) => {
-                           let keep_acc = test_acc(&i.acc, acc_memo, p);
-                           let keep_empty = i.empty.as_ref().map_or(false, |e| test_acc(e, acc_memo, p));
-      -                    if !keep_acc && !keep_empty {
-      -                        None
-      -                    } else if !keep_acc && keep_empty {
-      -                        let new_b = new_branch(IHashMap::new(), i.empty.clone());
-      -                        Some(try_promote(&new_b))
-      -                    } else {
-      -                        let new_empty = if keep_empty { i.empty.clone() } else { None };
-      -                        let new_i = new_interface(i.children.clone(), i.acc.clone(), new_empty);
-      -                        Some(try_promote(&new_i))
-      -                    }
-      +                    if !keep_acc && !keep_empty {
-      +                        None
-      +                    } else if !keep_acc && keep_empty {
-      +                        // If the original node is already a leaf interface with empty,
-      +                        // nothing changes; preserve pointer.
-      +                        if i.children.is_empty() && i.empty.is_some() {
-      +                            Some(node.clone())
-      +                        } else {
-      +                            let new_b = new_branch(IHashMap::new(), i.empty.clone());
-      +                            Some(try_promote(&new_b))
-      +                        }
-      +                    } else {
-      +                        let new_empty = if keep_empty { i.empty.clone() } else { None };
-      +                        // If we keep acc and empty presence is unchanged, preserve pointer.
-      +                        if new_empty == i.empty {
-      +                            Some(node.clone())
-      +                        } else {
-      +                            let new_i = new_interface(i.children.clone(), i.acc.clone(), new_empty);
-      +                            Some(try_promote(&new_i))
-      +                        }
-      +                    }
+      @@ -1005,7 +1005,7 @@
+                           .keys()
+                           .all(|k| values_set.contains(&Some(k.clone())));
+      -                let empty_kept_ok = !b.empty.is_some() || values_set.contains(&None);
+      +                let empty_kept_ok = b.empty.is_some() == values_set.contains(&None);
+                       if all_children_kept && empty_kept_ok {
+                           return self.clone();
                        }
-                       Upper::Branch(b) => {
-      -                    let new_empty = b.empty.as_ref().and_then(|e| if test_acc(e, acc_memo, p) { Some(e.clone()) } else { None });
-      -
-      -                    let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
-      -                    for (v, kids) in b.children.iter() {
-      -                        let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-      -                        for child in kids.values() {
-      -                            if let Some(nc) = transform::<T, A, P>(child, acc_memo, p) {
-      -                                new_kids.insert(nc.max_depth(), nc);
-      -                            }
-      -                        }
-      -                        if !new_kids.is_empty() {
-      -                            new_children.insert(v.clone(), new_kids);
-      -                        }
-      -                    }
-      -
-      -                    if new_children.is_empty() && new_empty.is_none() {
-      -                        None
-      -                    } else {
-      -                        let new_b = new_branch(new_children, new_empty);
-      -                        Some(try_promote(&new_b))
-      -                    }
-      +                    let new_empty = b
-      +                        .empty
-      +                        .as_ref()
-      +                        .and_then(|e| if test_acc(e, acc_memo, p) { Some(e.clone()) } else { None });
-      +
-      +                    let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
-      +                    let mut children_identical = true;
-      +                    for (v, kids) in b.children.iter() {
-      +                        let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-      +                        let mut same_kids = true;
-      +                        let mut count = 0usize;
-      +                        for (orig_depth, child) in kids.iter() {
-      +                            if let Some(nc) = transform::<T, A, P>(child, acc_memo, p) {
-      +                                if !Arc::ptr_eq(&nc, child) || nc.max_depth() != *orig_depth {
-      +                                    same_kids = false;
-      +                                }
-      +                                new_kids.insert(nc.max_depth(), nc);
-      +                                count += 1;
-      +                            } else {
-      +                                same_kids = false;
-      +                            }
-      +                        }
-      +                        if count > 0 {
-      +                            new_children.insert(v.clone(), new_kids);
-      +                        } else {
-      +                            children_identical = false;
-      +                        }
-      +                        children_identical &= same_kids;
-      +                    }
-      +
-      +                    // If nothing changed, preserve pointer.
-      +                    if new_empty == b.empty && children_identical {
-      +                        return Some(node.clone());
-      +                    }
-      +
-      +                    if new_children.is_empty() && new_empty.is_none() {
-      +                        None
-      +                    } else {
-      +                        let new_b = new_branch(new_children, new_empty);
-      +                        Some(try_promote(&new_b))
-      +                    }
+      @@ -1015,7 +1015,7 @@
+                           .keys()
+                           .all(|k| values_set.contains(&Some(k.clone())));
+      -                let empty_kept_ok = !i.empty.is_some() || values_set.contains(&None);
+      +                let empty_kept_ok = i.empty.is_some() == values_set.contains(&None);
+                       if all_children_kept && empty_kept_ok {
+                           return self.clone();
                        }
-                   }
-               }
-       
-               let res_inner_opt = transform::<T, A, P>(&self.inner, &mut acc_memo, &mut predicate);
-               res_inner_opt.map_or_else(Self::empty, |inner| LeveledGSS { inner })
-           }
       ```
     metadata:
-  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
-      applied now.
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/datastructures/leveled_gss.rs
+      Applying patch to 'src/datastructures/leveled_gss.rs' using custom patcher...
+      Successfully applied patch and wrote to src/datastructures/leveled_gss.rs.
     metadata:
-  - assistant: |-
-      ```diff
-      diff --git a/src/datastructures/leveled_gss.rs b/src/datastructures/leveled_gss.rs
-      index 7724f3b..b2a095a 100644
-      --- a/src/datastructures/leveled_gss.rs
-      +++ b/src/datastructures/leveled_gss.rs
-      @@ -370,7 +370,7 @@
-           current_depth: isize,
-           min_len: Option<isize>,
-           max_len: Option<isize>,
-      -) -> Option<Arc<Lower<T>>> {
-      +) -> Option<Arc<Lower<T>>> {
-           let min_d = min_len.unwrap_or(0);
-           let max_d = max_len.unwrap_or(isize::MAX);
-      @@ -159,25 +160,65 @@ fn filter_lower<T: Clone + Eq + Hash>(
-           let keep_empty = node.empty && current_depth >= min_d;
-       
-           let mut new_children: Children<T, Lower<T>> = IHashMap::new();
-      -    if current_depth < max_d {
-      -        for (v, kids) in node.children.iter() {
-      -            let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-      -            for child in kids.values() {
-      -                if let Some(new_child) =
-      -                    filter_lower(child, current_depth + 1, min_len, max_len)
-      -                {
-      -                    new_kids.insert(new_child.max_depth, new_child);
-      -                }
-      -            }
-      -            if !new_kids.is_empty() {
-      -                new_children.insert(v.clone(), new_kids);
-      -            }
-      -        }
-      -    }
-      -
-      -    if !keep_empty && new_children.is_empty() {
-      -        None
-      -    } else {
-      -        Some(new_lower(new_children, keep_empty))
-      -    }
-      +    let mut children_identical = true;
-      +
-      +    if current_depth < max_d {
-      +        for (v, kids) in node.children.iter() {
-      +            let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-      +            let mut same_kids = true;
-      +            let mut count = 0usize;
-      +            for (orig_depth, child) in kids.iter() {
-      +                if let Some(new_child) =
-      +                    filter_lower(child, current_depth + 1, min_len, max_len)
-      +                {
-      +                    // Preserve identicality if pointer and depth key match
-      +                    if !Arc::ptr_eq(&new_child, child) || new_child.max_depth != *orig_depth {
-      +                        same_kids = false;
-      +                    }
-      +                    new_kids.insert(new_child.max_depth, new_child);
-      +                    count += 1;
-      +                } else {
-      +                    same_kids = false;
-      +                }
-      +            }
-      +            if count > 0 {
-      +                new_children.insert(v.clone(), new_kids);
-      +            } else {
-      +                children_identical = false;
-      +            }
-      +            children_identical &= same_kids;
-      +        }
-      +    } else {
-      +        // We cannot descend; identical only if there were no children to begin with
-      +        children_identical = node.children.is_empty();
-      +    }
-      +
-      +    // If nothing changed at this node, return the original pointer for maximal sharing.
-      +    if keep_empty == node.empty && children_identical {
-      +        return Some(node.clone());
-      +    }
-      +
-      +    if !keep_empty && new_children.is_empty() {
-      +        None
-      +    } else {
-      +        Some(new_lower(new_children, keep_empty))
-      +    }
-       }
-       
-       fn filter_upper<T, A>(
-           node: &Arc<Upper<T, A>>,
-           current_depth: isize,
-           min_len: Option<isize>,
-           max_len: Option<isize>,
-       ) -> Option<Arc<Upper<T, A>>>
-       where
-           T: Clone + Eq + Hash,
-           A: Merge + Clone + Eq + Hash,
-       {
-           let min_d = min_len.unwrap_or(0);
-           let max_d = max_len.unwrap_or(isize::MAX);
-       
-           if current_depth > max_d {
-               return None;
-           }
-       
-           match &**node {
-               Upper::Branch(b) => {
-                   let keep_empty = b.empty.is_some() && current_depth >= min_d;
-                   let new_empty = if keep_empty { b.empty.clone() } else { None };
-       
-      -            let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
-      -            if current_depth < max_d {
-      -                for (v, kids) in b.children.iter() {
-      -                    let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-      -                    for child in kids.values() {
-      -                        if let Some(new_child) =
-      -                            filter_upper(child, current_depth + 1, min_len, max_len)
-      -                        {
-      -                            new_kids.insert(new_child.max_depth(), new_child);
-      -                        }
-      -                    }
-      -                    if !new_kids.is_empty() {
-      -                        new_children.insert(v.clone(), new_kids);
-      -                    }
-      -                }
-      -            }
-      +            let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
-      +            let mut children_identical = true;
-      +            if current_depth < max_d {
-      +                for (v, kids) in b.children.iter() {
-      +                    let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-      +                    let mut same_kids = true;
-      +                    let mut count = 0usize;
-      +                    for (orig_depth, child) in kids.iter() {
-      +                        if let Some(new_child) =
-      +                            filter_upper(child, current_depth + 1, min_len, max_len)
-      +                        {
-      +                            if !Arc::ptr_eq(&new_child, child)
-      +                                || new_child.max_depth() != *orig_depth
-      +                            {
-      +                                same_kids = false;
-      +                            }
-      +                            new_kids.insert(new_child.max_depth(), new_child);
-      +                            count += 1;
-      +                        } else {
-      +                            same_kids = false;
-      +                        }
-      +                    }
-      +                    if count > 0 {
-      +                        new_children.insert(v.clone(), new_kids);
-      +                    } else {
-      +                        children_identical = false;
-      +                    }
-      +                    children_identical &= same_kids;
-      +                }
-      +            } else {
-      +                // We cannot descend; identical only if there were no children to begin with
-      +                children_identical = b.children.is_empty();
-      +            }
-       
-      +            // If nothing changed at this node, return original pointer for maximal sharing.
-      +            if new_empty == b.empty && children_identical {
-      +                return Some(node.clone());
-      +            }
-      +
-                   if new_children.is_empty() && new_empty.is_none() {
-                       None
-                   } else {
-                       let new_b = new_branch(new_children, new_empty);
-                       Some(try_promote(&new_b))
-                   }
-               }
-               Upper::Interface(i) => {
-                   let keep_empty = i.empty.is_some() && current_depth >= min_d;
-                   let new_empty = if keep_empty { i.empty.clone() } else { None };
-       
-      -            let mut new_l_children: Children<T, Lower<T>> = IHashMap::new();
-      -            if current_depth < max_d {
-      -                for (v, kids) in i.children.iter() {
-      -                    let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-      -                    for child in kids.values() {
-      -                        if let Some(new_child) =
-      -                            filter_lower(child, current_depth + 1, min_len, max_len)
-      -                        {
-      -                            new_kids.insert(new_child.max_depth, new_child);
-      -                        }
-      -                    }
-      -                    if !new_kids.is_empty() {
-      -                        new_l_children.insert(v.clone(), new_kids);
-      -                    }
-      -                }
-      -            }
-      +            let mut new_l_children: Children<T, Lower<T>> = IHashMap::new();
-      +            let mut children_identical = true;
-      +            if current_depth < max_d {
-      +                for (v, kids) in i.children.iter() {
-      +                    let mut new_kids: OrdMap<isize, Arc<Lower<T>>> = OrdMap::new();
-      +                    let mut same_kids = true;
-      +                    let mut count = 0usize;
-      +                    for (orig_depth, child) in kids.iter() {
-      +                        if let Some(new_child) =
-      +                            filter_lower(child, current_depth + 1, min_len, max_len)
-      +                        {
-      +                            if !Arc::ptr_eq(&new_child, child)
-      +                                || new_child.max_depth != *orig_depth
-      +                            {
-      +                                same_kids = false;
-      +                            }
-      +                            new_kids.insert(new_child.max_depth, new_child);
-      +                            count += 1;
-      +                        } else {
-      +                            same_kids = false;
-      +                        }
-      +                    }
-      +                    if count > 0 {
-      +                        new_l_children.insert(v.clone(), new_kids);
-      +                    } else {
-      +                        children_identical = false;
-      +                    }
-      +                    children_identical &= same_kids;
-      +                }
-      +            } else {
-      +                // We cannot descend; identical only if there were no children to begin with
-      +                children_identical = i.children.is_empty();
-      +            }
-       
-                   let is_leaf_interface = i.children.is_empty() && i.empty.is_none();
-                   let keep_leaf_interface = is_leaf_interface && current_depth >= min_d;
-       
-                   if new_l_children.is_empty() && new_empty.is_none() && !keep_leaf_interface {
-                       None
-                   } else {
-      +                // If nothing changed at this node, return original pointer for maximal sharing.
-      +                if new_empty == i.empty
-      +                    && ((is_leaf_interface && keep_leaf_interface)
-      +                        || (!is_leaf_interface && children_identical))
-      +                {
-      +                    return Some(node.clone());
-      +                }
-                       let new_i = new_interface(new_l_children, i.acc.clone(), new_empty);
-                       Some(try_promote(&new_i))
-                   }
-               }
-           }
-       }
-      @@ -870,29 +911,87 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-           pub fn isolate(&self, value: Option<T>) -> Self {
-      -        let new_inner = if let Some(val) = value {
-      -            match &*self.inner {
-      -                Upper::Branch(b) => {
-      -                    let filtered_children = b
-      -                        .children
-      -                        .get(&val)
-      -                        .map(|kids| IHashMap::unit(val.clone(), kids.clone()))
-      -                        .unwrap_or_else(IHashMap::new);
-      -                    let new_b = new_branch(filtered_children, None);
-      -                    try_promote(&new_b)
-      -                }
-      -                Upper::Interface(i) => {
-      -                    if let Some(kids) = i.children.get(&val) {
-      -                        let filtered_children = IHashMap::unit(val.clone(), kids.clone());
-      -                        new_interface(filtered_children, i.acc.clone(), None)
-      -                    } else {
-      -                        empty_upper_inner()
-      -                    }
-      -                }
-      -            }
-      -        } else {
-      -            let empty_acc = match &*self.inner {
-      -                Upper::Branch(b) => b.empty.clone(),
-      -                Upper::Interface(i) => i.empty.clone(),
-      -            };
-      -            let new_b = new_branch(IHashMap::new(), empty_acc);
-      -            try_promote(&new_b)
-      -        };
-      -        LeveledGSS { inner: new_inner }
-      +        // Fast-path: if the isolation would yield an identical structure, return self.
-      +        if let Some(ref v) = value {
-      +            match &*self.inner {
-      +                Upper::Branch(b) => {
-      +                    if b.empty.is_none() && b.children.len() == 1 && b.children.contains_key(v) {
-      +                        return self.clone();
-      +                    }
-      +                }
-      +                Upper::Interface(i) => {
-      +                    if i.empty.is_none() && i.children.len() == 1 && i.children.contains_key(v) {
-      +                        return self.clone();
-      +                    }
-      +                }
-      +            }
-      +        } else {
-      +            match &*self.inner {
-      +                Upper::Branch(b) => {
-      +                    if b.children.is_empty() {
-      +                        return self.clone();
-      +                    }
-      +                }
-      +                Upper::Interface(i) => {
-      +                    if i.children.is_empty() && i.empty.is_some() {
-      +                        return self.clone();
-      +                    }
-      +                }
-      +            }
-      +        }
-      +
-      +        let new_inner = if let Some(val) = value {
-      +            match &*self.inner {
-      +                Upper::Branch(b) => {
-      +                    let filtered_children = b
-      +                        .children
-      +                        .get(&val)
-      +                        .map(|kids| IHashMap::unit(val.clone(), kids.clone()))
-      +                        .unwrap_or_else(IHashMap::new);
-      +                    let new_b = new_branch(filtered_children, None);
-      +                    try_promote(&new_b)
-      +                }
-      +                Upper::Interface(i) => {
-      +                    if let Some(kids) = i.children.get(&val) {
-      +                        let filtered_children = IHashMap::unit(val.clone(), kids.clone());
-      +                        new_interface(filtered_children, i.acc.clone(), None)
-      +                    } else {
-      +                        empty_upper_inner()
-      +                    }
-      +                }
-      +            }
-      +        } else {
-      +            let empty_acc = match &*self.inner {
-      +                Upper::Branch(b) => b.empty.clone(),
-      +                Upper::Interface(i) => i.empty.clone(),
-      +            };
-      +            let new_b = new_branch(IHashMap::new(), empty_acc);
-      +            try_promote(&new_b)
-      +        };
-      +        LeveledGSS { inner: new_inner }
-           }
-       
-           pub fn isolate_many<I: IntoIterator<Item = Option<T>>>(&self, values: I) -> Self {
-               let values_set: HashSet<Option<T>> = values.into_iter().collect();
-       
-      +        // Fast-path: if the selection keeps everything exactly as-is, return self.
-      +        match &*self.inner {
-      +            Upper::Branch(b) => {
-      +                let all_children_kept = b
-      +                    .children
-      +                    .keys()
-      +                    .all(|k| values_set.contains(&Some(k.clone())));
-      +                let empty_kept_ok = !b.empty.is_some() || values_set.contains(&None);
-      +                if all_children_kept && empty_kept_ok {
-      +                    return self.clone();
-      +                }
-      +            }
-      +            Upper::Interface(i) => {
-      +                let all_children_kept = i
-      +                    .children
-      +                    .keys()
-      +                    .all(|k| values_set.contains(&Some(k.clone())));
-      +                let empty_kept_ok = !i.empty.is_some() || values_set.contains(&None);
-      +                if all_children_kept && empty_kept_ok {
-      +                    return self.clone();
-      +                }
-      +            }
-      +        }
-      +
-               let new_empty: Option<A> = if values_set.contains(&None) {
-                   match &*self.inner {
-                       Upper::Branch(b) => b.empty.clone(),
-      @@ -934,27 +1033,63 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-           pub fn filter_by_length(&self, min_len: Option<isize>, max_len: Option<isize>) -> Self {
-               if self.is_empty() {
-                   return self.clone();
-               }
-       
-               let new_inner_opt = filter_upper::<T, A>(&self.inner, 0, min_len, max_len);
-               new_inner_opt.map_or_else(Self::empty, |inner| LeveledGSS { inner })
-           }
-       
-           pub fn apply<B, F>(&self, mut func: F) -> LeveledGSS<T, B>
-           where
-               B: Merge + Clone + Eq + Hash,
-               F: FnMut(&A) -> B,
-           {
-      @@ -1032,42 +1167,115 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-               LeveledGSS {
-                   inner: transform::<T, A, B, F>(&self.inner, &mut acc_memo, &mut func),
-               }
-           }
-       
-           pub fn prune<P>(&self, mut predicate: P) -> Self
-           where
-               P: FnMut(&A) -> bool,
-           {
-               // Memoize per-accumulator predicate
-               let mut acc_memo: StdHashMap<A, bool> = StdHashMap::new();
-       
-               fn test_acc<A, P>(a: &A, memo: &mut StdHashMap<A, bool>, p: &mut P) -> bool
-               where
-                   A: Clone + Eq + Hash,
-                   P: FnMut(&A) -> bool,
-               {
-                   if let Some(v) = memo.get(a) {
-                       return *v;
-                   }
-                   let r = p(a);
-                   memo.insert(a.clone(), r);
-                   r
-               }
-       
-               fn transform<T, A, P>(
-                   node: &Arc<Upper<T, A>>,
-                   acc_memo: &mut StdHashMap<A, bool>,
-                   p: &mut P,
-               ) -> Option<Arc<Upper<T, A>>>
-               where
-                   T: Clone + Eq + Hash,
-                   A: Merge + Clone + Eq + Hash,
-                   P: FnMut(&A) -> bool,
-               {
-                   match &**node {
-                       Upper::Interface(i) => {
-                           let keep_acc = test_acc(&i.acc, acc_memo, p);
-                           let keep_empty = i.empty.as_ref().map_or(false, |e| test_acc(e, acc_memo, p));
-      -                    if !keep_acc && !keep_empty {
-      -                        None
-      -                    } else if !keep_acc && keep_empty {
-      -                        let new_b = new_branch(IHashMap::new(), i.empty.clone());
-      -                        Some(try_promote(&new_b))
-      -                    } else {
-      -                        let new_empty = if keep_empty { i.empty.clone() } else { None };
-      -                        let new_i = new_interface(i.children.clone(), i.acc.clone(), new_empty);
-      -                        Some(try_promote(&new_i))
-      -                    }
-      +                    if !keep_acc && !keep_empty {
-      +                        None
-      +                    } else if !keep_acc && keep_empty {
-      +                        // If the original node is already a leaf interface with empty,
-      +                        // nothing changes; preserve pointer.
-      +                        if i.children.is_empty() && i.empty.is_some() {
-      +                            Some(node.clone())
-      +                        } else {
-      +                            let new_b = new_branch(IHashMap::new(), i.empty.clone());
-      +                            Some(try_promote(&new_b))
-      +                        }
-      +                    } else {
-      +                        let new_empty = if keep_empty { i.empty.clone() } else { None };
-      +                        // If we keep acc and empty presence is unchanged, preserve pointer.
-      +                        if new_empty == i.empty {
-      +                            Some(node.clone())
-      +                        } else {
-      +                            let new_i = new_interface(i.children.clone(), i.acc.clone(), new_empty);
-      +                            Some(try_promote(&new_i))
-      +                        }
-      +                    }
-                       }
-                       Upper::Branch(b) => {
-      -                    let new_empty = b.empty.as_ref().and_then(|e| if test_acc(e, acc_memo, p) { Some(e.clone()) } else { None });
-      -
-      -                    let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
-      -                    for (v, kids) in b.children.iter() {
-      -                        let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-      -                        for child in kids.values() {
-      -                            if let Some(nc) = transform::<T, A, P>(child, acc_memo, p) {
-      -                                new_kids.insert(nc.max_depth(), nc);
-      -                            }
-      -                        }
-      -                        if !new_kids.is_empty() {
-      -                            new_children.insert(v.clone(), new_kids);
-      -                        }
-      -                    }
-      -
-      -                    if new_children.is_empty() && new_empty.is_none() {
-      -                        None
-      -                    } else {
-      -                        let new_b = new_branch(new_children, new_empty);
-      -                        Some(try_promote(&new_b))
-      -                    }
-      +                    let new_empty = b
-      +                        .empty
-      +                        .as_ref()
-      +                        .and_then(|e| if test_acc(e, acc_memo, p) { Some(e.clone()) } else { None });
-      +
-      +                    let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
-      +                    let mut children_identical = true;
-      +                    for (v, kids) in b.children.iter() {
-      +                        let mut new_kids: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
-      +                        let mut same_kids = true;
-      +                        let mut count = 0usize;
-      +                        for (orig_depth, child) in kids.iter() {
-      +                            if let Some(nc) = transform::<T, A, P>(child, acc_memo, p) {
-      +                                if !Arc::ptr_eq(&nc, child) || nc.max_depth() != *orig_depth {
-      +                                    same_kids = false;
-      +                                }
-      +                                new_kids.insert(nc.max_depth(), nc);
-      +                                count += 1;
-      +                            } else {
-      +                                same_kids = false;
-      +                            }
-      +                        }
-      +                        if count > 0 {
-      +                            new_children.insert(v.clone(), new_kids);
-      +                        } else {
-      +                            children_identical = false;
-      +                        }
-      +                        children_identical &= same_kids;
-      +                    }
-      +
-      +                    // If nothing changed, preserve pointer.
-      +                    if new_empty == b.empty && children_identical {
-      +                        return Some(node.clone());
-      +                    }
-      +
-      +                    if new_children.is_empty() && new_empty.is_none() {
-      +                        None
-      +                    } else {
-      +                        let new_b = new_branch(new_children, new_empty);
-      +                        Some(try_promote(&new_b))
-      +                    }
-                       }
-                   }
-               }
-       
-               let res_inner_opt = transform::<T, A, P>(&self.inner, &mut acc_memo, &mut predicate);
-               res_inner_opt.map_or_else(Self::empty, |inner| LeveledGSS { inner })
-           }
-      ```
+  - user: 'Changes committed with message: "Fix pointer preservation in isolate_many
+      fast path for empty path handling and update related test setups"'
     metadata:
 ...

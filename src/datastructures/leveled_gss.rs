@@ -1868,7 +1868,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     .children
                     .keys()
                     .all(|k| values_set.contains(&Some(k.clone())));
-                let empty_kept_ok = !b.empty.is_some() || values_set.contains(&None);
+                let empty_kept_ok = b.empty.is_some() == values_set.contains(&None);
                 if all_children_kept && empty_kept_ok {
                     return self.clone();
                 }
@@ -1878,7 +1878,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     .children
                     .keys()
                     .all(|k| values_set.contains(&Some(k.clone())));
-                let empty_kept_ok = !i.empty.is_some() || values_set.contains(&None);
+                let empty_kept_ok = i.empty.is_some() == values_set.contains(&None);
                 if all_children_kept && empty_kept_ok {
                     return self.clone();
                 }
