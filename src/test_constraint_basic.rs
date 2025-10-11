@@ -1658,11 +1658,13 @@ fn test_gss_structural_sharing_factor2() -> Result<(), Box<dyn std::error::Error
             'p01' VALUE POST
           | 'p02' VALUE POST
           | 'p03' VALUE POST
+          | 'p04' VALUE POST
+          | 'p05' VALUE POST
         ;
 
         VALUE ::= IDENTIFIER;
 
-        POST ::= 't01' | 't02' | 't03';
+        POST ::= 't01' | 't02' | 't03' | 't04' | 't05';
 
         EOF ::= '$';
 
