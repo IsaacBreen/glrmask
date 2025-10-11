@@ -929,10 +929,218 @@ pub fn stage_11_create_hallucinated_row(table: &Table) -> HallucinatedRow {
     }
 }
 
+// Internal key for grouping equivalent reduce actions while building combined states.
+// Two reduce actions are considered the "same" if they share the same reduced non-terminal,
+// length, and the exact same set of production IDs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CombinedReduceKey {
+    nt: NonTerminalID,
+    len: usize,
+    production_ids: BTreeSet<ProductionID>,
+}
+
 pub fn stage_12_build_combined_states(
     table: &Table,
 ) -> (BTreeMap<StateID, HallucinatedRow>, StateID) {
-    todo!()
+    // A "combined" state is represented by an origin set:
+    // a set of pairs (x -> y), where x is the original "origin" state,
+    // and y is the current original state we are at (for that origin) in the base automaton.
+    //
+    // We create a graph whose nodes are such origin sets. Edges are induced by:
+    // - Shifts on terminals: for each terminal T, build a new origin set using the original table's shifts.
+    // - Gotos on non-terminals: for each non-terminal A, build a new origin set using the original table's gotos.
+    //
+    // Each combined state's row is represented using the same structure as HallucinatedRow:
+    // per terminal: a vector of (action, mask-of-origins), and
+    // per non-terminal: a vector of (goto, mask-of-origins).
+    // The masks indicate for which origin states the action/goto applies.
+
+    type OriginSet = BTreeSet<(StateID, StateID)>;
+
+    // 1) Seed combined-state space with the initial origin set: { s -> s | for all original states s }.
+    let mut initial_origin_set: OriginSet = BTreeSet::new();
+    for &sid in table.keys() {
+        initial_origin_set.insert((sid, sid));
+    }
+
+    let mut originset_to_id: BiBTreeMap<OriginSet, StateID> = BiBTreeMap::new();
+    let mut next_combined_id = 0usize;
+    originset_to_id.insert(initial_origin_set.clone(), StateID(next_combined_id));
+    next_combined_id += 1;
+    let combined_start_state_id = *originset_to_id.get_by_left(&initial_origin_set).unwrap();
+
+    let mut worklist: VecDeque<OriginSet> = VecDeque::new();
+    worklist.push_back(initial_origin_set);
+
+    let mut combined_rows: BTreeMap<StateID, HallucinatedRow> = BTreeMap::new();
+
+    while let Some(origin_set) = worklist.pop_front() {
+        let this_cid = *originset_to_id.get_by_left(&origin_set).unwrap();
+
+        // Collect all terminals/non-terminals that are relevant in any current state.
+        let mut all_terminals: BTreeSet<TerminalID> = BTreeSet::new();
+        let mut all_nonterminals: BTreeSet<NonTerminalID> = BTreeSet::new();
+        for &(_origin, current) in &origin_set {
+            if let Some(row) = table.get(&current) {
+                for &tid in row.shifts_and_reduces_full.keys() {
+                    all_terminals.insert(tid);
+                }
+                for &ntid in row.gotos.keys() {
+                    all_nonterminals.insert(ntid);
+                }
+            }
+        }
+
+        // --- Build per-terminal actions: Shift and Reduce(Split flattened) with origin masks.
+        let mut shifts_and_reduces: BTreeMap<TerminalID, Vec<(Stage7ShiftsAndReducesLookaheadValue, StateIDBV)>> = BTreeMap::new();
+
+        for tid in all_terminals {
+            // Gather:
+            // - shift_pairs: the resulting origin set for shifting on `tid`
+            // - shift_mask: which origins actually perform a shift
+            // - reduce_masks: map from "equivalent reduce actions" to origin masks
+            let mut shift_pairs: OriginSet = BTreeSet::new();
+            let mut shift_mask = StateIDBV::zeros();
+
+            let mut reduce_masks: BTreeMap<CombinedReduceKey, StateIDBV> = BTreeMap::new();
+
+            for &(origin, current) in &origin_set {
+                let row = &table[&current];
+                if let Some(action) = row.shifts_and_reduces_full.get(&tid) {
+                    match action {
+                        Stage7ShiftsAndReducesLookaheadValue::Shift(next_state) => {
+                            // Only a shift.
+                            shift_pairs.insert((origin, *next_state));
+                            shift_mask.insert(origin.0);
+                        }
+                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                            // Only reduces (single).
+                            let key = CombinedReduceKey {
+                                nt: *nonterminal_id,
+                                len: *len,
+                                production_ids: production_ids.clone(),
+                            };
+                            reduce_masks.entry(key).or_insert_with(StateIDBV::zeros).insert(origin.0);
+                        }
+                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                            // Handle the shift part (if any) by adding shift_pairs/mask,
+                            // and also flatten all reduces into individual Reduce entries keyed by (nt,len,pids).
+                            if let Some(next_state) = shift {
+                                shift_pairs.insert((origin, *next_state));
+                                shift_mask.insert(origin.0);
+                            }
+                            for (&len, nts) in reduces {
+                                for (&ntid, pids) in nts {
+                                    let key = CombinedReduceKey {
+                                        nt: ntid,
+                                        len,
+                                        production_ids: pids.clone(),
+                                    };
+                                    reduce_masks.entry(key).or_insert_with(StateIDBV::zeros).insert(origin.0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Produce a single shift action to the next combined state (if any shift exists).
+            if !shift_pairs.is_empty() {
+                let next_cid = if let Some(existing) = originset_to_id.get_by_left(&shift_pairs).copied() {
+                    existing
+                } else {
+                    let sid = StateID(next_combined_id);
+                    next_combined_id += 1;
+                    originset_to_id.insert(shift_pairs.clone(), sid);
+                    worklist.push_back(shift_pairs);
+                    sid
+                };
+                shifts_and_reduces
+                    .entry(tid)
+                    .or_default()
+                    .push((Stage7ShiftsAndReducesLookaheadValue::Shift(next_cid), shift_mask));
+            }
+
+            // Produce reduce actions (flattened).
+            for (key, mask) in reduce_masks {
+                let action = Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                    nonterminal_id: key.nt,
+                    len: key.len,
+                    production_ids: key.production_ids,
+                };
+                shifts_and_reduces.entry(tid).or_default().push((action, mask));
+            }
+        }
+
+        // --- Build per-nonterminal gotos with origin masks:
+        // We split them into two entries if necessary (accept=false vs accept=true).
+        let mut gotos: BTreeMap<NonTerminalID, Vec<(Goto, StateIDBV)>> = BTreeMap::new();
+
+        for ntid in all_nonterminals {
+            let mut goto_pairs: OriginSet = BTreeSet::new();
+            let mut accept_mask = StateIDBV::zeros();
+            let mut non_accept_mask = StateIDBV::zeros();
+            let mut saw_accept = false;
+            let mut saw_non_accept = false;
+
+            for &(origin, current) in &origin_set {
+                let row = &table[&current];
+                if let Some(goto) = row.gotos.get(&ntid) {
+                    if let Some(next_state) = goto.state_id {
+                        goto_pairs.insert((origin, next_state));
+                        if goto.accept {
+                            accept_mask.insert(origin.0);
+                            saw_accept = true;
+                        } else {
+                            non_accept_mask.insert(origin.0);
+                            saw_non_accept = true;
+                        }
+                    }
+                }
+            }
+
+            if !goto_pairs.is_empty() {
+                let next_cid = if let Some(existing) = originset_to_id.get_by_left(&goto_pairs).copied() {
+                    existing
+                } else {
+                    let sid = StateID(next_combined_id);
+                    next_combined_id += 1;
+                    originset_to_id.insert(goto_pairs.clone(), sid);
+                    worklist.push_back(goto_pairs);
+                    sid
+                };
+
+                if saw_non_accept {
+                    gotos
+                        .entry(ntid)
+                        .or_default()
+                        .push((
+                            Goto { state_id: Some(next_cid), accept: false },
+                            non_accept_mask,
+                        ));
+                }
+                if saw_accept {
+                    gotos
+                        .entry(ntid)
+                        .or_default()
+                        .push((
+                            Goto { state_id: Some(next_cid), accept: true },
+                            accept_mask,
+                        ));
+                }
+            }
+        }
+
+        // Build the final combined row. We don't attempt "default reduce" promotion here.
+        let row = HallucinatedRow {
+            shifts_and_reduces,
+            gotos,
+            default_reduce: DefaultReduce { clone_and_merge: true, reduce: None },
+        };
+        combined_rows.insert(this_cid, row);
+    }
+
+    (combined_rows, combined_start_state_id)
 }
 
 /// Helper for `stage_9`: Traces a chain of unit reductions from a given starting state and non-terminal.
