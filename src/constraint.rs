@@ -1707,8 +1707,8 @@ impl GrammarConstraint {
                 let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
                 glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                 println!("stats: {:?}", glr_state.active_state.stack.inner.stats());
-                println!("GLR state: {}", glr_state);
-                println!("{}", glr_state.active_state.stack.inner.to_graph_string(false));
+                println!("GLR state stacks: {}", glr_state);
+                println!("GLR state graph structure:{}", glr_state.active_state.stack.inner.to_graph_string(false));
             // }
 
             return (precomputed3, trie3_god); // TEMP
