@@ -408,14 +408,14 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
     def pop(self) -> LeveledGSS[T, Acc]:
         if isinstance(self.inner, Interface):
             all_children = list(self.inner.lower._all_children())
-            merged = reduce(merge_lower, all_children[1:], all_children[0]) if all_children else Lower(children={}, empty=False)
+            merged: Lower = reduce(merge_lower, all_children[1:], all_children[0]) if all_children else Lower(children={}, empty=False)
             if not merged.children and not merged.empty:
                 return LeveledGSS(UpperBranch(children={}, empty=None))
             else:
                 return LeveledGSS(Interface(lower=merged, acc=self.inner.acc))
         else:
             all_children = list(self.inner._all_children())
-            merged = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
+            merged: UpperBranch | Interface = reduce(merge_upper, all_children[1:], all_children[0]) if all_children else UpperBranch(children={}, empty=None)
             return LeveledGSS(try_promote(merged))
 
     def popn(self, n: int) -> LeveledGSS[T, Acc]:
