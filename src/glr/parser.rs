@@ -286,6 +286,7 @@ pub struct GLRParser {
     // New: support multiple combined states (including the "combined start" which replaces hallucinated semantics)
     pub combined_rows: BTreeMap<StateID, HallucinatedRow>,
     pub combined_start_state_id: StateID,
+    pub combined_gss: Arc<GSSNode>,
 }
 
 impl JSONConvertible for GLRParser {
@@ -336,6 +337,12 @@ impl JSONConvertible for GLRParser {
                 // Build combined states (start combined replaces hallucinated behavior)
                 let (combined_rows, combined_start_state_id) = crate::glr::table::stage_12_build_combined_states(&table);
 
+                let combined_gss = {
+                    let gss_leaf = GSSNode::new(Acc::new_fresh());
+                    let gss = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: combined_start_state_id }));
+                    gss
+                };
+
                 Ok(GLRParser {
                     table,
                     productions,
@@ -351,6 +358,7 @@ impl JSONConvertible for GLRParser {
                     hallucinated_state_id,
                     combined_rows,
                     combined_start_state_id,
+                    combined_gss,
                 })
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -425,6 +433,12 @@ impl GLRParser {
             })
             .collect();
 
+        let combined_gss = {
+            let gss_leaf = GSSNode::new(Acc::new_fresh());
+            let gss = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: combined_start_state_id }));
+            gss
+        };
+
         Self {
             table,
             productions,
@@ -440,6 +454,7 @@ impl GLRParser {
             hallucinated_state_id,
             combined_rows,
             combined_start_state_id,
+            combined_gss,
         }
     }
 
@@ -565,15 +580,13 @@ impl GLRParser {
     }
 
     pub fn get_combined_gss(&self) -> Arc<GSSNode> {
-        let gss_leaf = GSSNode::new(Acc::new_fresh());
-        let gss = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: self.combined_start_state_id }));
-        gss
+        self.combined_gss.clone()
     }
 
     pub fn get_combined_gss_with_acc(&self, acc: Acc) -> Arc<GSSNode> {
-        let gss_leaf = GSSNode::new(acc);
-        let gss = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: self.combined_start_state_id }));
-        gss
+        let mut gss = (*self.combined_gss).clone();
+        gss.inner = gss.inner.apply(|_| acc.clone());
+        Arc::new(gss)
     }
 
     pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
