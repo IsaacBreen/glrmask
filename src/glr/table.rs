@@ -943,12 +943,6 @@ struct CombinedReduceKey {
 // one Split per group rather than one Reduce per (nt,len,production set).
 type ReducesMap = BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct ReduceSignature {
-    with_shift: bool,
-    reduces: ReducesMap,
-}
-
 pub fn stage_12_build_combined_states(
     table: &Table,
 ) -> (BTreeMap<StateID, HallucinatedRow>, StateID) {
@@ -1001,106 +995,108 @@ pub fn stage_12_build_combined_states(
             }
         }
 
-        // --- Build per-terminal actions: group identical reduce-sets and shift presence into compact Split actions.
+        // --- Build per-terminal actions using a partitioning strategy for maximum compactness.
         let mut shifts_and_reduces: BTreeMap<TerminalID, Vec<(Stage7ShiftsAndReducesLookaheadValue, StateIDBV)>> = BTreeMap::new();
 
+        // Helper to find the equivalence classes of origins based on which actions they have.
+        fn partition_by_masks(universe: StateIDBV, masks: &[StateIDBV]) -> Vec<StateIDBV> {
+            if universe.is_empty() {
+                return Vec::new();
+            }
+            let mut partition = vec![universe];
+            for mask in masks {
+                let mut next_partition = Vec::new();
+                for block in partition {
+                    let intersection = block & *mask;
+                    let difference = block - intersection;
+
+                    if !intersection.is_empty() {
+                        next_partition.push(intersection);
+                    }
+                    if !difference.is_empty() {
+                        next_partition.push(difference);
+                    }
+                }
+                partition = next_partition;
+            }
+            partition
+        }
+
         for tid in all_terminals {
-            // Gather:
-            // - shift_pairs: resulting origin set for shifting on `tid`.
-            // - shift_origins: which origins actually perform a shift.
-            // - reduce_groups: map from (with_shift, reduces-map) to origin-set.
+            // 1. GATHERING PHASE: Collect all shifts and individual reductions, mapping them to the origins they apply to.
             let mut shift_pairs: OriginSet = BTreeSet::new();
-            let mut shift_origins: BTreeSet<usize> = BTreeSet::new();
-            let mut reduce_groups: BTreeMap<ReduceSignature, BTreeSet<usize>> = BTreeMap::new();
+            let mut reduce_to_origins: BTreeMap<CombinedReduceKey, StateIDBV> = BTreeMap::new();
 
             for &(origin, current) in &origin_set {
                 let row = &table[&current];
                 if let Some(action) = row.shifts_and_reduces_full.get(&tid) {
-                    match action {
-                        Stage7ShiftsAndReducesLookaheadValue::Shift(next_state) => {
-                            shift_pairs.insert((origin, *next_state));
-                            shift_origins.insert(origin.0);
-                        }
+                    let (maybe_shift, maybe_reduces) = match action {
+                        Stage7ShiftsAndReducesLookaheadValue::Shift(next_state) => (Some(next_state), None),
                         Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-                            let mut reduces: ReducesMap = BTreeMap::new();
-                            reduces.entry(*len).or_default().insert(*nonterminal_id, production_ids.clone());
-                            let sig = ReduceSignature { with_shift: false, reduces };
-                            reduce_groups.entry(sig).or_default().insert(origin.0);
-                        }
-                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                            if let Some(next_state) = shift {
-                                shift_pairs.insert((origin, *next_state));
-                                shift_origins.insert(origin.0);
-                            }
-                            if !reduces.is_empty() {
-                                let sig = ReduceSignature { with_shift: shift.is_some(), reduces: reduces.clone() };
-                                reduce_groups.entry(sig).or_default().insert(origin.0);
+                            let mut r: ReducesMap = BTreeMap::new();
+                            r.entry(*len).or_default().insert(*nonterminal_id, production_ids.clone());
+                            (None, Some(r))
+                        },
+                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => (shift.as_ref(), Some(reduces.clone())),
+                    };
+
+                    if let Some(next_state) = maybe_shift {
+                        shift_pairs.insert((origin, *next_state));
+                    }
+                    if let Some(reduces) = maybe_reduces {
+                        for (&len, nts) in &reduces {
+                            for (&nt, pids) in nts {
+                                let key = CombinedReduceKey { nt, len, production_ids: pids.clone() };
+                                reduce_to_origins.entry(key).or_default().insert(origin.0);
                             }
                         }
                     }
                 }
             }
 
-            // Compute the next combined id for any shift on this terminal.
-            let next_cid_opt = if !shift_pairs.is_empty() {
+            if shift_pairs.is_empty() && reduce_to_origins.is_empty() {
+                continue;
+            }
+
+            // 2. PARTITIONING PHASE: Find all groups of origins that have the exact same set of actions.
+            let next_cid_opt = if shift_pairs.is_empty() { None } else { Some({
                 let mut now_states = shift_pairs.iter().map(|(_, now)| *now);
-                let first_now_state = now_states.next().unwrap(); // Not empty, so safe.
-                Some(if now_states.all(|s| s == first_now_state) {
-                    // Optimization: all 'now' states are the same, transition to that original state.
-                    first_now_state
-                } else {
-                    // Otherwise, it's a true combined state.
-                    if let Some(existing) = originset_to_id.get_by_left(&shift_pairs).copied() {
-                        existing
-                    } else {
+                let first_now_state = now_states.next().unwrap();
+                if now_states.all(|s| s == first_now_state) { first_now_state } else {
+                    originset_to_id.get_by_left(&shift_pairs).copied().unwrap_or_else(|| {
                         let sid = StateID(next_combined_id);
                         next_combined_id += 1;
                         originset_to_id.insert(shift_pairs.clone(), sid);
                         worklist.push_back(shift_pairs);
                         sid
-                    }
-                })
-            } else {
-                None
-            };
-
-            // Build Split actions first (to avoid duplicating shifts).
-            let mut covered_shift_origins: BTreeSet<usize> = BTreeSet::new();
-            for (sig, origins) in &reduce_groups {
-                if sig.with_shift {
-                    covered_shift_origins.extend(origins.iter().copied());
+                    })
                 }
-            }
-            for (sig, origins) in reduce_groups {
+            })};
+
+            let shift_mask = shift_pairs.iter().map(|(o, _)| o.0).collect::<StateIDBV>();
+            let mut all_masks = reduce_to_origins.values().cloned().collect::<Vec<_>>();
+            if !shift_mask.is_empty() { all_masks.push(shift_mask.clone()); }
+
+            let universe = all_masks.iter().fold(StateIDBV::zeros(), |mut acc, m| { acc |= m; acc });
+            let partition = partition_by_masks(universe, &all_masks);
+
+            // 3. ACTION BUILDING PHASE: For each block in the partition, create one compact action.
+            for block in partition {
+                let sample_origin = block.iter().next().unwrap();
+                let has_shift = shift_mask.contains(sample_origin);
+                let mut reduces = BTreeMap::new();
+                for (key, reduce_mask) in &reduce_to_origins {
+                    if reduce_mask.contains(sample_origin) {
+                        reduces.entry(key.len).or_default().entry(key.nt).or_default().extend(key.production_ids.iter().cloned());
+                    }
+                }
+
                 let mut action = Stage7ShiftsAndReducesLookaheadValue::Split {
-                    shift: if sig.with_shift { next_cid_opt } else { None },
-                    reduces: sig.reduces.clone(),
+                    shift: if has_shift { next_cid_opt } else { None },
+                    reduces,
                 };
                 action.simplify();
-
-                let mut mask = StateIDBV::zeros();
-                for o in origins {
-                    mask.insert(o);
-                }
-                shifts_and_reduces.entry(tid).or_default().push((action, mask));
-            }
-
-            // Any remaining pure-shift origins (no reduces on this terminal) become a single Shift action.
-            if let Some(next_cid) = next_cid_opt {
-                let mut mask_set: BTreeSet<usize> = shift_origins
-                    .into_iter()
-                    .filter(|o| !covered_shift_origins.contains(o))
-                    .collect();
-                if !mask_set.is_empty() {
-                    let mut mask = StateIDBV::zeros();
-                    for o in std::mem::take(&mut mask_set) {
-                        mask.insert(o);
-                    }
-                    shifts_and_reduces
-                        .entry(tid)
-                        .or_default()
-                        .push((Stage7ShiftsAndReducesLookaheadValue::Shift(next_cid), mask));
-                }
+                shifts_and_reduces.entry(tid).or_default().push((action, block));
             }
         }
 
