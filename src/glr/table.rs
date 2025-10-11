@@ -1160,6 +1160,74 @@ pub fn stage_12_build_combined_states(
         combined_rows.insert(this_cid, row);
     }
 
+    if !combined_rows.is_empty() {
+        println!("\n--- Combined States Statistics ---");
+        println!("Total combined states: {}", combined_rows.len());
+
+        let mut shift_counts = Vec::new();
+        let mut reduce_counts = Vec::new();
+        let mut goto_counts = Vec::new();
+
+        for row in combined_rows.values() {
+            let mut num_shifts = 0;
+            let mut num_reduces = 0;
+            for actions in row.shifts_and_reduces.values() {
+                for (action, _) in actions {
+                    match action {
+                        Stage7ShiftsAndReducesLookaheadValue::Shift(_) => num_shifts += 1,
+                        Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } => num_reduces += 1,
+                        Stage7ShiftsAndReducesLookaheadValue::Split { .. } => {
+                            // This shouldn't happen as splits are flattened
+                        }
+                    }
+                }
+            }
+            shift_counts.push(num_shifts);
+            reduce_counts.push(num_reduces);
+
+            let num_gotos = row.gotos.values().map(|v| v.len()).sum();
+            goto_counts.push(num_gotos);
+        }
+
+        fn print_stats(name: &str, counts: &[usize]) {
+            if counts.is_empty() {
+                println!("{}: N/A (no data)", name);
+                return;
+            }
+            let total_states = counts.len();
+            let total_actions: usize = counts.iter().sum();
+            let min = *counts.iter().min().unwrap();
+            let max = *counts.iter().max().unwrap();
+            let avg = total_actions as f64 / total_states as f64;
+
+            println!(
+                "{}: Total: {}, Min/Max per state: {}/{}, Avg per state: {:.2}",
+                name, total_actions, min, max, avg
+            );
+
+            let mut distribution = BTreeMap::new();
+            for &count in counts {
+                *distribution.entry(count).or_insert(0) += 1;
+            }
+
+            print!("  Distribution (count -> #states): ");
+            let mut first = true;
+            for (count, num_states) in distribution {
+                if !first {
+                    print!(", ");
+                }
+                print!("{}: {}", count, num_states);
+                first = false;
+            }
+            println!();
+        }
+
+        print_stats("Shift actions", &shift_counts);
+        print_stats("Reduce actions", &reduce_counts);
+        print_stats("Goto actions", &goto_counts);
+        println!("------------------------------------");
+    }
+
     (combined_rows, combined_start_state_id)
 }
 
