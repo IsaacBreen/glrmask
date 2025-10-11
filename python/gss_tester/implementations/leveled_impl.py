@@ -1357,7 +1357,9 @@ def _merge_children_by_depth(
         merged_children[v] = v_out
     return merged_children
 
-def try_promote(node: UpperBranch[T, AccPromote]) -> Upper[T, AccPromote]:
+def try_promote(node: Upper[T, AccPromote]) -> Upper[T, AccPromote]:
+    if isinstance(node, Interface):
+        return node
     all_children: List[Upper[T, AccPromote]] = list(node._all_children())
     if not all_children:
         # Leaf UpperBranch: if it represents an explicit empty stack (empty is not None),
