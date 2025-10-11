@@ -875,7 +875,7 @@ impl<T: Clone + Eq + Hash> Default for NormalizationLowerInterner<T> {
 struct NormalizationUpperInterner<
     T: Clone + Eq + Hash,
     A: Merge + Clone + Eq + Hash,
- {
+> {
     // hash -> bucket of (signature, canonical id, canonical node)
     map: StdHashMap<u64, Vec<(UpperSig<T, A>, usize, Arc<Upper<T, A>>)>>,
     next_id: usize,
@@ -1088,7 +1088,7 @@ where
 
             // Build new branch with canonical children; dedup per depth.
             let mut new_children: Children<T, Upper<T, A>> = IHashMap::new();
-            for (v, items) in &edges_raw {
+            for (v, items) in edges_raw {
                 let mut ord: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
                 for (_, carc) in items {
                     let d = carc.max_depth();
@@ -1100,7 +1100,7 @@ where
                     }
                 }
                 if !ord.is_empty() {
-                    new_children.insert(v.clone(), ord);
+                    new_children.insert(v, ord);
                 }
             }
             let new_b = new_branch(new_children, b.empty.clone());
