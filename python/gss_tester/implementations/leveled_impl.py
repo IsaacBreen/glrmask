@@ -467,6 +467,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
 
             if isinstance(node, Interface):
                 # For an Interface, we pop k-1 levels from its Lower subtree
+                all_children: List[Lower[T]]
                 popped_lower_children = [_popn_lower(child, k - 1) for child in all_children]
                 merged = reduce(merge_lower, popped_lower_children[1:], popped_lower_children[0])
 
@@ -476,6 +477,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     res = Interface(lower=merged, acc=node.acc)
             else:  # UpperBranch
                 # For an UpperBranch, we pop k-1 levels from its Upper children
+                all_children: List[Upper[T, Acc]]
                 popped_upper_children = [_popn_upper(child, k - 1) for child in all_children]
                 merged = reduce(merge_upper, popped_upper_children[1:], popped_upper_children[0])
                 res = try_promote(merged)
