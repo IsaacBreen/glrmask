@@ -1692,7 +1692,8 @@ impl GrammarConstraint {
         let trie3_god = Trie3GodWrapper::new();
 
         if true {
-            for tid in tqdm!(0..=tokenizer.num_groups() as usize, desc = "Trie 3 temp", disable = !PROGRESS_BAR_ENABLED, leave=false) {
+            let tid = 79;
+            // for tid in tqdm!(0..=tokenizer.num_groups() as usize, desc = "Trie 3 temp", disable = !PROGRESS_BAR_ENABLED, leave=false) {
                 let parser = parser.unwrap();
                 let terminal = TerminalID(tid);
 
@@ -1706,7 +1707,7 @@ impl GrammarConstraint {
                 let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
                 glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
                 println!("stats: {:?}", glr_state.active_state.stack.inner.stats());
-            }
+            // }
 
             return (precomputed3, trie3_god); // TEMP
         }
