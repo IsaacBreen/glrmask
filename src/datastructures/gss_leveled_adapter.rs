@@ -181,6 +181,30 @@ pub struct GSSNode {
     pub(crate) inner: LeveledGSS<ParseStateEdgeContent, Acc>,
 }
 
+pub trait GSSNodeOps {
+    fn push(&self, edge_value: ParseStateEdgeContent) -> Arc<GSSNode>;
+    fn push_many(&self, edge_values: Vec<ParseStateEdgeContent>) -> Arc<GSSNode>;
+}
+
+impl GSSNodeOps for Arc<GSSNode> {
+    fn push(&self, edge_value: ParseStateEdgeContent) -> Arc<GSSNode> {
+        Arc::new(GSSNode {
+            inner: GSSNode::push_all(&self.inner, edge_value),
+        })
+    }
+    fn push_many(&self, edge_values: Vec<ParseStateEdgeContent>) -> Arc<GSSNode> {
+        if edge_values.is_empty() {
+            return self.clone();
+        }
+        let mut merged = LeveledGSS::empty();
+        for e in edge_values {
+            let next = GSSNode::push_all(&self.inner, e);
+            merged = merged.merge(&next);
+        }
+        Arc::new(GSSNode { inner: merged })
+    }
+}
+
 impl Debug for GSSNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "GSSNode(len_paths={})", self.inner.num_paths())
@@ -227,23 +251,6 @@ impl GSSNode {
         } else {
             inner.push(edge)
         }
-    }
-
-    pub fn push(&self, edge_value: ParseStateEdgeContent) -> Self {
-        GSSNode {
-            inner: Self::push_all(&self.inner, edge_value),
-        }
-    }
-    pub fn push_many(&self, edge_values: Vec<ParseStateEdgeContent>) -> Self {
-        if edge_values.is_empty() {
-            return self.clone();
-        }
-        let mut merged = LeveledGSS::empty();
-        for e in edge_values {
-            let next = Self::push_all(&self.inner, e);
-            merged = merged.merge(&next);
-        }
-        GSSNode { inner: merged }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -403,9 +410,9 @@ impl<'a> GSSPeek<'a> {
         let iso = self.parent_arc.isolate(Some(self.edge_value.clone()));
         Arc::new(GSSNode { inner: iso })
     }
-    pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+    pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> Arc<GSSNode> {
         let iso = self.isolated_parent();
-        iso.as_ref().push(edge_value)
+        iso.push(edge_value)
     }
     pub fn popn(&self, n: usize) -> GSSPopper {
         self.isolated_parent().popn(n)
@@ -515,9 +522,9 @@ impl<'a> GSSPopperItemPeek<'a> {
         let iso = self.parent_arc.isolate(Some(self.edge_value.clone()));
         Arc::new(GSSNode { inner: iso })
     }
-    pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> GSSNode {
+    pub fn push_on_parent(&self, edge_value: ParseStateEdgeContent) -> Arc<GSSNode> {
         let iso = self.isolated_parent();
-        iso.as_ref().push(edge_value)
+        iso.push(edge_value)
     }
 }
 
