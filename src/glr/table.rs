@@ -1,6 +1,6 @@
 use super::items::{Item, LRMode, LR_MODE};
 use crate::glr::automaton::{compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals, compute_goto, compute_nullable_nonterminals, split_on_dot};
-use crate::datastructures::hybrid_bitset::{HybridBitset, HybridBitset as TerminalBV};
+use crate::datastructures::hybrid_bitset::HybridBitset as TerminalBV;
 use crate::constraint::StateIDBV;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use bimap::BiBTreeMap;
@@ -14,7 +14,6 @@ use profiler_macro::time_it;
 use std::sync::Arc;
 use crate::interface::display_productions;
 // Added for derive macro pattern
-use crate::glr::grammar::regex_name;
 
 
 const EVERYTHING: bool = false;
@@ -262,33 +261,6 @@ pub struct HallucinatedRow {
     pub default_reduce: DefaultReduce,
 }
 
-impl JSONConvertible for HallucinatedRow {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("shifts_and_reduces".to_string(), self.shifts_and_reduces.to_json());
-        obj.insert("gotos".to_string(), self.gotos.to_json());
-        obj.insert("default_reduce".to_string(), self.default_reduce.to_json());
-        JSONNode::Object(obj)
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => Ok(HallucinatedRow {
-                shifts_and_reduces: BTreeMap::<TerminalID, Vec<(Stage7ShiftsAndReducesLookaheadValue, StateIDBV)>>::from_json(
-                    obj.remove("shifts_and_reduces").ok_or_else(|| "Missing field shifts_and_reduces for HallucinatedRow".to_string())?
-                )?,
-                gotos: BTreeMap::<NonTerminalID, Vec<(Goto, StateIDBV)>>::from_json(
-                    obj.remove("gotos").ok_or_else(|| "Missing field gotos for HallucinatedRow".to_string())?
-                )?,
-                default_reduce: DefaultReduce::from_json(
-                    obj.remove("default_reduce").ok_or_else(|| "Missing field default_reduce for HallucinatedRow".to_string())?
-                )?,
-            }),
-            _ => Err("Expected JSONNode::Object for HallucinatedRow".to_string()),
-        }
-    }
-}
-
 // Manual impl for Row (could be derived)
 impl JSONConvertible for Row {
     fn to_json(&self) -> JSONNode {
@@ -364,34 +336,6 @@ pub struct NonTerminalID(pub usize);
 impl JSONConvertible for NonTerminalID {
     fn to_json(&self) -> JSONNode { self.0.to_json() }
     fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(NonTerminalID) }
-}
-
-type CombinedStateID = u32;
-type OriginSet = BTreeMap<StateID, StateID>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CombinedStateAutomaton {
-    pub table: BTreeMap<CombinedStateID, HallucinatedRow>,
-    pub start_state_id: CombinedStateID,
-}
-
-impl JSONConvertible for CombinedStateAutomaton {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("table".to_string(), self.table.to_json());
-        obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
-        JSONNode::Object(obj)
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => Ok(CombinedStateAutomaton {
-                table: BTreeMap::<CombinedStateID, HallucinatedRow>::from_json(obj.remove("table").ok_or_else(|| "Missing field table for CombinedStateAutomaton".to_string())?)?,
-                start_state_id: CombinedStateID::from_json(obj.remove("start_state_id").ok_or_else(|| "Missing field start_state_id for CombinedStateAutomaton".to_string())?)?,
-            }),
-            _ => Err("Expected JSONNode::Object for CombinedStateAutomaton".to_string()),
-        }
-    }
 }
 
 
@@ -941,135 +885,53 @@ pub fn stage_10(
     reduce_goto_map
 }
 
-fn get_shift_state(action: &Stage7ShiftsAndReducesLookaheadValue) -> Option<StateID> {
-    match action {
-        Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => Some(*sid),
-        Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => *shift,
-        _ => None,
-    }
-}
+pub fn stage_11_create_hallucinated_row(table: &Table) -> HallucinatedRow {
+    let mut shifts_and_reduces: BTreeMap<TerminalID, BTreeMap<Stage7ShiftsAndReducesLookaheadValue, StateIDBV>> = BTreeMap::new();
+    let mut gotos: BTreeMap<NonTerminalID, BTreeMap<Goto, StateIDBV>> = BTreeMap::new();
 
-pub fn build_combined_state_automaton(
-    original_table: &Table,
-    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
-) -> CombinedStateAutomaton {
-    let mut origin_set_to_id: BTreeMap<OriginSet, CombinedStateID> = BTreeMap::new();
-    let mut worklist: VecDeque<OriginSet> = VecDeque::new();
-    let mut next_id: CombinedStateID = 0;
-
-    let mut graph: BTreeMap<OriginSet, BTreeMap<Symbol, OriginSet>> = BTreeMap::new();
-
-    // 1. Build the state graph of the combined automaton.
-    let initial_origin_set: OriginSet = original_table.keys().map(|&id| (id, id)).collect();
-    worklist.push_back(initial_origin_set.clone());
-    graph.insert(initial_origin_set, BTreeMap::new());
-
-    let mut processed_sets = BTreeSet::new();
-
-    while let Some(current_origin_set) = worklist.pop_front() {
-        if !processed_sets.insert(current_origin_set.clone()) {
-            continue;
+    for (&state_id, row) in table {
+        // Aggregate shifts and reduces
+        for (&terminal_id, action) in &row.shifts_and_reduces_full {
+            shifts_and_reduces
+                .entry(terminal_id)
+                .or_default()
+                .entry(action.clone())
+                .or_default()
+                .insert(state_id.0);
         }
 
-        let mut transitions: BTreeMap<Symbol, OriginSet> = BTreeMap::new();
-
-        for (&s_origin, &s_now) in &current_origin_set {
-            let row_now = &original_table[&s_now];
-
-            // Gotos
-            for (nt_id, goto_action) in &row_now.gotos {
-                if let Some(s_next) = goto_action.state_id {
-                    let symbol = Symbol::NonTerminal(non_terminal_map.get_by_right(nt_id).unwrap().clone());
-                    transitions.entry(symbol).or_default().insert(s_origin, s_next);
-                }
-            }
-
-            // Shifts
-            for (terminal_id, action) in &row_now.shifts_and_reduces_full {
-                if let Some(s_next) = get_shift_state(action) {
-                    let symbol = Symbol::Terminal(terminal_map.get_by_right(terminal_id).unwrap().clone());
-                    transitions.entry(symbol).or_default().insert(s_origin, s_next);
-                }
-            }
+        // Aggregate gotos
+        for (&nonterminal_id, goto) in &row.gotos {
+            gotos
+                .entry(nonterminal_id)
+                .or_default()
+                .entry(*goto)
+                .or_default()
+                .insert(state_id.0);
         }
-
-        for next_origin_set in transitions.values() {
-            if !graph.contains_key(next_origin_set) {
-                graph.insert(next_origin_set.clone(), BTreeMap::new());
-                worklist.push_back(next_origin_set.clone());
-            }
-        }
-        *graph.get_mut(&current_origin_set).unwrap() = transitions;
     }
 
-    // 2. Assign IDs to each unique origin set.
-    for origin_set in graph.keys() {
-        origin_set_to_id.insert(origin_set.clone(), next_id);
-        next_id += 1;
-    }
-
-    // 3. Build the final table of HallucinatedRows.
-    let mut combined_table: BTreeMap<CombinedStateID, HallucinatedRow> = BTreeMap::new();
-    for (current_origin_set, transitions) in &graph {
-        let current_id = origin_set_to_id[current_origin_set];
-
-        let mut temp_actions: BTreeMap<TerminalID, BTreeMap<Stage7ShiftsAndReducesLookaheadValue, BTreeSet<StateID>>> = BTreeMap::new();
-        let mut temp_gotos: BTreeMap<NonTerminalID, BTreeMap<Goto, BTreeSet<StateID>>> = BTreeMap::new();
-
-        for (&s_origin, &s_now) in current_origin_set {
-            let row_now = &original_table[&s_now];
-
-            // Aggregate reduces and splits
-            for (terminal_id, action) in &row_now.shifts_and_reduces_full {
-                let mut new_action = action.clone();
-                if let Some(shift_state) = get_shift_state(action) {
-                    let symbol = Symbol::Terminal(terminal_map.get_by_right(terminal_id).unwrap().clone());
-                    let dest_origin_set = transitions.get(&symbol).unwrap();
-                    let dest_id = origin_set_to_id[dest_origin_set];
-                    // Replace state ID in the action
-                    match &mut new_action {
-                        Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => *sid = StateID(dest_id as usize),
-                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => *shift = Some(StateID(dest_id as usize)),
-                        _ => unreachable!(),
-                    }
-                }
-                temp_actions.entry(*terminal_id).or_default().entry(new_action).or_default().insert(s_origin);
-            }
-
-            // Aggregate gotos
-            for (nt_id, goto) in &row_now.gotos {
-                let mut new_goto = *goto;
-                if let Some(_) = goto.state_id {
-                    let symbol = Symbol::NonTerminal(non_terminal_map.get_by_right(nt_id).unwrap().clone());
-                    let dest_origin_set = transitions.get(&symbol).unwrap();
-                    let dest_id = origin_set_to_id[dest_origin_set];
-                    new_goto.state_id = Some(StateID(dest_id as usize));
-                }
-                temp_gotos.entry(*nt_id).or_default().entry(new_goto).or_default().insert(s_origin);
-            }
-        }
-
-        let final_shifts_and_reduces = temp_actions.into_iter().map(|(tid, actions)| {
-            let action_vec = actions.into_iter().map(|(action, s_origins)| (action, s_origins.iter().map(|s| s.0).collect::<StateIDBV>())).collect();
+    // Convert the intermediate maps to the final Vec format
+    let final_shifts_and_reduces = shifts_and_reduces
+        .into_iter()
+        .map(|(tid, actions)| {
+            let action_vec = actions.into_iter().collect::<Vec<_>>();
             (tid, action_vec)
-        }).collect();
+        })
+        .collect();
 
-        let final_gotos = temp_gotos.into_iter().map(|(ntid, gotos)| {
-            let goto_vec = gotos.into_iter().map(|(goto, s_origins)| (goto, s_origins.iter().map(|s| s.0).collect::<StateIDBV>())).collect();
+    let final_gotos = gotos
+        .into_iter()
+        .map(|(ntid, gotos_map)| {
+            let goto_vec = gotos_map.into_iter().collect::<Vec<_>>();
             (ntid, goto_vec)
-        }).collect();
+        })
+        .collect();
 
-        combined_table.insert(current_id, HallucinatedRow {
-            shifts_and_reduces: final_shifts_and_reduces,
-            gotos: final_gotos,
-            default_reduce: DefaultReduce { clone_and_merge: true, reduce: None },
-        });
-    }
-
-    CombinedStateAutomaton {
-        table: combined_table,
-        start_state_id: origin_set_to_id[&initial_origin_set],
+    HallucinatedRow {
+        shifts_and_reduces: final_shifts_and_reduces,
+        gotos: final_gotos,
+        default_reduce: DefaultReduce { clone_and_merge: true, reduce: None },
     }
 }
 
@@ -1232,7 +1094,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
 
     crate::debug!(2, "Removing productions with undefined non-terminals");
     // println!("Before removing undefined non-terminals:\n{}", display_productions(&productions));
-    let mut productions = remove_productions_with_undefined_nonterminals(productions, &[start_production_id]);
+    let mut productions = remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
     // productions = simplify_grammar(&mut productions);
 
     // Resolve right-recursion
@@ -1297,17 +1159,20 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     crate::debug!(2, "Stage 10: Precomputing reduce goto map");
     let reduce_goto_map = stage_10(&stage_8_table);
 
-    crate::debug!(2, "Stage 12: Building combined state automaton");
-    let combined_state_automaton = build_combined_state_automaton(&stage_8_table, &terminal_map, &non_terminal_map);
-
     crate::debug!(2, "Finalizing table");
     let final_table = stage_8_table;
 
+    let hallucinated_row = stage_11_create_hallucinated_row(&final_table);
+    let hallucinated_state_id = StateID(usize::MAX);
+
     crate::debug!(2, "Done generating GLR parser");
+    // crate::debug!(6, "Number of states: {}", final_table.len());
+    // panic!("GLR parser generation complete. Number of states: {}", final_table.len());
+
     print_summary();
     print_summary_flat();
 
-    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos, reduce_goto_map, combined_state_automaton)
+    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos, reduce_goto_map, hallucinated_row, hallucinated_state_id)
 }
 
 pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
