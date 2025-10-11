@@ -1202,7 +1202,7 @@ pub fn stage_12_build_combined_states(
 
             if let Some((Stage7ShiftsAndReducesLookaheadValue::Shift(sid), shift_mask)) = maybe_shift_action {
                 split_shift = Some(sid);
-                combined_mask.union_with(&shift_mask);
+                combined_mask |= &shift_mask;
             }
 
             for (action, mask) in reduces_to_group {
@@ -1213,7 +1213,7 @@ pub fn stage_12_build_combined_states(
                         .entry(nonterminal_id)
                         .or_default()
                         .extend(production_ids);
-                    combined_mask.union_with(&mask);
+                    combined_mask |= &mask;
                 }
             }
 
