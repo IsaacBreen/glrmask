@@ -939,7 +939,7 @@ pub fn stage_11_create_hallucinated_row(table: &Table) -> HallucinatedRow {
 /// The row format matches HallucinatedRow: actions and gotos each paired with a set of origin states.
 pub fn stage_11_build_combined_states(
     table: &Table,
-) -> BTreeMap<StateID, HallucinatedRow> {
+) -> (BTreeMap<StateID, HallucinatedRow>, StateID) {
     // Start with the legacy hallucinated behavior:
     // aggregate actions/gotos across all individual states with origin filters.
     let combined_start_row = stage_11_create_hallucinated_row(table);
@@ -951,7 +951,7 @@ pub fn stage_11_build_combined_states(
     combined_rows.insert(combined_start_state_id, combined_start_row);
 
     // In the future, we can grow this map with additional combined states (origin-set transitions).
-    combined_rows
+    (combined_rows, combined_start_state_id)
 }
 
 /// Helper for `stage_9`: Traces a chain of unit reductions from a given starting state and non-terminal.
@@ -1180,15 +1180,35 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
 
     crate::debug!(2, "Finalizing table");
     let final_table = stage_8_table;
+
+    let hallucinated_row = stage_11_create_hallucinated_row(&final_table);
+    let hallucinated_state_id = StateID(usize::MAX);
+
     // Build combined-state rows (replaces hallucinated row).
-    let combined_rows = stage_11_build_combined_states(&final_table);
+    let (combined_rows, combined_start_state_id) = stage_11_build_combined_states(&final_table);
     crate::debug!(2, "Done generating GLR parser");
     // crate::debug!(6, "Number of states: {}", final_table.len());
     // panic!("GLR parser generation complete. Number of states: {}", final_table.len());
 
     print_summary();
     print_summary_flat();
-    crate::glr::parser::GLRParser::new(final_table, productions, terminal_map, non_terminal_map, item_set_map, start_state_id, everything_state_id, actions, ignore_terminal_id, substring_gotos, reduce_goto_map, combined_rows)
+    crate::glr::parser::GLRParser::new(
+        final_table,
+        productions,
+        terminal_map,
+        non_terminal_map,
+        item_set_map,
+        start_state_id,
+        everything_state_id,
+        actions,
+        ignore_terminal_id,
+        substring_gotos,
+        reduce_goto_map,
+        hallucinated_row,
+        hallucinated_state_id,
+        combined_rows,
+        combined_start_state_id,
+    )
 }
 pub fn generate_glr_parser(productions: &[Production], ignore_terminal_id: Option<TerminalID>) -> crate::glr::parser::GLRParser {
     let terminal_map = assign_terminal_ids(productions);
