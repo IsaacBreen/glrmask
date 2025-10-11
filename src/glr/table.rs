@@ -1375,6 +1375,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
 
     // Build combined-state rows (replaces hallucinated row).
     let (combined_rows, combined_start_state_id) = stage_12_build_combined_states(&final_table);
+    println!("Number of combined states: {}", combined_rows.len());
     crate::debug!(2, "Done generating GLR parser");
     // crate::debug!(6, "Number of states: {}", final_table.len());
     // panic!("GLR parser generation complete. Number of states: {}", final_table.len());
