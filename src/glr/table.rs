@@ -964,7 +964,7 @@ pub fn stage_12_build_combined_states(
     }
 
     let mut originset_to_id: BiBTreeMap<OriginSet, StateID> = BiBTreeMap::new();
-    let mut next_combined_id = 0usize;
+    let mut next_combined_id = table.keys().max().unwrap().0 + 1;
     originset_to_id.insert(initial_origin_set.clone(), StateID(next_combined_id));
     next_combined_id += 1;
     let combined_start_state_id = *originset_to_id.get_by_left(&initial_origin_set).unwrap();
