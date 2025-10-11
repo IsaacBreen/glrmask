@@ -1082,6 +1082,59 @@ pub fn stage_12_build_combined_states(
             }
         }
 
+        // --- OPTIMIZATION PASS: Group actions by mask and combine into Splits ---
+        for actions in shifts_and_reduces.values_mut() {
+            if actions.len() <= 1 {
+                continue;
+            }
+
+            let mut actions_by_mask: BTreeMap<StateIDBV, Vec<Stage7ShiftsAndReducesLookaheadValue>> = BTreeMap::new();
+            for (action, mask) in actions.drain(..) {
+                actions_by_mask.entry(mask).or_default().push(action);
+            }
+
+            for (mask, action_group) in actions_by_mask {
+                if action_group.len() <= 1 {
+                    // No combining needed, just push back.
+                    for action in action_group {
+                        actions.push((action, mask.clone()));
+                    }
+                    continue;
+                }
+
+                let mut maybe_shift: Option<StateID> = None;
+                let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+
+                for action in action_group {
+                    match action {
+                        Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => {
+                            // There should only be one shift per mask per terminal.
+                            assert!(maybe_shift.is_none(), "Found multiple shifts for the same mask, which should not be possible.");
+                            maybe_shift = Some(sid);
+                        }
+                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                            reduces
+                                .entry(len)
+                                .or_default()
+                                .entry(nonterminal_id)
+                                .or_default()
+                                .extend(production_ids);
+                        }
+                        Stage7ShiftsAndReducesLookaheadValue::Split { .. } => {
+                            // We shouldn't have splits at this stage, we are creating them.
+                            unreachable!("Split found during split creation optimization");
+                        }
+                    }
+                }
+
+                if maybe_shift.is_some() || !reduces.is_empty() {
+                    let mut combined_action = Stage7ShiftsAndReducesLookaheadValue::Split { shift: maybe_shift, reduces };
+                    combined_action.simplify(); // Good practice to simplify if possible.
+                    actions.push((combined_action, mask));
+                }
+            }
+        }
+
         // --- Build per-nonterminal gotos with origin masks:
         // We split them into two entries if necessary (accept=false vs accept=true).
         let mut gotos: BTreeMap<NonTerminalID, Vec<(Goto, StateIDBV)>> = BTreeMap::new();
