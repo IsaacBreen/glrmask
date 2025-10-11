@@ -1746,7 +1746,7 @@ impl GrammarConstraint {
             let mut gss_stack = gss_stack_base.clone();
             gss_stack.inner = gss_stack.inner.apply(|acc| {
                 let mut new_acc = acc.clone();
-                new_acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
+                // new_acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
                 new_acc
             });
             let gss_stack = Arc::new(gss_stack);
