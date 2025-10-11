@@ -192,8 +192,8 @@ mod tests {
             &[1],
         )]);
 
-        let gss1 = gss0.push("X".to_string()).pop();
-        let gss2 = gss0.push("X".to_string()).pop();
+        let gss1 = gss0.push("X".to_string());
+        let gss2 = gss0.push("X".to_string());
 
         assert!(gss1.inner_ptrs_eq(&gss2));
         assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
@@ -206,8 +206,8 @@ mod tests {
             &[1],
         )]);
 
-        let gss1 = gss0.push("X".to_string()).pop();
-        let gss2 = gss0.push("X".to_string()).pop();
+        let gss1 = gss0.push("X".to_string());
+        let gss2 = gss0.push("X".to_string());
 
         assert!(gss1.inner_ptrs_eq(&gss2));
         assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
@@ -220,8 +220,8 @@ mod tests {
             &[1],
         )]);
 
-        let gss1 = gss0.push("X".to_string()).pop();
-        let gss2 = gss0.push("X".to_string()).pop();
+        let gss1 = gss0.push("X".to_string());
+        let gss2 = gss0.push("X".to_string());
 
         assert!(gss1.inner_ptrs_eq(&gss2));
         assert!(!gss1.ptr_eq(&gss2)); // The top-level Arc will be different.
