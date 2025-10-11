@@ -463,8 +463,9 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 return res
 
             if isinstance(node, Interface):
-                # For an Interface, we pop k-1 levels from its Lower children
-                popped_lower = _popn_lower(node.lower, k - 1)
+                # For an Interface, we pop k levels from its Lower subtree.
+                # The Interface node itself doesn't represent a stack item/level.
+                popped_lower = _popn_lower(node.lower, k)
                 if not popped_lower.children and not popped_lower.empty:
                     res = UpperBranch(children={}, empty=None)
                 else:
