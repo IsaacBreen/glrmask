@@ -1708,6 +1708,7 @@ fn test_gss_structural_sharing_factor2() -> Result<(), Box<dyn std::error::Error
     let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
     let parser = compiled_grammar.glr_parser;
+    println!("Parser: {}", parser);
 
     // 2. Replicate the GSS setup from `precompute3` to test a single token step.
     //    We are interested in the terminal for 'if', which is TerminalID(1) in this compiled grammar.
