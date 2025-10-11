@@ -229,9 +229,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
         # Now, check for promotion condition on the current node
         # All children are Interfaces. Gather all accumulators.
         accs: Set[Acc] = set()
-        if node.empty is not None:
-            accs.add(node.empty)
-
         for child in node._all_children():
             interface_child: Interface[T, Acc] = child  # type: ignore[assignment]
             accs.add(interface_child.acc)
@@ -334,14 +331,17 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     if c.empty is not None:
                         accs.add(c.empty)
 
-                if root_empty is not None:
-                    accs.add(root_empty)
-
                 if len(accs) <= 1:
                     the_acc = accs.pop() if accs else None
                     if the_acc is None:
-                        # This is a truly empty GSS.
-                        return UpperBranch(children={}, empty=None)
+                        # If there are no child accumulators, we can use root_empty as the accumulator
+                        # for the new Interface, if it exists. This covers the case of promoting
+                        # an UpperBranch with no children but an `empty` acc.
+                        if root_empty is not None:
+                            the_acc = root_empty
+                        else:
+                            # This is a truly empty GSS.
+                            return UpperBranch(children={}, empty=None)
 
                     def build_lower(sub_d: Dict[T, Dict[str, Any]]) -> Lower[T]:
                         l_children: Dict[T, Dict[int, Lower[T]]] = {}
@@ -1092,8 +1092,6 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
             if not all(isinstance(c, Interface) for c in all_children):
                 return False
             accs: Set[Acc] = set()
-            if node.empty is not None:
-                accs.add(node.empty)
             for c in all_children:
                 ic: Interface[T, Acc] = c  # type: ignore[assignment]
                 accs.add(ic.acc)
@@ -1373,8 +1371,6 @@ def try_promote(node: Upper[T, AccPromote]) -> Upper[T, AccPromote]:
         return node
 
     accs: Set[AccPromote] = set()
-    if node.empty is not None:
-        accs.add(node.empty)
     for c in all_children:
         ic: Interface[T, AccPromote] = c  # type: ignore[assignment]
         accs.add(ic.acc)
