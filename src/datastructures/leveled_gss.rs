@@ -1383,7 +1383,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 true
             }
             (Upper::Interface(i1), Upper::Interface(i2)) => {
-                if i1.acc != i2.acc || i1.inner.children.len() != i2.inner.children.len() || i1.max_depth() != i2.max_depth() {
+                if i1.acc != i2.acc || i1.inner.children.len() != i2.inner.children.len() || i1.inner.max_depth != i2.inner.max_depth {
                     return false;
                 }
                 let keys1: HashSet<_> = i1.inner.children.keys().collect();
