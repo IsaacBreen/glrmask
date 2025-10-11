@@ -1691,7 +1691,7 @@ impl GrammarConstraint {
         let mut precomputed3 = BTreeMap::new();
         let trie3_god = Trie3GodWrapper::new();
 
-        if true {
+        if false {
             let tid = 3;
             // for tid in tqdm!(0..=tokenizer.num_groups() as usize, desc = "Trie 3 temp", disable = !PROGRESS_BAR_ENABLED, leave=false) {
                 let parser = parser.unwrap();
@@ -1743,7 +1743,7 @@ impl GrammarConstraint {
             let mut gss_stack = gss_stack_base.clone();
             gss_stack.inner = gss_stack.inner.apply(|acc| {
                 let mut new_acc = acc.clone();
-                new_acc.stored_trie_nodes_mut().insert(trie3_root);
+                // new_acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
                 new_acc
             });
             let gss_stack = Arc::new(gss_stack);
@@ -1777,15 +1777,15 @@ impl GrammarConstraint {
                     let stats = glr_s.stats();
                     println!("After processing token {:?}, number of GSS nodes: {}, edges: {}", gt, stats.unique_nodes(), stats.total_edges());
 
-                    timeit!("Normalize", {
-                        Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
-                    });
+                    // timeit!("Normalize", {
+                    //     Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
+                    // });
 
-                    let stats2 = glr_s.stats();
-                    println!("After normalization, number of GSS nodes: {}, edges: {}", stats2.unique_nodes(), stats2.total_edges());
+                    // let stats2 = glr_s.stats();
+                    // println!("After normalization, number of GSS nodes: {}, edges: {}", stats2.unique_nodes(), stats2.total_edges());
                     if (!(stats.unique_nodes() < 10000)) {
                         println!("Stats before normalization: {:?}", stats);
-                        println!("Stats after normalization: {:?}", stats2);
+                        // println!("Stats after normalization: {:?}", stats2);
                         print_summary_flat();
                         print_summary();
                         assert!(stats.unique_nodes() < 10000);
@@ -1828,9 +1828,9 @@ impl GrammarConstraint {
                 // }
                 glr_s1.merge_with(glr_s2);
 
-                timeit!("Normalize", {
-                    Arc::make_mut(&mut glr_s1.active_state.stack).inner = glr_s1.active_state.stack.inner.normalize();
-                });
+                // timeit!("Normalize", {
+                //     Arc::make_mut(&mut glr_s1.active_state.stack).inner = glr_s1.active_state.stack.inner.normalize();
+                // });
 
                 // println!("After merge, flat:");
                 // for (i, p) in glr_s1.active_state.stack.flatten().iter().enumerate() {
@@ -1852,9 +1852,9 @@ impl GrammarConstraint {
                 timeit!("precompute3 process node", {
 
                 // Arc::make_mut(&mut glr_s.active_state.stack).fuse_predecessors(1);
-                timeit!("Normalize", {
-                    Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
-                });
+                // timeit!("Normalize", {
+                //     Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
+                // });
 
                 crate::datastructures::gss_leveled_adapter::merge_stored_trie_nodes(
                     &mut glr_s.active_state.stack,
