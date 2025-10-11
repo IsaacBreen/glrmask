@@ -27,7 +27,7 @@ class UpperBranch(Generic[T, Acc]):
         depth = max(child._max_depth for child in self._all_children()) + 1 if self.children else 0
         object.__setattr__(self, '_max_depth', depth)
 
-    def _all_children(self) -> Generator[Upper[T, Acc], None, None]:
+    def _all_children(self) -> Iterator[Upper[T, Acc]]:
         """Returns an iterator over all child nodes."""
         for children_at_depth in self.children.values():
             yield from children_at_depth.values()
@@ -468,7 +468,7 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                 return memo_upper[key]
 
             # Base case for recursion: no children to pop from
-            all_children = list(node._all_children())
+            all_children: List[Upper[T, Acc]] | List[Lower[T]] = list(node._all_children())
             if not all_children:
                 res = UpperBranch(children={}, empty=None)
                 memo_upper[key] = res
