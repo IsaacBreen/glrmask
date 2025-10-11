@@ -564,6 +564,18 @@ impl GLRParser {
         }
     }
 
+    pub fn get_combined_gss(&self) -> Arc<GSSNode> {
+        let gss_leaf = GSSNode::new(Acc::new_fresh());
+        let gss = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: self.combined_start_state_id }));
+        gss
+    }
+
+    pub fn get_combined_gss_with_acc(&self, acc: Acc) -> Arc<GSSNode> {
+        let gss_leaf = GSSNode::new(acc);
+        let gss = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: self.combined_start_state_id }));
+        gss
+    }
+
     pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
         let mut state = self.init_glr_parser(llm_vocab);
         state.parse(input);
@@ -1468,8 +1480,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // - Add a precompute3-trie edge (k, LLMTokenBV::max_ones()) with StateIDBV::max_ones() across this GSS (shallowly via deep helper).
         // - Push a single hallucinated state edge on top.
         // - Return a single (hallucinated_state_id, gss) todo per k-group.
-        let hallucinate_sid = self.parser.combined_start_state_id;
-
         if below.is_empty() {
             return Vec::new();
         }
@@ -1522,9 +1532,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
             new_acc.stored_trie_nodes_mut().clear();
         }
 
-        let new_leaf = Arc::new(GSSNode::new(new_acc));
-        let new_gss = Arc::new(new_leaf.push(ParseStateEdgeContent { state_id: hallucinate_sid }));
-        let new_todo_items = vec![(hallucinate_sid, new_gss)];
+        // let new_leaf = Arc::new(GSSNode::new(new_acc));
+        // let new_gss = Arc::new(new_leaf.push(ParseStateEdgeContent { state_id: hallucinate_sid }));
+        let new_gss = self.parser.get_combined_gss_with_acc(new_acc);
+        let new_todo_items = vec![(self.parser.combined_start_state_id, new_gss)];
 
         new_todo_items
     }
