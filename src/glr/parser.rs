@@ -33,8 +33,8 @@ use crate::datastructures::leveled_gss::Merge;
 
 // const MAX_MERGE_DEPTH: usize = usize::MAX;
 // const MAX_MERGE_DEPTH: usize = 2;
-// const MAX_MERGE_DEPTH: usize = 1;
-const MAX_MERGE_DEPTH: usize = 0;
+const MAX_MERGE_DEPTH: usize = 1;
+// const MAX_MERGE_DEPTH: usize = 0;
 
 
 // A single combined action for a given (state,row) and token:
