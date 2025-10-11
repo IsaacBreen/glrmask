@@ -937,7 +937,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
         crate::debug!(4, "Pushing new state with content: {:?}", new_content);
         timeit!("GLRParserState::push_state::push_on_parent GSS PUSH", {});
         let mut new_gss_node_instance = peek.push_on_parent(new_content);
+        println!("peek.isolated_parent() = {}", peek.isolated_parent().inner.to_graph_string(false));
+        println!("peek.isolated_parent() = {}", peek.isolated_parent().inner.to_graph_string(false));
         new_gss_node_instance.inner = peek.isolated_parent().inner.push(new_content);
+        println!("new_gss_node_instance = {}", new_gss_node_instance.inner.to_graph_string(false));
+        new_gss_node_instance.inner = peek.isolated_parent().inner.push(new_content);
+        println!("new_gss_node_instance = {}", new_gss_node_instance.inner.to_graph_string(false));
         ParseState {
             stack: Arc::new(new_gss_node_instance),
             accepted_state: self.active_state.accepted_state.clone(),
