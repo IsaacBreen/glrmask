@@ -1691,9 +1691,9 @@ impl GrammarConstraint {
         let mut precomputed3 = BTreeMap::new();
         let trie3_god = Trie3GodWrapper::new();
 
-        if false {
-            let tid = 3;
-            // for tid in tqdm!(0..=tokenizer.num_groups() as usize, desc = "Trie 3 temp", disable = !PROGRESS_BAR_ENABLED, leave=false) {
+        if true {
+            // let tid = 3;
+            for tid in tqdm!(0..=tokenizer.num_groups() as usize, desc = "Trie 3 temp", disable = !PROGRESS_BAR_ENABLED, leave=false) {
                 let parser = parser.unwrap();
                 let terminal = TerminalID(tid);
 
@@ -1712,7 +1712,7 @@ impl GrammarConstraint {
                 println!("GLR state graph structure before normalization:{}\n", glr_state.active_state.stack.inner.to_graph_string(false));
                 println!("GLR state graph structure after normalization:{}\n", glr_state.active_state.stack.inner.normalize().to_graph_string(false));
                 println!("---------------------------------");
-            // }
+            }
 
             return (precomputed3, trie3_god); // TEMP
         }
