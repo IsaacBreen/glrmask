@@ -1589,15 +1589,24 @@ fn test_gss_structural_sharing_factor() -> Result<(), Box<dyn std::error::Error>
     // 1. Minimal grammar that causes GSS explosion without proper sharing.
     //    See `test_js_if_statement_gss_explosion` for a detailed explanation.
     let js_grammar_ebnf = indoc! {r#"
-        program ::= statement* EOF;
-        EOF ::= '<|EOF|>';
+        program ::= (statement ';')* EOF;
 
-        statement ::= if_statement | expression | block ;
-        block ::= '{' statement* '}' ;
-        if_statement ::= 'if' expression statement ;
+        statement ::= prefix target suffix ;
 
-        expression ::= IDENTIFIER IDENTIFIER | IDENTIFIER ;
-        IDENTIFIER ::= [a-zA-Z_] [a-zA-Z0-9_]* ;
+        // The reduction of this non-terminal is the focus.
+        // It is an empty production, so we pop 0 symbols from the stack.
+        target ::= /* empty */ ;
+
+        // The 'prefix' rules create N distinct parser states that can
+        // immediately precede the position where 'target' is recognized.
+        // These become the "revealed states" for the reduction of 'target'.
+        prefix ::= 'p1' | 'p2' | 'p3' | 'p4' | 'p5' | 'p6' | 'p7' | 'p8' ;
+
+        // The 'suffix' rules create a large FIRST set. This set becomes the
+        // FOLLOW set for 'target', providing many lookahead terminals for its reduction.
+        suffix ::= 't1' | 't2' | 't3' | 't4' | 't5' | 't6' | 't7' | 't8' ;
+
+        EOF ::= '$';
     "#};
     let grammar_definition = GrammarDefinition::from_ebnf(js_grammar_ebnf)?;
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition));
