@@ -527,8 +527,61 @@ pub fn filter_productions_by_reachability(
     kept_productions
 }
 
+/// Simplifies a grammar by removing non-productive and unreachable productions.
+///
+/// This function applies a series of transformations to the grammar to reduce its size
+/// and remove parts that are not useful, without changing the language it generates.
+/// The process is as follows:
+/// 1.  **Remove Non-Productive Productions**: It first identifies all non-terminals that
+///     cannot derive a finite string of terminals. Any production that involves such a
+///     non-terminal (either on the LHS or RHS) is removed. This process is repeated
+///     until no more non-productive productions can be found.
+/// 2.  **Remove Unreachable Productions**: After cleaning up non-productive rules, it
+///     identifies all symbols (terminals and non-terminals) that are not reachable
+///     from the grammar's start symbol. Productions that are defined for unreachable
+///     non-terminals are then removed.
+///
+/// # Arguments
+/// * `initial_productions` - A slice of `Production`s representing the grammar to be simplified.
+///
+/// # Returns
+/// A `Vec<Production>` containing the simplified grammar. The start production is preserved
+/// at index 0.
 pub fn simplify_grammar(initial_productions: &[Production]) -> Vec<Production> {
-    todo!()
+    if initial_productions.is_empty() {
+        return Vec::new();
+    }
+
+    let mut current_productions = initial_productions.to_vec();
+    loop {
+        let initial_count = current_productions.len();
+
+        // 1. Remove non-productive productions
+        let productive_nts = compute_productive_non_terminals(&current_productions);
+        current_productions.retain(|prod| {
+            let lhs_is_productive = productive_nts.contains(&prod.lhs);
+            let rhs_is_productive = prod.rhs.iter().all(|sym| match sym {
+                Symbol::Terminal(_) => true,
+                Symbol::NonTerminal(nt) => productive_nts.contains(nt),
+            });
+            lhs_is_productive && rhs_is_productive
+        });
+
+        // 2. Remove unreachable productions (from the start symbol)
+        let start_symbol = Symbol::NonTerminal(initial_productions[0].lhs.clone());
+        let reachable_symbols = compute_can_derive_interesting(&current_productions, &BTreeSet::from([start_symbol]));
+
+        let mut reachable_productions = vec![current_productions[0].clone()]; // Start production is always reachable
+        reachable_productions.extend(
+            current_productions.iter().skip(1).filter(|prod| reachable_symbols.contains(&prod.lhs)).cloned()
+        );
+        current_productions = reachable_productions;
+
+        if current_productions.len() == initial_count {
+            break; // Fixed point reached
+        }
+    }
+    current_productions
 }
 
 /// Helper function to find the last symbol in a rule's RHS that is not a nullable non-terminal.

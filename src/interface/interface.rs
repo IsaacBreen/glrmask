@@ -1061,7 +1061,11 @@ impl JSONConvertible for CompiledGrammar {
 
                 let glr_parser_node = obj.remove("glr_parser")
                     .ok_or_else(|| "Missing field glr_parser for CompiledGrammar".to_string())?;
-                let glr_parser = GLRParser::from_json(glr_parser_node)?;
+                // The structure of GLRParser's JSON is changing to accommodate the new CombinedStateAutomaton.
+                // We pass the definition's non_terminal_map to it, as it might be needed for deserialization
+                // of the new structure. This is a necessary assumption as GLRParser's definition is not in this file.
+                let non_terminal_map = &definition.productions.iter().map(|p| p.lhs.clone()).collect::<BTreeSet<_>>().into_iter().enumerate().map(|(i, nt)| (nt, crate::glr::table::NonTerminalID(i))).collect::<bimap::BiBTreeMap<_,_>>();
+                let glr_parser = GLRParser::from_json(glr_parser_node, Some(non_terminal_map))?;
 
                 Ok(CompiledGrammar {
                     definition,
