@@ -381,13 +381,18 @@ class LeveledGSS(GSS[T, Acc], Generic[T, Acc]):
                     for child in kids.values():
                         dfs_upper(child, pref + [v])
             elif isinstance(u, Interface):
-                # Implicit terminal: no lower children and no explicit lower empty
-                if not u.lower.children and not u.lower.empty:
+                # If the lower tree has no children, the interface itself represents a terminal stack.
+                # This covers both explicit (lower.empty=True) and implicit (lower.empty=False) terminals.
+                if not u.lower.children:
                     res.append((list(reversed(pref)), u.acc))
-                # Traverse lower subtree
-                for v, kids in u.lower.children.items():
-                    for child in kids.values():
-                        dfs_lower(child, pref + [v], u.acc)
+                else:
+                    # If there are children, check if the interface is also an explicit terminal.
+                    if u.lower.empty:
+                        res.append((list(reversed(pref)), u.acc))
+                    # And traverse the children for longer stacks.
+                    for v, kids in u.lower.children.items():
+                        for child in kids.values():
+                            dfs_lower(child, pref + [v], u.acc)
 
         dfs_upper(self.inner, [])
 
