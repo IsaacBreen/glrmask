@@ -1093,7 +1093,7 @@ pub fn stage_12_build_combined_states(
                     .collect();
                 if !mask_set.is_empty() {
                     let mut mask = StateIDBV::zeros();
-                    for o in mask_set.drain() {
+                    for o in std::mem::take(&mut mask_set) {
                         mask.insert(o);
                     }
                     shifts_and_reduces
