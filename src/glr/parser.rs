@@ -1008,6 +1008,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     println!("peek.isolated_parent() = {}", peek.isolated_parent().inner.to_graph_string(false));
                     let new_parse_state =
                         self.push_state(&peek, ParseStateEdgeContent { state_id: *to });
+                    println!("new_parse_state.stack = {}", new_parse_state.stack.inner.to_graph_string(false));
                     shifted_states_todo.push_back(new_parse_state);
                     found_shift = true;
                     if early_exit_on_shift {
