@@ -287,6 +287,7 @@ pub struct GLRParser {
     pub combined_rows: BTreeMap<StateID, HallucinatedRow>,
     pub combined_start_state_id: StateID,
 }
+
 impl JSONConvertible for GLRParser {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
@@ -335,6 +336,7 @@ impl JSONConvertible for GLRParser {
                 let combined_rows = crate::glr::table::stage_11_build_combined_states(&table);
                 let combined_start_state_id = StateID(usize::MAX);
                 let hallucinated_state_id = StateID(usize::MAX);
+
                 Ok(GLRParser {
                     table,
                     productions,
@@ -754,6 +756,8 @@ impl GLRParser {
         } else {
             // Combined state?
             if self.is_combined_state(state_id) {
+                writeln!(f, "{}Items: (Combined state)", indent)?;
+
                 writeln!(f, "{}Actions (combined):", indent)?;
                 let row = self.combined_rows.get(&state_id).unwrap();
                 if row.shifts_and_reduces.is_empty() {
@@ -925,19 +929,23 @@ impl Display for GLRParser {
             writeln!(f, "  State {}:", state_id.0)?;
             self.format_state_details(f, state_id, "    ")?;
         }
+
         // Print all combined states, including the combined start.
         for (sid, _) in &self.combined_rows {
             writeln!(f, "  State {} (Combined):", sid.0)?;
             self.format_state_details(f, *sid, "    ")?;
         }
+
         writeln!(f, "\nTerminal Map (name to terminal ID):")?;
         for (terminal, terminal_id) in terminal_map {
             writeln!(f, "  {} -> {}", terminal, terminal_id.0)?;
         }
+
         writeln!(f, "\nNon-Terminal Map:")?;
         for (non_terminal, non_terminal_id) in non_terminal_map {
             writeln!(f, "  {} -> {}", non_terminal.0, non_terminal_id.0)?;
         }
+
         Ok(())
     }
 }
@@ -1462,6 +1470,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // - Push a single hallucinated state edge on top.
         // - Return a single (hallucinated_state_id, gss) todo per k-group.
         let hallucinate_sid = self.parser.combined_start_state_id;
+
         if below.is_empty() {
             return Vec::new();
         }
@@ -1850,14 +1859,12 @@ impl<'a> GLRParserState<'a> { // No longer generic
             self.phase = ParserPhase::ReadyForDefaultReductions; // Skip phase 1 and 2, go straight to phase 3
             return;
         }
-        let is_combined = self.parser.is_combined_state(token_id);
 
         self.log_gss("Phase1/2-start", token_id, false, false);
+
         let mut phase2_todo: WorkMap = WorkMap::new();
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
         let mut accepted_states_todo: VecDeque<ParseState> = VecDeque::new();
-        // Note: is_combined is not used here; combined state behavior is handled via action selectors.
-        // Keeping this comment for clarity of control flow.
 
         if self.phase == ParserPhase::ReadyForToken {
             let mut phase1_todo: WorkMap = WorkMap::new();
@@ -2070,6 +2077,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         } else {
             Self::enqueue(&mut phase2_todo, s.active_state.clone(), None);
         }
+
         s.process_action_queue(
             &mut phase2_todo,
             None,
@@ -2129,7 +2137,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
     }
 
     /// Returns the set of terminals that cause a SHIFT from at least one top-of-stack state.
-    /// Returns the set of terminals that cause a SHIFT from at least one top-of-stack state.
     pub fn immediate_shift_terminals(&self) -> BTreeSet<TerminalID> {
         let mut out = BTreeSet::new();
         for peek in GSSNode::peek_iter(&self.active_state.stack) {
@@ -2178,7 +2185,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
         out
     }
 
-    /// Returns the set of terminals that cause a REDUCE from at least one top-of-stack state.
     /// Returns the set of terminals that cause a REDUCE from at least one top-of-stack state.
     pub fn immediate_reduce_terminals(&self) -> BTreeSet<TerminalID> {
         let mut out = BTreeSet::new();
@@ -2413,6 +2419,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
 }
 
 impl GLRParser {
+    pub fn is_combined_state(&self, state_id: StateID) -> bool { self.combined_rows.contains_key(&state_id) }
+}
+
+impl GLRParser {
     /// Generates a Graphviz DOT representation of the state transitions present in a GSS forest.
     /// This visualizes the portion of the state machine explored by the parser.
     pub fn gss_forest_to_dot(
@@ -2545,10 +2555,6 @@ impl GLRParser {
     }
 }
 
-impl GLRParser {
-    pub fn is_combined_state(&self, state_id: StateID) -> bool { self.combined_rows.contains_key(&state_id) }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateKey {
     stack_state_id: StateID,
@@ -2608,4 +2614,3 @@ fn default_reduce_chain(
     }
     final_goto_state_ids
 }
-
