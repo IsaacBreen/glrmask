@@ -1735,7 +1735,7 @@ impl GrammarConstraint {
         #[cfg(rustrover)]
         let it = trie1_roots_to_tokenizer_states.iter();
 
-        let gss_stack_base = parser.get_combined_gss_with_acc(Acc::new_fresh());
+        let gss_stack_base = (*parser.get_combined_gss_with_acc(Acc::new_fresh())).clone();
 
         for (trie1_root, tokenizer_state_ids) in it {
             let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
