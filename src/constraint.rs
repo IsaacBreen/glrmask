@@ -1720,19 +1720,27 @@ impl GrammarConstraint {
         let parser = parser.unwrap();
         let mut initial_values_for_map: Vec<(PrecomputeNode1Index, GLRParserState)> = Vec::new();
 
+        // Group tokenizer states by their shared Trie1 root to avoid redundant work.
+        let mut trie1_roots_to_tokenizer_states: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
+        for (tokenizer_state_id, trie1_root) in precomputed1.iter() {
+            trie1_roots_to_tokenizer_states.entry(trie1_root.clone()).or_default().push(*tokenizer_state_id);
+        }
+
         #[cfg(not(rustrover))]
-        let it = tqdm!(precomputed1.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=true);
+        let it = tqdm!(trie1_roots_to_tokenizer_states.iter(), desc = "Precomputing Trie 3", disable = !PROGRESS_BAR_ENABLED, leave=true);
         #[cfg(rustrover)]
-        let it = precomputed1.iter();
+        let it = trie1_roots_to_tokenizer_states.iter();
 
         let gss_leaf = Arc::new(GSSNode::new(Acc::new_fresh()));
-        let gss_stack = gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id });
+        let gss_stack_base = gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id });
 
-        for (tokenizer_state_id, trie1_root) in it {
+        for (trie1_root, tokenizer_state_ids) in it {
             let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
-            precomputed3.insert(*tokenizer_state_id, trie3_root.clone());
+            for tokenizer_state_id in tokenizer_state_ids {
+                precomputed3.insert(*tokenizer_state_id, trie3_root.clone());
+            }
 
-            let mut gss_stack = gss_stack.clone();
+            let mut gss_stack = gss_stack_base.clone();
             gss_stack.inner = gss_stack.inner.apply(|acc| {
                 let mut new_acc = acc.clone();
                 new_acc.stored_trie_nodes_mut().insert(trie3_root);
