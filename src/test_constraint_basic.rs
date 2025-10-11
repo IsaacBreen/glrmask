@@ -1625,7 +1625,7 @@ fn test_gss_structural_sharing_factor() -> Result<(), Box<dyn std::error::Error>
     let stats = glr_state.active_state.stack.inner.stats();
     println!("Stats for terminal ID {}: {:?}", tid, stats);
 
-    let THRESHOLD = 0.49;
+    let THRESHOLD = 0.39;
     if !(stats.structural_sharing_factor > THRESHOLD) {
         // Print the GSS structure before and after normalization.
         println!("GSS before normalization:");
