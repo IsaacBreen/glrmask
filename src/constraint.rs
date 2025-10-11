@@ -1691,6 +1691,31 @@ impl GrammarConstraint {
         let mut precomputed3 = BTreeMap::new();
         let trie3_god = Trie3GodWrapper::new();
 
+        if true {
+            // let tid = 3;
+            for tid in tqdm!(0..=tokenizer.num_groups() as usize, desc = "Trie 3 temp", disable = !PROGRESS_BAR_ENABLED, leave=false) {
+                let parser = parser.unwrap();
+                let terminal = TerminalID(tid);
+
+                let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
+                let mut acc = Acc::new_fresh();
+                acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
+                let gss_leaf = Arc::new(GSSNode::new(acc));
+
+                let gss_stack = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: parser.hallucinated_state_id }));
+
+                let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
+                glr_state.process_token_advanced(terminal, &ProcessTokenAdvancedConfig { below_bottom_mode: BELOW_BOTTOM_REDUCE_MODE });
+                println!("--- Results for token ID {} ---", tid);
+                println!("stats: {:?}", glr_state.active_state.stack.inner.stats());
+                // println!("GLR state stacks: {}", glr_state);
+                // println!("GLR state graph structure:{}", glr_state.active_state.stack.inner.to_graph_string(false));
+                println!("---------------------------------");
+            }
+
+            return (precomputed3, trie3_god); // TEMP
+        }
+
         let parser = parser.unwrap();
         let mut initial_values_for_map: Vec<(PrecomputeNode1Index, GLRParserState)> = Vec::new();
 
