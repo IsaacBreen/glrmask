@@ -937,7 +937,7 @@ pub fn stage_11_create_hallucinated_row(table: &Table) -> HallucinatedRow {
 /// Builds the initial set of "combined" states used to replace the hallucinated/everything state.
 /// For now, we construct only the "combined start" state whose origin-set is {x -> x | for all states x}.
 /// The row format matches HallucinatedRow: actions and gotos each paired with a set of origin states.
-pub fn stage_11_build_combined_states(
+pub fn stage_12_build_combined_states(
     table: &Table,
 ) -> (BTreeMap<StateID, HallucinatedRow>, StateID) {
     // Start with the legacy hallucinated behavior:
@@ -1185,7 +1185,7 @@ pub fn generate_glr_parser_with_maps(productions: &[Production], terminal_map: B
     let hallucinated_state_id = StateID(usize::MAX);
 
     // Build combined-state rows (replaces hallucinated row).
-    let (combined_rows, combined_start_state_id) = stage_11_build_combined_states(&final_table);
+    let (combined_rows, combined_start_state_id) = stage_12_build_combined_states(&final_table);
     crate::debug!(2, "Done generating GLR parser");
     // crate::debug!(6, "Number of states: {}", final_table.len());
     // panic!("GLR parser generation complete. Number of states: {}", final_table.len());
