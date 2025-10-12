@@ -2721,7 +2721,9 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
 
     // 2. Replicate the GSS setup from `precompute3`
     let trie3_god = crate::constraint::Trie3GodWrapper::new();
+    let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(0))));
     let mut acc = Acc::new_fresh();
+    acc.stored_trie_nodes.insert(trie3_root);
     let gss_stack = parser.get_combined_gss_with_acc(acc);
     let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
 
