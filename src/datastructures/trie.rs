@@ -711,7 +711,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// - A new `Arena<Trie<EK, EV, T>>` with the copied subtrees.
     /// - A `Vec<Trie2Index>` containing the indices of the new roots in the new arena, in the
     ///   same order as the input `roots`.
-    /// - A `HashMap<usize, Trie2Index>` mapping old node indices to new node indices.
+    /// - A `HashMap<Trie2Index, Trie2Index>` mapping old node indices to new node indices.
     pub fn deep_copy_subtrees(
         source_arena: &Arena<Self>,
         roots: &[Trie2Index],
@@ -744,7 +744,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// A tuple containing:
     /// - A `Vec<Trie2Index>` containing the indices of the new roots in the `dest_arena`,
     ///   in the same order as the input `roots`.
-    /// - A `HashMap<usize, Trie2Index>` mapping old node indices to new node indices.
+    /// - A `HashMap<Trie2Index, Trie2Index>` mapping old node indices to new node indices.
     pub fn deep_copy_subtrees_into(
         source_arena: &Arena<Self>,
         dest_arena: &Arena<Self>,
