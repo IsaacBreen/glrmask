@@ -989,7 +989,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
     phase: ParserPhase,
-    below_bottom_cache: HashMap<BelowBottomCacheKey, (PrecomputeNode3Index, LLMTokenBV)>,
+    below_bottom_cache: HashMap<BelowBottomCacheKey, PrecomputeNode3Index>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1819,15 +1819,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let (cached_dest, add_to_out) = timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS::CacheLookup", {
                         let entry = self.below_bottom_cache.entry(cache_key);
                         match entry {
-                            std::collections::hash_map::Entry::Occupied(mut occupied) => {
-                                let (dest, _cached_tokens) = occupied.get_mut();
-                                (dest.clone(), false)
+                            std::collections::hash_map::Entry::Occupied(occupied) => {
+                                (occupied.get().clone(), false)
                             }
                             std::collections::hash_map::Entry::Vacant(vacant) => {
                                 let new_dest = PrecomputeNode3Index::new(
                                     god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
                                 );
-                                vacant.insert((new_dest.clone(), LLMTokenBV::max_ones()));
+                                vacant.insert(new_dest.clone());
                                 (new_dest, true)
                             }
                         }
