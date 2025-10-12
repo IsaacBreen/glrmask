@@ -1803,7 +1803,9 @@ impl GrammarConstraint {
 
                         // panic!("Structural sharing factor too low ({}) before normalization at edge {:?} with tokens {:?}.", stats.structural_sharing_factor, edge_grammar_token_opt, edge_bv);
                     }
-                    assert!(stats2.structural_sharing_factor >= stats.structural_sharing_factor);
+                    if stats2.structural_sharing_factor >= stats.structural_sharing_factor {
+                        panic!("Structural sharing factor did not decrease after normalization at edge {:?} with tokens {:?}. Stats before: {:?}, after: {:?}.", edge_grammar_token_opt, edge_bv, stats, stats2);
+                    }
                 }
 
                 out = Vec::new();
