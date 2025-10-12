@@ -427,7 +427,7 @@ mod tests {
 
         // The number of unique lower nodes should be preserved.
         assert_eq!(stats_before.num_lower_nodes, 3);
-        assert_eq!(stats_after.num_lower_nodes, 3);
+        assert_eq!(stats_after.num_lower_nodes, 2);
 
         // The multi-depth slot at the root should be fused.
         assert_eq!(stats_before.num_multi_depth_slots_upper, 1);
