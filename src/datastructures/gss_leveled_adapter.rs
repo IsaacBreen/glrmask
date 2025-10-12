@@ -893,6 +893,18 @@ pub(crate) fn merge_stored_trie_nodes(
     });
 }
 
+pub(crate) fn map_trie3_node_ids(
+    root_arc: &mut Arc<GSSNode>,
+    id_map: &BTreeMap<Trie2Index, Trie2Index>,
+) {
+    transform_all(root_arc, |acc| {
+        let mut new_acc = acc.clone();
+        new_acc.stored_trie_nodes = new_acc.stored_trie_nodes.iter().map(|node| id_map[node]).collect();
+        Some(new_acc)
+    });
+}
+
+
 #[time_it]
 pub(crate) fn is_simple_gss(
     node: &Arc<GSSNode>,
