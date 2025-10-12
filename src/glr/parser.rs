@@ -12,7 +12,7 @@ use std::sync::{Mutex, RwLock};
 // Import LLMTokenInfo
 
 use crate::datastructures::trie::EdgeInserter;
-use crate::constraint::Trie2Index;
+use crate::datastructures::trie::Trie2Index;
 use crate::{debug, hit};
 use crate::glr::automaton::compute_closure;
 use crate::glr::items::{Item, LRMode, LR_MODE};
@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::ops::Deref;
 use std::sync::Arc;
 use crate::datastructures::trie::{God, GodWrapper};
 use crate::datastructures::gss_leveled_adapter::{is_simple_gss, PruneAndTransformRecursiveMemo};
@@ -1030,7 +1031,7 @@ impl GLRParser {
                 let reduce_action = Stage7ShiftsAndReducesLookaheadValue::Reduce {
                     nonterminal_id: nt_id,
                     len: 2, // As per instruction
-                    production_ids: vec![],
+                    production_ids: BTreeSet::new(), // Empty set
                 };
                 self.precomputation_dummy_actions.entry(dummy_state_id).or_default().insert(token_id, reduce_action);
 
@@ -1069,7 +1070,7 @@ impl GLRParser {
                         build_id_map(source_god, dest_god, *source_child, *dest_child, map);
                     }
                 }
-                let new_root_vec = PrecomputeNode3::deep_copy_subtrees_into(&local_god.0.read().unwrap().arena, &self.precomputation_god.0.read().unwrap().arena, &[root_idx.into_trie2_index()]);
+                let new_root_vec = PrecomputeNode3::deep_copy_subtrees_into(&local_god, &self.precomputation_god, &[root_idx.into_trie2_index()]);
                 let new_root_idx = PrecomputeNode3Index::from_trie2_index(new_root_vec[0]);
                 let mut id_map = BTreeMap::new();
                 build_id_map(&local_god.0.read().unwrap(), &self.precomputation_god.0.read().unwrap(), root_idx.into_trie2_index(), new_root_idx.into_trie2_index(), &mut id_map);
@@ -1901,84 +1902,86 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // --- NEW CACHING LOGIC ---
         let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
-        if config.use_precomputation_cache && let Some(god) = self.active_state.trie2_god.as_ref() {
-            timeit!("GLRParserState::reduce_and_goto::Caching", { // ~500 calls
-            for gss_arc in out {
-                timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", { // SLOW POINT, ~20k calls
-                if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.combined_start_state_id) {
-                    let cache_key = (nt, token_id);
-                    let has_sources = !acc.stored_trie_nodes().is_empty();
+        if config.use_precomputation_cache {
+            if let Some(god) = self.active_state.trie2_god.as_ref() {
+                timeit!("GLRParserState::reduce_and_goto::Caching", { // ~500 calls
+                for gss_arc in out {
+                    timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", { // SLOW POINT, ~20k calls
+                    if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.combined_start_state_id) {
+                        let cache_key = (nt, token_id);
+                        let has_sources = !acc.stored_trie_nodes().is_empty();
 
-                    if let Some(cached_dest) = self.below_bottom_cache.get(&cache_key) {
-                        // Local cache hit
-                        hit!("GLRParserState::reduce_and_goto::LocalCacheHit");
-                        if has_sources {
-                            // Connect current GSS trie leaves to the cached trie root
-                            let edge_key = (0, tokens_all.clone());
-                            let edge_value = StateIDBV::max_ones();
-                            let tokens_for_update = tokens_all.clone();
-                            let memo_for_dest = cached_dest_memos.entry(cached_dest.clone()).or_default();
-                            let mut gss_to_modify = gss_arc; // This is just for its acc
-                            deep_add_precompute_trie_edges(&mut gss_to_modify, god, &edge_key, &edge_value, &tokens_for_update, &mut || cached_dest.clone(), memo_for_dest);
-                        }
-                        // Discard original gss_arc, as its path is now represented by the connection
-                    } else if let Some((stored_root, stored_gss)) = self.parser.precomputation_cache.get(&cache_key) {
-                        // Stored cache hit
-                        hit!("GLRParserState::reduce_and_goto::StoredCacheHit");
-
-                        // 1. Deep copy trie from stored god to local god
-                        let new_root_vec = PrecomputeNode3::deep_copy_subtrees_into(
-                            &self.parser.precomputation_god.0.read().unwrap().arena,
-                            &god.0.read().unwrap().arena,
-                            &[stored_root.into_trie2_index()]
-                        );
-                        let new_root_idx = PrecomputeNode3Index::from_trie2_index(new_root_vec[0]);
-
-                        // 2. Build ID map for remapping GSS
-                        fn build_id_map(source_god: &Trie3God, dest_god: &Trie3God, source_root: Trie2Index, dest_root: Trie2Index, map: &mut BTreeMap<Trie2Index, Trie2Index>) {
-                            if map.contains_key(&source_root) { return; }
-                            map.insert(source_root, dest_root);
-                            let source_node = &source_god.arena[source_root];
-                            let dest_node = &dest_god.arena[dest_root];
-                            for ((_, source_child), (_, dest_child)) in source_node.children.iter().zip(dest_node.children.iter()) {
-                                build_id_map(source_god, dest_god, *source_child, *dest_child, map);
+                        if let Some(cached_dest) = self.below_bottom_cache.get(&cache_key) {
+                            // Local cache hit
+                            hit!("GLRParserState::reduce_and_goto::LocalCacheHit");
+                            if has_sources {
+                                // Connect current GSS trie leaves to the cached trie root
+                                let edge_key = (0, tokens_all.clone());
+                                let edge_value = StateIDBV::max_ones();
+                                let tokens_for_update = tokens_all.clone();
+                                let memo_for_dest = cached_dest_memos.entry(cached_dest.clone()).or_default();
+                                let mut gss_to_modify = gss_arc; // This is just for its acc
+                                deep_add_precompute_trie_edges(&mut gss_to_modify, god, &edge_key, &edge_value, &tokens_for_update, &mut || cached_dest.clone(), memo_for_dest);
                             }
+                            // Discard original gss_arc, as its path is now represented by the connection
+                        } else if let Some((stored_root, stored_gss)) = self.parser.precomputation_cache.get(&cache_key) {
+                            // Stored cache hit
+                            hit!("GLRParserState::reduce_and_goto::StoredCacheHit");
+
+                            // 1. Deep copy trie from stored god to local god
+                            let new_root_vec = PrecomputeNode3::deep_copy_subtrees_into(
+                                &self.parser.precomputation_god.0.read().unwrap().arena,
+                                &god.0.read().unwrap().arena,
+                                &[stored_root.into_trie2_index()]
+                            );
+                            let new_root_idx = PrecomputeNode3Index::from_trie2_index(new_root_vec[0]);
+
+                            // 2. Build ID map for remapping GSS
+                            fn build_id_map(source_god: &Trie3God, dest_god: &Trie3God, source_root: Trie2Index, dest_root: Trie2Index, map: &mut BTreeMap<Trie2Index, Trie2Index>) {
+                                if map.contains_key(&source_root) { return; }
+                                map.insert(source_root, dest_root);
+                                let source_node = &source_god.arena[source_root];
+                                let dest_node = &dest_god.arena[dest_root];
+                                for ((_, source_child), (_, dest_child)) in source_node.children.iter().zip(dest_node.children.iter()) {
+                                    build_id_map(source_god, dest_god, *source_child, *dest_child, map);
+                                }
+                            }
+                            let mut id_map = BTreeMap::new();
+                            build_id_map(&self.parser.precomputation_god.0.read().unwrap(), &god.0.read().unwrap(), stored_root.into_trie2_index(), new_root_idx.into_trie2_index(), &mut id_map);
+
+                            // 3. Clone and remap GSS, add to output
+                            let mut remapped_gss = stored_gss.clone();
+                            map_trie3_node_ids(&mut remapped_gss, &id_map);
+                            final_out.push(remapped_gss);
+
+                            // 4. Add to local cache
+                            self.below_bottom_cache.insert(cache_key, new_root_idx.clone());
+
+                            // 5. Connect current GSS trie leaves to the new trie root
+                            if has_sources {
+                                let edge_key = (0, tokens_all.clone());
+                                let edge_value = StateIDBV::max_ones();
+                                let tokens_for_update = tokens_all.clone();
+                                let memo_for_dest = cached_dest_memos.entry(new_root_idx.clone()).or_default();
+                                let mut gss_to_modify = gss_arc; // This is just for its acc
+                                deep_add_precompute_trie_edges(&mut gss_to_modify, god, &edge_key, &edge_value, &tokens_for_update, &mut || new_root_idx.clone(), memo_for_dest);
+                            }
+                            // Discard original gss_arc
+                        } else {
+                            // Complete cache miss, fall back to original behavior
+                            hit!("GLRParserState::reduce_and_goto::CacheMiss");
+                            final_out.push(gss_arc);
                         }
-                        let mut id_map = BTreeMap::new();
-                        build_id_map(&self.parser.precomputation_god.0.read().unwrap(), &god.0.read().unwrap(), stored_root.into_trie2_index(), new_root_idx.into_trie2_index(), &mut id_map);
-
-                        // 3. Clone and remap GSS, add to output
-                        let mut remapped_gss = stored_gss.clone();
-                        map_trie3_node_ids(&mut remapped_gss, &id_map);
-                        final_out.push(remapped_gss);
-
-                        // 4. Add to local cache
-                        self.below_bottom_cache.insert(cache_key, new_root_idx.clone());
-
-                        // 5. Connect current GSS trie leaves to the new trie root
-                        if has_sources {
-                            let edge_key = (0, tokens_all.clone());
-                            let edge_value = StateIDBV::max_ones();
-                            let tokens_for_update = tokens_all.clone();
-                            let memo_for_dest = cached_dest_memos.entry(new_root_idx.clone()).or_default();
-                            let mut gss_to_modify = gss_arc; // This is just for its acc
-                            deep_add_precompute_trie_edges(&mut gss_to_modify, god, &edge_key, &edge_value, &tokens_for_update, &mut || new_root_idx.clone(), memo_for_dest);
-                        }
-                        // Discard original gss_arc
                     } else {
-                        // Complete cache miss, fall back to original behavior
-                        hit!("GLRParserState::reduce_and_goto::CacheMiss");
+                        // Not a simple GSS, keep it for merging.
+                        crate::debug!(5, "Non-simple GSS encountered, keeping as-is.");
+                        hit!("GLRParserState::reduce_and_goto::NonSimpleGSS");
                         final_out.push(gss_arc);
                     }
-                } else {
-                    // Not a simple GSS, keep it for merging.
-                    crate::debug!(5, "Non-simple GSS encountered, keeping as-is.");
-                    hit!("GLRParserState::reduce_and_goto::NonSimpleGSS");
-                    final_out.push(gss_arc);
+                    });
                 }
-                });
-            }
             });
+            }
         } else {
             // No trie god, so no caching is possible.
             final_out = out;
