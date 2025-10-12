@@ -2714,6 +2714,7 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
     grammar_token_map.insert(regex_name("A"), TerminalID(0));
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    println!("Parser: {}", parser);
 
     let trie3_god = Trie3God::new();
 
@@ -2734,7 +2735,6 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     // 3. Loop, feed token 'a', and check for explosion
     for i in 1..=10 {
         glr_state.process_token_advanced(terminal_a, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
-        glr_state.process_default_reductions();
 
         let current_nodes = glr_state.stats().unique_nodes();
         node_counts.push(current_nodes);
