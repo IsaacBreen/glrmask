@@ -2725,7 +2725,7 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     let gss_stack = parser.get_combined_gss_with_acc(acc);
     let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
 
-    for i in 0..5 {
+    for i in 0..50 {
         let mut next_glr_state: Option<GLRParserState> = None;
         for (terminal, terminal_id) in &parser.terminal_map {
             let mut glr_state_copy = glr_state.clone();
