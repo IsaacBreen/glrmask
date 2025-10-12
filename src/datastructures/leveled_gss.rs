@@ -343,6 +343,8 @@ mod tests {
 
     #[test]
     fn test_normalize_merges_across_accs() {
+        // TODO: FIX this test. Need to be more careful how we set up stacks.
+        //  Actually, to_stacks() will merge on its own. What we want to do is get a case where...
         // Two identical stack shapes with different accumulators.
         let g1 = gss_from_str_stacks(&[(&["A", "B", "C"], &[1])]);
         let g2 = gss_from_str_stacks(&[(&["A", "B", "C"], &[2])]);
@@ -350,21 +352,20 @@ mod tests {
         let merged = g1.merge(&g2);
         // Before normalization, we should have two paths (acc {1} and acc {2})
         let before_stacks = merged.to_stacks();
-        assert_eq!(before_stacks.len(), 1, "Before normalization expected 2 stacks, got {:?}", before_stacks);
+        assert_eq!(before_stacks.len(), 2, "Before normalization expected 2 stacks, got {:?}", before_stacks);
 
-        // Test faulty
-        // // After normalization, they should merge into a single path with acc {1,2}
-        // let normalized = merged.normalize();
-        // let stacks = normalized.to_stacks();
-        // assert_eq!(stacks.len(), 1);
-        // let (path, acc) = &stacks[0];
-        // assert_eq!(path, &vec!["A".to_string(), "B".to_string(), "C".to_string()]);
-        // assert_eq!(acc, &super::tests::IntAcc::new(&[1, 2]));
-        //
-        // // Sanity: node count should not increase after normalization.
-        // let stats_before = merged.stats();
-        // let stats_after = normalized.stats();
-        // assert!(stats_after.total_unique_nodes <= stats_before.total_unique_nodes);
+        // After normalization, they should merge into a single path with acc {1,2}
+        let normalized = merged.normalize();
+        let stacks = normalized.to_stacks();
+        assert_eq!(stacks.len(), 1);
+        let (path, acc) = &stacks[0];
+        assert_eq!(path, &vec!["A".to_string(), "B".to_string(), "C".to_string()]);
+        assert_eq!(acc, &super::tests::IntAcc::new(&[1, 2]));
+
+        // Sanity: node count should not increase after normalization.
+        let stats_before = merged.stats();
+        let stats_after = normalized.stats();
+        assert!(stats_after.total_unique_nodes <= stats_before.total_unique_nodes);
     }
 }
 
