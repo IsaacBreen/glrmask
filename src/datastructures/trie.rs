@@ -709,12 +709,13 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// # Returns
     /// A tuple containing:
     /// - A new `Arena<Trie<EK, EV, T>>` with the copied subtrees.
-    /// - A `Vec<Trie2Index>` containing the indices of the new roots in the new arena,
-    ///   in the same order as the input `roots`.
+    /// - A `Vec<Trie2Index>` containing the indices of the new roots in the new arena, in the
+    ///   same order as the input `roots`.
+    /// - A `HashMap<usize, Trie2Index>` mapping old node indices to new node indices.
     pub fn deep_copy_subtrees(
         source_arena: &Arena<Self>,
         roots: &[Trie2Index],
-    ) -> (Arena<Self>, Vec<Trie2Index>) {
+    ) -> (Arena<Self>, Vec<Trie2Index>, HashMap<usize, Trie2Index>) {
         let new_arena = Arena::new();
         let mut old_to_new_map: HashMap<usize, Trie2Index> = HashMap::new();
         let mut new_roots = Vec::with_capacity(roots.len());
@@ -725,7 +726,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             new_roots.push(new_root);
         }
 
-        (new_arena, new_roots)
+        (new_arena, new_roots, old_to_new_map)
     }
 
     /// Deep copies the subtrees rooted at `roots` from `source_arena` into `dest_arena`.
@@ -740,13 +741,15 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     /// * `roots`: A slice of `Trie2Index` pointing to the root nodes of the subtrees to copy.
     ///
     /// # Returns
-    /// A `Vec<Trie2Index>` containing the indices of the new roots in the `dest_arena`,
-    /// in the same order as the input `roots`.
+    /// A tuple containing:
+    /// - A `Vec<Trie2Index>` containing the indices of the new roots in the `dest_arena`,
+    ///   in the same order as the input `roots`.
+    /// - A `HashMap<usize, Trie2Index>` mapping old node indices to new node indices.
     pub fn deep_copy_subtrees_into(
         source_arena: &Arena<Self>,
         dest_arena: &Arena<Self>,
         roots: &[Trie2Index],
-    ) -> Vec<Trie2Index> {
+    ) -> (Vec<Trie2Index>, HashMap<usize, Trie2Index>) {
         let mut old_to_new_map: HashMap<usize, Trie2Index> = HashMap::new();
         let mut new_roots = Vec::with_capacity(roots.len());
 
@@ -756,7 +759,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
             new_roots.push(new_root);
         }
 
-        new_roots
+        (new_roots, old_to_new_map)
     }
 
     /// Recursive helper for `deep_copy_subtrees`.
