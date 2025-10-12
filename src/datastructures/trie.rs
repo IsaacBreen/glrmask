@@ -728,6 +728,37 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         (new_arena, new_roots)
     }
 
+    /// Deep copies the subtrees rooted at `roots` from `source_arena` into `dest_arena`.
+    ///
+    /// This function performs a full traversal from the given roots and duplicates all
+    /// reachable nodes and edges from `source_arena` into `dest_arena`. It correctly
+    /// handles shared subtrees (copying them only once) and cycles.
+    ///
+    /// # Arguments
+    /// * `source_arena`: The arena containing the original graph.
+    /// * `dest_arena`: The arena to copy the subtrees into.
+    /// * `roots`: A slice of `Trie2Index` pointing to the root nodes of the subtrees to copy.
+    ///
+    /// # Returns
+    /// A `Vec<Trie2Index>` containing the indices of the new roots in the `dest_arena`,
+    /// in the same order as the input `roots`.
+    pub fn deep_copy_subtrees_into(
+        source_arena: &Arena<Self>,
+        dest_arena: &Arena<Self>,
+        roots: &[Trie2Index],
+    ) -> Vec<Trie2Index> {
+        let mut old_to_new_map: HashMap<usize, Trie2Index> = HashMap::new();
+        let mut new_roots = Vec::with_capacity(roots.len());
+
+        for &root in roots {
+            let new_root =
+                Self::deep_copy_recursive(root, source_arena, dest_arena, &mut old_to_new_map);
+            new_roots.push(new_root);
+        }
+
+        new_roots
+    }
+
     /// Recursive helper for `deep_copy_subtrees`.
     fn deep_copy_recursive(
         old_idx: Trie2Index,
