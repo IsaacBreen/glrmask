@@ -1786,17 +1786,24 @@ impl GrammarConstraint {
                     let mut glr_s2 = glr_s.clone();
                     Arc::make_mut(&mut glr_s2.active_state.stack).inner = glr_s2.active_state.stack.inner.normalize();
                     let stats2 = glr_s2.stats();
+                    println!("Stats before normalization: {:?}", stats);
+                    println!("Stats after normalization: {:?}", stats2);
                     // if (!(stats.unique_nodes() < 1000)) {
                     if stats.structural_sharing_factor < 0.5 {
-                        // println!("After normalization, number of GSS nodes: {}, edges: {}", stats2.unique_nodes(), stats2.total_edges());
-                        println!("Stats before normalization: {:?}", stats);
-                        println!("Stats after normalization: {:?}", stats2);
                         print_summary_flat();
                         print_summary();
-                        // Ensure that normalization has the expected effect of increasing the structural sharing factor.
-                        assert!(stats2.structural_sharing_factor >= stats.structural_sharing_factor);
-                        assert!(stats.unique_nodes() < 10000);
+                        // Ensure that normalization has the expected effect of increasing the structural sharing factor significantly.
+                        // Significantly here means by at least 10 percentage points.
+                        let diff = stats2.structural_sharing_factor - stats.structural_sharing_factor;
+                        let diff_pct = diff / stats.structural_sharing_factor;
+                        let min_diff_pct = 0.1;
+                        if diff_pct < min_diff_pct {
+                            panic!("Structural sharing factor increase too low ({:.1}% < {:.1}%) after normalization at edge {:?} with tokens {:?}. Stats before: {:?}, after: {:?}.", diff_pct * 100.0, min_diff_pct * 100.0, edge_grammar_token_opt, edge_bv, stats, stats2);
+                        }
+
+                        // panic!("Structural sharing factor too low ({}) before normalization at edge {:?} with tokens {:?}.", stats.structural_sharing_factor, edge_grammar_token_opt, edge_bv);
                     }
+                    assert!(stats2.structural_sharing_factor >= stats.structural_sharing_factor);
                 }
 
                 out = Vec::new();
