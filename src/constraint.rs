@@ -495,7 +495,7 @@ impl Default for GrammarConstraintConfig {
             trie0: Trie0Config::off(),
             trie1: Trie1Config::default(),
             trie2: Trie2Config::off(),
-            trie3: Trie3Config::default(),
+            trie3: Trie3Config::off(),
         }
     }
 }
