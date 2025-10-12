@@ -512,9 +512,8 @@ impl GLRParser {
                 // 3. Setup for one parse run
                 let internal_max_llm_token = llm_vocab.as_ref().map_or(0, |v| v.size() - 1);
                 let root_idx = {
-                    let mut god = self.trie3_god.lock().unwrap();
                     PrecomputeNode3Index::new(
-                        god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token)))
+                        self.trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token)))
                     )
                 };
                 let mut acc = Acc::new_fresh();
