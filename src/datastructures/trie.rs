@@ -696,6 +696,95 @@ where
 // Implementation block for special_map and related functionality
 // Requires T: Clone, EK: Ord + Clone, EV: Clone
 impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
+    /// Deep copies the subtrees rooted at `roots` from `source_arena` into a new `Arena`.
+    ///
+    /// This function performs a full traversal from the given roots and duplicates all
+    /// reachable nodes and edges into a new `Arena`. It correctly handles shared subtrees
+    /// (copying them only once) and cycles.
+    ///
+    /// # Arguments
+    /// * `source_arena`: The arena containing the original graph.
+    /// * `roots`: A slice of `Trie2Index` pointing to the root nodes of the subtrees to copy.
+    ///
+    /// # Returns
+    /// A tuple containing:
+    /// - A new `Arena<Trie<EK, EV, T>>` with the copied subtrees.
+    /// - A `Vec<Trie2Index>` containing the indices of the new roots in the new arena,
+    ///   in the same order as the input `roots`.
+    pub fn deep_copy_subtrees(
+        source_arena: &Arena<Self>,
+        roots: &[Trie2Index],
+    ) -> (Arena<Self>, Vec<Trie2Index>) {
+        let new_arena = Arena::new();
+        let mut old_to_new_map: HashMap<usize, Trie2Index> = HashMap::new();
+        let mut new_roots = Vec::with_capacity(roots.len());
+
+        for &root in roots {
+            let new_root =
+                Self::deep_copy_recursive(root, source_arena, &new_arena, &mut old_to_new_map);
+            new_roots.push(new_root);
+        }
+
+        (new_arena, new_roots)
+    }
+
+    /// Recursive helper for `deep_copy_subtrees`.
+    fn deep_copy_recursive(
+        old_idx: Trie2Index,
+        source_arena: &Arena<Self>,
+        new_arena: &Arena<Self>,
+        old_to_new_map: &mut HashMap<usize, Trie2Index>,
+    ) -> Trie2Index {
+        if let Some(&new_idx) = old_to_new_map.get(&old_idx.as_usize()) {
+            return new_idx;
+        }
+
+        let old_node_guard = old_idx
+            .read(source_arena)
+            .expect("Source node not found during deep copy");
+
+        // Create a new node with copied value and max_depth, but no children yet.
+        let new_node = Trie {
+            value: old_node_guard.value.clone(),
+            children: BTreeMap::new(), // Children will be added after recursive calls.
+            max_depth: old_node_guard.max_depth,
+        };
+        let new_idx = Trie2Index::from(new_arena.insert(new_node));
+
+        // Insert the mapping *before* recursing to handle cycles correctly.
+        old_to_new_map.insert(old_idx.as_usize(), new_idx);
+
+        // Now, collect children info to avoid holding the read guard during recursive calls.
+        let children_to_copy: Vec<(EK, OrderedHashMap<Trie2Index, EV>)> = old_node_guard
+            .children
+            .iter()
+            .map(|(ek, dest_map)| (ek.clone(), dest_map.clone()))
+            .collect();
+
+        // Drop the read guard on the old node.
+        drop(old_node_guard);
+
+        // Recurse for all children and build up the new children map.
+        let mut new_children = BTreeMap::new();
+        for (ek, dest_map) in children_to_copy {
+            let mut new_dest_map = OrderedHashMap::with_capacity(dest_map.len());
+            for (old_child_idx, ev) in dest_map {
+                let new_child_idx =
+                    Self::deep_copy_recursive(old_child_idx, source_arena, new_arena, old_to_new_map);
+                new_dest_map.insert(new_child_idx, ev.clone());
+            }
+            new_children.insert(ek, new_dest_map);
+        }
+
+        // Now, get a write lock on the new node to insert the copied children.
+        let mut new_node_guard = new_idx
+            .write(new_arena)
+            .expect("Newly created node not found during deep copy");
+        new_node_guard.children = new_children;
+
+        new_idx
+    }
+
     fn count_all_edges(
         arena: &Arena<Trie<EK, EV, T>>,
         root_nodes: &[Trie2Index],
