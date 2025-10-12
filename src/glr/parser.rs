@@ -3,7 +3,7 @@ use crate::datastructures::gss_leveled_adapter::{find_longest_path, gather_gss_s
 use crate::datastructures::gss_leveled_adapter::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{CombinedRow, Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
+use crate::glr::table::{CombinedRow, Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID, Trie3};
 use crate::tokenizer::LLMTokenID;
 use std::any::Any;
 use std::cmp::Ordering;
@@ -287,6 +287,8 @@ pub struct GLRParser {
     pub combined_rows: BTreeMap<StateID, CombinedRow>,
     pub combined_start_state_id: StateID,
     pub combined_gss: Arc<GSSNode>,
+    pub precomputation_states: BTreeMap<StateID, NonTerminalID>,
+    pub precomputed_cache: HashMap<(NonTerminalID, TerminalID), (Trie3GodWrapper, PrecomputeNode3Index, Arc<GSSNode>)>,
 }
 
 impl JSONConvertible for GLRParser {
@@ -342,8 +344,7 @@ impl JSONConvertible for GLRParser {
                     let gss = Arc::new(gss_leaf.push(ParseStateEdgeContent { state_id: combined_start_state_id }));
                     gss
                 };
-
-                Ok(GLRParser {
+                let mut parser = GLRParser {
                     table,
                     productions,
                     terminal_map,
@@ -359,7 +360,11 @@ impl JSONConvertible for GLRParser {
                     combined_rows,
                     combined_start_state_id,
                     combined_gss,
-                })
+                    precomputation_states: BTreeMap::new(),
+                    precomputed_cache: HashMap::new(),
+                };
+                parser.precompute_and_cache_reductions();
+                Ok(parser)
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
         }
@@ -401,6 +406,7 @@ impl PartialEq for GLRParser {
         self.hallucinated_state_id == other.hallucinated_state_id &&
         self.combined_rows == other.combined_rows &&
         self.combined_start_state_id == other.combined_start_state_id
+        // The precomputation fields are ignored as they are derived data.
     }
 }
 
@@ -439,7 +445,7 @@ impl GLRParser {
             gss
         };
 
-        Self {
+        let mut parser = Self {
             table,
             productions,
             terminal_map,
@@ -455,6 +461,72 @@ impl GLRParser {
             combined_rows,
             combined_start_state_id,
             combined_gss,
+            precomputation_states: BTreeMap::new(),
+            precomputed_cache: HashMap::new(),
+        };
+        parser.precompute_and_cache_reductions();
+        parser
+    }
+
+    pub fn precompute_and_cache_reductions(&mut self) {
+        let mut max_state_id = self.table.keys().map(|s| s.0).max().unwrap_or(0);
+        max_state_id = std::cmp::max(max_state_id, self.combined_rows.keys().map(|s| s.0).max().unwrap_or(0));
+
+        let mut next_state_id = max_state_id + 1;
+        let mut precomputation_states = BTreeMap::new();
+        for &nt_id in self.non_terminal_map.values() {
+            precomputation_states.insert(StateID(next_state_id), nt_id);
+            next_state_id += 1;
+        }
+        self.precomputation_states = precomputation_states;
+
+        let mut temp_parser = self.clone();
+        for (&state_id, _) in &self.precomputation_states {
+            let fake_row = Row {
+                shifts_and_reduces_full: BTreeMap::new(),
+                shifts_and_reduces_without_default_reduce: BTreeMap::new(),
+                default_reduce: DefaultReduce::default(),
+                gotos: BTreeMap::new(),
+            };
+            temp_parser.table.insert(state_id, fake_row);
+        }
+
+        for (&nt_id, _nt) in self.non_terminal_map.iter_by_right() {
+            let fake_state_id = *self.precomputation_states.iter().find(|(_, &v)| v == nt_id).unwrap().0;
+
+            for (&terminal_id, _terminal) in self.terminal_map.iter_by_right() {
+                let reduce_action = Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                    nonterminal_id: nt_id,
+                    len: 2,
+                    production_ids: BTreeSet::new(),
+                };
+                {
+                    let fake_row = temp_parser.table.get_mut(&fake_state_id).unwrap();
+                    fake_row.shifts_and_reduces_full.clear();
+                    fake_row.shifts_and_reduces_without_default_reduce.clear();
+                    fake_row.shifts_and_reduces_full.insert(terminal_id, reduce_action.clone());
+                    fake_row.shifts_and_reduces_without_default_reduce.insert(terminal_id, reduce_action);
+                }
+
+                let god = Trie3God::new();
+                let god_wrapper = Trie3GodWrapper(Arc::new(RwLock::new(god)));
+                let root_node = PrecomputeNode3Index::new(
+                    god_wrapper.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+                );
+
+                let mut acc = Acc::new_fresh();
+                acc.stored_trie_nodes_mut().insert(root_node.clone());
+
+                let mut parser_state = temp_parser.init_parser_state_combined_with_acc(acc);
+                parser_state = parser_state.with_god(god_wrapper.clone());
+
+                let new_stack = Arc::new(parser_state.active_state.stack.push(ParseStateEdgeContent { state_id: fake_state_id }));
+                parser_state.active_state.stack = new_stack;
+
+                parser_state.process_token_advanced(terminal_id, &ProcessTokenAdvancedConfig::default());
+
+                self.precomputed_cache.insert((nt_id, terminal_id), (god_wrapper, root_node, parser_state.active_state.stack));
+            }
         }
     }
 
@@ -468,6 +540,7 @@ impl GLRParser {
             active_state: stack,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            current_token_id: None,
         }
     }
 
@@ -477,6 +550,7 @@ impl GLRParser {
             active_state: ParseState::new(),
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            current_token_id: None,
         }
     }
 
@@ -487,6 +561,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            current_token_id: None,
         };
         parser_state
     }
@@ -497,6 +572,7 @@ impl GLRParser {
             active_state: parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            current_token_id: None,
         };
         parser_state
     }
@@ -519,6 +595,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            current_token_id: None,
         }
     }
 
@@ -545,6 +622,7 @@ impl GLRParser {
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
             below_bottom_cache: Default::default(),
+            current_token_id: None,
         }
     }
 
@@ -990,6 +1068,7 @@ pub struct GLRParserState<'a> { // No longer generic
     pub active_state: ParseState,
     phase: ParserPhase,
     below_bottom_cache: HashMap<BelowBottomCacheKey, PrecomputeNode3Index>,
+    current_token_id: Option<TerminalID>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1798,81 +1877,113 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // --- NEW CACHING LOGIC ---
         let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
         if let Some(god) = self.active_state.trie2_god.as_ref() {
-            timeit!("GLRParserState::reduce_and_goto::Caching", { // ~500 calls
-            for gss_arc in out {
-                timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", { // SLOW POINT, ~20k calls
-                if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.combined_start_state_id) {
-                    // assert!(gss_arc.inner.pop().inner_ptr_eq(&self.parser.get_combined_gss_with_acc((*acc).clone()).inner), "Expected simple GSS to have the canonical combined GSS as its isolated parent.\n{}\n{}", gss_arc.inner.pop().to_graph_string(false), self.parser.get_combined_gss().inner.to_graph_string(false));
-                    let mut new_gss_arc = gss_arc;
-                    let has_sources = !acc.stored_trie_nodes().is_empty();
+            timeit!("GLRParserState::reduce_and_goto::Caching", {
+                // ~500 calls
+                for gss_arc in out {
+                    timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", {
+                        // SLOW POINT, ~20k calls
+                        if let Some((state_id, acc)) =
+                            is_simple_gss(&gss_arc, self.parser.combined_start_state_id)
+                        {
+                            let mut new_gss_arc = gss_arc;
+                            let has_sources = !acc.stored_trie_nodes().is_empty();
 
-                    // Always perform cache lookup/insertion to prevent infinite loops.
-                    let cache_key = BelowBottomCacheKey {
-                        nonterminal_id: nt,
-                        // nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
-                        source_state_id: StateID(usize::MAX),      // Dummy value
-                        // goto_state_id: state_id,
-                        goto_state_id: StateID(usize::MAX), // Dummy value
-                        k: usize::MAX,                             // Dummy value
-                    };
+                            let cache_key = BelowBottomCacheKey {
+                                nonterminal_id: nt,
+                                source_state_id: StateID(usize::MAX),
+                                goto_state_id: StateID(usize::MAX),
+                                k: usize::MAX,
+                            };
 
-                    let (cached_dest, add_to_out) = timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS::CacheLookup", {
-                        let entry = self.below_bottom_cache.entry(cache_key);
-                        match entry {
-                            std::collections::hash_map::Entry::Occupied(occupied) => {
-                                (occupied.get().clone(), false)
+                            if let Some(cached_dest) = self.below_bottom_cache.get(&cache_key) {
+                                hit!("GLRParserState::reduce_and_goto::CacheHit");
+                                if has_sources {
+                                    let edge_key = (0, tokens_all.clone());
+                                    let edge_value = StateIDBV::max_ones();
+                                    let tokens_for_update = tokens_all.clone();
+                                    let memo_for_dest = cached_dest_memos
+                                        .entry(cached_dest.clone())
+                                        .or_insert_with(PruneAndTransformRecursiveMemo::default);
+                                    deep_add_precompute_trie_edges(
+                                        &mut new_gss_arc,
+                                        god,
+                                        &edge_key,
+                                        &edge_value,
+                                        &tokens_for_update,
+                                        &mut || cached_dest.clone(),
+                                        memo_for_dest,
+                                    );
+                                }
+                                continue;
                             }
-                            std::collections::hash_map::Entry::Vacant(vacant) => {
-                                let new_dest = PrecomputeNode3Index::new(
-                                    god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
+
+                            if let Some(token_id) = self.current_token_id {
+                                if let Some((stored_god, stored_root, stored_gss)) =
+                                    self.parser.precomputed_cache.get(&(nt, token_id))
+                                {
+                                    hit!("GLRParserState::reduce_and_goto::PrecomputedCacheHit");
+
+                                    let new_root_idx = god.0.write().unwrap().insert_subtree(
+                                        &stored_god.0.read().unwrap(),
+                                        stored_root.index(),
+                                    );
+                                    let new_root = PrecomputeNode3Index(new_root_idx);
+                                    self.below_bottom_cache.insert(cache_key, new_root.clone());
+
+                                    let (stored_state_id, stored_acc) = is_simple_gss(
+                                        stored_gss,
+                                        self.parser.combined_start_state_id,
+                                    )
+                                    .unwrap();
+                                    let mut new_acc = stored_acc.clone();
+                                    new_acc.stored_trie_nodes_mut().clear();
+                                    new_acc.stored_trie_nodes_mut().insert(new_root.clone());
+
+                                    let new_gss_base =
+                                        self.parser.get_combined_gss_with_acc(new_acc);
+                                    let new_gss = Arc::new(new_gss_base.push(
+                                        ParseStateEdgeContent {
+                                            state_id: stored_state_id,
+                                        },
+                                    ));
+                                    final_out.push(new_gss);
+
+                                    continue;
+                                }
+                            }
+
+                            hit!("GLRParserState::reduce_and_goto::CacheMiss");
+                            let new_dest = PrecomputeNode3Index::new(
+                                god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())),
+                            );
+                            self.below_bottom_cache.insert(cache_key, new_dest.clone());
+
+                            if has_sources {
+                                let edge_key = (0, tokens_all.clone());
+                                let edge_value = StateIDBV::max_ones();
+                                let tokens_for_update = tokens_all.clone();
+                                let memo_for_dest = cached_dest_memos
+                                    .entry(new_dest.clone())
+                                    .or_insert_with(PruneAndTransformRecursiveMemo::default);
+                                deep_add_precompute_trie_edges(
+                                    &mut new_gss_arc,
+                                    god,
+                                    &edge_key,
+                                    &edge_value,
+                                    &tokens_for_update,
+                                    &mut || new_dest.clone(),
+                                    memo_for_dest,
                                 );
-                                vacant.insert(new_dest.clone());
-                                (new_dest, true)
                             }
+                            final_out.push(new_gss_arc);
+                        } else {
+                            // Not a simple GSS, keep it for merging.
+                            crate::debug!(5, "Non-simple GSS encountered, keeping as-is.");
+                            hit!("GLRParserState::reduce_and_goto::NonSimpleGSS");
+                            final_out.push(gss_arc);
                         }
                     });
-
-                    // If there are source nodes, connect them to the cached destination. This will modify new_gss_arc.
-                    if has_sources {
-                        let edge_key = (0, tokens_all.clone());
-                        let edge_value = StateIDBV::max_ones();
-                        let tokens_for_update = tokens_all.clone();
-
-                        // Memoize deep_add for this particular cached destination to avoid re-walking identical subgraphs.
-                        let memo_for_dest = cached_dest_memos.entry(cached_dest.clone())
-                            .or_insert_with(PruneAndTransformRecursiveMemo::default);
-
-                        deep_add_precompute_trie_edges(
-                            &mut new_gss_arc,
-                            god,
-                            &edge_key,
-                            &edge_value,
-                            &tokens_for_update,
-                            &mut || cached_dest.clone(),
-                            memo_for_dest,
-                        );
-                    }
-
-                    // On a cache miss, we must add the canonical GSS representation to the output.
-                    // If has_sources is false, new_gss_arc is unmodified.
-                    // If has_sources is true, new_gss_arc has its stored_trie_nodes replaced by the destination.
-                    if add_to_out {
-                        crate::debug!(5, "Cache miss for simple GSS to state {}, adding to output (has_sources={}).", state_id.0, has_sources);
-                        hit!("GLRParserState::reduce_and_goto::CacheMiss");
-                        final_out.push(new_gss_arc);
-                    } else {
-                        crate::debug!(5, "Cache hit for simple GSS to state {}, skipping addition to output.", state_id.0);
-                        hit!("GLRParserState::reduce_and_goto::CacheHit");
-                    }
-                    // On a cache hit, the GSS is redundant and is discarded.
-                } else {
-                    // Not a simple GSS, keep it for merging.
-                    crate::debug!(5, "Non-simple GSS encountered, keeping as-is.");
-                    hit!("GLRParserState::reduce_and_goto::NonSimpleGSS");
-                    final_out.push(gss_arc);
                 }
-                });
-            }
             });
         } else {
             // No trie god, so no caching is possible.
@@ -1893,6 +2004,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::process_token_advanced")]
     pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
+        self.current_token_id = Some(token_id);
         self.below_bottom_cache.clear();
 
         if Some(token_id) == self.parser.ignore_terminal_id {
