@@ -1960,6 +1960,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 // Update local cache with the imported destination
                                 let dest_entry = self.below_bottom_cache.entry(cache_key).or_insert(new_root.clone());
                                 *dest_entry = new_root.clone();
+                                // Map trie node indices within the stored GSS to local arena indices
+                                let mut mapped_gss = stored_gss.clone();
+                                map_trie3_node_ids(&mut mapped_gss, &id_map);
+                                // Add the mapped GSS to the output
+                                final_out.push(mapped_gss);
                                 // Link the existing trie nodes to the cached root
                                 let existing_nodes = acc.stored_trie_nodes().clone();
                                 for existing_node in existing_nodes {
@@ -1974,11 +1979,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     );
                                     inserter.try_destination(new_root.clone()).expect("Cycle detected when adding precompute trie edges for cached below-bottom");
                                 }
-                                // Map trie node indices within the stored GSS to local arena indices
-                                let mut mapped_gss = stored_gss.clone();
-                                map_trie3_node_ids(&mut mapped_gss, &id_map);
-                                // Add the mapped GSS to the output
-                                final_out.push(mapped_gss);
                                 hit!("GLRParserState::reduce_and_goto::StoredCacheReuse");
                                 continue;
                             }
