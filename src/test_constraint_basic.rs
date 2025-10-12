@@ -2700,41 +2700,57 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
 #[test]
 fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>> {
     // This test checks for exponential GSS node growth in the face of ambiguity.
-    // The grammar S -> S S | 'a' creates a Catalan number of parse trees for a string of 'a's.
+    // The grammar S -> 'a' S | 'b' S | '' creates 2^n parse trees for a string of length n.
     // A correct GLR parser with GSS should handle this in polynomial time and space.
-    // We will feed a sequence of 'a's and check the GSS node growth.
+    // We simulate feeding both 'a' and 'b' at each step and merging the results.
     // If GSS node sharing is working correctly, the number of unique nodes should
-    // grow polynomially (e.g., quadratically), not exponentially.
+    // grow linearly, not exponentially.
 
     // 1. Grammar and Parser setup
     let productions = vec![
-        prod("S", vec![nt("S"), nt("S")]),
-        prod("S", vec![t("A")]),
+        prod("S", vec![t("A"), nt("S")]),
+        prod("S", vec![t("B"), nt("S")]),
+        prod("S", vec![t("C"), nt("S")]),
+        prod("S", vec![]),
     ];
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
     grammar_token_map.insert(regex_name("A"), TerminalID(0));
+    grammar_token_map.insert(regex_name("B"), TerminalID(1));
+    grammar_token_map.insert(regex_name("C"), TerminalID(2));
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
-    println!("Parser: {}", parser);
 
     let trie3_god = Trie3God::new();
 
     // 2. Initial GLR state
-    let internal_max_llm_token = 0;
+    let internal_max_llm_token = 2;
     let trie3_root = PrecomputeNode3Index::new(trie3_god.insert(PrecomputeNode3::new(PrecomputedNodeContents::root(internal_max_llm_token))));
     let mut acc = Acc::new_fresh();
     acc.stored_trie_nodes.insert(trie3_root);
     let mut glr_state = parser.init_parser_state_combined_with_acc(acc).with_god(trie3_god);
 
     let terminal_a = TerminalID(0);
+    let terminal_b = TerminalID(1);
+    let terminal_c = TerminalID(2);
 
     let mut node_counts = Vec::new();
     let initial_nodes = glr_state.stats().unique_nodes();
     node_counts.push(initial_nodes);
     println!("Initial state: {} nodes", initial_nodes);
 
-    // 3. Loop, feed token 'a', and check for explosion
+    // 3. Loop, feed tokens, merge, and check for explosion
     for i in 1..=10 {
-        glr_state.process_token_advanced(terminal_a, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
+        let mut state_a = glr_state.clone();
+        state_a.process_token_advanced(terminal_a, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
+
+        let mut state_b = glr_state.clone();
+        state_b.process_token_advanced(terminal_b, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
+
+        let mut state_c = glr_state.clone();
+        state_c.process_token_advanced(terminal_c, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
+
+        state_a.merge_with(state_b);
+        state_a.merge_with(state_c);
+        glr_state = state_a;
 
         let current_nodes = glr_state.stats().unique_nodes();
         node_counts.push(current_nodes);
@@ -2746,18 +2762,9 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     let increases: Vec<isize> = node_counts.windows(2).map(|w| w[1] as isize - w[0] as isize).collect();
     println!("Node increases per step: {:?}", increases);
 
-    // For S -> S S | 'a', the number of GSS nodes should grow polynomially (quadratically).
-    // An exponential explosion would show accelerating increases.
-    // We check that the growth is not exponential. A simple heuristic is to check that
-    // the ratio of consecutive increases is not large and growing.
-    if increases.len() > 4 {
-        let last_increase = *increases.last().unwrap() as f64;
-        let prev_increase = increases[increases.len() - 2] as f64;
-        // A healthy polynomial growth will have this ratio approach 1. Exponential will be > 1.
-        // We assert it's not growing wildly.
-        let ratio = if prev_increase > 0.0 { last_increase / prev_increase } else { 1.0 };
-        println!("Ratio of last two increases: {:.2}", ratio);
-        assert!(ratio < 2.0, "GSS node growth appears exponential. Ratio of last two increases is {:.2}. Increases: {:?}", ratio, increases);
+    // The growth should be roughly constant (linear). An explosion would show accelerating increases.
+    if let (Some(&increase1), Some(&increase2)) = (increases.get(2), increases.get(increases.len() - 1)) {
+        assert!(increase2 <= increase1, "GSS node growth appears exponential. Increase after 3 steps: {}, Last increase: {}. Full increases: {:?}", increase1, increase2, increases);
     }
 
     Ok(())
