@@ -1711,15 +1711,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 );
                                 (new_dest, PruneAndTransformRecursiveMemo::default())
                             });
-                            deep_add_precompute_trie_edges(
-                                &mut parent_after_filter,
-                                god,
-                                &edge_key_all_tokens_zero_k,
-                                bv,
-                                &tokens_all,
-                                &mut || dest.clone(),
-                                memo,
-                            );
+                            // deep_add_precompute_trie_edges(
+                            //     &mut parent_after_filter,
+                            //     god,
+                            //     &edge_key_all_tokens_zero_k,
+                            //     bv,
+                            //     &tokens_all,
+                            //     &mut || dest.clone(),
+                            //     memo,
+                            // );
                         }
 
                         // Accept contribution (store isolated parent)
