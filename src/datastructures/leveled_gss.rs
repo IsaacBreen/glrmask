@@ -350,7 +350,7 @@ mod tests {
         let merged = g1.merge(&g2);
         // Before normalization, we should have two paths (acc {1} and acc {2})
         let before_stacks = merged.to_stacks();
-        assert_eq!(before_stacks.len(), 2);
+        assert_eq!(before_stacks.len(), 2, "Before normalization expected 2 stacks, got {:?}", before_stacks);
 
         // After normalization, they should merge into a single path with acc {1,2}
         let normalized = merged.normalize();
