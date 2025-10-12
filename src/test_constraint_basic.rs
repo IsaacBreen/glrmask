@@ -2710,11 +2710,13 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     let productions = vec![
         prod("S", vec![t("A"), nt("S")]),
         prod("S", vec![t("B"), nt("S")]),
+        prod("S", vec![t("C"), nt("S")]),
         prod("S", vec![]),
     ];
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
     grammar_token_map.insert(regex_name("A"), TerminalID(0));
     grammar_token_map.insert(regex_name("B"), TerminalID(1));
+    grammar_token_map.insert(regex_name("C"), TerminalID(2));
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
     let trie3god = Trie3God::new();
@@ -2724,6 +2726,7 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
 
     let terminal_a = TerminalID(0);
     let terminal_b = TerminalID(1);
+    let terminal_c = TerminalID(2);
 
     let mut node_counts = Vec::new();
     let initial_nodes = glr_state.stats().unique_nodes();
@@ -2738,7 +2741,11 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
         let mut state_b = glr_state.clone();
         state_b.process_token_advanced(terminal_b, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
 
+        let mut state_c = glr_state.clone();
+        state_c.process_token_advanced(terminal_c, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
+
         state_a.merge_with(state_b);
+        state_a.merge_with(state_c);
         glr_state = state_a;
 
         let current_nodes = glr_state.stats().unique_nodes();
