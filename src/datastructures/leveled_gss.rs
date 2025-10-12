@@ -76,6 +76,39 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
     }
 }
 
+[cfg(test)]
+mod normalize_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    // Reuse IntAcc and helpers from the main tests module
+
+    #[test]
+    fn test_normalize_merges_across_accs() {
+        // Two identical stack shapes with different accumulators.
+        let g1 = super::tests::gss_from_str_stacks(&[(&["A", "B", "C"], &[1])]);
+        let g2 = super::tests::gss_from_str_stacks(&[(&["A", "B", "C"], &[2])]);
+
+        let merged = g1.merge(&g2);
+        // Before normalization, we should have two paths (acc {1} and acc {2})
+        let before_stacks = merged.to_stacks();
+        assert_eq!(before_stacks.len(), 2);
+
+        // After normalization, they should merge into a single path with acc {1,2}
+        let normalized = merged.normalize();
+        let stacks = normalized.to_stacks();
+        assert_eq!(stacks.len(), 1);
+        let (path, acc) = &stacks[0];
+        assert_eq!(path, &vec!["A".to_string(), "B".to_string(), "C".to_string()]);
+        assert_eq!(acc, &super::tests::IntAcc::new(&[1, 2]));
+
+        // Sanity: node count should not increase after normalization.
+        let stats_before = merged.stats();
+        let stats_after = normalized.stats();
+        assert!(stats_after.total_unique_nodes <= stats_before.total_unique_nodes);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -950,6 +983,8 @@ struct NormalizationLowerInterner<T: Clone + Eq + Hash> {
     // hash -> bucket of (signature, canonical id, canonical node)
     map: StdHashMap<u64, Vec<(LowerSig<T>, usize, Arc<Lower<T>>)>>,
     next_id: usize,
+    // allow reconstruction of canonical Lower node from its canonical id
+    id_to_arc: StdHashMap<usize, Arc<Lower<T>>>,
 }
 
 impl<T: Clone + Eq + Hash> Default for NormalizationLowerInterner<T> {
@@ -1081,6 +1116,11 @@ where
         for (existing_sig, id, arc) in bucket.iter() {
             if existing_sig == &sig {
                 memo_lower.insert(ptr, (*id, arc.clone()));
+                // ensure id_to_arc has a mapping for this id
+                interner_lower
+                    .id_to_arc
+                    .entry(*id)
+                    .or_insert_with(|| arc.clone());
                 return (*id, arc.clone());
             }
         }
@@ -1112,9 +1152,96 @@ where
         .entry(h)
         .or_default()
         .push((sig, id, new_node.clone()));
+    interner_lower.id_to_arc.insert(id, new_node.clone());
     memo_lower.insert(ptr, (id, new_node.clone()));
     (id, new_node)
 }
+
+// Acc-agnostic structural signatures for Upper nodes (used for accumulator merging).
+#[derive(Clone, PartialEq, Eq)]
+enum AggUpperSig<T: Clone + Eq + Hash> {
+    Branch {
+        terminal: bool, // presence of empty accumulator at this node
+        // Order-independent: label -> sorted, deduplicated list of child canonical upper ids
+        edges: StdHashMap<T, Vec<usize>>,
+    },
+    Interface {
+        // Canonical Lower root id fully captures lower structure including inner.empty.
+        lower_id: usize,
+    },
+}
+
+fn agg_upper_sig_hash<T: Clone + Eq + Hash>(sig: &AggUpperSig<T>) -> u64 {
+    use std::hash::{Hash as _, Hasher};
+    match sig {
+        AggUpperSig::Interface { lower_id } => {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            lower_id.hash(&mut h);
+            0x1f83_d9ab_fb41_bd6bu64 ^ h.finish()
+        }
+        AggUpperSig::Branch { terminal, edges } => {
+            let mut seed: u64 = if *terminal {
+                0x5be0_cd19_137e_2179
+            } else {
+                0xa2b0_8fe1_2a6b_7f42
+            };
+            seed ^= (edges.len() as u64).wrapping_mul(0x94d0_49bb_1331_11eb);
+            let mut xor_acc: u64 = 0;
+            let mut sum_acc: u64 = 0;
+            let mut prod_acc: u64 = 0x3c6e_f372_fe94_f82b ^ (edges.len() as u64);
+            for (k, ids) in edges {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                k.hash(&mut h);
+                ids.hash(&mut h);
+                let e = h.finish();
+                xor_acc ^= e;
+                sum_acc = sum_acc.wrapping_add(e);
+                prod_acc = prod_acc.wrapping_mul(e.wrapping_add(0xa54f_f53a_5f1d_36f1));
+            }
+            seed ^ xor_acc ^ sum_acc ^ prod_acc
+        }
+    }
+}
+
+struct AggUpperInterner<T: Clone + Eq + Hash> {
+    // hash -> bucket of (signature, canonical id)
+    map: StdHashMap<u64, Vec<(AggUpperSig<T>, usize)>>,
+    next_id: usize,
+    // allow reconstruction from id
+    id_to_sig: StdHashMap<usize, AggUpperSig<T>>,
+}
+
+impl<T: Clone + Eq + Hash> Default for AggUpperInterner<T> {
+    fn default() -> Self {
+        Self {
+            map: StdHashMap::new(),
+            next_id: 0,
+            id_to_sig: StdHashMap::new(),
+        }
+    }
+}
+
+impl<T: Clone + Eq + Hash> AggUpperInterner<T> {
+    fn intern(&mut self, sig: AggUpperSig<T>) -> usize {
+        let h = agg_upper_sig_hash(&sig);
+        let bucket = self.map.entry(h).or_default();
+        for (existing, id) in bucket.iter() {
+            if existing == &sig {
+                return *id;
+            }
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        bucket.push((sig.clone(), id));
+        self.id_to_sig.insert(id, sig);
+        id
+    }
+}
+
+// --------------------
+// Public GSS type
+// --------------------
+
 
 fn normalize_canonicalize_upper<T, A>(
     node: &Arc<Upper<T, A>>,
@@ -2285,27 +2412,185 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     #[time_it]
     pub fn normalize(&self) -> Self {
         // 1) Fuse all levels to collapse per-value multiplicity across depths.
-        //    This dramatically reduces branching in most real-world cases.
         let fused = self.fuse(None);
 
-        // 2) Hash-cons the resulting DAG bottom-up to maximally share all equal subgraphs.
-        //    We memoize by pointer to avoid repeated work and use interners keyed by
-        //    order-independent structural signatures.
-        let mut memo_upper: StdHashMap<usize, (usize, Arc<Upper<T, A>>)> = StdHashMap::new();
-        let mut memo_lower: StdHashMap<usize, (usize, Arc<Lower<T>>)> = StdHashMap::new();
-        let mut interner_upper: NormalizationUpperInterner<T, A> = Default::default();
+        // 2) Two-pass acc-agnostic structural interning with accumulator aggregation.
+        //    Pass A: collect structural signatures (ignoring acc) and aggregate accumulators.
+        //    Pass B: rebuild canonical DAG with merged accumulators and maximal sharing.
+
+        // Lower canonicalization used by Interface signatures
+        let mut memo_lower_collect: StdHashMap<usize, (usize, Arc<Lower<T>>)> = StdHashMap::new();
         let mut interner_lower: NormalizationLowerInterner<T> = Default::default();
 
-        let (_id, inner) = normalize_canonicalize_upper::<T, A>(
+        // Upper signature interning (acc-agnostic)
+        let mut memo_upper_collect: StdHashMap<usize, usize> = StdHashMap::new();
+        let mut interner_upper: AggUpperInterner<T> = Default::default();
+
+        // Accumulator aggregation maps:
+        // - For each Interface structural id, merge all accs (i.acc).
+        let mut iface_acc_agg: StdHashMap<usize, A> = StdHashMap::new();
+        // - For each Branch structural id with terminal=true, merge all empty accs.
+        let mut branch_empty_agg: StdHashMap<usize, A> = StdHashMap::new();
+
+        fn collect_upper_struct<T, A>(
+            node: &Arc<Upper<T, A>>,
+            memo_upper: &mut StdHashMap<usize, usize>,
+            memo_lower: &mut StdHashMap<usize, (usize, Arc<Lower<T>>)>,
+            interner_upper: &mut AggUpperInterner<T>,
+            interner_lower: &mut NormalizationLowerInterner<T>,
+            iface_acc_agg: &mut StdHashMap<usize, A>,
+            branch_empty_agg: &mut StdHashMap<usize, A>,
+        ) -> usize
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+        {
+            let ptr = Arc::as_ptr(node) as usize;
+            if let Some(id) = memo_upper.get(&ptr) {
+                return *id;
+            }
+            let id = match &**node {
+                Upper::Interface(i) => {
+                    // Canonicalize the inner lower root, use its canonical id as the interface signature.
+                    let (lower_id, _lower_arc) =
+                        normalize_canonicalize_lower(&i.inner, memo_lower, interner_lower);
+                    let sig = AggUpperSig::Interface { lower_id };
+                    let sid = interner_upper.intern(sig);
+                    // Merge accumulators for this interface structure.
+                    iface_acc_agg
+                        .entry(sid)
+                        .and_modify(|a| *a = a.merge(&i.acc))
+                        .or_insert_with(|| i.acc.clone());
+                    sid
+                }
+                Upper::Branch(b) => {
+                    // Recursively collect child upper structural ids.
+                    let mut edges: StdHashMap<T, Vec<usize>> = StdHashMap::new();
+                    for (v, kids) in b.children.iter() {
+                        let e = edges.entry(v.clone()).or_default();
+                        for child in kids.values() {
+                            let cid = collect_upper_struct::<T, A>(
+                                child,
+                                memo_upper,
+                                memo_lower,
+                                interner_upper,
+                                interner_lower,
+                                iface_acc_agg,
+                                branch_empty_agg,
+                            );
+                            e.push(cid);
+                        }
+                    }
+                    // Sort and deduplicate per label for a canonical signature.
+                    for ids in edges.values_mut() {
+                        ids.sort_unstable();
+                        ids.dedup();
+                    }
+                    let sig = AggUpperSig::Branch {
+                        terminal: b.empty.is_some(),
+                        edges,
+                    };
+                    let sid = interner_upper.intern(sig);
+                    if let Some(e) = &b.empty {
+                        branch_empty_agg
+                            .entry(sid)
+                            .and_modify(|a| *a = a.merge(e))
+                            .or_insert_with(|| e.clone());
+                    }
+                    sid
+                }
+            };
+            memo_upper.insert(ptr, id);
+            id
+        }
+
+        // Run Pass A on the fused root.
+        let root_sig_id = collect_upper_struct::<T, A>(
             &fused.inner,
-            &mut memo_upper,
-            &mut memo_lower,
+            &mut memo_upper_collect,
+            &mut memo_lower_collect,
             &mut interner_upper,
             &mut interner_lower,
+            &mut iface_acc_agg,
+            &mut branch_empty_agg,
         );
 
-        // Typically the inner pointer changes due to canonicalization. We just return the
-        // canonicalized GSS regardless.
+        // Pass B: rebuild canonical DAG from structural ids with aggregated accs.
+        let mut built_upper_by_id: StdHashMap<usize, Arc<Upper<T, A>>> = StdHashMap::new();
+
+        fn rebuild_upper_from_id<T, A>(
+            id: usize,
+            interner_upper: &AggUpperInterner<T>,
+            interner_lower: &NormalizationLowerInterner<T>,
+            built: &mut StdHashMap<usize, Arc<Upper<T, A>>>,
+            iface_acc_agg: &StdHashMap<usize, A>,
+            branch_empty_agg: &StdHashMap<usize, A>,
+        ) -> Arc<Upper<T, A>>
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+        {
+            if let Some(existing) = built.get(&id) {
+                return existing.clone();
+            }
+            let sig = interner_upper
+                .id_to_sig
+                .get(&id)
+                .expect("missing upper signature id");
+            let new_node = match sig {
+                AggUpperSig::Interface { lower_id } => {
+                    let lower_arc = interner_lower
+                        .id_to_arc
+                        .get(lower_id)
+                        .expect("missing lower arc for id")
+                        .clone();
+                    let acc = iface_acc_agg
+                        .get(&id)
+                        .expect("missing aggregated acc for interface id")
+                        .clone();
+                    new_interface(lower_arc, acc)
+                }
+                AggUpperSig::Branch { terminal, edges } => {
+                    let mut children: Children<T, Upper<T, A>> = IHashMap::new();
+                    for (v, ids) in edges.iter() {
+                        let mut ord: OrdMap<isize, Arc<Upper<T, A>>> = OrdMap::new();
+                        for cid in ids {
+                            let child = rebuild_upper_from_id::<T, A>(
+                                *cid,
+                                interner_upper,
+                                interner_lower,
+                                built,
+                                iface_acc_agg,
+                                branch_empty_agg,
+                            );
+                            ord.insert(child.max_depth(), child);
+                        }
+                        if !ord.is_empty() {
+                            children.insert(v.clone(), ord);
+                        }
+                    }
+                    let empty = if *terminal {
+                        branch_empty_agg.get(&id).cloned()
+                    } else {
+                        None
+                    };
+                    let b = new_branch(children, empty);
+                    try_promote(&b)
+                }
+            };
+            built.insert(id, new_node.clone());
+            new_node
+        }
+
+        let inner = rebuild_upper_from_id::<T, A>(
+            root_sig_id,
+            &interner_upper,
+            &interner_lower,
+            &mut built_upper_by_id,
+            &iface_acc_agg,
+            &branch_empty_agg,
+        );
+
         LeveledGSS { inner }
     }
 
