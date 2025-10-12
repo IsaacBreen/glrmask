@@ -534,7 +534,7 @@ impl GLRParser {
                 let pushed = s.active_state.stack.as_ref().clone().push(ParseStateEdgeContent { state_id: synthetic_sid });
                 s.active_state.stack = Arc::new(pushed);
                 // Run a single token step with the configured current_token (so downstream caching can reference it)
-                let cfg = ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::Panic, current_token: Some(tid) };
+                let cfg = ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll, current_token: Some(tid) };
                 s.process_token_advanced(tid, &cfg);
                 // Store the result in the stored cache
                 // self.stored_below_bottom_cache.insert((nt, tid), (root, s.active_state.stack.clone()));
@@ -1969,14 +1969,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 if let Some((stored_root, stored_gss)) = self.parser.stored_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
                                     // --- STORED REUSE on MISS ---
                                     hit!("GLRParserState::reduce_and_goto::StoredCacheReuse");
-                                    let (new_roots, _id_map) = PrecomputeNode3::deep_copy_subtrees_into(
+                                    let (new_roots, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
                                         &self.parser.stored_trie_god, dest_god, &[stored_root.clone().into()],
                                     );
                                     let new_root = new_roots[0];
                                     vacant.insert(new_root.clone());
 
-                                    // Do not also add the mapped_gss. Just wire the current simple GSS
-                                    // to the newly copied trie, mirroring the local cache hit logic.
+                                    let mut mapped_gss = stored_gss.clone();
+                                    map_trie3_node_ids(&mut mapped_gss, &id_map);
+
                                     if has_sources {
                                         let edge_key = (0, tokens_all.clone());
                                         let edge_value = StateIDBV::max_ones();
@@ -1986,6 +1987,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                             &mut || new_root.clone(), memo_for_dest,
                                         );
                                     }
+
+                                    final_shifted.push(mapped_gss);
                                     continue;
                                 }
                             }
