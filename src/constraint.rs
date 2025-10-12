@@ -1783,15 +1783,15 @@ impl GrammarConstraint {
                     //     Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
                     // });
 
-                    // let stats2 = glr_s.stats();
-                    // println!("After normalization, number of GSS nodes: {}, edges: {}", stats2.unique_nodes(), stats2.total_edges());
-                    // if (!(stats.unique_nodes() < 10000)) {
-                    //     println!("Stats before normalization: {:?}", stats);
-                    //     // println!("Stats after normalization: {:?}", stats2);
-                    //     print_summary_flat();
-                    //     print_summary();
-                    //     assert!(stats.unique_nodes() < 10000);
-                    // }
+                    let stats2 = glr_s.stats();
+                    println!("After normalization, number of GSS nodes: {}, edges: {}", stats2.unique_nodes(), stats2.total_edges());
+                    if (!(stats.unique_nodes() < 1000)) {
+                        println!("Stats before normalization: {:?}", stats);
+                        // println!("Stats after normalization: {:?}", stats2);
+                        print_summary_flat();
+                        print_summary();
+                        assert!(stats.unique_nodes() < 10000);
+                    }
                 }
 
                 out = Vec::new();
