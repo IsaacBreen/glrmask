@@ -1796,7 +1796,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
             for gss_arc in out {
                 timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS", { // SLOW POINT, ~20k calls
                 if let Some((state_id, acc)) = is_simple_gss(&gss_arc, self.parser.combined_start_state_id) {
-                    assert!(gss_arc.inner.pop().inner_ptr_eq(&self.parser.get_combined_gss().inner), "Expected simple GSS to have the canonical combined GSS as its isolated parent.\n{}\n{}", gss_arc.inner.pop().to_graph_string(false), self.parser.get_combined_gss().inner.to_graph_string(false));
+                    assert!(gss_arc.inner.pop().inner_ptr_eq(&self.parser.get_combined_gss_with_acc((*acc).clone()).inner), "Expected simple GSS to have the canonical combined GSS as its isolated parent.\n{}\n{}", gss_arc.inner.pop().to_graph_string(false), self.parser.get_combined_gss().inner.to_graph_string(false));
                     let mut new_gss_arc = gss_arc;
                     let has_sources = !acc.stored_trie_nodes().is_empty();
 
