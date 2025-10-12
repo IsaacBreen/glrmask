@@ -102,6 +102,7 @@ mod tests {
     }
 
     type TestGSS = LeveledGSS<String, IntAcc>;
+    type TestGSSInt = LeveledGSS<i32, IntAcc>;
 
     fn gss_from_str_stacks(stacks: &[(&[&str], &[i32])]) -> TestGSS {
         let stacks_vec: Vec<(Vec<String>, IntAcc)> = stacks
@@ -339,6 +340,83 @@ mod tests {
         let gss_empty = TestGSS::empty();
         let gss_empty_pruned = gss_empty.prune(|_acc| true);
         assert!(gss_empty.ptr_eq(&gss_empty_pruned));
+    }
+
+    #[test]
+    fn test_normalization_sharing_factor_regression() {
+        type TestGSSInt = LeveledGSS<i32, IntAcc>;
+
+        // Manually construct the GSS from the log to reproduce the issue.
+        // The key is to create a structure that is not fully optimal,
+        // with multiple paths to similar substructures that are not yet shared.
+
+        // 1. Build the shared terminal `Lower` node.
+        // This corresponds to `Lower @ ... (MaxDepth: 0) [TERMINAL]` in the log.
+        let l_terminal = new_lower::<i32>(IHashMap::new(), true);
+
+        // 2. Build the `Lower` node that is a parent to the terminal via edge 500.
+        // This is a shared structural component.
+        let l_500_parent = new_lower(
+            IHashMap::unit(500, OrdMap::unit(l_terminal.max_depth, l_terminal.clone())),
+            false,
+        );
+
+        // 3. Build the `Interface` nodes.
+
+        // The branch for path `... -> 295 -> 569 -> 500`
+        let i_54_inner = new_lower(
+            IHashMap::unit(569, OrdMap::unit(l_500_parent.max_depth, l_500_parent.clone())),
+            false,
+        );
+        let i_54 = new_interface(i_54_inner, IntAcc::new(&[54]));
+
+        // The branch with 10 parallel interfaces. Their `inner` is `l_500_parent`.
+        let acc_vals = vec![38, 39, 40, 44, 45, 46, 47, 48, 49, 50];
+        let interfaces_10: Vec<_> = acc_vals
+            .iter()
+            .map(|&acc| new_interface(l_500_parent.clone(), IntAcc::new(&[acc])))
+            .collect();
+
+        // 4. Build the `UpperBranch` nodes.
+        let edge_vals = vec![419, 437, 66, 477, 531, 541, 556, 558, 560, 562];
+        let mut children_101 = IHashMap::new();
+        for (edge, interface) in edge_vals.iter().zip(interfaces_10.iter()) {
+            children_101.insert(*edge, OrdMap::unit(interface.max_depth(), interface.clone()));
+        }
+        let ub_101 = new_branch(children_101, None);
+
+        let ub_295_d4 = new_branch(
+            IHashMap::unit(101, OrdMap::unit(ub_101.max_depth(), ub_101)),
+            None,
+        );
+
+        // 5. Build the root, which has two children for edge 295 at different depths.
+        let mut children_295 = OrdMap::new();
+        children_295.insert(i_54.max_depth(), i_54);
+        children_295.insert(ub_295_d4.max_depth(), ub_295_d4);
+        let root_children = IHashMap::unit(295, children_295);
+        let root_inner = new_branch(root_children, None);
+
+        let gss = TestGSSInt { inner: root_inner };
+
+        // 6. Check stats before normalization to confirm we've built the right structure.
+        let stats_before = gss.stats();
+        // These numbers come from your panic log.
+        assert_eq!(stats_before.num_upperbranch_nodes, 3);
+        assert_eq!(stats_before.num_interface_nodes, 11);
+        assert_eq!(stats_before.num_lower_nodes, 2);
+        assert_eq!(stats_before.total_unique_nodes, 16);
+        assert_eq!(stats_before.num_structurally_unique_nodes, 6);
+        assert_eq!(stats_before.structural_sharing_factor, 0.375);
+
+        // 7. Normalize and check stats after.
+        let gss_after = gss.normalize();
+        let stats_after = gss_after.stats();
+
+        // These numbers also come from your panic log.
+        assert_eq!(stats_after.total_unique_nodes, 15);
+        assert_eq!(stats_after.num_structurally_unique_nodes, 5);
+        assert!((stats_after.structural_sharing_factor - (5.0 / 15.0)).abs() < 1e-9);
     }
 }
 
