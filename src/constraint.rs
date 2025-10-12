@@ -1745,7 +1745,7 @@ impl GrammarConstraint {
             let mut gss_stack = gss_stack_base.clone();
             gss_stack.inner = gss_stack.inner.apply(|acc| {
                 let mut new_acc = acc.clone();
-                // new_acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
+                new_acc.stored_trie_nodes_mut().insert(trie3_root); // TEMP
                 new_acc
             });
             let gss_stack = Arc::new(gss_stack);
@@ -1783,12 +1783,14 @@ impl GrammarConstraint {
                     //     Arc::make_mut(&mut glr_s.active_state.stack).inner = glr_s.active_state.stack.inner.normalize();
                     // });
 
-                    let stats2 = glr_s.stats();
+                    let mut glr_s2 = glr_s.clone();
+                    Arc::make_mut(&mut glr_s2.active_state.stack).inner = glr_s2.active_state.stack.inner.normalize();
+                    let stats2 = glr_s2.stats();
                     // if (!(stats.unique_nodes() < 1000)) {
                     if stats.structural_sharing_factor < 0.2 {
                         // println!("After normalization, number of GSS nodes: {}, edges: {}", stats2.unique_nodes(), stats2.total_edges());
                         println!("Stats before normalization: {:?}", stats);
-                        // println!("Stats after normalization: {:?}", stats2);
+                        println!("Stats after normalization: {:?}", stats2);
                         print_summary_flat();
                         print_summary();
                         assert!(stats.unique_nodes() < 10000);
