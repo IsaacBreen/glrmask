@@ -1787,12 +1787,14 @@ impl GrammarConstraint {
                     Arc::make_mut(&mut glr_s2.active_state.stack).inner = glr_s2.active_state.stack.inner.normalize();
                     let stats2 = glr_s2.stats();
                     // if (!(stats.unique_nodes() < 1000)) {
-                    if stats.structural_sharing_factor < 0.2 {
+                    if stats.structural_sharing_factor < 0.5 {
                         // println!("After normalization, number of GSS nodes: {}, edges: {}", stats2.unique_nodes(), stats2.total_edges());
                         println!("Stats before normalization: {:?}", stats);
                         println!("Stats after normalization: {:?}", stats2);
                         print_summary_flat();
                         print_summary();
+                        // Ensure that normalization has the expected effect of increasing the structural sharing factor.
+                        assert!(stats2.structural_sharing_factor >= stats.structural_sharing_factor);
                         assert!(stats.unique_nodes() < 10000);
                     }
                 }
