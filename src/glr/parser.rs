@@ -3,7 +3,7 @@ use crate::datastructures::gss_leveled_adapter::{find_longest_path, gather_gss_s
 use crate::datastructures::gss_leveled_adapter::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{CombinedRow, Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID, Trie3};
+use crate::glr::table::{CombinedRow, Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
 use crate::tokenizer::LLMTokenID;
 use std::any::Any;
 use std::cmp::Ordering;
@@ -474,7 +474,7 @@ impl GLRParser {
 
         let mut next_state_id = max_state_id + 1;
         let mut precomputation_states = BTreeMap::new();
-        for &nt_id in self.non_terminal_map.values() {
+        for &nt_id in self.non_terminal_map.right_values() {
             precomputation_states.insert(StateID(next_state_id), nt_id);
             next_state_id += 1;
         }
@@ -509,7 +509,7 @@ impl GLRParser {
                 }
 
                 let god = Trie3God::new();
-                let god_wrapper = Trie3GodWrapper(Arc::new(RwLock::new(god)));
+                let god_wrapper = Trie3GodWrapper::new();
                 let root_node = PrecomputeNode3Index::new(
                     god_wrapper.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal()))
                 );
