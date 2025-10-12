@@ -1784,7 +1784,8 @@ impl GrammarConstraint {
                     // });
 
                     let stats2 = glr_s.stats();
-                    if (!(stats.unique_nodes() < 1000)) {
+                    // if (!(stats.unique_nodes() < 1000)) {
+                    if stats.structural_sharing_factor < 0.4 {
                         // println!("After normalization, number of GSS nodes: {}, edges: {}", stats2.unique_nodes(), stats2.total_edges());
                         println!("Stats before normalization: {:?}", stats);
                         // println!("Stats after normalization: {:?}", stats2);
