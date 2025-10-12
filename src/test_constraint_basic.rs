@@ -2728,7 +2728,7 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     // 3. Process the token 'a', which corresponds to the IDENTIFIER terminal.
     // This is a common token that can appear in many contexts, making it a good
     // candidate to trigger the creation of many parallel parse paths from the combined state.
-    let terminal_a = *parser.terminal_map.get_by_left(&Terminal::literal("a".into())).unwrap();
+    let terminal_a = *parser.terminal_map.get_by_left(&Terminal::terminal("IDENTIFIER")).unwrap();
     glr_state.process_token_advanced(terminal_a, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
 
     // 4. Check stats before normalization. A low sharing factor indicates the problem.
