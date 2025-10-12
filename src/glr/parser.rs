@@ -1,6 +1,6 @@
 use crate::constraint::{LLMTokenBV, LLMVocab, PrecomputeNode3, PrecomputeNode3Index, PrecomputedNodeContents, StateIDBV, Trie3God, Trie3GodWrapper};
 use crate::datastructures::gss_leveled_adapter::{find_longest_path, gather_gss_stats, GSSNode, GSSPeek, GSSStats, StoredPrecomputeNodeIndex, StoredTrieGodWrapper};
-use crate::datastructures::gss_leveled_adapter::{print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
+use crate::datastructures::gss_leveled_adapter::{deep_clone_gss_and_trie, print_gss_forest, Acc, GSSPopper, GSSPopperItem, GSSPrintConfig, deep_add_precompute_trie_edges};
 use crate::datastructures::ArcPtrWrapper;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::table::{CombinedRow, Goto, HallucinatedRow, NonTerminalID, ProductionID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
@@ -287,6 +287,10 @@ pub struct GLRParser {
     pub combined_rows: BTreeMap<StateID, CombinedRow>,
     pub combined_start_state_id: StateID,
     pub combined_gss: Arc<GSSNode>,
+    // For precomputation
+    pub dummy_reduce_actions: BTreeMap<StateID, BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue>>,
+    pub dummy_nt_map: BTreeMap<StateID, NonTerminalID>,
+    pub below_bottom_precomputed_cache: Arc<RwLock<HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>, Trie3GodWrapper)>>>,
 }
 
 impl JSONConvertible for GLRParser {
@@ -343,7 +347,7 @@ impl JSONConvertible for GLRParser {
                     gss
                 };
 
-                Ok(GLRParser {
+                let mut parser = GLRParser {
                     table,
                     productions,
                     terminal_map,
@@ -359,7 +363,12 @@ impl JSONConvertible for GLRParser {
                     combined_rows,
                     combined_start_state_id,
                     combined_gss,
-                })
+                    dummy_reduce_actions: Default::default(),
+                    dummy_nt_map: Default::default(),
+                    below_bottom_precomputed_cache: Arc::new(RwLock::new(HashMap::new())),
+                };
+                parser._precompute_below_bottom_cache();
+                Ok(parser)
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
         }
@@ -439,7 +448,7 @@ impl GLRParser {
             gss
         };
 
-        Self {
+        let mut parser = Self {
             table,
             productions,
             terminal_map,
@@ -455,6 +464,57 @@ impl GLRParser {
             combined_rows,
             combined_start_state_id,
             combined_gss,
+            dummy_reduce_actions: Default::default(),
+            dummy_nt_map: Default::default(),
+            below_bottom_precomputed_cache: Arc::new(RwLock::new(HashMap::new())),
+        };
+        parser._precompute_below_bottom_cache();
+        parser
+    }
+
+    fn _precompute_below_bottom_cache(&mut self) {
+        let max_state_id = self.table.keys().map(|s| s.0).max().unwrap_or(0);
+        let max_combined_id = self.combined_rows.keys().map(|s| s.0).max().unwrap_or(0);
+        let mut next_dummy_id = std::cmp::max(max_state_id, max_combined_id) + 1;
+
+        for &nt_id in self.non_terminal_map.right_values() {
+            let dummy_state_id = StateID(next_dummy_id);
+            next_dummy_id += 1;
+            self.dummy_nt_map.insert(dummy_state_id, nt_id);
+
+            let reduce_action = Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                nonterminal_id: nt_id,
+                len: 2,
+                production_ids: BTreeSet::new(),
+            };
+            let mut actions = BTreeMap::new();
+            for &term_id in self.terminal_map.right_values() {
+                if Some(term_id) != self.ignore_terminal_id {
+                    actions.insert(term_id, reduce_action.clone());
+                }
+            }
+            self.dummy_reduce_actions.insert(dummy_state_id, actions);
+        }
+
+        let mut cache = self.below_bottom_precomputed_cache.write().unwrap();
+        for (&dummy_state_id, &nt_id) in &self.dummy_nt_map {
+            for &term_id in self.terminal_map.right_values() {
+                if Some(term_id) == self.ignore_terminal_id { continue; }
+
+                let god = Trie3GodWrapper::new(Trie3God::new());
+                let root_idx = PrecomputeNode3Index::new(god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())));
+                let mut acc = Acc::new_fresh();
+                acc.stored_trie_nodes_mut().insert(root_idx.clone());
+
+                let mut parser_state = self.init_parser_state_combined_with_acc(acc).with_god(god.clone());
+
+                let new_stack = Arc::new(parser_state.active_state.stack.push(ParseStateEdgeContent { state_id: dummy_state_id }));
+                parser_state.active_state.stack = new_stack;
+
+                parser_state.process_token_advanced(term_id, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::Fail });
+
+                cache.insert((nt_id, term_id), (root_idx, parser_state.active_state.stack, god));
+            }
         }
     }
 
@@ -467,6 +527,7 @@ impl GLRParser {
             parser: self,
             active_state: stack,
             phase: ParserPhase::ReadyForDefaultReductions,
+            simple_gss_cache: Default::default(),
             below_bottom_cache: Default::default(),
         }
     }
@@ -476,6 +537,7 @@ impl GLRParser {
             parser: self,
             active_state: ParseState::new(),
             phase: ParserPhase::ReadyForDefaultReductions,
+            simple_gss_cache: Default::default(),
             below_bottom_cache: Default::default(),
         }
     }
@@ -486,6 +548,7 @@ impl GLRParser {
             parser: self,
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
+            simple_gss_cache: Default::default(),
             below_bottom_cache: Default::default(),
         };
         parser_state
@@ -496,6 +559,7 @@ impl GLRParser {
             parser: self,
             active_state: parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
+            simple_gss_cache: Default::default(),
             below_bottom_cache: Default::default(),
         };
         parser_state
@@ -518,6 +582,7 @@ impl GLRParser {
             parser: self,
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
+            simple_gss_cache: Default::default(),
             below_bottom_cache: Default::default(),
         }
     }
@@ -544,6 +609,7 @@ impl GLRParser {
             parser: self,
             active_state: initial_parse_state,
             phase: ParserPhase::ReadyForDefaultReductions,
+            simple_gss_cache: Default::default(),
             below_bottom_cache: Default::default(),
         }
     }
@@ -989,11 +1055,12 @@ pub struct GLRParserState<'a> { // No longer generic
     pub parser: &'a GLRParser,
     pub active_state: ParseState,
     phase: ParserPhase,
-    below_bottom_cache: HashMap<BelowBottomCacheKey, PrecomputeNode3Index>,
+    simple_gss_cache: HashMap<SimpleGSSCacheKey, PrecomputeNode3Index>,
+    below_bottom_cache: HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct BelowBottomCacheKey {
+struct SimpleGSSCacheKey {
     nonterminal_id: NonTerminalID,
     source_state_id: StateID,
     goto_state_id: StateID,
@@ -1165,12 +1232,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     len,
                     ..
                 }) => {
+                    let token_id = TerminalID(usize::MAX); // Dummy token ID
                     hit!("GLRParserState::handle_action::Reduce");
                     if per_state_fuel == &Some(0) { continue; }
                     let new_per_state_fuel = per_state_fuel.map(|f| f - 1);
 
                     crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-                    let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, action_selector, config);
+                    let (s_new_arc, accepted_s_new_arc, precomputed_states) = self.reduce_and_goto(None, &peek, *nt, *len, action_selector, config);
+                    shifted_states_todo.extend(precomputed_states);
                     if !s_new_arc.is_empty() {
                         let new_parse_state = ParseState {
                             stack: s_new_arc,
@@ -1213,7 +1282,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             for (nt, _prod_ids) in nts {
                                 hit!("GLRParserState::handle_action::Split::Reduce");
                                 crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-                                let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, action_selector, config);
+                                let (s_new_arc, accepted_s_new_arc, precomputed_states) = self.reduce_and_goto(None, &peek, *nt, *len, action_selector, config);
+                                shifted_states_todo.extend(precomputed_states);
                                 if !s_new_arc.is_empty() {
                                     let new_parse_state = ParseState {
                                         stack: s_new_arc,
@@ -1257,6 +1327,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
     fn process_action_queue<F>(
         &mut self,
         work_map: &mut WorkMap,
+        token_id: Option<TerminalID>,
         mut reduce_map: Option<&mut WorkMap>,
         shifted_states_todo: &mut VecDeque<ParseState>,
         accepted_states_todo: &mut VecDeque<ParseState>,
@@ -1293,6 +1364,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     for (action, filter_opt) in actions {
                         let (new_found_shift, early_exit) = self.handle_action(
                             &action,
+                            token_id,
                             filter_opt.as_ref(),
                             state_id,
                             &state,
@@ -1358,13 +1430,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     if !constrained_state.stack.is_empty() {
                         for peek in GSSNode::peek_iter(&constrained_state.stack) {
-                            let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(
+                            let (s_new_arc, accepted_s_new_arc, precomputed_states) = self.reduce_and_goto(
+                                None,
                                 &peek,
                                 reduce.nonterminal_id,
                                 reduce.len,
                                 action_selector,
                                 config,
                             );
+                            shifted_states_todo.extend(precomputed_states);
                             if !s_new_arc.is_empty() {
                                 let new_parse_state = ParseState {
                                     stack: s_new_arc,
@@ -1401,10 +1475,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
         timeit!("GLRParserState::step::phase1", {
             self.process_action_queue(
                 phase1_todo,
+                Some(token_id),
                 Some(phase2_todo),
                 shifted_states_todo,
                 accepted_states_todo,
                 |state_id| {
+                    if let Some(actions) = parser.dummy_reduce_actions.get(&state_id) {
+                        return actions.get(&token_id).map(|a| vec![(Action::Normal(a), None)]).unwrap_or_default();
+                    }
+
                     if parser.is_combined_state(state_id) {
                         parser
                             .combined_rows
@@ -1438,10 +1517,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
             // Reduces are pushed back onto the same queue (`None`).
             self.process_action_queue(
                 phase2_todo,
+                Some(token_id),
                 None,
                 shifted_states_todo,
                 accepted_states_todo,
                 |state_id| {
+                    if let Some(actions) = parser.dummy_reduce_actions.get(&state_id) {
+                        return actions.get(&token_id).map(|a| vec![(Action::Normal(a), None)]).unwrap_or_default();
+                    }
+
                     if parser.is_combined_state(state_id) {
                         // Prefer concrete actions; no default reductions during Phase 2.
                         parser
@@ -1568,12 +1652,13 @@ impl<'a> GLRParserState<'a> { // No longer generic
     #[time_it("GLRParserState::reduce_and_goto")]
     fn reduce_and_goto<G>(
         &mut self,
+        token_id: Option<TerminalID>,
         peek: &GSSPeek,
         nt: NonTerminalID,
         len: usize,
         action_selector: &G,
         config: &ProcessTokenAdvancedConfig,
-    ) -> (Arc<GSSNode>, Arc<GSSNode>)
+    ) -> (Arc<GSSNode>, Arc<GSSNode>, Vec<ParseState>)
     where
         G: Fn(StateID) -> Vec<FilteredAction<'a>>,
     {
@@ -1591,6 +1676,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         let mut out: Vec<Arc<GSSNode>> = Vec::new();
         let mut accepted_out: Vec<Arc<GSSNode>> = Vec::new();
+        let mut precomputed_states: Vec<ParseState> = Vec::new();
 
         // Shared constants and caches for this call
         let tokens_all = LLMTokenBV::max_ones();
@@ -1608,6 +1694,53 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut todo_map: BTreeMap<StateID, BTreeMap<*const GSSNode, Arc<GSSNode>>> = BTreeMap::new();
 
         // Handle "below bottom" (substring parsing continuation) first, adding to the todo list.
+        if !popper.below_bottom().is_empty() {
+            if let Some(tid) = token_id {
+                let cache_key = (nt, tid);
+                let god = self.active_state.trie2_god.as_ref().unwrap();
+                let (dest, gss) = self.below_bottom_cache.entry(cache_key)
+                    .or_insert_with(|| {
+                        let precomputed_cache = self.parser.below_bottom_precomputed_cache.read().unwrap();
+                        let (src_dest, src_gss, src_god) = precomputed_cache.get(&cache_key).unwrap();
+
+                        let (new_dest, new_gss) = deep_clone_gss_and_trie(src_gss, src_god, god, src_dest);
+                        (new_dest, new_gss)
+                    }).clone();
+
+                let below_accs = self.build_below_bottom_accs(&popper);
+                let mut merged_acc = Acc::new_fresh();
+                for acc in below_accs.values() {
+                    merged_acc = Acc::merge(&merged_acc, &acc);
+                }
+
+                for source_node in merged_acc.stored_trie_nodes() {
+                    let tokens_all = LLMTokenBV::max_ones();
+                    let key = (0, tokens_all.clone());
+                    let all_states = StateIDBV::max_ones();
+                    let inserter = EdgeInserter::new(
+                        god,
+                        source_node.as_arc().clone(),
+                        key.clone(),
+                        all_states.clone(),
+                        |e, n| *e |= n,
+                        |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
+                        |_, _| {}, // Unconditional insertion
+                    );
+                    inserter.try_destination(dest.clone()).expect("Cycle detected when adding precompute trie edges for below-bottom");
+                }
+
+                let mut final_gss = gss.as_ref().clone();
+                final_gss.inner = final_gss.inner.apply(|existing_acc| Acc::merge(existing_acc, &merged_acc));
+
+                precomputed_states.push(ParseState {
+                    stack: Arc::new(final_gss),
+                    accepted_state: self.active_state.accepted_state.clone(),
+                    prev_accepted_state: self.active_state.prev_accepted_state.clone(),
+                    trie2_god: self.active_state.trie2_god.clone(),
+                });
+            }
+        }
+
         timeit!("GLRParserState::reduce_and_goto::HandleBelowBottom", {
             if !popper.below_bottom().is_empty() {
                 match config.below_bottom_mode {
@@ -1635,6 +1768,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // Standard reductions along in-graph paths
         timeit!("GLRParserState::reduce_and_goto::BuildTodoMap", {
+            // TODO: This iterates over below_bottom paths again. Avoid this.
             for popper_item in popper.iter() {
                 for peek2 in popper_item.peek_iter() {
                     let predecessor_state_id = peek2.edge_value().state_id;
@@ -1817,7 +1951,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     };
 
                     let (cached_dest, add_to_out) = timeit!("GLRParserState::reduce_and_goto::Caching::ForEachGSS::CacheLookup", {
-                        let entry = self.below_bottom_cache.entry(cache_key);
+                        let entry = self.simple_gss_cache.entry(cache_key);
                         match entry {
                             std::collections::hash_map::Entry::Occupied(occupied) => {
                                 (occupied.get().clone(), false)
@@ -1883,7 +2017,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut new_active = timeit!("GLRParserState::reduce_and_goto::MergeActive", GSSNode::merge_many_with_depth(MAX_MERGE_DEPTH, final_out));
         // Arc::make_mut(&mut new_active).inner = new_active.inner.normalize();
         let new_accepted = timeit!("GLRParserState::reduce_and_goto::MergeAccepted", GSSNode::merge_many_with_depth(MAX_MERGE_DEPTH, accepted_out));
-        (new_active, new_accepted)
+        (new_active, new_accepted, precomputed_states)
         })
     }
 
@@ -1893,6 +2027,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
     #[time_it("GLRParserState::process_token_advanced")]
     pub fn process_token_advanced(&mut self, token_id: TerminalID, config: &ProcessTokenAdvancedConfig) {
+        self.simple_gss_cache.clear();
         self.below_bottom_cache.clear();
 
         if Some(token_id) == self.parser.ignore_terminal_id {
@@ -1941,7 +2076,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.active_state.accepted_state = None;
 
         // self.log_gss("Phase1/2-end", token_id, false, false);
-        self.below_bottom_cache.clear();
+        self.simple_gss_cache.clear();
     }
 
     pub fn process_default_reductions(&mut self) {
@@ -1975,6 +2110,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // - action_selector returns the Default action for each row (no token actions here).
         self.process_action_queue(
             &mut work_map,
+            None,
             None,
             &mut shifted_states_todo,
             &mut accepted_states_todo,
@@ -2073,7 +2209,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         }
 
         let mut s = self.clone();
-        s.below_bottom_cache.clear();
+        s.simple_gss_cache.clear();
 
         let mut phase2_todo: WorkMap = WorkMap::new();
         let mut shifted_states_todo: VecDeque<ParseState> = VecDeque::new();
@@ -2086,10 +2222,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
             Self::enqueue(&mut phase1_todo, s.active_state.clone(), None);
             if s.process_action_queue(
                 &mut phase1_todo,
+                Some(token_id),
                 Some(&mut phase2_todo),
                 &mut shifted_states_todo,
                 &mut accepted_states_todo,
                 |state_id| {
+                    if let Some(actions) = parser.dummy_reduce_actions.get(&state_id) {
+                        return actions.get(&token_id).map(|a| vec![(Action::Normal(a), None)]).unwrap_or_default();
+                    }
                     if parser.is_combined_state(state_id) {
                         parser
                             .combined_rows
@@ -2121,10 +2261,14 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         s.process_action_queue(
             &mut phase2_todo,
+            Some(token_id),
             None,
             &mut shifted_states_todo,
             &mut accepted_states_todo,
             |state_id| {
+                if let Some(actions) = parser.dummy_reduce_actions.get(&state_id) {
+                    return actions.get(&token_id).map(|a| vec![(Action::Normal(a), None)]).unwrap_or_default();
+                }
                 if parser.is_combined_state(state_id) {
                     parser
                         .combined_rows
@@ -2597,7 +2741,7 @@ impl GLRParser {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParseStateKey {
+pub struct SimpleGSSCacheKey {
     stack_state_id: StateID,
 }
 
