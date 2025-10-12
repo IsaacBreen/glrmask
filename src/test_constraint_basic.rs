@@ -1,4 +1,4 @@
-use crate::glr::parser::ParseState;
+use crate::glr::parser::{BelowBottomReductionMode, ParseState, ProcessTokenAdvancedConfig};
 use rand::rngs::StdRng;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::{eat_u8, rep1};
@@ -2732,12 +2732,10 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     // 3. Loop, feed tokens, merge, and check for explosion
     for i in 1..=10 {
         let mut state_a = glr_state.clone();
-        state_a.process_token(terminal_a);
-        state_a.process_default_reductions();
+        state_a.process_token_advanced(terminal_a, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
 
         let mut state_b = glr_state.clone();
-        state_b.process_token(terminal_b);
-        state_b.process_default_reductions();
+        state_b.process_token_advanced(terminal_b, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
 
         state_a.merge_with(state_b);
         glr_state = state_a;
@@ -2749,7 +2747,7 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
 
     // 4. Analyze node growth
     println!("Node counts per step: {:?}", node_counts);
-    let increases: Vec<usize> = node_counts.windows(2).map(|w| w[1] - w[0]).collect();
+    let increases: Vec<isize> = node_counts.windows(2).map(|w| w[1] as isize - w[0] as isize).collect();
     println!("Node increases per step: {:?}", increases);
 
     // The growth should be roughly constant (linear). An explosion would show accelerating increases.
