@@ -413,6 +413,9 @@ impl<'a> GSSPeek<'a> {
     pub fn resolved_llm_tokens_union(&self) -> LLMTokenBV {
         self.isolated_parent().allowed_llm_tokens()
     }
+    pub(crate) fn _parent(&self) -> Arc<GSSNode> {
+        Arc::new(GSSNode { inner: self.parent_arc.clone() })
+    }
 }
 
 // --- Popper ---
