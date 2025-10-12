@@ -2396,7 +2396,6 @@ fn test_constraint_repetition_a() {
     // Tokenizer regex for grammar tokens 'a', '$'
     let expr = groups![
         eat_u8(b'a'),
-        eat_u8(b'$'),
     ];
     let tokenizer = expr.build();
 
@@ -2409,7 +2408,6 @@ fn test_constraint_repetition_a() {
     // Map grammar terminals to IDs matching regex order
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
     grammar_token_map.insert(regex_name("A"), TerminalID(0));
-    grammar_token_map.insert(regex_name("EOF"), TerminalID(1));
 
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
     println!("Parser: {}", parser);
