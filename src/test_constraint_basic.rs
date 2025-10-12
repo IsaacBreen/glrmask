@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use bimap::BiBTreeMap;
 use reqwest::blocking;
 use serde_json;
-use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, GrammarConstraintState};
+use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, GrammarConstraintState, Trie3God};
 use crate::datastructures::trie::Trie;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 // Already a main dependency, but good to be explicit if used directly
@@ -2717,8 +2717,10 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     grammar_token_map.insert(regex_name("B"), TerminalID(1));
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
+    let trie3god = Trie3God::new();
+
     // 2. Initial GLR state
-    let mut glr_state = parser.init_parser_state_combined();
+    let mut glr_state = parser.init_parser_state_combined().with_god(trie3god);
 
     let terminal_a = TerminalID(0);
     let terminal_b = TerminalID(1);
