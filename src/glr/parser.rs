@@ -1808,9 +1808,11 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     // Always perform cache lookup/insertion to prevent infinite loops.
                     let cache_key = BelowBottomCacheKey {
-                        nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
+                        nonterminal_id: nt,
+                        // nonterminal_id: NonTerminalID(usize::MAX), // Dummy value for this cache use case
                         source_state_id: StateID(usize::MAX),      // Dummy value
-                        goto_state_id: state_id,
+                        // goto_state_id: state_id,
+                        goto_state_id: StateID(usize::MAX), // Dummy value
                         k: usize::MAX,                             // Dummy value
                     };
 
