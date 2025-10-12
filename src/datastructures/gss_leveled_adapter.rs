@@ -899,7 +899,7 @@ pub(crate) fn map_trie3_node_ids(
 ) {
     transform_all(root_arc, |acc| {
         let mut new_acc = acc.clone();
-        new_acc.stored_trie_nodes = new_acc.stored_trie_nodes.iter().map(|node| id_map[node]).collect();
+        new_acc.stored_trie_nodes = new_acc.stored_trie_nodes.iter().map(|node| id_map.get(node).cloned().unwrap_or_else(|| panic!("Trie2Index {:?} not found in id_map", node))).collect();
         Some(new_acc)
     });
 }
