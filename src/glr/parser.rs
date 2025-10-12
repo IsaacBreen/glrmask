@@ -509,7 +509,7 @@ impl GLRParser {
             next_sid_val += 1;
             let mut per_token: BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue> = BTreeMap::new();
             for tid in term_ids.iter().cloned() {
-                per_token.insert(tid, Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len: 2, production_ids: BTreeSet::new() });
+                per_token.insert(tid, Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id: nt, len: 1, production_ids: BTreeSet::new() });
             }
             self.synthetic_reduce_rows.insert(sid, per_token);
             self.synthetic_reduce_state_for_nt.insert(nt, sid);
