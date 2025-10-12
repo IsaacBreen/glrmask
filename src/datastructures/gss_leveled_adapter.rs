@@ -519,6 +519,9 @@ impl<'a> GSSPopperItemPeek<'a> {
         let iso = self.isolated_parent();
         iso.as_ref().push(edge_value)
     }
+    pub(crate) fn _parent(&self) -> Arc<GSSNode> {
+        Arc::new(GSSNode { inner: self.parent_arc.clone() })
+    }
 }
 
 // --- Roots & helpers ---
