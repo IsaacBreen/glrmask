@@ -2582,19 +2582,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         if i.inner.empty {
                             num_interfaces_with_empty += 1;
                         }
-                        for (v, kids) in i.inner.children.iter() {
-                            distinct_values.insert(v.clone());
-                            if kids.len() > 1 {
-                                num_multi_depth_slots_lower += 1;
-                                max_multiplicity_per_value_lower =
-                                    std::cmp::max(max_multiplicity_per_value_lower, kids.len());
-                            }
-                            for child in kids.values() {
-                                interface_to_lower_edges += 1;
-                                *incoming_edges.entry(Arc::as_ptr(child) as usize).or_insert(0) += 1;
-                                lower_queue.push_back(child.clone());
-                            }
-                        }
+
+                        // The inner Lower node is part of the graph and needs to be traversed.
+                        lower_queue.push_back(i.inner.clone());
+
+                        // The conceptual edge from Interface to Lower should be counted.
+                        interface_to_lower_edges += 1;
+                        *incoming_edges.entry(Arc::as_ptr(&i.inner) as usize).or_insert(0) += 1;
                     }
                 }
             }

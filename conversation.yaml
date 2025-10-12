@@ -109,6 +109,7 @@ local_system:
           }
 
           type TestGSS = LeveledGSS<String, IntAcc>;
+          type TestGSSInt = LeveledGSS<i32, IntAcc>;
 
           fn gss_from_str_stacks(stacks: &[(&[&str], &[i32])]) -> TestGSS {
               let stacks_vec: Vec<(Vec<String>, IntAcc)> = stacks
@@ -346,6 +347,79 @@ local_system:
               let gss_empty = TestGSS::empty();
               let gss_empty_pruned = gss_empty.prune(|_acc| true);
               assert!(gss_empty.ptr_eq(&gss_empty_pruned));
+          }
+
+          #[test]
+          fn test_normalization_sharing_factor_regression() {
+              type TestGSSInt = LeveledGSS<i32, IntAcc>;
+
+              // Manually construct the GSS from the log to reproduce the issue.
+              // The key is to create a structure that is not fully optimal,
+              // with multiple paths to similar substructures that are not yet shared.
+
+              // 1. Build the shared terminal `Lower` node.
+              // This corresponds to `Lower @ ... (MaxDepth: 0) [TERMINAL]` in the log.
+              let l_terminal = new_lower::<i32>(IHashMap::new(), true);
+
+              // 2. Build the `Lower` node that is a parent to the terminal via edge 500.
+              // This is a shared structural component.
+              let l_500_parent = new_lower(
+                  IHashMap::unit(500, OrdMap::unit(l_terminal.max_depth, l_terminal.clone())),
+                  false,
+              );
+
+              // 3. Build the `Interface` nodes.
+
+              // The branch for path `... -> 295 -> 569 -> 500`
+              let i_54_inner = new_lower(
+                  IHashMap::unit(569, OrdMap::unit(l_500_parent.max_depth, l_500_parent.clone())),
+                  false,
+              );
+              let i_54 = new_interface(i_54_inner, IntAcc::new(&[54]));
+
+              // The branch with 10 parallel interfaces. Their `inner` is `l_500_parent`.
+              let acc_vals = vec![38, 39, 40, 44, 45, 46, 47, 48, 49, 50];
+              let interfaces_10: Vec<_> = acc_vals
+                  .iter()
+                  .map(|&acc| new_interface(l_500_parent.clone(), IntAcc::new(&[acc])))
+                  .collect();
+
+              // 4. Build the `UpperBranch` nodes.
+              let edge_vals = vec![419, 437, 66, 477, 531, 541, 556, 558, 560, 562];
+              let mut children_101 = IHashMap::new();
+              for (edge, interface) in edge_vals.iter().zip(interfaces_10.iter()) {
+                  children_101.insert(*edge, OrdMap::unit(interface.max_depth(), interface.clone()));
+              }
+              let ub_101 = new_branch(children_101, None);
+
+              let ub_295_d4 = new_branch(
+                  IHashMap::unit(101, OrdMap::unit(ub_101.max_depth(), ub_101)),
+                  None,
+              );
+
+              // 5. Build the root, which has two children for edge 295 at different depths.
+              let mut children_295 = OrdMap::new();
+              children_295.insert(i_54.max_depth(), i_54);
+              children_295.insert(ub_295_d4.max_depth(), ub_295_d4);
+              let root_children = IHashMap::unit(295, children_295);
+              let root_inner = new_branch(root_children, None);
+
+              let gss = TestGSSInt { inner: root_inner };
+
+              // 6. Check stats before normalization to confirm we've built the right structure.
+              let stats_before = gss.stats();
+
+              // 7. Normalize and check stats after.
+              let gss_after = gss.normalize();
+              let stats_after = gss_after.stats();
+
+              println!("GSS before normalization: {}", gss.to_graph_string(false));
+              println!("GSS after normalization: {}", gss_after.to_graph_string(false));
+
+              println!("Stats before: {:?}", stats_before);
+              println!("Stats after: {:?}", stats_after);
+
+              // TODO: assert that normalization has helped.
           }
       }
 
@@ -3759,22 +3833,18 @@ local_system:
 
               // 6. Check stats before normalization to confirm we've built the right structure.
               let stats_before = gss.stats();
-              // These numbers come from your panic log.
-              assert_eq!(stats_before.num_upperbranch_nodes, 3);
-              assert_eq!(stats_before.num_interface_nodes, 11);
-              assert_eq!(stats_before.num_lower_nodes, 2);
-              assert_eq!(stats_before.total_unique_nodes, 16);
-              assert_eq!(stats_before.num_structurally_unique_nodes, 6);
-              assert_eq!(stats_before.structural_sharing_factor, 0.375);
 
               // 7. Normalize and check stats after.
               let gss_after = gss.normalize();
               let stats_after = gss_after.stats();
 
-              // These numbers also come from your panic log.
-              assert_eq!(stats_after.total_unique_nodes, 15);
-              assert_eq!(stats_after.num_structurally_unique_nodes, 5);
-              assert!((stats_after.structural_sharing_factor - (5.0 / 15.0)).abs() < 1e-9);
+              println!("GSS before normalization: {}", gss.to_graph_string(false));
+              println!("GSS after normalization: {}", gss_after.to_graph_string(false));
+
+              println!("Stats before: {:?}", stats_before);
+              println!("Stats after: {:?}", stats_after);
+
+              // TODO: assert that normalization has helped.
           }
       }
 
@@ -5944,19 +6014,13 @@ local_system:
                               if i.inner.empty {
                                   num_interfaces_with_empty += 1;
                               }
-                              for (v, kids) in i.inner.children.iter() {
-                                  distinct_values.insert(v.clone());
-                                  if kids.len() > 1 {
-                                      num_multi_depth_slots_lower += 1;
-                                      max_multiplicity_per_value_lower =
-                                          std::cmp::max(max_multiplicity_per_value_lower, kids.len());
-                                  }
-                                  for child in kids.values() {
-                                      interface_to_lower_edges += 1;
-                                      *incoming_edges.entry(Arc::as_ptr(child) as usize).or_insert(0) += 1;
-                                      lower_queue.push_back(child.clone());
-                                  }
-                              }
+
+                              // The inner Lower node is part of the graph and needs to be traversed.
+                              lower_queue.push_back(i.inner.clone());
+
+                              // The conceptual edge from Interface to Lower should be counted.
+                              interface_to_lower_edges += 1;
+                              *incoming_edges.entry(Arc::as_ptr(&i.inner) as usize).or_insert(0) += 1;
                           }
                       }
                   }
@@ -6930,6 +6994,7 @@ messages:
           }
 
           type TestGSS = LeveledGSS<String, IntAcc>;
+          type TestGSSInt = LeveledGSS<i32, IntAcc>;
 
           fn gss_from_str_stacks(stacks: &[(&[&str], &[i32])]) -> TestGSS {
               let stacks_vec: Vec<(Vec<String>, IntAcc)> = stacks
@@ -7167,6 +7232,79 @@ messages:
               let gss_empty = TestGSS::empty();
               let gss_empty_pruned = gss_empty.prune(|_acc| true);
               assert!(gss_empty.ptr_eq(&gss_empty_pruned));
+          }
+
+          #[test]
+          fn test_normalization_sharing_factor_regression() {
+              type TestGSSInt = LeveledGSS<i32, IntAcc>;
+
+              // Manually construct the GSS from the log to reproduce the issue.
+              // The key is to create a structure that is not fully optimal,
+              // with multiple paths to similar substructures that are not yet shared.
+
+              // 1. Build the shared terminal `Lower` node.
+              // This corresponds to `Lower @ ... (MaxDepth: 0) [TERMINAL]` in the log.
+              let l_terminal = new_lower::<i32>(IHashMap::new(), true);
+
+              // 2. Build the `Lower` node that is a parent to the terminal via edge 500.
+              // This is a shared structural component.
+              let l_500_parent = new_lower(
+                  IHashMap::unit(500, OrdMap::unit(l_terminal.max_depth, l_terminal.clone())),
+                  false,
+              );
+
+              // 3. Build the `Interface` nodes.
+
+              // The branch for path `... -> 295 -> 569 -> 500`
+              let i_54_inner = new_lower(
+                  IHashMap::unit(569, OrdMap::unit(l_500_parent.max_depth, l_500_parent.clone())),
+                  false,
+              );
+              let i_54 = new_interface(i_54_inner, IntAcc::new(&[54]));
+
+              // The branch with 10 parallel interfaces. Their `inner` is `l_500_parent`.
+              let acc_vals = vec![38, 39, 40, 44, 45, 46, 47, 48, 49, 50];
+              let interfaces_10: Vec<_> = acc_vals
+                  .iter()
+                  .map(|&acc| new_interface(l_500_parent.clone(), IntAcc::new(&[acc])))
+                  .collect();
+
+              // 4. Build the `UpperBranch` nodes.
+              let edge_vals = vec![419, 437, 66, 477, 531, 541, 556, 558, 560, 562];
+              let mut children_101 = IHashMap::new();
+              for (edge, interface) in edge_vals.iter().zip(interfaces_10.iter()) {
+                  children_101.insert(*edge, OrdMap::unit(interface.max_depth(), interface.clone()));
+              }
+              let ub_101 = new_branch(children_101, None);
+
+              let ub_295_d4 = new_branch(
+                  IHashMap::unit(101, OrdMap::unit(ub_101.max_depth(), ub_101)),
+                  None,
+              );
+
+              // 5. Build the root, which has two children for edge 295 at different depths.
+              let mut children_295 = OrdMap::new();
+              children_295.insert(i_54.max_depth(), i_54);
+              children_295.insert(ub_295_d4.max_depth(), ub_295_d4);
+              let root_children = IHashMap::unit(295, children_295);
+              let root_inner = new_branch(root_children, None);
+
+              let gss = TestGSSInt { inner: root_inner };
+
+              // 6. Check stats before normalization to confirm we've built the right structure.
+              let stats_before = gss.stats();
+
+              // 7. Normalize and check stats after.
+              let gss_after = gss.normalize();
+              let stats_after = gss_after.stats();
+
+              println!("GSS before normalization: {}", gss.to_graph_string(false));
+              println!("GSS after normalization: {}", gss_after.to_graph_string(false));
+
+              println!("Stats before: {:?}", stats_before);
+              println!("Stats after: {:?}", stats_after);
+
+              // TODO: assert that normalization has helped.
           }
       }
 
@@ -10181,77 +10319,62 @@ messages:
       filename: src/datastructures/leveled_gss.rs
   - user: |-
       ```
-      Stack before normalization:--- Root UpperBranch @ 0x9dc6ef970 (MaxDepth: 5) ---
-      ├── Edge 295 (d=3) -> Interface @ 0x341dea410 (MaxDepth: 3) | acc: Acc { numbers: { 54 } }
-      │   └── Edge 569 (d=1) -> Lower @ 0x9cf66b810 (MaxDepth: 1)
-      │       └── Edge 500 (d=0) -> Lower @ 0x9cf66b850 (MaxDepth: 0) [TERMINAL]
-      └── Edge 295 (d=4) -> UpperBranch @ 0x9dc6eda50 (MaxDepth: 4)
-          └── Edge 101 (d=3) -> UpperBranch @ 0x9dc6efcd0 (MaxDepth: 3)
-              ├── Edge 419 (d=2) -> Interface @ 0x341de8690 (MaxDepth: 2) | acc: Acc { numbers: { 38 } }
-              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
-              ├── Edge 437 (d=2) -> Interface @ 0x341deb9d0 (MaxDepth: 2) | acc: Acc { numbers: { 39 } }
-              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
-              ├── Edge 477 (d=2) -> Interface @ 0x341deb250 (MaxDepth: 2) | acc: Acc { numbers: { 44 } }
-              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
-              ├── Edge 531 (d=2) -> Interface @ 0x341de83d0 (MaxDepth: 2) | acc: Acc { numbers: { 45 } }
-              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
-              ├── Edge 541 (d=2) -> Interface @ 0x341de9ad0 (MaxDepth: 2) | acc: Acc { numbers: { 46 } }
-              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
-              ├── Edge 556 (d=2) -> Interface @ 0x341debb90 (MaxDepth: 2) | acc: Acc { numbers: { 47 } }
-              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
-              ├── Edge 558 (d=2) -> Interface @ 0x341de8c10 (MaxDepth: 2) | acc: Acc { numbers: { 48 } }
-              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
-              ├── Edge 560 (d=2) -> Interface @ 0x341de8750 (MaxDepth: 2) | acc: Acc { numbers: { 49 } }
-              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
-              ├── Edge 562 (d=2) -> Interface @ 0x341de9750 (MaxDepth: 2) | acc: Acc { numbers: { 50 } }
-              │   └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
-              └── Edge 66 (d=2) -> Interface @ 0x341de8050 (MaxDepth: 2) | acc: Acc { numbers: { 40 } }
-                  └── Edge 500 (d=0) -> Ref to Node @ 0x9cf66b850
-
-      Stack after normalization:--- Root UpperBranch @ 0x9dc6ed3f0 (MaxDepth: 5) ---
-      └── Edge 295 (d=4) -> UpperBranch @ 0x9dc6efb50 (MaxDepth: 4)
-          ├── Edge 101 (d=3) -> UpperBranch @ 0x9dc6efd30 (MaxDepth: 3)
-          │   ├── Edge 419 (d=2) -> Interface @ 0x341de9f10 (MaxDepth: 2) | acc: Acc { numbers: { 38 } }
-          │   │   └── Edge 500 (d=0) -> Lower @ 0x9969293d0 (MaxDepth: 0) [TERMINAL]
-          │   ├── Edge 437 (d=2) -> Interface @ 0x341de81d0 (MaxDepth: 2) | acc: Acc { numbers: { 39 } }
-          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
-          │   ├── Edge 477 (d=2) -> Interface @ 0x341de93d0 (MaxDepth: 2) | acc: Acc { numbers: { 44 } }
-          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
-          │   ├── Edge 531 (d=2) -> Interface @ 0x341deb4d0 (MaxDepth: 2) | acc: Acc { numbers: { 45 } }
-          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
-          │   ├── Edge 541 (d=2) -> Interface @ 0x341debdd0 (MaxDepth: 2) | acc: Acc { numbers: { 46 } }
-          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
-          │   ├── Edge 556 (d=2) -> Interface @ 0x341deb8d0 (MaxDepth: 2) | acc: Acc { numbers: { 47 } }
-          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
-          │   ├── Edge 558 (d=2) -> Interface @ 0x341de9090 (MaxDepth: 2) | acc: Acc { numbers: { 48 } }
-          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
-          │   ├── Edge 560 (d=2) -> Interface @ 0x341deb290 (MaxDepth: 2) | acc: Acc { numbers: { 49 } }
-          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
-          │   ├── Edge 562 (d=2) -> Interface @ 0x341deb110 (MaxDepth: 2) | acc: Acc { numbers: { 50 } }
-          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
-          │   └── Edge 66 (d=2) -> Interface @ 0x341de8dd0 (MaxDepth: 2) | acc: Acc { numbers: { 40 } }
-          │       └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
-          └── Edge 569 (d=2) -> Interface @ 0x341f51dd0 (MaxDepth: 2) | acc: Acc { numbers: { 54 } }
-              └── Edge 500 (d=0) -> Ref to Node @ 0x9969293d0
-
-
-      thread 'main' (681917) panicked at src/constraint.rs:1803:29:
-      Structural sharing factor increase too low (-11.1% < -10.0%) after normalization at edge Some(TerminalID(70)) with tokens HybridBitset { inner: 1203..=1203 }.
+      GSS before normalization: --- Root UpperBranch @ 0x8f4c141f0 (MaxDepth: 5) ---
+      ├── Edge 295 (d=3) -> Interface @ 0x8f542c130 -> Lower @ 0x8f4c18450 (MaxDepth: 3) | acc: IntAcc({54})
+      │   └── Edge 569 (d=1) -> Lower @ 0x8f4c18550 (MaxDepth: 1)
+      │       └── Edge 500 (d=0) -> Lower @ 0x104003f30 (MaxDepth: 0) [TERMINAL]
+      └── Edge 295 (d=4) -> UpperBranch @ 0x8f4c14240 (MaxDepth: 4)
+          └── Edge 101 (d=3) -> UpperBranch @ 0x8f4c14010 (MaxDepth: 3)
+              ├── Edge 419 (d=2) -> Interface @ 0x8f542c1c0 -> Lower @ 0x8f4c18550 (MaxDepth: 2) | acc: IntAcc({38})
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x104003f30
+              ├── Edge 437 (d=2) -> Interface @ 0x8f542c1f0 -> Lower @ 0x8f4c18550 (MaxDepth: 2) | acc: IntAcc({39})
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x104003f30
+              ├── Edge 477 (d=2) -> Interface @ 0x8f542c250 -> Lower @ 0x8f4c18550 (MaxDepth: 2) | acc: IntAcc({44})
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x104003f30
+              ├── Edge 531 (d=2) -> Interface @ 0x8f542c280 -> Lower @ 0x8f4c18550 (MaxDepth: 2) | acc: IntAcc({45})
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x104003f30
+              ├── Edge 541 (d=2) -> Interface @ 0x8f542c2b0 -> Lower @ 0x8f4c18550 (MaxDepth: 2) | acc: IntAcc({46})
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x104003f30
+              ├── Edge 556 (d=2) -> Interface @ 0x8f542c2e0 -> Lower @ 0x8f4c18550 (MaxDepth: 2) | acc: IntAcc({47})
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x104003f30
+              ├── Edge 558 (d=2) -> Interface @ 0x8f542c310 -> Lower @ 0x8f4c18550 (MaxDepth: 2) | acc: IntAcc({48})
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x104003f30
+              ├── Edge 560 (d=2) -> Interface @ 0x8f542c340 -> Lower @ 0x8f4c18550 (MaxDepth: 2) | acc: IntAcc({49})
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x104003f30
+              ├── Edge 562 (d=2) -> Interface @ 0x8f542c370 -> Lower @ 0x8f4c18550 (MaxDepth: 2) | acc: IntAcc({50})
+              │   └── Edge 500 (d=0) -> Ref to Node @ 0x104003f30
+              └── Edge 66 (d=2) -> Interface @ 0x8f542c220 -> Lower @ 0x8f4c18550 (MaxDepth: 2) | acc: IntAcc({40})
+                  └── Edge 500 (d=0) -> Ref to Node @ 0x104003f30
+      GSS after normalization: --- Root UpperBranch @ 0x8f4c141a0 (MaxDepth: 5) ---
+      └── Edge 295 (d=4) -> UpperBranch @ 0x8f4c14060 (MaxDepth: 4)
+          ├── Edge 101 (d=3) -> UpperBranch @ 0x8f4c14100 (MaxDepth: 3)
+          │   ├── Edge 419 (d=2) -> Interface @ 0x8f542c490 -> Lower @ 0x8f4c188d0 (MaxDepth: 2) | acc: IntAcc({38})
+          │   │   └── Edge 500 (d=0) -> Lower @ 0x8f4c18390 (MaxDepth: 0) [TERMINAL]
+          │   ├── Edge 437 (d=2) -> Interface @ 0x8f542c010 -> Lower @ 0x8f4c18310 (MaxDepth: 2) | acc: IntAcc({39})
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x8f4c18390
+          │   ├── Edge 477 (d=2) -> Interface @ 0x8f542c3d0 -> Lower @ 0x8f4c18590 (MaxDepth: 2) | acc: IntAcc({44})
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x8f4c18390
+          │   ├── Edge 531 (d=2) -> Interface @ 0x8f542c400 -> Lower @ 0x8f4c184d0 (MaxDepth: 2) | acc: IntAcc({45})
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x8f4c18390
+          │   ├── Edge 541 (d=2) -> Interface @ 0x8f542c190 -> Lower @ 0x8f4c183d0 (MaxDepth: 2) | acc: IntAcc({46})
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x8f4c18390
+          │   ├── Edge 556 (d=2) -> Interface @ 0x8f542c100 -> Lower @ 0x8f4c18210 (MaxDepth: 2) | acc: IntAcc({47})
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x8f4c18390
+          │   ├── Edge 558 (d=2) -> Interface @ 0x8f542c460 -> Lower @ 0x8f4c186d0 (MaxDepth: 2) | acc: IntAcc({48})
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x8f4c18390
+          │   ├── Edge 560 (d=2) -> Interface @ 0x8f542c0a0 -> Lower @ 0x8f4c187d0 (MaxDepth: 2) | acc: IntAcc({49})
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x8f4c18390
+          │   ├── Edge 562 (d=2) -> Interface @ 0x8f542c070 -> Lower @ 0x8f4c18510 (MaxDepth: 2) | acc: IntAcc({50})
+          │   │   └── Edge 500 (d=0) -> Ref to Node @ 0x8f4c18390
+          │   └── Edge 66 (d=2) -> Interface @ 0x8f542c430 -> Lower @ 0x8f4c18650 (MaxDepth: 2) | acc: IntAcc({40})
+          │       └── Edge 500 (d=0) -> Ref to Node @ 0x8f4c18390
+          └── Edge 569 (d=2) -> Interface @ 0x8f542c040 -> Lower @ 0x8f4c18290 (MaxDepth: 2) | acc: IntAcc({54})
+              └── Edge 500 (d=0) -> Ref to Node @ 0x8f4c18390
       Stats before: LeveledGSSStats { num_upperbranch_nodes: 3, num_interface_nodes: 11, num_lower_nodes: 2, total_unique_nodes: 16, num_structurally_unique_nodes: 6, upper_edges: 13, interface_to_lower_edges: 11, lower_edges: 1, total_edges: 25, max_upper_depth: 5, max_lower_depth: 1, distinct_values_count: 14, unique_accumulators_count: 11, total_accumulator_instances: 11, num_upper_with_empty: 0, num_interfaces_with_empty: 0, num_lower_terminal_nodes: 1, num_interface_implicit_terminals: 0, num_multi_depth_slots_upper: 1, num_multi_depth_slots_lower: 0, max_multiplicity_per_value_upper: 2, max_multiplicity_per_value_lower: 1, average_in_degree: 1.6666666666666667, max_in_degree: 11, structural_sharing_factor: 0.375, promotable_upper_nodes: 0 }
       Stats after: LeveledGSSStats { num_upperbranch_nodes: 3, num_interface_nodes: 11, num_lower_nodes: 1, total_unique_nodes: 15, num_structurally_unique_nodes: 5, upper_edges: 13, interface_to_lower_edges: 11, lower_edges: 0, total_edges: 24, max_upper_depth: 5, max_lower_depth: 0, distinct_values_count: 14, unique_accumulators_count: 11, total_accumulator_instances: 11, num_upper_with_empty: 0, num_interfaces_with_empty: 0, num_lower_terminal_nodes: 1, num_interface_implicit_terminals: 0, num_multi_depth_slots_upper: 0, num_multi_depth_slots_lower: 0, max_multiplicity_per_value_upper: 1, max_multiplicity_per_value_lower: 1, average_in_degree: 1.7142857142857142, max_in_degree: 11, structural_sharing_factor: 0.3333333333333333, promotable_upper_nodes: 0 }
       ```
 
-      These are some stats from my program.
-
-      Why does normalization not improve the structural sharing factor? Why doesn't it reduce the total number of unique nodes? Actually, it *increases* it!
-
-      Even if all the accs are different, that shouldn't stop structural merging.
-      Conceptually, we can always merge the accs of two structurally-equivalent GSSs.
-      But it seems as if that isn't really happening? IDK.
-
-      Add a test that reproduces this issue.
-      Don't try to fix the issue. Just add the test.
-      Try to reproduce it exactly. The exact structure. Note that `from_stacks` might be insufficient here. We'll need a utility that lets us construct an exact GSS as specified.
+      Clearly the stats are failing to take into account lower nodes inside interface nodes. Fix this.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -10270,224 +10393,116 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      Of course. It seems like you've encountered a tricky situation where `normalize()` isn't behaving as expected, particularly with how the `structural_sharing_factor` is calculated and changes. The core of the issue appears to be that `fuse` followed by hash-consing, in this specific case, leads to a state that your monitoring considers a regression.
+      Of course. The issue you've pointed out is a bug in the graph traversal logic within the `stats()` method, which leads to incorrect node counts. Specifically, the `Lower` node directly contained within an `Interface` node was never being visited or counted itself; only its children were being queued for processing.
 
-      Here are the step-by-step instructions to add a test case that precisely reproduces the structure from your logs and verifies the problematic change in statistics.
+      Here are the step-by-step instructions to fix this, followed by the corresponding git diff.
 
-      ### Step-by-step Instructions
+      ### Step-by-Step Instructions
 
-      1.  **Open the file** `src/datastructures/leveled_gss.rs`.
+      1.  **Open the file `src/datastructures/leveled_gss.rs`**.
 
-      2.  **Add a new type alias for integer-based GSSs** inside the `tests` module. This is to avoid conflicts with existing tests that use `String` as the stack item type.
+      2.  **Navigate to the `stats()` method** inside the `impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A>` block.
 
-          Find this line in the `tests` module:
+      3.  **Find the `while let Some(node) = upper_queue.pop_front()` loop** that traverses the upper part of the GSS graph.
+
+      4.  **Locate the `Upper::Interface(i)` match arm** inside this loop. The existing code in this block incorrectly handles the traversal and statistics gathering for the lower parts of the graph connected via interfaces.
+
+      5.  **Replace the entire `Upper::Interface(i) => { ... }` block** with the corrected version below. The fix ensures that the `Lower` node held by the `Interface` is correctly queued for traversal. This allows the subsequent `lower_queue` processing loop to correctly count all `Lower` nodes and their associated stats (`lower_edges`, etc.), fixing the bug.
+
+          The new implementation simplifies this section significantly by delegating all `Lower` node processing to the dedicated `lower_queue` loop.
+
+          **Replace this block:**
           ```rust
-          type TestGSS = LeveledGSS<String, IntAcc>;
-          ```
-          And add the new type alias right after it:
-          ```rust
-          type TestGSSInt = LeveledGSS<i32, IntAcc>;
-          ```
-
-      3.  **Add the new test case** to the end of the `tests` module. This test will manually construct the GSS described in your logs, check its stats, run normalization, and then check the resulting stats to confirm it reproduces the issue.
-
-          Paste the following code at the end of the `mod tests { ... }` block:
-
-          ```rust
-          #[test]
-          fn test_normalization_sharing_factor_regression() {
-              type TestGSSInt = LeveledGSS<i32, IntAcc>;
-
-              // Manually construct the GSS from the log to reproduce the issue.
-              // The key is to create a structure that is not fully optimal,
-              // with multiple paths to similar substructures that are not yet shared.
-
-              // 1. Build the shared terminal `Lower` node.
-              // This corresponds to `Lower @ ... (MaxDepth: 0) [TERMINAL]` in the log.
-              let l_terminal = new_lower::<i32>(IHashMap::new(), true);
-
-              // 2. Build the `Lower` node that is a parent to the terminal via edge 500.
-              // This is a shared structural component.
-              let l_500_parent = new_lower(
-                  IHashMap::unit(500, OrdMap::unit(l_terminal.max_depth, l_terminal.clone())),
-                  false,
-              );
-
-              // 3. Build the `Interface` nodes.
-
-              // The branch for path `... -> 295 -> 569 -> 500`
-              let i_54_inner = new_lower(
-                  IHashMap::unit(569, OrdMap::unit(l_500_parent.max_depth, l_500_parent.clone())),
-                  false,
-              );
-              let i_54 = new_interface(i_54_inner, IntAcc::new(&[54]));
-
-              // The branch with 10 parallel interfaces. Their `inner` is `l_500_parent`.
-              let acc_vals = vec![38, 39, 40, 44, 45, 46, 47, 48, 49, 50];
-              let interfaces_10: Vec<_> = acc_vals
-                  .iter()
-                  .map(|&acc| new_interface(l_500_parent.clone(), IntAcc::new(&[acc])))
-                  .collect();
-
-              // 4. Build the `UpperBranch` nodes.
-              let edge_vals = vec![419, 437, 66, 477, 531, 541, 556, 558, 560, 562];
-              let mut children_101 = IHashMap::new();
-              for (edge, interface) in edge_vals.iter().zip(interfaces_10.iter()) {
-                  children_101.insert(*edge, OrdMap::unit(interface.max_depth(), interface.clone()));
-              }
-              let ub_101 = new_branch(children_101, None);
-
-              let ub_295_d4 = new_branch(
-                  IHashMap::unit(101, OrdMap::unit(ub_101.max_depth(), ub_101)),
-                  None,
-              );
-
-              // 5. Build the root, which has two children for edge 295 at different depths.
-              let mut children_295 = OrdMap::new();
-              children_295.insert(i_54.max_depth(), i_54);
-              children_295.insert(ub_295_d4.max_depth(), ub_295_d4);
-              let root_children = IHashMap::unit(295, children_295);
-              let root_inner = new_branch(root_children, None);
-
-              let gss = TestGSSInt { inner: root_inner };
-
-              // 6. Check stats before normalization to confirm we've built the right structure.
-              let stats_before = gss.stats();
-              // These numbers come from your panic log.
-              assert_eq!(stats_before.num_upperbranch_nodes, 3);
-              assert_eq!(stats_before.num_interface_nodes, 11);
-              assert_eq!(stats_before.num_lower_nodes, 2);
-              assert_eq!(stats_before.total_unique_nodes, 16);
-              assert_eq!(stats_before.num_structurally_unique_nodes, 6);
-              assert_eq!(stats_before.structural_sharing_factor, 0.375);
-
-              // 7. Normalize and check stats after.
-              let gss_after = gss.normalize();
-              let stats_after = gss_after.stats();
-
-              // These numbers also come from your panic log.
-              assert_eq!(stats_after.num_upperbranch_nodes, 3);
-              assert_eq!(stats_after.num_interface_nodes, 11);
-              assert_eq!(stats_after.num_lower_nodes, 1);
-              assert_eq!(stats_after.total_unique_nodes, 15);
-              assert_eq!(stats_after.num_structurally_unique_nodes, 5);
-              assert!((stats_after.structural_sharing_factor - (5.0 / 15.0)).abs() < 1e-9);
-
-              // 8. This assertion reproduces the condition that caused the panic.
-              // The structural sharing factor decreased, which is good, but the check
-              // that panicked was likely expecting an increase or a smaller decrease.
-              let change = (stats_after.structural_sharing_factor - stats_before.structural_sharing_factor)
-                  / stats_before.structural_sharing_factor;
-              assert!(
-                  change < -0.10,
-                  "Structural sharing factor decreased by more than 10%, which triggered the panic."
-              );
-          }
+                          Upper::Interface(i) => {
+                              let nid = Arc::as_ptr(i) as usize;
+                              if visited_interface.insert(nid) {
+                                  num_interface_nodes += 1;
+                                  unique_accumulators.insert(i.acc.clone());
+                                  total_accumulator_instances += 1;
+                                  if i.inner.empty {
+                                      num_interfaces_with_empty += 1;
+                                  }
+                                  for (v, kids) in i.inner.children.iter() {
+                                      distinct_values.insert(v.clone());
+                                      if kids.len() > 1 {
+                                          num_multi_depth_slots_lower += 1;
+                                          max_multiplicity_per_value_lower =
+                                              std::cmp::max(max_multiplicity_per_value_lower, kids.len());
+                                      }
+                                      for child in kids.values() {
+                                          interface_to_lower_edges += 1;
+                                          *incoming_edges.entry(Arc::as_ptr(child) as usize).or_insert(0) += 1;
+                                          lower_queue.push_back(child.clone());
+                                      }
+                                  }
+                              }
+                          }
           ```
 
-      This test constructs the exact GSS structure that was causing issues, confirms the statistics match your logs both before and after normalization, and includes an assertion that captures the condition that led to the panic.
+          **With this new block:**
+          ```rust
+                          Upper::Interface(i) => {
+                              let nid = Arc::as_ptr(i) as usize;
+                              if visited_interface.insert(nid) {
+                                  num_interface_nodes += 1;
+                                  unique_accumulators.insert(i.acc.clone());
+                                  total_accumulator_instances += 1;
+                                  if i.inner.empty {
+                                      num_interfaces_with_empty += 1;
+                                  }
+
+                                  // The inner Lower node is part of the graph and needs to be traversed.
+                                  lower_queue.push_back(i.inner.clone());
+
+                                  // The conceptual edge from Interface to Lower should be counted.
+                                  interface_to_lower_edges += 1;
+                                  *incoming_edges.entry(Arc::as_ptr(&i.inner) as usize).or_insert(0) += 1;
+                              }
+                          }
+          ```
 
       ### Git Diff
 
-      Here is the git diff for the changes:
+      Here is the git patch that applies the change described above.
 
       ```diff
       diff --git a/src/datastructures/leveled_gss.rs b/src/datastructures/leveled_gss.rs
-      index 8e45e14..786e680 100644
+      index 4558e8b..5b46e33 100644
       --- a/src/datastructures/leveled_gss.rs
       +++ b/src/datastructures/leveled_gss.rs
-      @@ -100,6 +100,7 @@
-           }
-       
-           type TestGSS = LeveledGSS<String, IntAcc>;
-      +    type TestGSSInt = LeveledGSS<i32, IntAcc>;
-       
-           fn gss_from_str_stacks(stacks: &[(&[&str], &[i32])]) -> TestGSS {
-               let stacks_vec: Vec<(Vec<String>, IntAcc)> = stacks
-      @@ -333,6 +334,83 @@
-               let gss_empty_pruned = gss_empty.prune(|_acc| true);
-               assert!(gss_empty.ptr_eq(&gss_empty_pruned));
-           }
+      @@ -2011,28 +2011,21 @@
+                       Upper::Interface(i) => {
+                           let nid = Arc::as_ptr(i) as usize;
+                           if visited_interface.insert(nid) {
+                               num_interface_nodes += 1;
+                               unique_accumulators.insert(i.acc.clone());
+                               total_accumulator_instances += 1;
+                               if i.inner.empty {
+                                   num_interfaces_with_empty += 1;
+                               }
+      -                        for (v, kids) in i.inner.children.iter() {
+      -                            distinct_values.insert(v.clone());
+      -                            if kids.len() > 1 {
+      -                                num_multi_depth_slots_lower += 1;
+      -                                max_multiplicity_per_value_lower =
+      -                                    std::cmp::max(max_multiplicity_per_value_lower, kids.len());
+      -                            }
+      -                            for child in kids.values() {
+      -                                interface_to_lower_edges += 1;
+      -                                *incoming_edges.entry(Arc::as_ptr(child) as usize).or_insert(0) += 1;
+      -                                lower_queue.push_back(child.clone());
+      -                            }
+      -                        }
       +
-      +    #[test]
-      +    fn test_normalization_sharing_factor_regression() {
-      +        type TestGSSInt = LeveledGSS<i32, IntAcc>;
+      +                        // The inner Lower node is part of the graph and needs to be traversed.
+      +                        lower_queue.push_back(i.inner.clone());
       +
-      +        // Manually construct the GSS from the log to reproduce the issue.
-      +        // The key is to create a structure that is not fully optimal,
-      +        // with multiple paths to similar substructures that are not yet shared.
-      +
-      +        // 1. Build the shared terminal `Lower` node.
-      +        // This corresponds to `Lower @ ... (MaxDepth: 0) [TERMINAL]` in the log.
-      +        let l_terminal = new_lower::<i32>(IHashMap::new(), true);
-      +
-      +        // 2. Build the `Lower` node that is a parent to the terminal via edge 500.
-      +        // This is a shared structural component.
-      +        let l_500_parent = new_lower(
-      +            IHashMap::unit(500, OrdMap::unit(l_terminal.max_depth, l_terminal.clone())),
-      +            false,
-      +        );
-      +
-      +        // 3. Build the `Interface` nodes.
-      +
-      +        // The branch for path `... -> 295 -> 569 -> 500`
-      +        let i_54_inner = new_lower(
-      +            IHashMap::unit(569, OrdMap::unit(l_500_parent.max_depth, l_500_parent.clone())),
-      +            false,
-      +        );
-      +        let i_54 = new_interface(i_54_inner, IntAcc::new(&[54]));
-      +
-      +        // The branch with 10 parallel interfaces. Their `inner` is `l_500_parent`.
-      +        let acc_vals = vec![38, 39, 40, 44, 45, 46, 47, 48, 49, 50];
-      +        let interfaces_10: Vec<_> = acc_vals
-      +            .iter()
-      +            .map(|&acc| new_interface(l_500_parent.clone(), IntAcc::new(&[acc])))
-      +            .collect();
-      +
-      +        // 4. Build the `UpperBranch` nodes.
-      +        let edge_vals = vec![419, 437, 66, 477, 531, 541, 556, 558, 560, 562];
-      +        let mut children_101 = IHashMap::new();
-      +        for (edge, interface) in edge_vals.iter().zip(interfaces_10.iter()) {
-      +            children_101.insert(*edge, OrdMap::unit(interface.max_depth(), interface.clone()));
-      +        }
-      +        let ub_101 = new_branch(children_101, None);
-      +
-      +        let ub_295_d4 = new_branch(
-      +            IHashMap::unit(101, OrdMap::unit(ub_101.max_depth(), ub_101)),
-      +            None,
-      +        );
-      +
-      +        // 5. Build the root, which has two children for edge 295 at different depths.
-      +        let mut children_295 = OrdMap::new();
-      +        children_295.insert(i_54.max_depth(), i_54);
-      +        children_295.insert(ub_295_d4.max_depth(), ub_295_d4);
-      +        let root_children = IHashMap::unit(295, children_295);
-      +        let root_inner = new_branch(root_children, None);
-      +
-      +        let gss = TestGSSInt { inner: root_inner };
-      +
-      +        // 6. Check stats before normalization to confirm we've built the right structure.
-      +        let stats_before = gss.stats();
-      +        // These numbers come from your panic log.
-      +        assert_eq!(stats_before.num_upperbranch_nodes, 3);
-      +        assert_eq!(stats_before.num_interface_nodes, 11);
-      +        assert_eq!(stats_before.num_lower_nodes, 2);
-      +        assert_eq!(stats_before.total_unique_nodes, 16);
-      +        assert_eq!(stats_before.num_structurally_unique_nodes, 6);
-      +        assert_eq!(stats_before.structural_sharing_factor, 0.375);
-      +
-      +        // 7. Normalize and check stats after.
-      +        let gss_after = gss.normalize();
-      +        let stats_after = gss_after.stats();
-      +
-      +        // These numbers also come from your panic log.
-      +        assert_eq!(stats_after.total_unique_nodes, 15);
-      +        assert_eq!(stats_after.num_structurally_unique_nodes, 5);
-      +        assert!((stats_after.structural_sharing_factor - (5.0 / 15.0)).abs() < 1e-9);
-      +    }
-       }
-       
-       // --------------------
+      +                        // The conceptual edge from Interface to Lower should be counted.
+      +                        interface_to_lower_edges += 1;
+      +                        *incoming_edges.entry(Arc::as_ptr(&i.inner) as usize).or_insert(0) += 1;
+                           }
+                       }
+                   }
 
       ```
     metadata:
@@ -10500,7 +10515,7 @@ messages:
       Applying patch to 'src/datastructures/leveled_gss.rs' using custom patcher...
       Successfully applied patch and wrote to src/datastructures/leveled_gss.rs.
     metadata:
-  - user: 'Changes committed with message: "Test: Add test case to reproduce normalization
-      sharing factor regression"'
+  - user: 'Changes committed with message: "Fix: Ensure lower nodes inside interface
+      nodes are counted in GSS stats"'
     metadata:
 ...
