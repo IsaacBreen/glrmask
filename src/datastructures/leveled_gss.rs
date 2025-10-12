@@ -76,7 +76,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
     }
 }
 
-[cfg(test)]
+#[cfg(test)]
 mod normalize_tests {
     use super::*;
     use std::sync::Arc;
@@ -116,7 +116,7 @@ mod tests {
 
     // A simple accumulator that just collects integers.
     #[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
-    struct IntAcc(im::HashSet<i32>);
+    pub(crate) struct IntAcc(im::HashSet<i32>);
 
     impl Merge for IntAcc {
         fn merge(&self, other: &Self) -> Self {
@@ -125,7 +125,7 @@ mod tests {
     }
 
     impl IntAcc {
-        fn new(vals: &[i32]) -> Self {
+        pub(crate) fn new(vals: &[i32]) -> Self {
             let mut set = im::HashSet::new();
             for &v in vals {
                 set.insert(v);
@@ -136,7 +136,7 @@ mod tests {
 
     type TestGSS = LeveledGSS<String, IntAcc>;
 
-    fn gss_from_str_stacks(stacks: &[(&[&str], &[i32])]) -> TestGSS {
+    pub(crate) fn gss_from_str_stacks(stacks: &[(&[&str], &[i32])]) -> TestGSS {
         let stacks_vec: Vec<(Vec<String>, IntAcc)> = stacks
             .iter()
             .map(|(s, a)| {
@@ -992,6 +992,7 @@ impl<T: Clone + Eq + Hash> Default for NormalizationLowerInterner<T> {
         Self {
             map: StdHashMap::new(),
             next_id: 0,
+            id_to_arc: StdHashMap::new(),
         }
     }
 }
