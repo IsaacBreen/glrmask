@@ -1254,7 +1254,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let new_per_state_fuel = per_state_fuel.map(|f| f - 1);
 
                     crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-                    let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, action_selector, config);
+                    let (s_new_arc, accepted_s_new_arc, s_new_shifted_arc) = self.reduce_and_goto(&peek, *nt, *len, action_selector, config);
                     if !s_new_arc.is_empty() {
                         let new_parse_state = ParseState {
                             stack: s_new_arc,
@@ -1277,6 +1277,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         };
                         accepted_states_todo.push_back(accepted_parse_state);
                     }
+                    if !s_new_shifted_arc.is_empty() {
+                        let shifted_parse_state = ParseState {
+                            stack: s_new_shifted_arc,
+                            accepted_state: state.accepted_state.clone(),
+                            prev_accepted_state: state.prev_accepted_state.clone(),
+                            trie2_god: state.trie2_god.clone(),
+                        };
+                        shifted_states_todo.push_back(shifted_parse_state);
+                        found_shift = true;
+                        if early_exit_on_shift {
+                            return (found_shift, true);
+                        }
+                    }
                 }
                 Action::Normal(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces }) => {
                     crate::debug!(5, "Action: Split with shift and reduces");
@@ -1297,7 +1310,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             for (nt, _prod_ids) in nts {
                                 hit!("GLRParserState::handle_action::Split::Reduce");
                                 crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-                                let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, action_selector, config);
+                                let (s_new_arc, accepted_s_new_arc, s_new_shifted_arc) = self.reduce_and_goto(&peek, *nt, *len, action_selector, config);
                                 if !s_new_arc.is_empty() {
                                     let new_parse_state = ParseState {
                                         stack: s_new_arc,
@@ -1319,6 +1332,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                         trie2_god: state.trie2_god.clone(),
                                     };
                                     accepted_states_todo.push_back(accepted_parse_state);
+                                }
+                                if !s_new_shifted_arc.is_empty() {
+                                    let shifted_parse_state = ParseState {
+                                        stack: s_new_shifted_arc,
+                                        accepted_state: state.accepted_state.clone(),
+                                        prev_accepted_state: state.prev_accepted_state.clone(),
+                                        trie2_god: state.trie2_god.clone(),
+                                    };
+                                    shifted_states_todo.push_back(shifted_parse_state);
+                                    found_shift = true;
+                                    if early_exit_on_shift {
+                                        return (found_shift, true);
+                                    }
                                 }
                             }
                         }
@@ -1442,7 +1468,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
                     if !constrained_state.stack.is_empty() {
                         for peek in GSSNode::peek_iter(&constrained_state.stack) {
-                            let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(
+                            let (s_new_arc, accepted_s_new_arc, s_new_shifted_arc) = self.reduce_and_goto(
                                 &peek,
                                 reduce.nonterminal_id,
                                 reduce.len,
@@ -1470,6 +1496,15 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     trie2_god: state.trie2_god.clone(),
                                 };
                                 accepted_states_todo.push_back(accepted_parse_state);
+                            }
+                            if !s_new_shifted_arc.is_empty() {
+                                let shifted_parse_state = ParseState {
+                                    stack: s_new_shifted_arc,
+                                    accepted_state: state.accepted_state.clone(),
+                                    prev_accepted_state: state.prev_accepted_state.clone(),
+                                    trie2_god: state.trie2_god.clone(),
+                                };
+                                shifted_states_todo.push_back(shifted_parse_state);
                             }
                         }
                     }
@@ -1665,7 +1700,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         len: usize,
         action_selector: &G,
         config: &ProcessTokenAdvancedConfig,
-    ) -> (Arc<GSSNode>, Arc<GSSNode>)
+    ) -> (Arc<GSSNode>, Arc<GSSNode>, Arc<GSSNode>)
     where
         G: Fn(StateID) -> Vec<FilteredAction<'a>>,
     {
@@ -1889,6 +1924,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
 
         // --- NEW CACHING LOGIC ---
         let mut final_out: Vec<Arc<GSSNode>> = Vec::new();
+        let mut final_shifted = Vec::new();
         if let Some(god) = self.active_state.trie2_god.as_ref() {
             timeit!("GLRParserState::reduce_and_goto::Caching", { // ~500 calls
             for gss_arc in out {
@@ -2010,7 +2046,8 @@ impl<'a> GLRParserState<'a> { // No longer generic
         let mut new_active = timeit!("GLRParserState::reduce_and_goto::MergeActive", GSSNode::merge_many_with_depth(MAX_MERGE_DEPTH, final_out));
         // Arc::make_mut(&mut new_active).inner = new_active.inner.normalize();
         let new_accepted = timeit!("GLRParserState::reduce_and_goto::MergeAccepted", GSSNode::merge_many_with_depth(MAX_MERGE_DEPTH, accepted_out));
-        (new_active, new_accepted)
+        let new_shifted = timeit!("GLRParserState::reduce_and_goto::MergeShifted", GSSNode::merge_many_with_depth(MAX_MERGE_DEPTH, final_shifted));
+        (new_active, new_accepted, new_shifted)
         })
     }
 
