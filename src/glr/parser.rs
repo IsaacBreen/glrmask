@@ -16,6 +16,7 @@ use crate::glr::automaton::compute_closure;
 use crate::glr::items::{Item, LRMode, LR_MODE};
 use crate::glr::table::{stage_9, DefaultReduce, Reduce, ShiftsAndReducesFull, ShiftsAndReducesWithoutDefaultReduce};
 use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::datastructures::trie::Trie;
 use crate::profiler::GSS_LOGGING_ENABLED;
 use bimap::BiBTreeMap;
 use deterministic_hash::DeterministicHasher;
@@ -287,6 +288,10 @@ pub struct GLRParser {
     pub combined_rows: BTreeMap<StateID, CombinedRow>,
     pub combined_start_state_id: StateID,
     pub combined_gss: Arc<GSSNode>,
+    // For precomputation
+    pub reduction_trigger_states: BTreeMap<StateID, NonTerminalID>,
+    pub precomputed_cache: HashMap<(NonTerminalID, TerminalID), (PrecomputeNode3Index, Arc<GSSNode>, Arc<GSSNode>)>,
+    pub precomputed_trie_god: Trie3GodWrapper,
 }
 
 impl JSONConvertible for GLRParser {
@@ -343,7 +348,7 @@ impl JSONConvertible for GLRParser {
                     gss
                 };
 
-                Ok(GLRParser {
+                let mut parser = GLRParser {
                     table,
                     productions,
                     terminal_map,
@@ -359,7 +364,12 @@ impl JSONConvertible for GLRParser {
                     combined_rows,
                     combined_start_state_id,
                     combined_gss,
-                })
+                    reduction_trigger_states: BTreeMap::new(),
+                    precomputed_cache: HashMap::new(),
+                    precomputed_trie_god: Trie3GodWrapper::new(),
+                };
+                parser.precompute_and_populate_cache();
+                Ok(parser)
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
         }
@@ -439,7 +449,7 @@ impl GLRParser {
             gss
         };
 
-        Self {
+        let mut parser = Self {
             table,
             productions,
             terminal_map,
@@ -455,9 +465,58 @@ impl GLRParser {
             combined_rows,
             combined_start_state_id,
             combined_gss,
-        }
+            reduction_trigger_states: BTreeMap::new(),
+            precomputed_cache: HashMap::new(),
+            precomputed_trie_god: Trie3GodWrapper::new(),
+        };
+        parser.precompute_and_populate_cache();
+        parser
     }
 
+    fn precompute_and_populate_cache(&mut self) {
+        let max_state_id = self.table.keys().max().cloned().unwrap_or(StateID(0)).0;
+        let max_combined_id = self.combined_rows.keys().max().cloned().unwrap_or(StateID(0)).0;
+        let mut next_state_id_val = std::cmp::max(max_state_id, max_combined_id) + 1;
+
+        let mut nt_to_state_id = BTreeMap::new();
+        for &nt_id in self.non_terminal_map.right_values() {
+            let state_id = StateID(next_state_id_val);
+            next_state_id_val += 1;
+            self.reduction_trigger_states.insert(state_id, nt_id);
+            nt_to_state_id.insert(nt_id, state_id);
+        }
+
+        let all_terminals: Vec<TerminalID> = self.terminal_map.right_values().cloned().collect();
+
+        for (&nt_id, &trigger_state_id) in &nt_to_state_id {
+            for &token_id in &all_terminals {
+                if Some(token_id) == self.ignore_terminal_id { continue; }
+
+                let god = Trie3GodWrapper::new(); // A fresh god for each computation to isolate tries
+                let root_node = PrecomputeNode3Index::new_with_god(
+                    god.insert(PrecomputeNode3::new(PrecomputedNodeContents::internal())),
+                    god.clone()
+                );
+                let mut acc = Acc::new_fresh();
+                acc.stored_trie_nodes_mut().insert(root_node.clone());
+
+                let combined_gss_with_acc = self.get_combined_gss_with_acc(acc);
+                let stack_with_trigger = Arc::new(combined_gss_with_acc.push(ParseStateEdgeContent { state_id: trigger_state_id }));
+                
+                let mut parser_state = self.init_glr_parser_from_stack(stack_with_trigger)
+                    .with_god(god.clone());
+                
+                parser_state.process_token_advanced(token_id, &ProcessTokenAdvancedConfig {
+                    below_bottom_mode: BelowBottomReductionMode::ContinueFromEverything,
+                });
+                
+                let result_active_stack = parser_state.active_state.stack;
+                let result_accepted_stack = parser_state.active_state.accepted_state.unwrap_or_else(|| Arc::new(GSSNode::new_dead()));
+
+                self.precomputed_cache.insert((nt_id, token_id), (root_node, result_active_stack, result_accepted_stack));
+            }
+        }
+    }
     pub fn init_glr_parser(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState { // No longer generic
         self.init_glr_parser_with_acc()
     }
@@ -1105,6 +1164,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         accepted_states_todo: &mut VecDeque<ParseState>,
         action_selector: &F,
         config: &ProcessTokenAdvancedConfig,
+        token_id: TerminalID,
         early_exit_on_shift: bool,
     ) -> (bool, bool) // (found_shift, should_early_exit)
     where
@@ -1170,7 +1230,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let new_per_state_fuel = per_state_fuel.map(|f| f - 1);
 
                     crate::debug!(5, "Action: Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), len);
-                    let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, action_selector, config);
+                    let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, action_selector, config, token_id);
                     if !s_new_arc.is_empty() {
                         let new_parse_state = ParseState {
                             stack: s_new_arc,
@@ -1213,7 +1273,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             for (nt, _prod_ids) in nts {
                                 hit!("GLRParserState::handle_action::Split::Reduce");
                                 crate::debug!(5, "Action (Split): Reduce by NT '{}' (len {})", self.parser.non_terminal_map.get_by_right(nt).unwrap(), *len);
-                                let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, action_selector, config);
+                                let (s_new_arc, accepted_s_new_arc) = self.reduce_and_goto(&peek, *nt, *len, action_selector, config, token_id);
                                 if !s_new_arc.is_empty() {
                                     let new_parse_state = ParseState {
                                         stack: s_new_arc,
@@ -1262,6 +1322,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         accepted_states_todo: &mut VecDeque<ParseState>,
         action_selector: F,
         config: &ProcessTokenAdvancedConfig,
+        token_id: TerminalID,
         fuel: &mut Option<usize>,
         early_exit_on_shift: bool,
     ) -> bool
@@ -1303,6 +1364,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                             accepted_states_todo,
                             &action_selector,
                             config,
+                            token_id,
                             early_exit_on_shift,
                         );
                         found_shift |= new_found_shift;
@@ -1364,6 +1426,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 reduce.len,
                                 action_selector,
                                 config,
+                                TerminalID(usize::MAX), // Dummy token for default reductions
                             );
                             if !s_new_arc.is_empty() {
                                 let new_parse_state = ParseState {
@@ -1404,7 +1467,19 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Some(phase2_todo),
                 shifted_states_todo,
                 accepted_states_todo,
-                |state_id| {
+                |state_id| { // ACTION SELECTOR
+                    if let Some(&nt_id) = parser.reduction_trigger_states.get(&state_id) {
+                        // This is a memory leak, but it's only for the few trigger states and only happens
+                        // during precomputation. It's the simplest way to satisfy the borrow checker
+                        // for the Action<'a> lifetime.
+                        let reduce_action = Box::new(Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                            nonterminal_id: nt_id,
+                            len: 2,
+                            production_ids: BTreeSet::new(),
+                        });
+                        return vec![(Action::Normal(Box::leak(reduce_action)), None)];
+                    }
+
                     if parser.is_combined_state(state_id) {
                         parser
                             .combined_rows
@@ -1425,6 +1500,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                 },
                 config,
+                token_id,
                 &mut None,
                 false,
             );
@@ -1441,7 +1517,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 None,
                 shifted_states_todo,
                 accepted_states_todo,
-                |state_id| {
+                |state_id| { // ACTION SELECTOR
+                    if let Some(&nt_id) = parser.reduction_trigger_states.get(&state_id) {
+                        let reduce_action = Box::new(Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                            nonterminal_id: nt_id,
+                            len: 2,
+                            production_ids: BTreeSet::new(),
+                        });
+                        return vec![(Action::Normal(Box::leak(reduce_action)), None)];
+                    }
+
                     if parser.is_combined_state(state_id) {
                         // Prefer concrete actions; no default reductions during Phase 2.
                         parser
@@ -1462,6 +1547,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                 },
                 config,
+                token_id,
                 &mut None,
                 false,
             );
@@ -1573,6 +1659,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
         len: usize,
         action_selector: &G,
         config: &ProcessTokenAdvancedConfig,
+        token_id: TerminalID,
     ) -> (Arc<GSSNode>, Arc<GSSNode>)
     where
         G: Fn(StateID) -> Vec<FilteredAction<'a>>,
@@ -1610,23 +1697,73 @@ impl<'a> GLRParserState<'a> { // No longer generic
         // Handle "below bottom" (substring parsing continuation) first, adding to the todo list.
         timeit!("GLRParserState::reduce_and_goto::HandleBelowBottom", {
             if !popper.below_bottom().is_empty() {
-                match config.below_bottom_mode {
-                    BelowBottomReductionMode::Fail => {
-                        crate::debug!(5, "Popped below bottom, failing these parse paths.");
+                if let Some((stored_root_idx, stored_active_gss, stored_accepted_gss)) = self.parser.precomputed_cache.get(&(nt, token_id)) {
+                    hit!("GLRParserState::reduce_and_goto::PrecomputedCacheHit");
+                    let god = self.active_state.trie2_god.as_ref().expect("Trie2 god missing");
+
+                    // 1. Deep copy the trie subtree.
+                    let new_root_indices = Trie::deep_copy_subtrees_into(
+                        &stored_root_idx.god().arena,
+                        &god.arena,
+                        &[stored_root_idx.index()]
+                    );
+                    let new_root_idx = PrecomputeNode3Index::new_with_god(new_root_indices.pop().unwrap(), god.clone());
+
+                    // 2. Build merged acc from below_bottom paths.
+                    let below_accs = self.build_below_bottom_accs(&popper);
+                    let merged_acc = below_accs.values().fold(Acc::new_fresh(), |a, b| Acc::merge(a, b));
+
+                    // 3. Connect sources from merged_acc to the new root.
+                    if !merged_acc.stored_trie_nodes().is_empty() {
+                        for node in merged_acc.stored_trie_nodes().iter().cloned() {
+                            let source_arc = node.as_arc().clone();
+                            let inserter = EdgeInserter::new(
+                                god,
+                                source_arc,
+                                (0, tokens_all.clone()),
+                                StateIDBV::max_ones(),
+                                |e, n| *e |= n,
+                                |node_value, _edge_value| node_value.live_tokens |= &tokens_all,
+                                |_, _| {},
+                            );
+                            inserter.try_destination(new_root_idx.clone()).expect("Cycle detected when connecting to precomputed trie node");
+                        }
                     }
-                    BelowBottomReductionMode::Panic => {
-                        panic!("A reduction popped below the bottom of the stack, and BelowBottomReductionMode was set to Panic.");
+
+                    // 4. Create a final Acc that points only to the new root.
+                    let mut final_acc = Acc::new_fresh();
+                    final_acc.stored_trie_nodes_mut().insert(new_root_idx);
+
+                    // 5. Apply this final_acc to the structure of the cached GSSs.
+                    let mut final_active_gss = (**stored_active_gss).clone();
+                    final_active_gss.inner = final_active_gss.inner.apply(|_| final_acc.clone());
+                    out.push(Arc::new(final_active_gss));
+
+                    if !stored_accepted_gss.is_empty() {
+                        let mut final_accepted_gss = (**stored_accepted_gss).clone();
+                        final_accepted_gss.inner = final_accepted_gss.inner.apply(|_| final_acc.clone());
+                        accepted_out.push(Arc::new(final_accepted_gss));
                     }
-                    _ => {
-                        let below_accs = self.build_below_bottom_accs(&popper);
-                        let below_todo = self.handle_below_bottom(nt, below_accs, config);
-                        crate::debug!(5, "Popped below bottom, hallucinating {} new parse paths.", below_todo.len());
-                        for (predecessor_state_id, isolated_parent) in below_todo {
-                            let pred_ptr = Arc::as_ptr(&isolated_parent);
-                            todo_map.entry(predecessor_state_id)
-                                .or_default()
-                                .entry(pred_ptr)
-                                .or_insert(isolated_parent);
+                } else {
+                    hit!("GLRParserState::reduce_and_goto::PrecomputedCacheMiss");
+                    match config.below_bottom_mode {
+                        BelowBottomReductionMode::Fail => {
+                            crate::debug!(5, "Popped below bottom, failing these parse paths.");
+                        }
+                        BelowBottomReductionMode::Panic => {
+                            panic!("A reduction popped below the bottom of the stack, and BelowBottomReductionMode was set to Panic.");
+                        }
+                        _ => {
+                            let below_accs = self.build_below_bottom_accs(&popper);
+                            let below_todo = self.handle_below_bottom(nt, below_accs, config);
+                            crate::debug!(5, "Popped below bottom, hallucinating {} new parse paths.", below_todo.len());
+                            for (predecessor_state_id, isolated_parent) in below_todo {
+                                let pred_ptr = Arc::as_ptr(&isolated_parent);
+                                todo_map.entry(predecessor_state_id)
+                                    .or_default()
+                                    .entry(pred_ptr)
+                                    .or_insert(isolated_parent);
+                            }
                         }
                     }
                 }
@@ -1976,10 +2113,10 @@ impl<'a> GLRParserState<'a> { // No longer generic
         self.process_action_queue(
             &mut work_map,
             None,
-            &mut shifted_states_todo,
             &mut accepted_states_todo,
             |state_id| vec![(Action::Default(&parser.table.get(&state_id).expect_else(|| format!("State ID {} not found in parse table during Phase 3", state_id.0)).default_reduce), None)],
             &token_config,
+            TerminalID(usize::MAX), // Dummy token ID for default reductions
             &mut fuel,
             false,
         );
@@ -2089,7 +2226,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 Some(&mut phase2_todo),
                 &mut shifted_states_todo,
                 &mut accepted_states_todo,
-                |state_id| {
+                |state_id| { // ACTION SELECTOR
+                    if let Some(&nt_id) = parser.reduction_trigger_states.get(&state_id) {
+                        let reduce_action = Box::new(Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                            nonterminal_id: nt_id,
+                            len: 2,
+                            production_ids: BTreeSet::new(),
+                        });
+                        return vec![(Action::Normal(Box::leak(reduce_action)), None)];
+                    }
+
                     if parser.is_combined_state(state_id) {
                         parser
                             .combined_rows
@@ -2110,6 +2256,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     }
                 },
                 &cfg,
+                token_id,
                 &mut None,
                 true, // early_exit_on_shift
             ) {
@@ -2124,7 +2271,16 @@ impl<'a> GLRParserState<'a> { // No longer generic
             None,
             &mut shifted_states_todo,
             &mut accepted_states_todo,
-            |state_id| {
+            |state_id| { // ACTION SELECTOR
+                if let Some(&nt_id) = parser.reduction_trigger_states.get(&state_id) {
+                    let reduce_action = Box::new(Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                        nonterminal_id: nt_id,
+                        len: 2,
+                        production_ids: BTreeSet::new(),
+                    });
+                    return vec![(Action::Normal(Box::leak(reduce_action)), None)];
+                }
+
                 if parser.is_combined_state(state_id) {
                     parser
                         .combined_rows
@@ -2145,6 +2301,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                 }
             },
             &cfg,
+            token_id,
             &mut None,
             true, // early_exit_on_shift
         )
