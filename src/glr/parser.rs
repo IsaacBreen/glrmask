@@ -1641,6 +1641,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                     let isolated_parent = peek2.isolated_parent();
                     if predecessor_state_id == self.parser.combined_start_state_id {
                         println!("peek: {}", peek._parent().inner.to_graph_string(false));
+                        println!("popper: {}", popper._inner().to_graph_string(false));
                         println!("parent: {}", peek2._parent().inner.to_graph_string(false));
                         assert!(isolated_parent.inner.inner_ptr_eq(&self.parser.get_combined_gss_with_acc(isolated_parent.inner.reduce_acc().unwrap()).inner), "HMM!.\n{}\n{}", isolated_parent.inner.to_graph_string(false), self.parser.get_combined_gss_with_acc(isolated_parent.inner.reduce_acc().unwrap()).inner.to_graph_string(false));
                     }

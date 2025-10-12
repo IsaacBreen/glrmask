@@ -475,6 +475,9 @@ impl GSSPopper {
         inner = inner.filter_by_length(Some(1), None);
         self.inner = inner;
     }
+    pub(crate) fn _inner(&self) -> &LeveledGSS<ParseStateEdgeContent, Acc> {
+        &self.inner
+    }
 }
 
 impl GSSPopperItem {
