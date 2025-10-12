@@ -328,17 +328,12 @@ fn merge_nodes_trie1(
 
     const MAX_ITERS: usize = 40;
     for it in 0..MAX_ITERS {
-        // Signature: (end_flag, Vec<((edge_key, dest_class), llm_bv_union)>)
         type SigEdgeKey = (Option<GrammarTokenID>, usize);
-        type Signature1 = (bool, Vec<(SigEdgeKey, LLMTokenBV)>);
 
-        let mut sig_to_id: HashMap<Signature1, usize> = HashMap::new();
-        let mut new_class = vec![0; n];
-        let mut next_id = 0;
-        let mut changes = 0;
+        let mut h_of: Vec<u64> = vec![0; n];
 
         #[cfg(not(rustrover))]
-        let its = tqdm!(0..n, desc = format!("Trie1 Merge Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
+        let its = tqdm!(0..n, desc = format!("Trie1 Merge Hash Iter {}", it + 1), total = n, disable = !PROGRESS_BAR_ENABLED, leave = true);
         #[cfg(rustrover)]
         let its = 0..n;
 
@@ -352,20 +347,31 @@ fn merge_nodes_trie1(
                     .or_insert_with(|| llm_bv.clone());
             }
             let agg_vec: Vec<(SigEdgeKey, LLMTokenBV)> = aggr.into_iter().collect();
-            let sig: Signature1 = (ends[u], agg_vec);
 
-            let cid = *sig_to_id.entry(sig).or_insert_with(|| {
+            let mut hasher = DefaultHasher::new();
+            ends[u].hash(&mut hasher);
+            agg_vec.hash(&mut hasher);
+            h_of[u] = hasher.finish();
+        }
+
+        let mut map: HashMap<u64, usize> = HashMap::with_capacity(n.checked_div(2).unwrap_or(1024));
+        let mut new_class = vec![0; n];
+        let mut next_id = 0;
+        let mut changes = 0;
+
+        for u in 0..n {
+            let cid = *map.entry(h_of[u]).or_insert_with(|| {
                 let id = next_id;
                 next_id += 1;
                 id
             });
             new_class[u] = cid;
             if new_class[u] != prev_class[u] {
-                changes += 1;
+                changes += 1
             }
         }
 
-        crate::debug!(3, "Trie1 merge iter {}: classes={}, changes={}", it + 1, next_id, changes);
+        crate::debug!(3, "Trie1 merge iter {}: classes={}, changes={}", it + 1, map.len(), changes);
         prev_class = new_class;
         if changes == 0 { break; }
     }
