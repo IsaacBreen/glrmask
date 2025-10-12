@@ -2718,7 +2718,7 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
     // 2. Initial GLR state
-    let mut glr_state = parser.init_glr_parser(None);
+    let mut glr_state = parser.init_parser_state_combined();
 
     let terminal_a = TerminalID(0);
     let terminal_b = TerminalID(1);
