@@ -1,4 +1,4 @@
-use crate::glr::parser::{BelowBottomReductionMode, ParseState, ProcessTokenAdvancedConfig};
+use crate::glr::parser::{BelowBottomReductionMode, GLRParserState, ParseState, ProcessTokenAdvancedConfig};
 use rand::rngs::StdRng;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::{eat_u8, rep1};
@@ -2725,11 +2725,21 @@ fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>>
     let gss_stack = parser.get_combined_gss_with_acc(acc);
     let mut glr_state = parser.init_glr_parser_from_stack(gss_stack).with_god(trie3_god.clone());
 
-    // 3. Process the token 'a', which corresponds to the IDENTIFIER terminal.
-    // This is a common token that can appear in many contexts, making it a good
-    // candidate to trigger the creation of many parallel parse paths from the combined state.
-    let terminal_a = *parser.terminal_map.get_by_left(&Terminal::terminal("IDENTIFIER")).unwrap();
-    glr_state.process_token_advanced(terminal_a, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
+    for i in 0..5 {
+        let mut next_glr_state: Option<GLRParserState> = None;
+        for (terminal, terminal_id) in &parser.terminal_map {
+            let mut glr_state_copy = glr_state.clone();
+            glr_state_copy.process_token_advanced(*terminal_id, &ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll });
+            if glr_state_copy.is_ok() {
+                if let Some(existing) = &mut next_glr_state {
+                    existing.merge_with(glr_state_copy);
+                } else {
+                    next_glr_state = Some(glr_state_copy);
+                }
+            }
+        }
+        glr_state = next_glr_state.expect("At least one terminal should be processable");
+    }
 
     // 4. Check stats before normalization. A low sharing factor indicates the problem.
     let stats_before = glr_state.active_state.stack.inner.stats();
