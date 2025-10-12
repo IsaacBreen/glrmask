@@ -533,7 +533,7 @@ impl GLRParser {
                 let pushed = s.active_state.stack.as_ref().clone().push(ParseStateEdgeContent { state_id: synthetic_sid });
                 s.active_state.stack = Arc::new(pushed);
                 // Run a single token step with the configured current_token (so downstream caching can reference it)
-                let cfg = ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::default(), current_token: Some(tid) };
+                let cfg = ProcessTokenAdvancedConfig { below_bottom_mode: BelowBottomReductionMode::ContinueFromAll, current_token: Some(tid) };
                 s.process_token_advanced(tid, &cfg);
                 // Store the result in the stored cache
                 self.stored_below_bottom_cache.insert((nt, tid), (root, s.active_state.stack.clone()));
