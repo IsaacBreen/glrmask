@@ -895,7 +895,7 @@ pub(crate) fn merge_stored_trie_nodes(
 
 pub(crate) fn map_trie3_node_ids(
     root_arc: &mut Arc<GSSNode>,
-    id_map: &BTreeMap<Trie2Index, Trie2Index>,
+    id_map: &HashMap<Trie2Index, Trie2Index>,
 ) {
     transform_all(root_arc, |acc| {
         let mut new_acc = acc.clone();

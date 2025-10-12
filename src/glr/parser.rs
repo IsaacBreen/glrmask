@@ -1951,7 +1951,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                         if let (Some(cur_tok), Some(dest_god)) = (config.current_token, self.active_state.trie2_god.as_ref()) {
                             if let Some((stored_root, stored_gss)) = self.parser.stored_below_bottom_cache.get(&(nt, cur_tok)).cloned() {
                                 // Deep copy the trie subtree from the parser's stored arena into the local arena
-                                let new_roots: Vec<Trie2Index> = PrecomputeNode3::deep_copy_subtrees_into(
+                                let (new_roots, id_map) = PrecomputeNode3::deep_copy_subtrees_into(
                                     &self.parser.stored_trie_god,
                                     dest_god,
                                     &[stored_root.clone().into()],
@@ -1961,8 +1961,6 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                 let dest_entry = self.below_bottom_cache.entry(cache_key).or_insert(new_root.clone());
                                 *dest_entry = new_root.clone();
                                 // Map trie node indices within the stored GSS to local arena indices
-                                let mut id_map: BTreeMap<Trie2Index, Trie2Index> = BTreeMap::new();
-                                id_map.insert(stored_root.into(), new_root.into());
                                 let mut mapped_gss = stored_gss.clone();
                                 map_trie3_node_ids(&mut mapped_gss, &id_map);
                                 // Add the mapped GSS to the output

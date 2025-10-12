@@ -715,9 +715,9 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
     pub fn deep_copy_subtrees(
         source_arena: &Arena<Self>,
         roots: &[Trie2Index],
-    ) -> (Arena<Self>, Vec<Trie2Index>, HashMap<usize, Trie2Index>) {
+    ) -> (Arena<Self>, Vec<Trie2Index>, HashMap<Trie2Index, Trie2Index>) {
         let new_arena = Arena::new();
-        let mut old_to_new_map: HashMap<usize, Trie2Index> = HashMap::new();
+        let mut old_to_new_map: HashMap<Trie2Index, Trie2Index> = HashMap::new();
         let mut new_roots = Vec::with_capacity(roots.len());
 
         for &root in roots {
@@ -749,8 +749,8 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         source_arena: &Arena<Self>,
         dest_arena: &Arena<Self>,
         roots: &[Trie2Index],
-    ) -> (Vec<Trie2Index>, HashMap<usize, Trie2Index>) {
-        let mut old_to_new_map: HashMap<usize, Trie2Index> = HashMap::new();
+    ) -> (Vec<Trie2Index>, HashMap<Trie2Index, Trie2Index>) {
+        let mut old_to_new_map: HashMap<Trie2Index, Trie2Index> = HashMap::new();
         let mut new_roots = Vec::with_capacity(roots.len());
 
         for &root in roots {
@@ -767,9 +767,9 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         old_idx: Trie2Index,
         source_arena: &Arena<Self>,
         new_arena: &Arena<Self>,
-        old_to_new_map: &mut HashMap<usize, Trie2Index>,
+        old_to_new_map: &mut HashMap<Trie2Index, Trie2Index>,
     ) -> Trie2Index {
-        if let Some(&new_idx) = old_to_new_map.get(&old_idx.as_usize()) {
+        if let Some(&new_idx) = old_to_new_map.get(&old_idx) {
             return new_idx;
         }
 
@@ -786,7 +786,7 @@ impl<T: Clone, EK: Ord + Clone, EV: Clone> Trie<EK, EV, T> {
         let new_idx = Trie2Index::from(new_arena.insert(new_node));
 
         // Insert the mapping *before* recursing to handle cycles correctly.
-        old_to_new_map.insert(old_idx.as_usize(), new_idx);
+        old_to_new_map.insert(old_idx, new_idx);
 
         // Now, collect children info to avoid holding the read guard during recursive calls.
         let children_to_copy: Vec<(EK, OrderedHashMap<Trie2Index, EV>)> = old_node_guard
