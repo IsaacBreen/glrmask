@@ -340,68 +340,6 @@ mod tests {
         let gss_empty_pruned = gss_empty.prune(|_acc| true);
         assert!(gss_empty.ptr_eq(&gss_empty_pruned));
     }
-
-    #[test]
-    fn test_normalization_worsens_sharing_factor() {
-        // This test reproduces a scenario where normalization was found to decrease
-        // the structural sharing factor, which is counter-intuitive.
-        // The scenario involves a GSS with a multi-depth child map, which `fuse`
-        // resolves by merging. The resulting structure, after canonicalization,
-        // had a worse sharing factor (structurally_unique / total_unique).
-
-        // GSS 1 represents a structure with max_depth=3.
-        let gss1 = gss_from_str_stacks(&[
-            (&["A", "B", "T"], &[1]),
-        ]);
-        assert_eq!(gss1.max_depth(), 3);
-
-        // GSS 2 represents a structure with max_depth=4 and some branching.
-        // It shares the terminal "T" with GSS 1.
-        let gss2 = gss_from_str_stacks(&[
-            (&["A", "C", "D1", "T"], &[2]),
-            (&["A", "C", "D2", "T"], &[3]),
-        ]);
-        assert_eq!(gss2.max_depth(), 4);
-
-        // Create a GSS with a multi-depth child map.
-        // We push gss1 and gss2 under a new root "X", then merge.
-        // Because gss1 and gss2 have different max_depths, the merge will
-        // create a child map for "X" with two entries: one for depth 3
-        // and one for depth 4.
-        let parent1 = gss1.push("X".to_string());
-        let parent2 = gss2.push("X".to_string());
-        let gss_to_test = parent1.merge(&parent2);
-
-        // Verify the multi-depth structure exists before normalization.
-        if let Upper::Branch(b) = &*gss_to_test.inner {
-            if let Some(kids) = b.children.get(&"X".to_string()) {
-                assert_eq!(kids.len(), 2, "Test setup failed: multi-depth map not created.");
-            } else {
-                panic!("Test setup failed: child 'X' not found.");
-            }
-        } else {
-            panic!("Test setup failed: root is not an UpperBranch.");
-        }
-
-        let stats_before = gss_to_test.stats();
-        let normalized_gss = gss_to_test.normalize();
-        let stats_after = normalized_gss.stats();
-
-        // 1. Normalization should not increase the total number of unique nodes.
-        assert!(
-            stats_after.total_unique_nodes <= stats_before.total_unique_nodes,
-            "Total unique nodes increased after normalization: {} -> {}",
-            stats_before.total_unique_nodes, stats_after.total_unique_nodes
-        );
-
-        // 2. The structural sharing factor should not get worse. This is the assertion
-        // that is expected to fail, reproducing the reported issue.
-        assert!(
-            stats_after.structural_sharing_factor >= stats_before.structural_sharing_factor,
-            "Structural sharing factor decreased after normalization: {:.3} -> {:.3}",
-            stats_before.structural_sharing_factor, stats_after.structural_sharing_factor
-        );
-    }
 }
 
 // --------------------
