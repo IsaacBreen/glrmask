@@ -675,139 +675,63 @@ pub(crate) fn allow_only_llm_tokens_on_stored_trie_nodes_and_prune_arc(
     _memo: &mut PruneAndTransformRecursiveMemo,
     stored_trie_god: &StoredTrieGodWrapper,
 ) {
-    // --- Global Analysis: Find common subsets (macros) ---
-    let mut all_accs = Vec::new();
-    root_arc.inner.visit_accs(|acc| all_accs.push(acc.clone()));
-    let mut all_needs_edge_sets = Vec::new();
-    for acc in &all_accs {
-        let needs_edge: BTreeSet<StoredPrecomputeNodeIndex> = acc
-            .stored_trie_nodes()
-            .iter()
-            .filter(|node| {
-                !node
-                    .as_arc()
-                    .read(stored_trie_god)
-                    .expect("poison")
-                    .value
-                    .live_tokens
-                    .is_subset(allowed_tokens)
-            })
-            .cloned()
-            .collect();
-        if !needs_edge.is_empty() {
-            all_needs_edge_sets.push(needs_edge);
-        }
-    }
+    let mut source_to_dest_map = BTreeMap::new();
 
-    let mut pair_counts: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, usize> = BTreeMap::new();
-    for needs_edge_set in &all_needs_edge_sets {
-        let nodes: Vec<_> = needs_edge_set.iter().cloned().collect();
-        if nodes.len() >= 2 {
-            for i in 0..nodes.len() {
-                for j in (i + 1)..nodes.len() {
-                    let mut pair = BTreeSet::new();
-                    pair.insert(nodes[i].clone());
-                    pair.insert(nodes[j].clone());
-                    *pair_counts.entry(pair).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-
-    let mut macros: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, StoredPrecomputeNodeIndex> = BTreeMap::new();
-    for (pair, count) in pair_counts {
-        if count > 1 { // Only create macros for pairs that are reused.
-            let dest_node = StoredPrecomputeNodeIndex::new(
-                stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                    crate::constraint::PrecomputedNodeContents::internal(),
-                )),
-            );
-            macros.insert(pair, dest_node);
-        }
-    }
-    let sorted_macros: Vec<_> = macros.into_iter().collect();
-
-    // --- Transformation ---
-    let mut new_destinations_for_leftovers = BTreeMap::new();
     transform_all(root_arc, |acc| {
-        let mut na = acc.clone();
-        let original_nodes = na.stored_trie_nodes.clone();
-        let mut needs_edge: BTreeSet<_> = original_nodes
-            .iter()
-            .filter(|node| {
-                !node
+        let mut final_nodes = BTreeSet::new();
+        let mut changed = false;
+
+        for source_node in acc.stored_trie_nodes() {
+            let needs_update = !source_node
                 .as_arc()
                 .read(stored_trie_god)
                 .expect("poison")
                 .value
                 .live_tokens
-                    .is_subset(allowed_tokens)
-            })
-            .cloned()
-            .collect();
+                .is_subset(allowed_tokens);
 
-        if needs_edge.is_empty() {
-            return Some(na);
-        }
+            if needs_update {
+                changed = true;
+                let dest_node = source_to_dest_map
+                    .entry(source_node.clone())
+                    .or_insert_with(|| {
+                        StoredPrecomputeNodeIndex::new(
+                            stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                                crate::constraint::PrecomputedNodeContents::internal(),
+                            )),
+                        )
+                    })
+                    .clone();
 
-        let mut final_nodes = original_nodes.difference(&needs_edge).cloned().collect::<BTreeSet<_>>();
-
-        // Greedily apply discovered macros
-        for (macro_nodes, macro_dest) in &sorted_macros {
-            if macro_nodes.is_subset(&needs_edge) {
                 let edge_key = (0, allowed_tokens.clone());
                 let edge_value = StateIDBV::max_ones();
-                for src in macro_nodes {
-                    let inserter = crate::datastructures::trie::EdgeInserter::new(
-                        stored_trie_god,
-                        src.as_arc().clone(),
-                        edge_key.clone(),
-                        edge_value.clone(),
-                        |e, n| *e |= n,
-                        |node_value, _| node_value.live_tokens |= allowed_tokens,
-                        |_, _| {},
-                    );
-                    inserter.try_destination(macro_dest.clone()).expect("Cycle detected");
-                }
-                macro_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
-                final_nodes.insert(macro_dest.clone());
-                needs_edge = needs_edge.difference(macro_nodes).cloned().collect();
-            }
-        }
 
-        // Handle leftovers using the original "macro for the whole set" logic
-        if !needs_edge.is_empty() {
-            let new_dest = new_destinations_for_leftovers
-                .entry(needs_edge.clone())
-                .or_insert_with(|| {
-                    StoredPrecomputeNodeIndex::new(
-                        stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
-                            crate::constraint::PrecomputedNodeContents::internal(),
-                        )),
-                    )
-                })
-                .clone();
-
-            let edge_key = (0, allowed_tokens.clone());
-            let edge_value = StateIDBV::max_ones();
-            for src in &needs_edge {
                 let inserter = crate::datastructures::trie::EdgeInserter::new(
                     stored_trie_god,
-                    src.as_arc().clone(),
-                    edge_key.clone(),
-                    edge_value.clone(),
+                    source_node.as_arc().clone(),
+                    edge_key,
+                    edge_value,
                     |e, n| *e |= n,
                     |node_value, _| node_value.live_tokens |= allowed_tokens,
                     |_, _| {},
                 );
-                inserter.try_destination(new_dest.clone()).expect("Cycle detected");
+                inserter.try_destination(dest_node.clone()).expect("Cycle detected");
+
+                dest_node.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
+
+                final_nodes.insert(dest_node);
+            } else {
+                final_nodes.insert(source_node.clone());
             }
-            new_dest.write(stored_trie_god).expect("poison").value.live_tokens |= allowed_tokens;
-            final_nodes.insert(new_dest);
         }
 
-        na.stored_trie_nodes = final_nodes;
-        Some(na)
+        if changed {
+            let mut new_acc = acc.clone();
+            new_acc.stored_trie_nodes = final_nodes;
+            Some(new_acc)
+        } else {
+            Some(acc.clone())
+        }
     });
 }
 
@@ -878,43 +802,93 @@ pub(crate) fn merge_stored_trie_nodes(
     _memo: &mut PruneAndTransformRecursiveMemo,
     stored_trie_god: &StoredTrieGodWrapper,
 ) {
-    let mut new_destinations = BTreeMap::new();
+    // --- 1. Collect all unique node sets from Accs that need merging ---
+    let mut all_node_sets = BTreeSet::new();
+    root_arc.inner.visit_accs(|acc| {
+        if acc.stored_trie_nodes().iter().any(|n| {
+            n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens
+                != acc.llm_tokens_union
+        }) {
+            all_node_sets.insert(acc.stored_trie_nodes().clone());
+        }
+    });
 
+    if all_node_sets.is_empty() {
+        return; // Nothing to do
+    }
+
+    let all_node_sets_vec: Vec<_> = all_node_sets.into_iter().collect();
+    let union_nodes: BTreeSet<_> =
+        all_node_sets_vec.iter().flat_map(|s| s.iter().cloned()).collect();
+
+    // --- 2. Find partitions based on co-occurrence in the collected sets ---
+    let mut partitions: BTreeMap<Vec<bool>, BTreeSet<StoredPrecomputeNodeIndex>> = BTreeMap::new();
+    for node in union_nodes {
+        let signature: Vec<bool> = all_node_sets_vec.iter().map(|s| s.contains(&node)).collect();
+        partitions.entry(signature).or_default().insert(node);
+    }
+
+    // --- 3. Create destination nodes for each partition ---
+    let partition_dests: BTreeMap<BTreeSet<StoredPrecomputeNodeIndex>, StoredPrecomputeNodeIndex> =
+        partitions
+            .into_values()
+            .map(|p| {
+                let dest = StoredPrecomputeNodeIndex::new(
+                    stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(
+                        crate::constraint::PrecomputedNodeContents::internal(),
+                    )),
+                );
+                (p, dest)
+            })
+            .collect();
+
+    // --- 4. Create a map from each source node to its partition's destination ---
+    let mut source_to_dest_map = BTreeMap::new();
+    for (partition, dest) in &partition_dests {
+        for source_node in partition {
+            source_to_dest_map.insert(source_node.clone(), dest.clone());
+        }
+    }
+
+    // --- 5. Transform all Accs, adding edges and updating node sets ---
     transform_all(root_arc, |acc| {
-        if !acc.stored_trie_nodes().iter().any(
-            |n| n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens != acc.llm_tokens_union
-        ) {
+        let needs_merging = acc.stored_trie_nodes().iter().any(|n| {
+            n.as_arc().read(stored_trie_god).expect("poison").value.live_tokens
+                != acc.llm_tokens_union
+        });
+
+        if !needs_merging {
             return Some(acc.clone());
         }
 
         let mut new_acc = acc.clone();
-        // Create a single new destination for this merge operation.
-        let new_destination = new_destinations.entry((new_acc.stored_trie_nodes().clone(), acc.llm_tokens_union.clone()))
-            .or_insert_with(|| StoredPrecomputeNodeIndex::new(stored_trie_god.insert(crate::constraint::PrecomputeNode3::new(crate::constraint::PrecomputedNodeContents::internal()))))
-            .clone();
+        let new_nodes: BTreeSet<_> = acc
+            .stored_trie_nodes()
+            .iter()
+            .map(|source_node| source_to_dest_map.get(source_node).unwrap().clone())
+            .collect();
 
-        let edge_key = (0, new_acc.llm_tokens_union.clone());
-        let edge_value = crate::constraint::StateIDBV::max_ones();
-        let tokens_for_edge = new_acc.llm_tokens_union.clone();
+        let tokens_for_edge = acc.llm_tokens_union.clone();
+        let edge_key = (0, tokens_for_edge.clone());
+        let edge_value = StateIDBV::max_ones();
 
-        for source_wrapper in new_acc.stored_trie_nodes() {
-            let source_arc = source_wrapper.as_arc().clone();
+        for source_node in acc.stored_trie_nodes() {
+            let dest_node = source_to_dest_map.get(source_node).unwrap();
 
             let inserter = crate::datastructures::trie::EdgeInserter::new(
                 stored_trie_god,
-                source_arc,
+                source_node.as_arc().clone(),
                 edge_key.clone(),
                 edge_value.clone(),
                 |e, n| *e |= n,
                 |node_value, _edge_value| node_value.live_tokens |= &tokens_for_edge,
                 |_, _| {}, // Unconditional insertion
             );
-            inserter.try_destination(new_destination.clone()).expect("Cycle detected when merging stored_trie nodes; this should be impossible.");
+            inserter.try_destination(dest_node.clone()).expect("Cycle detected when merging stored_trie nodes");
+            dest_node.write(stored_trie_god).expect("poison").value.live_tokens |= &tokens_for_edge;
         }
 
-        new_destination.write(stored_trie_god).expect("poison").value.live_tokens |= &tokens_for_edge;
-
-        new_acc.stored_trie_nodes = BTreeSet::from([new_destination]);
+        new_acc.stored_trie_nodes = new_nodes;
         Some(new_acc)
     });
 }
