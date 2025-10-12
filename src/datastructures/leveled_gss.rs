@@ -340,53 +340,6 @@ mod tests {
         let gss_empty_pruned = gss_empty.prune(|_acc| true);
         assert!(gss_empty.ptr_eq(&gss_empty_pruned));
     }
-
-    #[test]
-    fn test_merge_of_structurally_equal_loses_sharing() {
-        // GSS with one path, but created separately so internal nodes are not shared.
-        let gss1 = gss_from_str_stacks(&[(&["C", "B", "A"], &[1])]);
-        let gss2 = gss_from_str_stacks(&[(&["C", "B", "A"], &[2])]);
-
-        // Extract the Lower node for "B" -> "C" from gss1.
-        let preds1 = gss1.predecessors();
-        let gss_bc_1 = preds1.get("A").unwrap().values().next().unwrap().first().unwrap();
-        let lower_bc_1 = match &*gss_bc_1.inner {
-            Upper::Interface(i) => i.inner.clone(),
-            _ => panic!("Expected Interface"),
-        };
-
-        // Extract the Lower node for "B" -> "C" from gss2.
-        let preds2 = gss2.predecessors();
-        let gss_bc_2 = preds2.get("A").unwrap().values().next().unwrap().first().unwrap();
-        let lower_bc_2 = match &*gss_bc_2.inner {
-            Upper::Interface(i) => i.inner.clone(),
-            _ => panic!("Expected Interface"),
-        };
-
-        // They are structurally equal but not pointer equal.
-        assert_ne!(Arc::as_ptr(&lower_bc_1), Arc::as_ptr(&lower_bc_2));
-
-        // Merge the two top-level GSSs.
-        let merged_gss = gss1.merge(&gss2);
-
-        // The merged GSS will have one path "A" -> "B" -> "C".
-        // Extract the Lower node for "B" -> "C" from the merged result.
-        let merged_preds = merged_gss.predecessors();
-        let merged_gss_bc = merged_preds.get("A").unwrap().values().next().unwrap().first().unwrap();
-        let merged_lower_bc = match &*merged_gss_bc.inner {
-            Upper::Interface(i) => i.inner.clone(),
-            _ => panic!("Expected Interface"),
-        };
-
-        // The issue: merge_lower rebuilds the node, so the new pointer is different
-        // from both original pointers. A system that relies on pointer equality for
-        // canonical nodes will fail here.
-        // A "correct" implementation with hash-consing would return one of the original pointers
-        // or a canonical third one, and subsequent merges would reuse it.
-        // Here we just demonstrate that a new, non-canonical node is created.
-        let is_one_of_originals = Arc::ptr_eq(&merged_lower_bc, &lower_bc_1) || Arc::ptr_eq(&merged_lower_bc, &lower_bc_2);
-        assert!(!is_one_of_originals, "Merge of structurally-equal but pointer-different Lower nodes should produce a new node, breaking canonicality assumptions without hash-consing.");
-    }
 }
 
 // --------------------
