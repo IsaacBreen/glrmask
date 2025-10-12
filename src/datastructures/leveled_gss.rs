@@ -401,6 +401,14 @@ mod tests {
 
         // 6. Check stats before normalization to confirm we've built the right structure.
         let stats_before = gss.stats();
+
+        // 7. Normalize and check stats after.
+        let gss_after = gss.normalize();
+        let stats_after = gss_after.stats();
+
+        println!("GSS before normalization: {}", gss.to_graph_string(false));
+        println!("GSS after normalization: {}", gss_after.to_graph_string(false));
+
         // These numbers come from your panic log.
         assert_eq!(stats_before.num_upperbranch_nodes, 3);
         assert_eq!(stats_before.num_interface_nodes, 11);
@@ -408,10 +416,6 @@ mod tests {
         assert_eq!(stats_before.total_unique_nodes, 16);
         assert_eq!(stats_before.num_structurally_unique_nodes, 6);
         assert_eq!(stats_before.structural_sharing_factor, 0.375);
-
-        // 7. Normalize and check stats after.
-        let gss_after = gss.normalize();
-        let stats_after = gss_after.stats();
 
         // These numbers also come from your panic log.
         assert_eq!(stats_after.total_unique_nodes, 15);
