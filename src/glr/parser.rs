@@ -2014,7 +2014,7 @@ impl<'a> GLRParserState<'a> { // No longer generic
                                     inserter.try_destination(new_root.clone()).expect("Cycle detected when adding precompute trie edges for cached below-bottom");
                                 }
                                 // Add the mapped GSS to the output
-                                final_out.push(mapped_gss);
+                                final_shifted.push(mapped_gss);
                                 hit!("GLRParserState::reduce_and_goto::StoredCacheReuse");
                                 continue;
                             }
